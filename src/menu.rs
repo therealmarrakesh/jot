@@ -1593,6 +1593,7 @@ impl MenuBar {
                                         .w(px(CHECK_COLUMN))
                                         .font_family("Segoe Fluent Icons")
                                         .text_size(px(mark_size))
+                                        .line_height(px(mark_size))
                                         .when_some(mark_color, |this, color| {
                                             this.text_color(rgba(color))
                                         })
@@ -1639,6 +1640,7 @@ impl MenuBar {
                                         .flex_none()
                                         .font_family("Segoe Fluent Icons")
                                         .text_size(px(GLYPH_SIZE))
+                                        .line_height(px(GLYPH_SIZE))
                                         .text_color(rgba(p.text_secondary))
                                         .child("\u{E76C}"),
                                 )

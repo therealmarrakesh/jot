@@ -27,6 +27,7 @@ const WHEEL_SHARE: f32 = 0.15;
 const BUTTON_WIDTH: f32 = 32.;
 const BUTTON_HEIGHT: f32 = 24.;
 const BUTTON_TOP: f32 = 5.;
+const SCROLL_GLYPH_SIZE: f32 = 8.;
 const NEW_TAB_GAP: f32 = 5.;
 const NEW_TAB_GAP_SCROLLING: f32 = 3.;
 const SLIDE_DURATION: Duration = Duration::from_millis(200);
@@ -884,7 +885,8 @@ impl Jot {
                 .h(px(BUTTON_HEIGHT))
                 .rounded(px(4.))
                 .font_family("Segoe Fluent Icons")
-                .text_size(px(8.))
+                .text_size(px(SCROLL_GLYPH_SIZE))
+                .line_height(px(SCROLL_GLYPH_SIZE))
                 .text_color(rgba(if enabled {
                     p.text_secondary
                 } else {
@@ -915,13 +917,11 @@ impl Jot {
                 .child(tooltip::anchor(key))
                 .on_mouse_up(MouseButton::Left, stop)
                 .on_mouse_up_out(MouseButton::Left, stop_out)
-                .child(
-                    div()
-                        .relative()
-                        .left(px(-1.))
-                        .top(px(1.))
-                        .child(if forward { "\u{EDDA}" } else { "\u{EDD9}" }),
-                ),
+                .child(div().relative().left(px(-1.)).child(if forward {
+                    "\u{EDDA}"
+                } else {
+                    "\u{EDD9}"
+                })),
         )
     }
 
