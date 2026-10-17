@@ -400,10 +400,20 @@ impl Jot {
         let tab = Self::create_tab(None, window, cx);
         let editor = tab.editor.clone();
         let menu_bar = cx.new(|cx| MenuBar::new(editor, cx));
+        let menu_events = cx.subscribe(&menu_bar, |this, menu_bar, event, cx| match event {
+            menu::MenuEvent::Opened => {
+                let focus = menu_bar.read(cx).focus_handle().clone();
+                this.active_editor()
+                    .clone()
+                    .update(cx, |editor, cx| editor.set_selection_focus(Some(focus), cx));
+            }
+            menu::MenuEvent::Closed => this.sync_find_selection(cx),
+        });
         let dialogs = dialog::Dialogs::new(window, cx);
         let find = find::FindBar::new(window, cx);
 
         let _subscriptions = vec![
+            menu_events,
             cx.observe_window_activation(window, |this, window, cx| {
                 if window.is_window_active() {
                     this.restart_caret_blink(cx);
@@ -835,12 +845,25 @@ impl Jot {
             .child(separator())
     }
 
+    fn open_context_menu(
+        &mut self,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (commands, entries) = menu::context_menu(self.active_editor().read(cx));
+        self.menu_bar.update(cx, |menu_bar, cx| {
+            menu_bar.open_context_menu(commands, entries, position, window, cx)
+        });
+    }
+
     fn editor(
         &self,
         find: Option<impl IntoElement>,
         window: &Window,
-        cx: &App,
+        cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let this = cx.weak_entity();
         div()
             .relative()
             .flex_1()
@@ -850,6 +873,12 @@ impl Jot {
             .bg(rgb(EDITOR_BACKGROUND))
             .child(
                 Textarea::new(self.active_editor())
+                    .context_menu(move |menu, window, cx| {
+                        let position = window.mouse_position();
+                        this.update(cx, |jot, cx| jot.open_context_menu(position, window, cx))
+                            .ok();
+                        menu
+                    })
                     .appearance(false)
                     .h_full()
                     .font_family("Consolas")
