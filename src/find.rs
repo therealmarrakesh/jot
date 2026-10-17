@@ -7,10 +7,12 @@ use regex::bytes::{Regex, RegexBuilder};
 
 const QUERY_CONTEXT: &str = "JotFindQuery";
 const REPLACEMENT_CONTEXT: &str = "JotFindReplacement";
-const SHOW_DURATION: Duration = Duration::from_millis(167);
+const EXPAND_DURATION: Duration = Duration::from_millis(300);
 const CARD_Z: f32 = 32.;
 const NOTICE_Z: f32 = 16.;
-const HIDE_DURATION: Duration = Duration::from_millis(200);
+const CONTRACT_DURATION: Duration = Duration::from_millis(200);
+const COLLAPSED_SIZE: f32 = 20.;
+const EXPAND_START_SCALE: f32 = 0.01;
 const NOTICE_DURATION: Duration = Duration::from_secs(3);
 const BLOCK_SIZE: usize = 256 * 1024;
 const MAX_UTF8_LEN: usize = 4;
@@ -210,7 +212,7 @@ pub(crate) struct FindBar {
     closing: bool,
     replace: bool,
     serial: usize,
-    scale: f32,
+    scale: Point<f32>,
     match_case: bool,
     wrap_around: bool,
     focus: FocusHandle,
@@ -237,7 +239,7 @@ impl FindBar {
             closing: false,
             replace: false,
             serial: 0,
-            scale: 0.,
+            scale: point(0., 0.),
             match_case: false,
             wrap_around: true,
             focus: cx.focus_handle(),
@@ -271,26 +273,39 @@ impl FindBar {
         self.visible && !self.closing
     }
 
+    fn card_size(&self, window: &Window) -> (f32, f32) {
+        let rows = if self.replace { 2. } else { 1. };
+        let height = 2. + 2. * CARD_PADDING + rows * CONTROL_HEIGHT + (rows - 1.) * ROW_GAP;
+        let available = window.viewport_size().width.as_f32() - 2. * CARD_SIDE_MARGIN;
+        (CARD_WIDTH.min(available).max(0.), height)
+    }
+
     fn sample(&mut self, window: &mut Window, cx: &mut App) {
         if !self.visible {
             return;
         }
         let shown = Presence::new(ElementId::from(("jot-find-show", self.serial)), true)
-            .transition(Transition::new(SHOW_DURATION).ease(cubic_bezier(0., 0., 0., 1.)))
+            .transition(Transition::new(EXPAND_DURATION).ease(cubic_bezier(0.1, 0.9, 0.2, 1.)))
             .sample(window, cx)
             .progress;
         let hidden = transition_with_status(
             ElementId::from(("jot-find-hide", self.serial)),
             if self.closing { 1. } else { 0. },
-            Transition::new(HIDE_DURATION).ease(cubic_bezier(1., 0., 1., 1.)),
+            Transition::new(CONTRACT_DURATION).ease(cubic_bezier(0.7, 0., 1., 0.5)),
             window,
             cx,
         );
-        self.scale = if self.closing {
-            1. - hidden.value
-        } else {
-            shown
+        let (width, height) = self.card_size(window);
+        let axis = |size: f32| {
+            let collapsed = COLLAPSED_SIZE / size.max(COLLAPSED_SIZE);
+            if self.closing {
+                1. - (1. - collapsed) * hidden.value
+            } else {
+                let start = collapsed.min(EXPAND_START_SCALE);
+                start + (1. - start) * shown
+            }
         };
+        self.scale = point(axis(width), axis(height));
         if self.closing && hidden.status == MotionStatus::Finished {
             self.visible = false;
         }
@@ -433,7 +448,7 @@ impl Jot {
             self.find.serial += 1;
             self.find.visible = true;
             self.find.closing = false;
-            self.find.scale = 0.;
+            self.find.scale = point(0., 0.);
         }
         self.find.replace = replace;
         self.find.query.update(cx, |input, cx| {
@@ -545,11 +560,8 @@ impl Jot {
         if !self.find.visible {
             return None;
         }
-        let s = self.find.scale;
-        let rows = if self.find.replace { 2. } else { 1. };
-        let height = 2. + 2. * CARD_PADDING + rows * CONTROL_HEIGHT + (rows - 1.) * ROW_GAP;
-        let available = window.viewport_size().width.as_f32() - 2. * CARD_SIDE_MARGIN;
-        let width = CARD_WIDTH.min(available).max(0.);
+        let scale = self.find.scale;
+        let (width, height) = self.find.card_size(window);
         let notice = self
             .find
             .notice
@@ -573,7 +585,7 @@ impl Jot {
                         .flex()
                         .items_center()
                         .justify_center()
-                        .child(self.find_card(width, height, s, window, cx)),
+                        .child(self.find_card(width, height, scale, window, cx)),
                 )
                 .children(notice),
         )
@@ -643,18 +655,19 @@ impl Jot {
         &self,
         width: f32,
         height: f32,
-        s: f32,
+        scale: Point<f32>,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> Div {
         let p = palette(cx);
+        let s = scale.x;
         let u = |v: f32| px(v * s);
         let card = div()
-            .w(u(width))
-            .h(u(height))
+            .w(px(width * scale.x))
+            .h(px(height * scale.y))
             .border_1()
             .border_color(rgba(p.surface_stroke))
-            .rounded(u(CARD_RADIUS))
+            .rounded(px(CARD_RADIUS * scale.x.min(scale.y)))
             .shadow(theme_shadow(p, CARD_Z, s));
         if s < MIN_VISIBLE_SCALE {
             return card;
@@ -796,6 +809,9 @@ impl Jot {
                 .id("find-bar")
                 .track_focus(&self.find.focus)
                 .size_full()
+                .flex()
+                .flex_col()
+                .justify_center()
                 .p(u(CARD_PADDING))
                 .rounded(u(CARD_RADIUS - 1.))
                 .bg(rgb(p.card_fill))
