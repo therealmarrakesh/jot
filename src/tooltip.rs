@@ -1,5 +1,6 @@
 use super::*;
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Instant;
 use windows_sys::Win32::Foundation::{HWND, POINT, RECT};
 use windows_sys::Win32::Graphics::Dwm::{
@@ -42,6 +43,9 @@ const FADE_IN_STORYBOARD: i32 = 4;
 const FADE_OUT_STORYBOARD: i32 = 5;
 const FADE_TARGET: i32 = 1;
 const DEFAULT_FADE: Duration = Duration::from_millis(167);
+const NOISE: &[u8] = include_bytes!("../assets/acrylic-noise.png");
+const NOISE_SIZE: f32 = 256.;
+const NOISE_OPACITY: f32 = 0.02;
 
 #[repr(C)]
 struct AccentPolicy {
@@ -192,6 +196,7 @@ enum Phase {
 pub(crate) struct TooltipView {
     text: SharedString,
     size: gpui_kit::Size<Pixels>,
+    noise: Arc<Image>,
     phase: Phase,
     fade_in: Fade,
     fade_out: Fade,
@@ -220,6 +225,19 @@ impl Render for TooltipView {
         if !self.settled(now) {
             window.request_animation_frame();
         }
+        let columns = (self.size.width.as_f32() / NOISE_SIZE).ceil() as usize;
+        let rows = (self.size.height.as_f32() / NOISE_SIZE).ceil() as usize;
+        let noise: Vec<_> = (0..rows)
+            .flat_map(|row| (0..columns).map(move |column| (row, column)))
+            .map(|(row, column)| {
+                img(self.noise.clone())
+                    .absolute()
+                    .left(px(column as f32 * NOISE_SIZE))
+                    .top(px(row as f32 * NOISE_SIZE))
+                    .size(px(NOISE_SIZE))
+                    .opacity(NOISE_OPACITY)
+            })
+            .collect();
         div()
             .size_full()
             .opacity(self.opacity(now))
@@ -243,18 +261,27 @@ impl Render for TooltipView {
                     }])
                     .child(
                         div()
+                            .relative()
                             .size_full()
                             .rounded(px(RADIUS - BORDER))
-                            .bg(rgb(p.tooltip_fill))
-                            .pl(px(PADDING_X))
-                            .pr(px(PADDING_X))
-                            .pt(px(PADDING_TOP))
-                            .pb(px(PADDING_BOTTOM))
-                            .font_family(UI_FONT)
-                            .text_size(px(FONT_SIZE))
-                            .line_height(px(LINE_HEIGHT))
-                            .text_color(rgba(p.text_primary))
-                            .child(self.text.clone()),
+                            .overflow_hidden()
+                            .bg(rgb(p.tooltip_fallback))
+                            .child(div().absolute().size_full().bg(rgba(p.tooltip_luminosity)))
+                            .children(noise)
+                            .child(
+                                div()
+                                    .relative()
+                                    .size_full()
+                                    .pl(px(PADDING_X))
+                                    .pr(px(PADDING_X))
+                                    .pt(px(PADDING_TOP))
+                                    .pb(px(PADDING_BOTTOM))
+                                    .font_family(UI_FONT)
+                                    .text_size(px(FONT_SIZE))
+                                    .line_height(px(LINE_HEIGHT))
+                                    .text_color(rgba(p.text_primary))
+                                    .child(self.text.clone()),
+                            ),
                     ),
             )
     }
@@ -570,6 +597,7 @@ fn popup(cx: &mut App) -> Option<(Entity<TooltipView>, AnyWindowHandle, isize)> 
             let view = cx.new(|_| TooltipView {
                 text: "".into(),
                 size: size(px(0.), px(0.)),
+                noise: Arc::new(Image::from_bytes(ImageFormat::Png, NOISE.to_vec())),
                 phase: Phase::Out(Instant::now(), 0.),
                 fade_in,
                 fade_out,
