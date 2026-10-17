@@ -635,6 +635,7 @@ impl Jot {
             .hover(move |style| style.bg(rgba(p.subtle_secondary)))
             .active(move |style| style.bg(rgba(p.subtle_tertiary)))
             .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
+            .child(tooltip::anchor(id))
             .child(glyph)
     }
 

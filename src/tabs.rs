@@ -679,6 +679,7 @@ impl Jot {
             .child(tab_face(p, active, trailing, name).when(!active, |this| {
                 this.hover(move |style| style.bg(rgba(p.subtle_secondary)))
             }))
+            .child(tooltip::anchor(("tab", key)))
             .when(show_dot, |this| {
                 this.child(
                     div()
@@ -734,6 +735,7 @@ impl Jot {
                                 this.close_tab(ix, window, cx);
                             }
                         }))
+                        .child(tooltip::anchor(("close-tab", key)))
                         .child("\u{E711}"),
                 )
             })
@@ -760,6 +762,7 @@ impl Jot {
                 tooltip::hover("new-tab", 0, "New tab (Ctrl+N)", *hovered, cx)
             })
             .on_click(cx.listener(|this, _, window, cx| this.add_tab(window, cx)))
+            .child(tooltip::anchor("new-tab"))
             .child(
                 canvas(
                     |_, _, _| {},
@@ -844,6 +847,7 @@ impl Jot {
                         });
                     }),
                 )
+                .child(tooltip::anchor(key))
                 .on_mouse_up(MouseButton::Left, stop)
                 .on_mouse_up_out(MouseButton::Left, stop_out)
                 .child(

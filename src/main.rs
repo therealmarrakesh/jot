@@ -807,8 +807,10 @@ impl Render for Jot {
         let root = div()
             .relative()
             .size_full()
-            .capture_any_mouse_down(|_, _, cx| tooltip::dismiss(cx))
+            .on_mouse_move(|_, _, cx| tooltip::pointer_moved(cx))
+            .on_modifiers_changed(|event, _, cx| tooltip::modifiers_changed(&event.modifiers, cx))
             .capture_key_down(|event: &KeyDownEvent, _, cx| {
+                tooltip::key_down(cx);
                 if event.keystroke.key == "escape" && detach::dragging(cx) {
                     cx.stop_propagation();
                     cx.defer(detach::cancel);
@@ -903,6 +905,7 @@ fn main() {
             });
 
             let (window, jot) = open_jot_window(None, None, cx);
+            tooltip::prepare(cx);
             let paths: Vec<PathBuf> = std::env::args_os().skip(1).map(PathBuf::from).collect();
             if !paths.is_empty() {
                 window
