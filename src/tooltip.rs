@@ -44,8 +44,15 @@ const FADE_OUT_STORYBOARD: i32 = 5;
 const FADE_TARGET: i32 = 1;
 const DEFAULT_FADE: Duration = Duration::from_millis(167);
 const NOISE: &[u8] = include_bytes!("../assets/acrylic-noise.png");
-const NOISE_SIZE: f32 = 256.;
-const NOISE_OPACITY: f32 = 0.02;
+pub(crate) const NOISE_SIZE: f32 = 256.;
+pub(crate) const NOISE_OPACITY: f32 = 0.02;
+
+pub(crate) fn acrylic_noise() -> Arc<Image> {
+    static IMAGE: std::sync::OnceLock<Arc<Image>> = std::sync::OnceLock::new();
+    IMAGE
+        .get_or_init(|| Arc::new(Image::from_bytes(ImageFormat::Png, NOISE.to_vec())))
+        .clone()
+}
 
 #[repr(C)]
 struct AccentPolicy {
@@ -597,7 +604,7 @@ fn popup(cx: &mut App) -> Option<(Entity<TooltipView>, AnyWindowHandle, isize)> 
             let view = cx.new(|_| TooltipView {
                 text: "".into(),
                 size: size(px(0.), px(0.)),
-                noise: Arc::new(Image::from_bytes(ImageFormat::Png, NOISE.to_vec())),
+                noise: acrylic_noise(),
                 phase: Phase::Out(Instant::now(), 0.),
                 fade_in,
                 fade_out,

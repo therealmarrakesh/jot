@@ -7,7 +7,7 @@ use gpui::{
     Action, App, AppContext, Bounds, ClipboardItem, Context, Edges, Entity, EntityInputHandler,
     EventEmitter, FocusHandle, Focusable, InteractiveElement as _, IntoElement, KeyBinding,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Point,
-    Render, ScrollHandle, ScrollWheelEvent, SharedString, Styled as _, Subscription,
+    Render, ScrollDelta, ScrollHandle, ScrollWheelEvent, SharedString, Styled as _, Subscription,
     UTF16Selection, WeakFocusHandle, Window, actions, div, point, prelude::FluentBuilder as _, px,
 };
 use ropey::{Rope, RopeSlice};
@@ -41,6 +41,29 @@ use crate::input::{
     InputExtras as _, Position, RopeExt as _, element::RIGHT_MARGIN, layout::LastLayout,
 };
 use crate::{AutoScroll, StepAction};
+
+#[cfg(target_os = "windows")]
+fn wheel_scroll_lines() -> u32 {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        SPI_GETWHEELSCROLLLINES, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SystemParametersInfoW,
+    };
+    let mut lines = 3u32;
+    // SAFETY: SPI_GETWHEELSCROLLLINES writes one UINT through `pvParam`; it outlives the call.
+    let _ = unsafe {
+        SystemParametersInfoW(
+            SPI_GETWHEELSCROLLLINES,
+            0,
+            Some((&mut lines as *mut u32).cast()),
+            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+        )
+    };
+    lines
+}
+
+#[cfg(not(target_os = "windows"))]
+fn wheel_scroll_lines() -> u32 {
+    3
+}
 
 /// Vertical clearance to retain when revealing a text position.
 pub(crate) enum ScrollPadding {
@@ -490,6 +513,8 @@ pub struct InputBaseState<M: InputModeKind> {
     /// The size of the scrollable content.
     pub(crate) scroll_size: gpui::Size<Pixels>,
     pub(super) editor_scrollbar_snapshot: Cell<Option<EditorScrollbarSnapshot>>,
+    hide_scrollbar: bool,
+    viewport_wheel_step: bool,
     /// The unwrapped width of the longest line and what it was measured for.
     pub(super) longest_line_width: Cell<Option<(LongestLineKey, Pixels)>>,
     pub(super) editor_paddings: Edges<Pixels>,
@@ -678,7 +703,28 @@ impl<M: InputModeKind> InputBaseState<M> {
     /// thumb inside every text field, which is a control the field does not
     /// have.
     pub(crate) fn shows_scrollbar(&self) -> bool {
-        self.is_multi_line()
+        self.is_multi_line() && !self.hide_scrollbar
+    }
+
+    /// Hide the built-in scrollbar so the host can draw its own.
+    pub fn hide_scrollbar(mut self) -> Self {
+        self.hide_scrollbar = true;
+        self
+    }
+
+    /// Scroll one wheel notch by max(48px, 15% of the viewport), as WinUI's ScrollViewer does.
+    pub fn viewport_wheel_step(mut self) -> Self {
+        self.viewport_wheel_step = true;
+        self
+    }
+
+    /// The viewport size, the scrollable content size and the current scroll offset.
+    pub fn scroll_extent(&self) -> (gpui::Size<Pixels>, gpui::Size<Pixels>, Point<Pixels>) {
+        (
+            self.input_bounds.size,
+            self.scroll_size,
+            self.scroll_handle.offset(),
+        )
     }
 
     pub fn is_multi_line(&self) -> bool {
@@ -874,6 +920,8 @@ impl<M: InputModeKind> InputBaseState<M> {
             scroll_handle: ScrollHandle::new(),
             scroll_size: gpui::size(px(0.), px(0.)),
             editor_scrollbar_snapshot: Cell::new(None),
+            hide_scrollbar: false,
+            viewport_wheel_step: false,
             longest_line_width: Cell::new(None),
             editor_paddings: Edges::default(),
             deferred_scroll_offset: None,
@@ -2616,7 +2664,22 @@ impl<M: InputModeKind> InputBaseState<M> {
             .as_ref()
             .map(|layout| layout.line_height)
             .unwrap_or(window.line_height());
-        let delta = event.delta.pixel_delta(line_height);
+        let delta = match event.delta {
+            ScrollDelta::Lines(lines) if self.viewport_wheel_step => {
+                let lines_per_notch = wheel_scroll_lines().max(1) as f32;
+                let size = self.input_bounds.size;
+                let step = |notches: f32, extent: Pixels| {
+                    let extent = extent.as_f32();
+                    let notch = (extent * 0.15).round().max(48.);
+                    px((notches * notch).round().clamp(-extent.floor(), extent.floor()))
+                };
+                point(
+                    step(lines.x / lines_per_notch, size.width),
+                    step(lines.y / lines_per_notch, size.height),
+                )
+            }
+            _ => event.delta.pixel_delta(line_height),
+        };
 
         let old_offset = self.scroll_handle.offset();
         self.update_scroll_offset(Some(old_offset + delta), cx);

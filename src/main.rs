@@ -10,6 +10,7 @@ mod files;
 mod find;
 mod menu;
 mod palette;
+mod scrollbar;
 mod tabs;
 mod tooltip;
 
@@ -374,6 +375,7 @@ pub struct Jot {
     active: usize,
     hovered_tab: Option<EntityId>,
     strip: tabs::TabStrip,
+    scroll: scrollbar::ScrollChrome,
     hwnd: isize,
     close_confirmed: bool,
     menu_bar: Entity<MenuBar>,
@@ -439,6 +441,7 @@ impl Jot {
             active: 0,
             hovered_tab: None,
             strip: tabs::TabStrip::new(),
+            scroll: scrollbar::ScrollChrome::new(),
             hwnd: detach::hwnd(window),
             close_confirmed: false,
             menu_bar,
@@ -478,6 +481,8 @@ impl Jot {
         let editor = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .soft_wrap(word_wrap)
+                .hide_scrollbar()
+                .viewport_wheel_step()
                 .default_value(text)
         });
         Self::adopt_tab(
@@ -713,18 +718,23 @@ impl Jot {
     fn editor(
         &self,
         find: Option<impl IntoElement>,
+        scrollbars: impl IntoElement,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let p = palette(cx);
         let this = cx.weak_entity();
         div()
+            .id("editor-area")
             .relative()
             .flex_1()
             .min_h_0()
             .pl(px(6.))
             .pt(px(7.))
             .bg(rgb(p.editor))
+            .on_mouse_move(cx.listener(|this, _, _, cx| this.scroll_activity(cx)))
+            .on_hover(cx.listener(|this, _, _, cx| this.scroll_activity(cx)))
+            .child(self.scroll_area())
             .child(
                 Textarea::new(self.active_editor())
                     .context_menu(move |menu, window, cx| {
@@ -740,6 +750,7 @@ impl Jot {
                     .line_height(px((EDITOR_LINE_HEIGHT * self.zoom()).round())),
             )
             .child(self.caret(window, cx))
+            .child(scrollbars)
             .children(find)
     }
 
@@ -801,6 +812,8 @@ impl Render for Jot {
         let p = palette(cx);
         let status_bar = cx.global::<ViewSettings>().status_bar;
         self.sample_tabs(window);
+        self.sample_scrollbars(cx);
+        let scrollbars = self.scrollbars(window, cx);
         let dialogs = self.render_dialogs(window, cx);
         let find = self.render_find(window, cx);
 
@@ -843,7 +856,7 @@ impl Render for Jot {
                     .size_full()
                     .child(self.title_bar(window, cx))
                     .child(self.menu_bar(p))
-                    .child(self.editor(find, window, cx))
+                    .child(self.editor(find, scrollbars, window, cx))
                     .when(status_bar, |this| this.child(self.status_bar(cx))),
             )
             .children(dialogs);
