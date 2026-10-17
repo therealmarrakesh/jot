@@ -206,7 +206,7 @@ impl Render for TooltipView {
                     .h(self.size.height)
                     .rounded(px(RADIUS))
                     .border_1()
-                    .border_color(rgba(p.tooltip_border))
+                    .border_color(rgba(p.flyout_stroke))
                     .shadow(theme_shadow(p, ELEVATION * 2., 1.))
                     .child(
                         div()

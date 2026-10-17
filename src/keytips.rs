@@ -56,7 +56,7 @@ struct KeyTips {
 
 impl Global for KeyTips {}
 
-fn round_half_up(value: f32) -> f32 {
+pub(crate) fn round_half_up(value: f32) -> f32 {
     (value + 0.5).floor()
 }
 

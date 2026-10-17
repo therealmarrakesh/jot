@@ -322,11 +322,7 @@ fn caret_canvas(
             let Some(geometry) = geometry(cx) else {
                 return;
             };
-            let origin = geometry.cursor_bounds().origin;
-            let caret = Bounds::new(
-                point(origin.x, origin.y + geometry.scroll_offset().y),
-                size(px(1.), height),
-            );
+            let caret = Bounds::new(caret_origin(&geometry, window), size(px(1.), height));
             window.with_content_mask(
                 Some(ContentMask {
                     bounds: geometry.input_bounds(),
@@ -337,6 +333,11 @@ fn caret_canvas(
     )
     .absolute()
     .size_full()
+}
+
+fn caret_origin(geometry: &PrepaintCaretGeometry, window: &Window) -> Point<Pixels> {
+    let origin = geometry.cursor_bounds().origin;
+    window.pixel_snap_point(point(origin.x, origin.y + geometry.scroll_offset().y))
 }
 
 fn caret_key(editor: &TextareaState) -> (usize, Range<usize>, usize) {
@@ -750,12 +751,9 @@ impl Jot {
         let Some(geometry) = editor.read(cx).prepaint_caret_geometry() else {
             return;
         };
-        let caret = geometry.cursor_bounds().origin;
+        let caret = caret_origin(&geometry, window);
         let height = px((CARET_HEIGHT * self.zoom()).round());
-        let anchor = point(
-            caret.x + px(1.),
-            caret.y + geometry.scroll_offset().y + height,
-        );
+        let anchor = point(caret.x + px(1.), caret.y + height);
         self.open_context_menu(anchor, window, cx);
     }
 

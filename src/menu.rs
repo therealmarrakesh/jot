@@ -21,14 +21,18 @@ const FLYOUT_GAP: f32 = 3.;
 const CONTEXT_WIDTH: f32 = 342.;
 const ROW_ICON: f32 = 40.;
 const ICON_SIZE: f32 = 16.;
-const COMMAND_ROW: f32 = 60.;
-const COMMAND_TOP: f32 = 12.;
+const COMMAND_ROW: f32 = 59.;
+const COMMAND_BUTTON: f32 = 58.;
+const COMMAND_GAP: f32 = 1.;
+const COMMAND_ICON_TOP: f32 = 9.;
+const COMMAND_LABEL_PANEL: f32 = 60.;
 const COMMAND_LABEL_GAP: f32 = 4.;
 const COMMAND_LINE: f32 = 16.;
 const COMMAND_LABEL_SIZE: f32 = 12.;
 const COMMAND_DIVIDER_TOP: f32 = 14.;
 const COMMAND_DIVIDER_HEIGHT: f32 = 32.;
-const COMMAND_EDGE_TRIM: f32 = 2.;
+const COMMAND_OUTSET: f32 = 1.;
+const OVERFLOW_TOP: f32 = 1.;
 const COMMAND_INSET: f32 = 2.;
 const ROW_COMMAND: f32 = 33.;
 const ROW_COMPACT: f32 = 32.;
@@ -45,12 +49,7 @@ const SHORTCUT_SIZE: f32 = 12.;
 const GLYPH_SIZE: f32 = 12.;
 const SUBMENU_OVERLAP: f32 = 4.;
 const BAR_RADIUS: f32 = 4.;
-const COMMAND_FOCUS_OUTSET: Edges<f32> = Edges {
-    top: 0.,
-    right: 0.,
-    bottom: -2.,
-    left: 0.,
-};
+const CARD_RADIUS: f32 = 8.;
 const BAR_FOCUS_OUTSET: Edges<f32> = Edges {
     top: 0.,
     right: 1.,
@@ -894,11 +893,17 @@ impl MenuBar {
         });
     }
 
-    fn command_row(&self, commands: &[CommandButton], width: f32, cx: &mut Context<Self>) -> Div {
+    fn command_row(
+        &self,
+        commands: &[CommandButton],
+        width: f32,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Div {
         let p = palette(cx);
         let count = commands.len() as f32;
-        let cell = ((width - 2. - (count - 1.) + 2. * COMMAND_EDGE_TRIM) / count).floor();
-        let last = commands.len().saturating_sub(1);
+        let row = width + 2. * COMMAND_OUTSET;
+        let cell = ((row - (count - 1.)) / count).floor();
         let ring = self
             .open
             .as_ref()
@@ -907,16 +912,11 @@ impl MenuBar {
         div()
             .absolute()
             .top(px(1.))
-            .left(px(1.))
-            .w(px(width - 2.))
+            .left(px(-COMMAND_OUTSET))
+            .w(px(row))
             .h(px(COMMAND_ROW))
             .flex()
             .children(commands.iter().enumerate().flat_map(|(ix, command)| {
-                let edge = if ix == 0 || ix == last {
-                    COMMAND_EDGE_TRIM
-                } else {
-                    0.
-                };
                 let color = if command.enabled {
                     p.text_primary
                 } else {
@@ -931,12 +931,18 @@ impl MenuBar {
                         .bg(rgb(p.menu_separator))
                 });
                 let enabled = command.enabled;
+                let label_width = text_width(window, command.label, UI_FONT, COMMAND_LABEL_SIZE);
+                let face = cell - 2. * (COMMAND_GAP + COMMAND_INSET);
+                let label_left = (face - COMMAND_LABEL_PANEL) / 2.
+                    + keytips::round_half_up((COMMAND_LABEL_PANEL - label_width) / 2.);
                 let button = div()
                     .id(("menu-command", ix))
                     .flex_none()
-                    .w(px(cell - edge))
+                    .w(px(cell))
                     .h_full()
-                    .p(px(COMMAND_INSET))
+                    .pt(px(COMMAND_ROW - COMMAND_BUTTON + COMMAND_INSET))
+                    .px(px(COMMAND_GAP + COMMAND_INSET))
+                    .pb(px(COMMAND_INSET))
                     .on_click(
                         cx.listener(move |this, _, window, cx| this.run_command(ix, window, cx)),
                     )
@@ -947,7 +953,7 @@ impl MenuBar {
                             .flex()
                             .flex_col()
                             .items_center()
-                            .pt(px(COMMAND_TOP - COMMAND_INSET))
+                            .pt(px(COMMAND_ICON_TOP))
                             .rounded(px(4.))
                             .text_color(rgba(color))
                             .child(
@@ -960,6 +966,10 @@ impl MenuBar {
                             )
                             .child(
                                 div()
+                                    .self_start()
+                                    .ml(px(label_left))
+                                    .w(px(label_width))
+                                    .text_center()
                                     .mt(px(COMMAND_LABEL_GAP))
                                     .h(px(COMMAND_LINE))
                                     .line_height(px(COMMAND_LINE))
@@ -985,7 +995,7 @@ impl MenuBar {
                                 this.active(move |style| style.text_color(rgba(p.text_secondary)))
                             })
                             .when(ring == Some(ix), |this| {
-                                this.child(field::focus_ring(p, COMMAND_FOCUS_OUTSET, px(4.)))
+                                this.child(field::focus_ring(p, Edges::default(), px(4.)))
                             }),
                     );
                 divider
@@ -996,8 +1006,8 @@ impl MenuBar {
             .child(
                 div()
                     .absolute()
-                    .left_0()
-                    .right_0()
+                    .left(px(1. + COMMAND_OUTSET))
+                    .right(px(1. + COMMAND_OUTSET))
                     .bottom(px(-1.))
                     .h(px(1.))
                     .bg(rgb(p.menu_separator)),
@@ -1255,7 +1265,7 @@ impl MenuBar {
         let p = palette(cx);
         let open = self.open.as_ref().filter(|open| open.kind == kind);
         let active = open.is_some_and(|open| !open.is_closing());
-        let popup = open.map(|open| self.popup(open, cx));
+        let popup = open.map(|open| self.popup(open, window, cx));
         let ring = self.bar_focused(window) == Some(kind);
 
         div()
@@ -1389,14 +1399,19 @@ impl MenuBar {
         }
     }
 
-    fn popup(&self, open: &OpenMenu, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    fn popup(
+        &self,
+        open: &OpenMenu,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
         let p = palette(cx);
         let panel = &open.panel;
         let width = panel.width;
         let bar = if open.commands.is_empty() {
             0.
         } else {
-            COMMAND_ROW + 1.
+            COMMAND_ROW + 1. + OVERFLOW_TOP - PADDING_Y
         };
         let height = panel.height() + bar;
         let hidden = panel.height() * CLOSED_RATIO * (1. - open.motion.unroll);
@@ -1472,7 +1487,7 @@ impl MenuBar {
                 div()
                     .size_full()
                     .when(bar > 0., |this| {
-                        this.child(self.command_row(&open.commands, width, cx))
+                        this.child(self.command_row(&open.commands, width, window, cx))
                     })
                     .child(self.panel_rows(panel, None, bar, bar > 0., cx)),
             ))
@@ -1683,11 +1698,16 @@ fn reveal(
         .left_0()
         .w_full()
         .h(px(shown))
-        .bg(rgb(p.menu_fill))
         .border_1()
-        .border_color(rgb(p.menu_border))
-        .rounded(px(8.))
-        .shadow(theme_shadow(p, z, 1.));
+        .border_color(rgba(p.flyout_stroke))
+        .rounded(px(CARD_RADIUS))
+        .shadow(theme_shadow(p, z, 1.))
+        .child(
+            div()
+                .size_full()
+                .rounded(px(CARD_RADIUS - 1.))
+                .bg(rgb(p.menu_fill)),
+        );
     [
         card,
         div()
@@ -1785,7 +1805,14 @@ impl Render for MenuBar {
         let hit_areas = self.hit_areas.clone();
         let flyout = self.open.as_ref().and_then(|open| {
             let anchor = open.anchor?;
-            Some(deferred(anchored().position(anchor).child(self.popup(open, cx))).with_priority(1))
+            Some(
+                deferred(
+                    anchored()
+                        .position(anchor)
+                        .child(self.popup(open, window, cx)),
+                )
+                .with_priority(1),
+            )
         });
 
         div()

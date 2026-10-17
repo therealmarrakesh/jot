@@ -602,19 +602,23 @@ impl Jot {
             .justify_center()
             .child(
                 div()
-                    .px(px(NOTICE_PADDING_X))
-                    .pt(px(NOTICE_PADDING_TOP))
-                    .pb(px(NOTICE_PADDING_BOTTOM))
-                    .bg(rgb(p.notice_fill))
                     .border_1()
-                    .border_color(rgb(p.notice_border))
+                    .border_color(rgba(p.flyout_stroke))
                     .rounded(px(CARD_RADIUS))
                     .shadow(theme_shadow(p, NOTICE_Z, 1.))
-                    .font_family(MENU_FONT)
-                    .text_size(px(BODY_SIZE))
-                    .line_height(px(NOTICE_LINE))
-                    .text_color(rgba(p.text_primary))
-                    .child(text),
+                    .child(
+                        div()
+                            .px(px(NOTICE_PADDING_X))
+                            .pt(px(NOTICE_PADDING_TOP))
+                            .pb(px(NOTICE_PADDING_BOTTOM))
+                            .rounded(px(CARD_RADIUS - 1.))
+                            .bg(rgb(p.notice_fill))
+                            .font_family(MENU_FONT)
+                            .text_size(px(BODY_SIZE))
+                            .line_height(px(NOTICE_LINE))
+                            .text_color(rgba(p.text_primary))
+                            .child(text),
+                    ),
             )
     }
 
