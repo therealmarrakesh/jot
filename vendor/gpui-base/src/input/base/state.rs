@@ -547,6 +547,7 @@ pub struct InputBaseState<M: InputModeKind> {
     pub(super) emit_events: bool,
 
     _subscriptions: Vec<Subscription>,
+    _window_subscriptions: Vec<Subscription>,
 
     pub(super) auto_scroll: AutoScroll,
 }
@@ -703,6 +704,32 @@ impl<M: InputModeKind> InputBaseState<M> {
         self.selections.iter().any(|sel| !sel.is_empty()) && !self.masked
     }
 
+    fn window_subscriptions(
+        focus_handle: &FocusHandle,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<Subscription> {
+        vec![
+            // Blink the cursor when the window is active, pause when it's not.
+            cx.observe_window_activation(window, |input, window, cx| {
+                if window.is_window_active() {
+                    let focus_handle = input.focus_handle.clone();
+                    if focus_handle.is_focused(window) {
+                        input.blink_cursor.update(cx, |blink_cursor, cx| {
+                            blink_cursor.start(cx);
+                        });
+                    }
+                }
+            }),
+            cx.on_focus(focus_handle, window, Self::on_focus),
+            cx.on_blur(focus_handle, window, Self::on_blur),
+        ]
+    }
+
+    pub fn attach_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self._window_subscriptions = Self::window_subscriptions(&self.focus_handle, window, cx);
+    }
+
     pub fn can_undo(&self) -> bool {
         self.undo_manager.has_undos()
     }
@@ -786,20 +813,8 @@ impl<M: InputModeKind> InputBaseState<M> {
             }),
             // Observe the blink cursor to repaint the view when it changes.
             cx.observe(&blink_cursor, |_, _, cx| cx.notify()),
-            // Blink the cursor when the window is active, pause when it's not.
-            cx.observe_window_activation(window, |input, window, cx| {
-                if window.is_window_active() {
-                    let focus_handle = input.focus_handle.clone();
-                    if focus_handle.is_focused(window) {
-                        input.blink_cursor.update(cx, |blink_cursor, cx| {
-                            blink_cursor.start(cx);
-                        });
-                    }
-                }
-            }),
-            cx.on_focus(&focus_handle, window, Self::on_focus),
-            cx.on_blur(&focus_handle, window, Self::on_blur),
         ];
+        let _window_subscriptions = Self::window_subscriptions(&focus_handle, window, cx);
 
         let text_style = window.text_style();
 
@@ -876,6 +891,7 @@ impl<M: InputModeKind> InputBaseState<M> {
             silent_replace_text: false,
             emit_events: true,
             _subscriptions,
+            _window_subscriptions,
             _pending_update: false,
             cursor_line_end_affinity: false,
             auto_scroll: AutoScroll::default(),

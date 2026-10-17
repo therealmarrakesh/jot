@@ -3292,6 +3292,7 @@ dependencies = [
  "embed-resource",
  "futures",
  "gpui-kit",
+ "raw-window-handle",
  "regex",
  "windows-sys 0.60.2",
 ]

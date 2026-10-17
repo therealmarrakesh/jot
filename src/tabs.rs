@@ -2,7 +2,7 @@ use super::*;
 use std::time::Instant;
 
 pub(crate) const TAB_WIDTH: f32 = 240.;
-const TAB_HEIGHT: f32 = 32.;
+pub(crate) const TAB_HEIGHT: f32 = 32.;
 const TAB_LABEL_INSET: f32 = 8.;
 const TAB_LABEL_TRAILING: f32 = 44.;
 const UNSAVED_DOT: f32 = 6.;
@@ -11,8 +11,8 @@ const UNSAVED_DOT_RIGHT: f32 = 19.;
 const CLOSE_BUTTON_TOP: f32 = 5.;
 const CLOSE_BUTTON_RIGHT: f32 = 6.;
 pub(crate) const STRIP_LEFT: f32 = 9.;
+pub(crate) const STRIP_TOP: f32 = 10.;
 const SLIDE_DURATION: Duration = Duration::from_millis(200);
-const DRAG_THRESHOLD: f32 = 10.;
 const REORDER_THRESHOLD: f32 = 16.;
 
 #[derive(Clone, Copy)]
@@ -126,10 +126,8 @@ struct Ghost {
 #[derive(Clone, Copy)]
 struct Drag {
     id: EntityId,
-    press: Point<Pixels>,
     grab: f32,
     last_move: f32,
-    started: bool,
 }
 
 pub(crate) struct TabStrip {
@@ -156,6 +154,10 @@ fn slide_duration(cx: &App) -> Duration {
     } else {
         SLIDE_DURATION
     }
+}
+
+fn slot_index(left: f32, last: usize) -> usize {
+    ((left / TAB_WIDTH - 0.5).ceil().max(0.) as usize).min(last)
 }
 
 fn visible(x: f32, right: f32, cover: Option<(f32, f32)>) -> (f32, f32) {
@@ -245,13 +247,11 @@ impl Jot {
         let duration = slide_duration(cx);
         let name = self.tab_name(ix);
         let tab = self.tabs.remove(ix);
-        if self
-            .strip
-            .drag
-            .is_some_and(|drag| drag.id == tab.editor.entity_id())
-        {
+        let id = tab.editor.entity_id();
+        if self.strip.drag.is_some_and(|drag| drag.id == id) {
             self.strip.drag = None;
         }
+        detach::forget(id, cx);
         let mut slot = tab.slot;
         slot.x.slide(ix as f32 * TAB_WIDTH, duration, now);
         slot.width.slide(0., duration, now);
@@ -269,14 +269,21 @@ impl Jot {
         self.activate_tab(self.active, window, cx);
     }
 
+    pub(crate) fn owner(&self, window: &Window, cx: &Context<Self>) -> detach::Owner {
+        detach::Owner {
+            handle: window.window_handle(),
+            jot: cx.weak_entity(),
+            hwnd: self.hwnd,
+        }
+    }
+
     fn layout_tabs(&mut self, cx: &App) {
+        self.layout_tabs_over(slide_duration(cx));
+    }
+
+    fn layout_tabs_over(&mut self, duration: Duration) {
         let now = Instant::now();
-        let duration = slide_duration(cx);
-        let dragged = self
-            .strip
-            .drag
-            .filter(|drag| drag.started)
-            .map(|drag| drag.id);
+        let dragged = self.strip.drag.map(|drag| drag.id);
         let mut x = 0.;
         for tab in &mut self.tabs {
             if Some(tab.editor.entity_id()) != dragged {
@@ -288,41 +295,32 @@ impl Jot {
         self.strip.trailing.slide(x, duration, now);
     }
 
-    fn press_tab(&mut self, id: EntityId, position: Point<Pixels>) {
-        let Some(ix) = self.tab_index(id) else {
+    pub(crate) fn drag_tab(
+        &mut self,
+        id: EntityId,
+        position: Point<f32>,
+        grab: f32,
+        start: f32,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(from) = self.tab_index(id) else {
             return;
         };
-        let x = position.x.as_f32() - STRIP_LEFT;
-        self.strip.drag = Some(Drag {
-            id,
-            press: position,
-            grab: x - self.tabs[ix].slot.x.value(Instant::now()),
-            last_move: x,
-            started: false,
-        });
-    }
-
-    fn drag_tab(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
-        let Some(mut drag) = self.strip.drag else {
-            return;
-        };
-        let Some(from) = self.tab_index(drag.id) else {
-            self.strip.drag = None;
-            return;
-        };
-        if !drag.started {
-            let delta = position - drag.press;
-            if delta.x.as_f32().hypot(delta.y.as_f32()) <= DRAG_THRESHOLD {
-                return;
-            }
-            drag.started = true;
-            self.strip.lifted = Some(drag.id);
-        }
-        let x = position.x.as_f32() - STRIP_LEFT;
+        let mut drag = self
+            .strip
+            .drag
+            .filter(|drag| drag.id == id)
+            .unwrap_or(Drag {
+                id,
+                grab,
+                last_move: start - STRIP_LEFT,
+            });
+        self.strip.lifted = Some(id);
+        let x = position.x - STRIP_LEFT;
         let last = self.tabs.len() - 1;
         let left = (x - drag.grab).clamp(0., last as f32 * TAB_WIDTH);
         self.tabs[from].slot.x = Motion::at(left);
-        let to = ((left / TAB_WIDTH - 0.5).ceil().max(0.) as usize).min(last);
+        let to = slot_index(left, last);
         if to != from && (x - drag.last_move).abs() > REORDER_THRESHOLD {
             let active = self.active_editor().entity_id();
             let tab = self.tabs.remove(from);
@@ -335,22 +333,104 @@ impl Jot {
         cx.notify();
     }
 
-    fn release_tab(&mut self, cx: &mut Context<Self>) {
-        let Some(drag) = self.strip.drag.take() else {
-            return;
-        };
-        if drag.started {
+    pub(crate) fn release_tab(&mut self, cx: &mut Context<Self>) {
+        if self.strip.drag.take().is_some() {
             self.layout_tabs(cx);
             cx.notify();
         }
     }
 
+    pub(crate) fn take_tab(
+        &mut self,
+        id: EntityId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<TabData> {
+        let ix = self.tab_index(id)?;
+        let tab = self.tabs.remove(ix);
+        self.strip.drag = None;
+        self.strip.lifted = None;
+        self.hovered_tab = None;
+        if self.tabs.is_empty() {
+            window.remove_window();
+            return Some(tab.into_data());
+        }
+        if ix < self.active || self.active == self.tabs.len() {
+            self.active -= 1;
+        }
+        self.layout_tabs(cx);
+        self.activate_tab(self.active, window, cx);
+        Some(tab.into_data())
+    }
+
+    pub(crate) fn insert_dragged_tab(
+        &mut self,
+        data: TabData,
+        position: Point<f32>,
+        grab: f32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let mut tab = Self::adopt_tab(data, window, cx);
+        let id = tab.editor.entity_id();
+        let x = position.x - STRIP_LEFT;
+        let count = self.tabs.len();
+        let left = (x - grab).clamp(0., count as f32 * TAB_WIDTH);
+        let ix = slot_index(left, count);
+        tab.slot = Slot::at(left, TAB_WIDTH);
+        self.tabs.insert(ix, tab);
+        self.strip.drag = Some(Drag {
+            id,
+            grab,
+            last_move: x,
+        });
+        self.strip.lifted = Some(id);
+        self.layout_tabs_over(Duration::ZERO);
+        self.activate_tab(ix, window, cx);
+    }
+
+    pub(crate) fn restore_tab(
+        &mut self,
+        data: TabData,
+        ix: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let mut tab = Self::adopt_tab(data, window, cx);
+        let ix = ix.min(self.tabs.len());
+        tab.slot = Slot::at(ix as f32 * TAB_WIDTH, 0.);
+        self.tabs.insert(ix, tab);
+        self.layout_tabs(cx);
+        self.activate_tab(ix, window, cx);
+    }
+
+    pub(crate) fn return_tab(
+        &mut self,
+        id: EntityId,
+        ix: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.strip.drag = None;
+        if let Some(from) = self.tab_index(id) {
+            let tab = self.tabs.remove(from);
+            let ix = ix.min(self.tabs.len());
+            self.tabs.insert(ix, tab);
+            self.activate_tab(ix, window, cx);
+        }
+        self.layout_tabs(cx);
+        cx.notify();
+    }
+
+    pub(crate) fn tab_count(&self) -> usize {
+        self.tabs.len()
+    }
+
     pub(crate) fn sample_tabs(&mut self, window: &mut Window) {
         let now = Instant::now();
         self.strip.ghosts.retain(|ghost| ghost.slot.moving(now));
-        let dragging = self.strip.drag.is_some_and(|drag| drag.started);
         if let Some(id) = self.strip.lifted
-            && !dragging
+            && self.strip.drag.is_none()
             && !self
                 .tab_index(id)
                 .is_some_and(|ix| self.tabs[ix].slot.x.moving(now))
@@ -394,7 +474,13 @@ impl Jot {
                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {
                     if let Some(ix) = this.tab_index(id) {
                         this.activate_tab(ix, window, cx);
-                        this.press_tab(id, event.position);
+                        let x = event.position.x.as_f32();
+                        let grab = point(
+                            x - STRIP_LEFT - this.tabs[ix].slot.x.value(Instant::now()),
+                            event.position.y.as_f32() - STRIP_TOP,
+                        );
+                        detach::press(this.owner(window, cx), id, ix, grab, x, cx);
+                        cx.notify();
                     }
                 }),
             )
@@ -492,38 +578,6 @@ impl Jot {
             )
     }
 
-    fn drag_listeners(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let jot = cx.weak_entity();
-        canvas(
-            |_, _, _| {},
-            move |_, _, window, _| {
-                let moved = jot.clone();
-                window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
-                    if phase != DispatchPhase::Bubble {
-                        return;
-                    }
-                    moved
-                        .update(cx, |jot, cx| {
-                            if event.pressed_button == Some(MouseButton::Left) {
-                                jot.drag_tab(event.position, cx);
-                            } else {
-                                jot.release_tab(cx);
-                            }
-                        })
-                        .ok();
-                });
-                let released = jot.clone();
-                window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
-                    if phase == DispatchPhase::Bubble && event.button == MouseButton::Left {
-                        released.update(cx, |jot, cx| jot.release_tab(cx)).ok();
-                    }
-                });
-            },
-        )
-        .absolute()
-        .size_full()
-    }
-
     pub(crate) fn tab_strip(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let p = palette(cx);
         let now = Instant::now();
@@ -570,9 +624,7 @@ impl Jot {
                     .w(px(self.strip.trailing.value(now)))
                     .children(ghosts)
                     .children(tabs)
-                    .when(self.strip.drag.is_some(), |this| {
-                        this.child(self.drag_listeners(cx))
-                    }),
+                    .when(detach::active(cx), |this| this.child(detach::listeners())),
             )
             .child(self.new_tab_button(cx))
     }

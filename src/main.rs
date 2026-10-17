@@ -2,6 +2,7 @@
 
 #[cfg(feature = "bench")]
 mod bench;
+mod detach;
 mod dialog;
 mod document;
 mod field;
@@ -224,15 +225,15 @@ fn key_bindings() -> Vec<KeyBinding> {
     ]
 }
 
-fn window_options(cx: &App) -> WindowOptions {
+fn window_options(window_size: Option<gpui_kit::Size<Pixels>>, cx: &App) -> WindowOptions {
     let screen = cx
         .primary_display()
         .map(|display| display.visible_bounds().size)
         .unwrap_or(size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT)));
-    let window_size = size(
+    let window_size = window_size.unwrap_or(size(
         px(WINDOW_WIDTH).min(screen.width * WINDOW_MAX_SCREEN_SHARE),
         px(WINDOW_HEIGHT).min(screen.height * WINDOW_MAX_SCREEN_SHARE),
-    );
+    ));
 
     WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
@@ -250,9 +251,13 @@ fn window_options(cx: &App) -> WindowOptions {
     }
 }
 
-fn open_jot_window(cx: &mut App) -> (AnyWindowHandle, Entity<Jot>) {
-    gpui_kit::open_window(window_options(cx), cx, |window, cx| {
-        cx.new(|cx| Jot::new(window, cx))
+fn open_jot_window(
+    initial: Option<TabData>,
+    window_size: Option<gpui_kit::Size<Pixels>>,
+    cx: &mut App,
+) -> (AnyWindowHandle, Entity<Jot>) {
+    gpui_kit::open_window(window_options(window_size, cx), cx, |window, cx| {
+        cx.new(|cx| Jot::new(initial, window, cx))
     })
     .expect("Failed to open window")
 }
@@ -332,6 +337,14 @@ fn caret_key(editor: &TextareaState) -> (usize, Range<usize>, usize) {
     )
 }
 
+struct TabData {
+    editor: Entity<TextareaState>,
+    zoom: f32,
+    path: Option<PathBuf>,
+    format: document::Format,
+    dirty: bool,
+}
+
 struct Tab {
     editor: Entity<TextareaState>,
     zoom: f32,
@@ -343,11 +356,24 @@ struct Tab {
     _changes: Subscription,
 }
 
+impl Tab {
+    fn into_data(self) -> TabData {
+        TabData {
+            editor: self.editor,
+            zoom: self.zoom,
+            path: self.path,
+            format: self.format,
+            dirty: self.dirty,
+        }
+    }
+}
+
 pub struct Jot {
     tabs: Vec<Tab>,
     active: usize,
     hovered_tab: Option<EntityId>,
     strip: tabs::TabStrip,
+    hwnd: isize,
     close_confirmed: bool,
     menu_bar: Entity<MenuBar>,
     dialogs: dialog::Dialogs,
@@ -363,8 +389,11 @@ pub struct Jot {
 }
 
 impl Jot {
-    fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let tab = Self::create_tab(None, window, cx);
+    fn new(initial: Option<TabData>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let tab = match initial {
+            Some(data) => Self::adopt_tab(data, window, cx),
+            None => Self::create_tab(None, window, cx),
+        };
         let editor = tab.editor.clone();
         let menu_bar = cx.new(|cx| MenuBar::new(editor, cx));
         let menu_events = cx.subscribe(&menu_bar, |this, menu_bar, event, cx| match event {
@@ -409,6 +438,7 @@ impl Jot {
             active: 0,
             hovered_tab: None,
             strip: tabs::TabStrip::new(),
+            hwnd: detach::hwnd(window),
             close_confirmed: false,
             menu_bar,
             dialogs,
@@ -423,6 +453,7 @@ impl Jot {
             painted: Rc::new(Cell::new(None)),
         };
         jot.activate_tab(0, window, cx);
+        detach::register(jot.owner(window, cx), cx);
         let this = cx.weak_entity();
         window.on_window_should_close(cx, move |window, cx| {
             this.update(cx, |jot, cx| jot.request_close_window(window, cx))
@@ -448,6 +479,22 @@ impl Jot {
                 .soft_wrap(word_wrap)
                 .default_value(text)
         });
+        Self::adopt_tab(
+            TabData {
+                editor,
+                zoom: 1.,
+                path,
+                format,
+                dirty: false,
+            },
+            window,
+            cx,
+        )
+    }
+
+    fn adopt_tab(data: TabData, window: &mut Window, cx: &mut Context<Self>) -> Tab {
+        let editor = data.editor;
+        editor.update(cx, |editor, cx| editor.attach_window(window, cx));
         let _changes = cx.subscribe(&editor, |this, editor, event: &InputEvent, cx| {
             if let InputEvent::Change = event
                 && let Some(tab) = this.tabs.iter_mut().find(|tab| tab.editor == editor)
@@ -469,10 +516,10 @@ impl Jot {
         });
         Tab {
             editor,
-            zoom: 1.,
-            path,
-            format,
-            dirty: false,
+            zoom: data.zoom,
+            path: data.path,
+            format: data.format,
+            dirty: data.dirty,
             slot: tabs::Slot::at(0., tabs::TAB_WIDTH),
             _observer,
             _changes,
@@ -758,6 +805,12 @@ impl Render for Jot {
         let root = div()
             .relative()
             .size_full()
+            .capture_key_down(|event: &KeyDownEvent, _, cx| {
+                if event.keystroke.key == "escape" && detach::dragging(cx) {
+                    cx.stop_propagation();
+                    cx.defer(detach::cancel);
+                }
+            })
             .on_action(cx.listener(Self::zoom_in))
             .on_action(cx.listener(Self::zoom_out))
             .on_action(cx.listener(Self::reset_zoom))
@@ -833,7 +886,7 @@ fn main() {
                 }
             });
             cx.on_action(|_: &NewWindow, cx| {
-                open_jot_window(cx);
+                open_jot_window(None, None, cx);
             });
             cx.on_action(|_: &ToggleStatusBar, cx| {
                 cx.update_global::<ViewSettings, _>(|view, _| view.status_bar = !view.status_bar);
@@ -842,7 +895,7 @@ fn main() {
                 cx.update_global::<ViewSettings, _>(|view, _| view.word_wrap = !view.word_wrap);
             });
 
-            let (window, jot) = open_jot_window(cx);
+            let (window, jot) = open_jot_window(None, None, cx);
             let paths: Vec<PathBuf> = std::env::args_os().skip(1).map(PathBuf::from).collect();
             if !paths.is_empty() {
                 window
