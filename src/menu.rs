@@ -680,6 +680,8 @@ impl MenuBar {
                 .w(px(sub_width))
                 .h(px(sub_height))
                 .opacity(submenu.motion.opacity)
+                .occlude()
+                .cursor_default()
                 .children(reveal(
                     sub_width,
                     sub_height,
@@ -706,6 +708,8 @@ impl MenuBar {
             .w(px(width))
             .h(px(height))
             .opacity(open.motion.opacity)
+            .occlude()
+            .cursor_default()
             .on_mouse_down_out(cx.listener(|this, event: &MouseDownEvent, window, cx| {
                 let inside = this
                     .hit_areas
