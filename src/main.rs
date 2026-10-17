@@ -198,7 +198,10 @@ const CARET_COLOR: u32 = 0x060606;
 const TAB_WIDTH: f32 = 240.;
 const TAB_LABEL_INSET: f32 = 8.;
 const TAB_LABEL_TRAILING: f32 = 44.;
-const UNSAVED_DOT: f32 = 8.;
+const UNSAVED_DOT: f32 = 6.;
+const UNSAVED_DOT_TOP: f32 = 13.;
+const UNSAVED_DOT_RIGHT: f32 = 19.;
+const UNSAVED_DOT_COLOR: u32 = 0x00000048;
 const CLOSE_BUTTON_TOP: f32 = 5.;
 const CLOSE_BUTTON_RIGHT: f32 = 6.;
 const PLUS_LINE: u32 = 0x000000a4;
@@ -688,19 +691,11 @@ impl Jot {
                 this.child(
                     div()
                         .absolute()
-                        .top(px(CLOSE_BUTTON_TOP - inset))
-                        .right(px(CLOSE_BUTTON_RIGHT - inset))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .w(px(32.))
-                        .h(px(24.))
-                        .child(
-                            div()
-                                .size(px(UNSAVED_DOT))
-                                .rounded_full()
-                                .bg(rgba(TEXT_PRIMARY)),
-                        ),
+                        .top(px(UNSAVED_DOT_TOP - inset))
+                        .right(px(UNSAVED_DOT_RIGHT - inset))
+                        .size(px(UNSAVED_DOT))
+                        .rounded_full()
+                        .bg(rgba(UNSAVED_DOT_COLOR)),
                 )
             })
             .when(separator, |this| {
