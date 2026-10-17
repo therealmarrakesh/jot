@@ -1,9 +1,12 @@
 use super::*;
-use std::time::Instant;
+use gpui_kit::base::actions::{
+    Cancel, Confirm, SelectDown, SelectFirst, SelectLast, SelectLeft, SelectRight, SelectUp,
+};
+use gpui_kit::base::{MotionStatus, Presence, Transition, transition_with_status};
 
 const CONTEXT: &str = "JotMenu";
-const OPEN_MS: f32 = 250.;
-const CLOSE_MS: f32 = 83.;
+const OPEN_DURATION: Duration = Duration::from_millis(250);
+const CLOSE_DURATION: Duration = Duration::from_millis(83);
 const CLOSED_RATIO: f32 = 0.5;
 const MIN_WIDTH: f32 = 232.;
 const FILL: u32 = 0xfcfcfc;
@@ -24,27 +27,25 @@ const SHORTCUT_SIZE: f32 = 12.;
 const GLYPH_SIZE: f32 = 12.;
 const SUBMENU_OVERLAP: f32 = 4.;
 
-gpui_kit::actions!(
-    jot_menu,
-    [
-        MenuUp,
-        MenuDown,
-        MenuConfirm,
-        MenuCancel,
-        MenuLeft,
-        MenuRight
-    ]
-);
-
 pub fn key_bindings() -> Vec<KeyBinding> {
     vec![
-        KeyBinding::new("up", MenuUp, Some(CONTEXT)),
-        KeyBinding::new("down", MenuDown, Some(CONTEXT)),
-        KeyBinding::new("enter", MenuConfirm, Some(CONTEXT)),
-        KeyBinding::new("escape", MenuCancel, Some(CONTEXT)),
-        KeyBinding::new("left", MenuLeft, Some(CONTEXT)),
-        KeyBinding::new("right", MenuRight, Some(CONTEXT)),
+        KeyBinding::new("up", SelectUp, Some(CONTEXT)),
+        KeyBinding::new("down", SelectDown, Some(CONTEXT)),
+        KeyBinding::new("home", SelectFirst, Some(CONTEXT)),
+        KeyBinding::new("end", SelectLast, Some(CONTEXT)),
+        KeyBinding::new("enter", Confirm { secondary: false }, Some(CONTEXT)),
+        KeyBinding::new("escape", Cancel, Some(CONTEXT)),
+        KeyBinding::new("left", SelectLeft, Some(CONTEXT)),
+        KeyBinding::new("right", SelectRight, Some(CONTEXT)),
     ]
+}
+
+fn open_transition() -> Transition {
+    Transition::new(OPEN_DURATION).ease(cubic_bezier(0., 0., 0., 1.))
+}
+
+fn close_transition() -> Transition {
+    Transition::new(CLOSE_DURATION).ease(|t| t)
 }
 
 #[derive(Clone)]
@@ -229,13 +230,33 @@ struct OpenMenu {
     kind: MenuKind,
     panel: Panel,
     submenu: Option<(usize, Panel)>,
-    opened_at: Instant,
-    closing_since: Option<Instant>,
+    serial: usize,
+    closing: bool,
+    unroll: f32,
+    opacity: f32,
 }
 
 impl OpenMenu {
     fn is_closing(&self) -> bool {
-        self.closing_since.is_some()
+        self.closing
+    }
+
+    fn sample(&mut self, window: &mut Window, cx: &mut App) -> bool {
+        if !self.closing {
+            self.unroll = Presence::new(ElementId::from(("jot-menu-unroll", self.serial)), true)
+                .transition(open_transition())
+                .sample(window, cx)
+                .progress;
+        }
+        let fade = transition_with_status(
+            ElementId::from(("jot-menu-fade", self.serial)),
+            if self.closing { 0. } else { 1. },
+            close_transition(),
+            window,
+            cx,
+        );
+        self.opacity = fade.value;
+        self.closing && fade.status == MotionStatus::Finished
     }
 }
 
@@ -243,6 +264,7 @@ pub struct MenuBar {
     pub action_context: FocusHandle,
     focus: FocusHandle,
     open: Option<OpenMenu>,
+    openings: usize,
     hit_areas: Rc<Cell<[Bounds<Pixels>; 3]>>,
 }
 
@@ -252,6 +274,7 @@ impl MenuBar {
             action_context,
             focus: cx.focus_handle(),
             open: None,
+            openings: 0,
             hit_areas: Rc::new(Cell::new([Bounds::default(); 3])),
         }
     }
@@ -265,12 +288,15 @@ impl MenuBar {
 
     fn open_menu(&mut self, kind: MenuKind, window: &mut Window, cx: &mut Context<Self>) {
         let panel = Panel::new(kind.entries(cx), &self.action_context, window);
+        self.openings += 1;
         self.open = Some(OpenMenu {
             kind,
             panel,
             submenu: None,
-            opened_at: Instant::now(),
-            closing_since: None,
+            serial: self.openings,
+            closing: false,
+            unroll: 0.,
+            opacity: 1.,
         });
         self.focus.focus(window, cx);
         cx.notify();
@@ -278,7 +304,7 @@ impl MenuBar {
 
     fn close_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(open) = self.open.as_mut().filter(|open| !open.is_closing()) {
-            open.closing_since = Some(Instant::now());
+            open.closing = true;
             open.submenu = None;
         }
         self.action_context.focus(window, cx);
@@ -386,12 +412,36 @@ impl MenuBar {
         }
     }
 
-    fn on_up(&mut self, _: &MenuUp, _: &mut Window, cx: &mut Context<Self>) {
+    fn on_up(&mut self, _: &SelectUp, _: &mut Window, cx: &mut Context<Self>) {
         self.step_active(-1, cx);
     }
 
-    fn on_down(&mut self, _: &MenuDown, _: &mut Window, cx: &mut Context<Self>) {
+    fn on_down(&mut self, _: &SelectDown, _: &mut Window, cx: &mut Context<Self>) {
         self.step_active(1, cx);
+    }
+
+    fn on_first(&mut self, _: &SelectFirst, _: &mut Window, cx: &mut Context<Self>) {
+        self.jump_active(1, cx);
+    }
+
+    fn on_last(&mut self, _: &SelectLast, _: &mut Window, cx: &mut Context<Self>) {
+        self.jump_active(-1, cx);
+    }
+
+    fn jump_active(&mut self, delta: isize, cx: &mut Context<Self>) {
+        if let Some(open) = self.open.as_mut().filter(|open| !open.is_closing()) {
+            let panel = match open
+                .submenu
+                .as_mut()
+                .filter(|(_, panel)| panel.highlighted.is_some())
+            {
+                Some((_, panel)) => panel,
+                None => &mut open.panel,
+            };
+            panel.highlighted = None;
+            panel.step(delta);
+            cx.notify();
+        }
     }
 
     fn step_active(&mut self, delta: isize, cx: &mut Context<Self>) {
@@ -408,7 +458,7 @@ impl MenuBar {
         }
     }
 
-    fn on_confirm(&mut self, _: &MenuConfirm, window: &mut Window, cx: &mut Context<Self>) {
+    fn on_confirm(&mut self, _: &Confirm, window: &mut Window, cx: &mut Context<Self>) {
         let Some(open) = self.open.as_ref() else {
             return;
         };
@@ -421,21 +471,21 @@ impl MenuBar {
         }
     }
 
-    fn on_cancel(&mut self, _: &MenuCancel, window: &mut Window, cx: &mut Context<Self>) {
+    fn on_cancel(&mut self, _: &Cancel, window: &mut Window, cx: &mut Context<Self>) {
         match self.open.as_mut().and_then(|open| open.submenu.take()) {
             Some(_) => cx.notify(),
             None => self.close_menu(window, cx),
         }
     }
 
-    fn on_left(&mut self, _: &MenuLeft, window: &mut Window, cx: &mut Context<Self>) {
+    fn on_left(&mut self, _: &SelectLeft, window: &mut Window, cx: &mut Context<Self>) {
         match self.open.as_mut().and_then(|open| open.submenu.take()) {
             Some(_) => cx.notify(),
             None => self.switch(-1, window, cx),
         }
     }
 
-    fn on_right(&mut self, _: &MenuRight, window: &mut Window, cx: &mut Context<Self>) {
+    fn on_right(&mut self, _: &SelectRight, window: &mut Window, cx: &mut Context<Self>) {
         let submenu_row = self.open.as_ref().and_then(|open| {
             open.panel
                 .highlighted
@@ -507,12 +557,8 @@ impl MenuBar {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
-        let now = Instant::now();
-        let progress = (now.duration_since(open.opened_at).as_secs_f32() * 1000. / OPEN_MS).min(1.);
-        let eased = cubic_bezier(0., 0., 0., 1.)(progress);
-        let opacity = open.closing_since.map_or(1., |since| {
-            1. - (now.duration_since(since).as_secs_f32() * 1000. / CLOSE_MS).min(1.)
-        });
+        let eased = open.unroll;
+        let opacity = open.opacity;
         let panel = &open.panel;
         let height = panel.height();
         let width = panel.width;
@@ -781,17 +827,12 @@ fn shortcut_text(
 
 impl Render for MenuBar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let now = Instant::now();
-        if self.open.as_ref().is_some_and(|open| {
-            open.closing_since
-                .is_some_and(|since| now.duration_since(since).as_secs_f32() * 1000. >= CLOSE_MS)
-        }) {
+        if self
+            .open
+            .as_mut()
+            .is_some_and(|open| open.sample(window, cx))
+        {
             self.open = None;
-        }
-        if self.open.as_ref().is_some_and(|open| {
-            open.is_closing() || now.duration_since(open.opened_at).as_secs_f32() * 1000. < OPEN_MS
-        }) {
-            window.request_animation_frame();
         }
         let hit_areas = self.hit_areas.clone();
 
@@ -808,6 +849,8 @@ impl Render for MenuBar {
             .text_color(rgba(TEXT_PRIMARY))
             .on_action(cx.listener(Self::on_up))
             .on_action(cx.listener(Self::on_down))
+            .on_action(cx.listener(Self::on_first))
+            .on_action(cx.listener(Self::on_last))
             .on_action(cx.listener(Self::on_confirm))
             .on_action(cx.listener(Self::on_cancel))
             .on_action(cx.listener(Self::on_left))
