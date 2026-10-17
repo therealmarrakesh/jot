@@ -11,7 +11,7 @@ impl Jot {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let _ = self.prompt(title, message, &["OK"], window, cx);
+        drop(self.prompt(title, message, &["OK"], window, cx));
     }
 
     pub(crate) fn tab_name(&self, ix: usize) -> String {

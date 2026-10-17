@@ -409,6 +409,19 @@ struct OpenMenu {
 }
 
 impl OpenMenu {
+    fn new(kind: MenuKind, panel: Panel) -> Self {
+        Self {
+            kind,
+            anchor: None,
+            upward: false,
+            commands: Vec::new(),
+            return_focus: None,
+            panel,
+            submenu: None,
+            motion: Motion::new(0, false),
+        }
+    }
+
     fn is_closing(&self) -> bool {
         self.motion.closing
     }
@@ -479,7 +492,7 @@ impl MenuBar {
     fn open_menu(&mut self, kind: MenuKind, window: &mut Window, cx: &mut Context<Self>) {
         let entries = kind.entries(self.editor.read(cx), cx);
         let panel = Panel::new(entries, MIN_WIDTH, &self.action_context(cx), window);
-        self.show(kind, panel, Vec::new(), None, false, None, window, cx);
+        self.show(OpenMenu::new(kind, panel), window, cx);
     }
 
     pub fn focus_handle(&self) -> &FocusHandle {
@@ -496,12 +509,11 @@ impl MenuBar {
     ) {
         let panel = Panel::new(entries, CONTEXT_WIDTH, &self.action_context(cx), window);
         self.show(
-            MenuKind::Flyout,
-            panel,
-            commands,
-            Some(anchor),
-            false,
-            None,
+            OpenMenu {
+                anchor: Some(anchor),
+                commands,
+                ..OpenMenu::new(MenuKind::Flyout, panel)
+            },
             window,
             cx,
         );
@@ -521,39 +533,20 @@ impl MenuBar {
             target.top() - px(FLYOUT_GAP + panel.height()),
         );
         self.show(
-            MenuKind::Flyout,
-            panel,
-            Vec::new(),
-            Some(anchor),
-            true,
-            Some(return_focus),
+            OpenMenu {
+                anchor: Some(anchor),
+                upward: true,
+                return_focus: Some(return_focus),
+                ..OpenMenu::new(MenuKind::Flyout, panel)
+            },
             window,
             cx,
         );
     }
 
-    fn show(
-        &mut self,
-        kind: MenuKind,
-        panel: Panel,
-        commands: Vec<CommandButton>,
-        anchor: Option<Point<Pixels>>,
-        upward: bool,
-        return_focus: Option<FocusHandle>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let motion = Motion::new(self.next_serial(), !commands.is_empty());
-        self.open = Some(OpenMenu {
-            kind,
-            anchor,
-            upward,
-            commands,
-            return_focus,
-            panel,
-            submenu: None,
-            motion,
-        });
+    fn show(&mut self, open: OpenMenu, window: &mut Window, cx: &mut Context<Self>) {
+        let motion = Motion::new(self.next_serial(), !open.commands.is_empty());
+        self.open = Some(OpenMenu { motion, ..open });
         self.submenu_timer = Task::ready(());
         self.focus.focus(window, cx);
         cx.emit(MenuEvent::Opened);

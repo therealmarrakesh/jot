@@ -659,6 +659,11 @@ impl Jot {
         if s < MIN_VISIBLE_SCALE {
             return card;
         }
+        let buttons = field::ButtonStyle {
+            surface: p.card_surface,
+            accent: self.accent,
+            scale: s,
+        };
         let options_bounds = self.find.options_bounds.clone();
         let replace = self.find.replace;
         let query_row = div()
@@ -760,19 +765,10 @@ impl Jot {
                         .ml(u(ACTION_GAP))
                         .w(u(ACTION_WIDTH))
                         .child(
-                            field::button(
-                                p,
-                                "find-replace",
-                                "Replace",
-                                false,
-                                false,
-                                p.card_surface,
-                                self.accent,
-                                s,
-                            )
-                            .on_click(cx.listener(
-                                |this, _, window, cx| this.replace_next(&ReplaceNext, window, cx),
-                            )),
+                            field::button(p, buttons, "find-replace", "Replace", false, false)
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.replace_next(&ReplaceNext, window, cx)
+                                })),
                         ),
                 )
                 .child(
@@ -783,13 +779,11 @@ impl Jot {
                         .child(
                             field::button(
                                 p,
+                                buttons,
                                 "find-replace-all",
                                 "Replace all",
                                 false,
                                 false,
-                                p.card_surface,
-                                self.accent,
-                                s,
                             )
                             .on_click(cx.listener(
                                 |this, _, window, cx| this.replace_all(&ReplaceAll, window, cx),

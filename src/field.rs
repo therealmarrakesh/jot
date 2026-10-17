@@ -81,16 +81,26 @@ fn mix(color: Rgba, toward: f32, amount: f32) -> Rgba {
     }
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct ButtonStyle {
+    pub surface: Surface,
+    pub accent: Rgba,
+    pub scale: f32,
+}
+
 pub(crate) fn button(
     p: Palette,
+    style: ButtonStyle,
     id: impl Into<ElementId>,
     label: impl Into<SharedString>,
     accent_style: bool,
     focused: bool,
-    surface: Surface,
-    accent: Rgba,
-    s: f32,
 ) -> Stateful<Div> {
+    let ButtonStyle {
+        surface,
+        accent,
+        scale: s,
+    } = style;
     let u = |v: f32| px(v * s);
     let (fill, hover, pressed, edge, bottom, text) = if accent_style {
         let backdrop = (p.dialog_command & 0xff) as f32 / 255.;
