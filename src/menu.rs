@@ -3,6 +3,8 @@ use gpui_kit::base::actions::{
     Cancel, Confirm, SelectDown, SelectFirst, SelectLast, SelectLeft, SelectRight, SelectUp,
 };
 use gpui_kit::base::{MotionStatus, Presence, Transition, transition_with_status};
+use windows_sys::Win32::System::DataExchange::IsClipboardFormatAvailable;
+use windows_sys::Win32::System::Ole::CF_UNICODETEXT;
 use windows_sys::Win32::UI::WindowsAndMessaging::{SPI_GETMENUSHOWDELAY, SystemParametersInfoW};
 
 const CONTEXT: &str = "JotMenu";
@@ -15,6 +17,7 @@ const MIN_WIDTH: f32 = 232.;
 const FILL: u32 = 0xfcfcfc;
 const BORDER: u32 = 0xdcdcdc;
 const SEPARATOR_LINE: u32 = 0xededed;
+const TEXT_DISABLED: u32 = 0x0000004c;
 const ROW_COMMAND: f32 = 33.;
 const ROW_COMPACT: f32 = 32.;
 const ROW_SEPARATOR: f32 = 3.;
@@ -54,27 +57,38 @@ fn close_transition() -> Transition {
 #[derive(Clone)]
 enum Entry {
     Command(&'static str, fn() -> Box<dyn Action>),
+    Disabled(&'static str, fn() -> Box<dyn Action>),
     Toggle(&'static str, bool, fn() -> Box<dyn Action>),
     Submenu(&'static str, Vec<Entry>),
     Separator,
 }
 
 impl Entry {
+    fn command(label: &'static str, enabled: bool, action: fn() -> Box<dyn Action>) -> Self {
+        if enabled {
+            Self::Command(label, action)
+        } else {
+            Self::Disabled(label, action)
+        }
+    }
+
     fn height(&self) -> f32 {
         match self {
-            Self::Command(..) => ROW_COMMAND,
+            Self::Command(..) | Self::Disabled(..) => ROW_COMMAND,
             Self::Toggle(..) | Self::Submenu(..) => ROW_COMPACT,
             Self::Separator => ROW_SEPARATOR,
         }
     }
 
     fn selectable(&self) -> bool {
-        !matches!(self, Self::Separator)
+        !matches!(self, Self::Separator | Self::Disabled(..))
     }
 
     fn action(&self) -> Option<Box<dyn Action>> {
         match self {
-            Self::Command(_, action) | Self::Toggle(_, _, action) => Some(action()),
+            Self::Command(_, action) | Self::Disabled(_, action) | Self::Toggle(_, _, action) => {
+                Some(action())
+            }
             _ => None,
         }
     }
@@ -102,7 +116,7 @@ impl MenuKind {
         Self::ALL.iter().position(|kind| *kind == self).unwrap_or(0)
     }
 
-    fn entries(self, cx: &App) -> Vec<Entry> {
+    fn entries(self, editor: &TextareaState, cx: &App) -> Vec<Entry> {
         use Entry::*;
         match self {
             Self::File => vec![
@@ -117,23 +131,28 @@ impl MenuKind {
                 Command("Close window", || Box::new(CloseWindow)),
                 Command("Exit", || Box::new(Exit)),
             ],
-            Self::Edit => vec![
-                Command("Undo", || Box::new(input::Undo)),
-                Separator,
-                Command("Cut", || Box::new(input::Cut)),
-                Command("Copy", || Box::new(input::Copy)),
-                Command("Paste", || Box::new(input::Paste)),
-                Command("Delete", || Box::new(input::Delete)),
-                Separator,
-                Command("Find", || Box::new(Find)),
-                Command("Find next", || Box::new(FindNext)),
-                Command("Find previous", || Box::new(FindPrevious)),
-                Command("Replace", || Box::new(Replace)),
-                Command("Go to", || Box::new(GoTo)),
-                Separator,
-                Command("Select all", || Box::new(input::SelectAll)),
-                Command("Time/Date", || Box::new(TimeDate)),
-            ],
+            Self::Edit => {
+                let selection = !editor.selected_range().is_empty();
+                let clipboard_text =
+                    unsafe { IsClipboardFormatAvailable(CF_UNICODETEXT.into()) } != 0;
+                vec![
+                    Entry::command("Undo", editor.can_undo(), || Box::new(input::Undo)),
+                    Separator,
+                    Entry::command("Cut", selection, || Box::new(input::Cut)),
+                    Entry::command("Copy", selection, || Box::new(input::Copy)),
+                    Entry::command("Paste", clipboard_text, || Box::new(input::Paste)),
+                    Entry::command("Delete", selection, || Box::new(input::Delete)),
+                    Separator,
+                    Command("Find", || Box::new(Find)),
+                    Command("Find next", || Box::new(FindNext)),
+                    Command("Find previous", || Box::new(FindPrevious)),
+                    Command("Replace", || Box::new(Replace)),
+                    Command("Go to", || Box::new(GoTo)),
+                    Separator,
+                    Command("Select all", || Box::new(input::SelectAll)),
+                    Command("Time/Date", || Box::new(TimeDate)),
+                ]
+            }
             Self::View => {
                 let view = cx.global::<ViewSettings>();
                 vec![
@@ -179,6 +198,7 @@ impl Panel {
             .map(|(entry, shortcut)| {
                 let label = match entry {
                     Entry::Command(label, _)
+                    | Entry::Disabled(label, _)
                     | Entry::Toggle(label, ..)
                     | Entry::Submenu(label, _) => text_width(window, label, MENU_FONT, LABEL_SIZE),
                     Entry::Separator => 0.,
@@ -322,7 +342,7 @@ enum SubmenuChange {
 }
 
 pub struct MenuBar {
-    pub action_context: FocusHandle,
+    pub editor: Entity<TextareaState>,
     focus: FocusHandle,
     open: Option<OpenMenu>,
     serials: usize,
@@ -331,15 +351,19 @@ pub struct MenuBar {
 }
 
 impl MenuBar {
-    pub fn new(action_context: FocusHandle, cx: &mut Context<Self>) -> Self {
+    pub fn new(editor: Entity<TextareaState>, cx: &mut Context<Self>) -> Self {
         Self {
-            action_context,
+            editor,
             focus: cx.focus_handle(),
             open: None,
             serials: 0,
             submenu_timer: Task::ready(()),
             hit_areas: Rc::new(Cell::new([Bounds::default(); 3])),
         }
+    }
+
+    fn action_context(&self, cx: &App) -> FocusHandle {
+        self.editor.focus_handle(cx)
     }
 
     fn next_serial(&mut self) -> usize {
@@ -355,7 +379,8 @@ impl MenuBar {
     }
 
     fn open_menu(&mut self, kind: MenuKind, window: &mut Window, cx: &mut Context<Self>) {
-        let panel = Panel::new(kind.entries(cx), &self.action_context, window);
+        let entries = kind.entries(self.editor.read(cx), cx);
+        let panel = Panel::new(entries, &self.action_context(cx), window);
         let motion = Motion::new(self.next_serial());
         self.open = Some(OpenMenu {
             kind,
@@ -373,7 +398,7 @@ impl MenuBar {
             open.motion.closing = true;
         }
         self.submenu_timer = Task::ready(());
-        self.action_context.focus(window, cx);
+        self.action_context(cx).focus(window, cx);
         cx.notify();
     }
 
@@ -395,12 +420,12 @@ impl MenuBar {
         };
         match entry {
             Entry::Submenu(..) => self.open_submenu(path.0, true, window, cx),
-            Entry::Separator => {}
+            Entry::Separator | Entry::Disabled(..) => {}
             entry => {
                 let action = entry.action();
                 self.close_menu(window, cx);
                 if let Some(action) = action {
-                    let target = self.action_context.clone();
+                    let target = self.action_context(cx);
                     window.defer(cx, move |window, cx| {
                         target.dispatch_action(action.as_ref(), window, cx)
                     });
@@ -416,7 +441,7 @@ impl MenuBar {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let action_context = self.action_context.clone();
+        let action_context = self.action_context(cx);
         let serial = self.next_serial();
         self.submenu_timer = Task::ready(());
         let Some(open) = self.open.as_mut().filter(|open| !open.is_closing()) else {
@@ -491,7 +516,7 @@ impl MenuBar {
         };
         let change = match path {
             (ix, None) => {
-                open.panel.highlighted = Some(ix);
+                open.panel.highlighted = open.panel.entries[ix].selectable().then_some(ix);
                 let current = open.live_submenu().map(|submenu| submenu.ix);
                 match (&open.panel.entries[ix], current) {
                     (Entry::Submenu(..), Some(open_ix)) if open_ix == ix => SubmenuChange::Keep,
@@ -502,7 +527,8 @@ impl MenuBar {
             }
             (_, Some(sub)) => {
                 if let Some(submenu) = open.live_submenu_mut() {
-                    submenu.panel.highlighted = Some(sub);
+                    submenu.panel.highlighted =
+                        submenu.panel.entries[sub].selectable().then_some(sub);
                 }
                 SubmenuChange::Keep
             }
@@ -772,8 +798,11 @@ impl MenuBar {
                         .child(div().h(px(1.)).bg(rgb(SEPARATOR_LINE)));
                 }
                 let highlighted = panel.highlighted == Some(ix);
+                let enabled = entry.selectable();
                 let (label, checked) = match entry {
-                    Entry::Command(label, _) | Entry::Submenu(label, _) => (*label, false),
+                    Entry::Command(label, _)
+                    | Entry::Disabled(label, _)
+                    | Entry::Submenu(label, _) => (*label, false),
                     Entry::Toggle(label, checked, _) => (*label, *checked),
                     Entry::Separator => unreachable!(),
                 };
@@ -816,7 +845,11 @@ impl MenuBar {
                                     .flex_1()
                                     .font_family(MENU_FONT)
                                     .text_size(px(LABEL_SIZE))
-                                    .text_color(rgba(TEXT_PRIMARY))
+                                    .text_color(rgba(if enabled {
+                                        TEXT_PRIMARY
+                                    } else {
+                                        TEXT_DISABLED
+                                    }))
                                     .child(label),
                             )
                             .when_some(shortcut, |this, shortcut| {
@@ -825,7 +858,11 @@ impl MenuBar {
                                         .flex_none()
                                         .font_family(UI_FONT)
                                         .text_size(px(SHORTCUT_SIZE))
-                                        .text_color(rgba(TEXT_SECONDARY))
+                                        .text_color(rgba(if enabled {
+                                            TEXT_SECONDARY
+                                        } else {
+                                            TEXT_DISABLED
+                                        }))
                                         .child(shortcut),
                                 )
                             })

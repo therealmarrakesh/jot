@@ -703,6 +703,10 @@ impl<M: InputModeKind> InputBaseState<M> {
         self.selections.iter().any(|sel| !sel.is_empty()) && !self.masked
     }
 
+    pub fn can_undo(&self) -> bool {
+        self.undo_manager.has_undos()
+    }
+
     pub fn context_menu_capabilities(&self) -> InputContextMenuCapabilities {
         let (go_to_definition, code_actions) = self.extras.context_menu_capabilities();
         InputContextMenuCapabilities::new()

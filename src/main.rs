@@ -17,6 +17,11 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Duration;
+use windows_sys::Win32::Foundation::SYSTEMTIME;
+use windows_sys::Win32::Globalization::{
+    DATE_SHORTDATE, GetDateFormatEx, GetTimeFormatEx, TIME_NOSECONDS,
+};
+use windows_sys::Win32::System::SystemInformation::GetLocalTime;
 use windows_sys::Win32::UI::WindowsAndMessaging::GetCaretBlinkTime;
 
 const LAYER_ON_MICA: u32 = 0xffffffb3;
@@ -279,6 +284,37 @@ fn caret_blink_period() -> Option<Duration> {
     (millis != 0 && millis != u32::MAX).then(|| Duration::from_millis(millis.into()))
 }
 
+fn time_date() -> String {
+    let mut now: SYSTEMTIME = unsafe { std::mem::zeroed() };
+    let mut time = [0u16; 128];
+    let mut date = [0u16; 128];
+    let (time_len, date_len) = unsafe {
+        GetLocalTime(&mut now);
+        (
+            GetTimeFormatEx(
+                std::ptr::null(),
+                TIME_NOSECONDS,
+                &now,
+                std::ptr::null(),
+                time.as_mut_ptr(),
+                time.len() as i32,
+            ),
+            GetDateFormatEx(
+                std::ptr::null(),
+                DATE_SHORTDATE,
+                &now,
+                std::ptr::null(),
+                date.as_mut_ptr(),
+                date.len() as i32,
+                std::ptr::null(),
+            ),
+        )
+    };
+    let text =
+        |buffer: &[u16], len: i32| String::from_utf16_lossy(&buffer[..(len.max(1) - 1) as usize]);
+    format!("{} {}", text(&time, time_len), text(&date, date_len))
+}
+
 fn caret_key(editor: &TextareaState) -> (usize, Range<usize>, usize) {
     (
         editor.cursor(),
@@ -314,8 +350,8 @@ pub struct Jot {
 impl Jot {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let tab = Self::create_tab(None, window, cx);
-        let action_context = tab.editor.focus_handle(cx);
-        let menu_bar = cx.new(|cx| MenuBar::new(action_context, cx));
+        let editor = tab.editor.clone();
+        let menu_bar = cx.new(|cx| MenuBar::new(editor, cx));
 
         let _subscriptions = vec![
             cx.observe_window_activation(window, |this, window, cx| {
@@ -422,10 +458,9 @@ impl Jot {
     fn activate_tab(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         self.active = ix;
         let editor = self.active_editor().clone();
-        let focus = editor.focus_handle(cx);
-        focus.focus(window, cx);
+        editor.focus_handle(cx).focus(window, cx);
         self.menu_bar
-            .update(cx, |menu_bar, _| menu_bar.action_context = focus);
+            .update(cx, |menu_bar, _| menu_bar.editor = editor.clone());
         self.caret_key = caret_key(editor.read(cx));
         self.restart_caret_blink(cx);
         self.refresh_title(window);
@@ -488,6 +523,13 @@ impl Jot {
         )
         .absolute()
         .size_full()
+    }
+
+    fn insert_time_date(&mut self, _: &TimeDate, window: &mut Window, cx: &mut Context<Self>) {
+        let stamp = time_date();
+        self.active_editor()
+            .clone()
+            .update(cx, |editor, cx| editor.replace(stamp, window, cx));
     }
 
     fn zoom_in(&mut self, _: &ZoomIn, _: &mut Window, cx: &mut Context<Self>) {
@@ -846,6 +888,7 @@ impl Render for Jot {
             .on_action(cx.listener(Self::save))
             .on_action(cx.listener(Self::save_as))
             .on_action(cx.listener(Self::save_all))
+            .on_action(cx.listener(Self::insert_time_date))
             .child(self.title_bar(window, cx))
             .child(self.menu_bar())
             .child(self.editor(window, cx))

@@ -364,7 +364,6 @@ impl UndoManager {
         Some(replay)
     }
 
-    #[cfg(test)]
     pub(super) fn has_undos(&self) -> bool {
         !self.undo_transactions.is_empty()
     }
