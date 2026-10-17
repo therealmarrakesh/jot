@@ -1,7 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use gpui_kit::component::global_state::GlobalState;
-use gpui_kit::component::input::{self, Textarea, TextareaState};
+use gpui_kit::component::input::{self, RopeExt as _, Textarea, TextareaState};
 use gpui_kit::component::menu::AppMenuBar;
 use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
@@ -11,6 +11,8 @@ const LAYER_ON_MICA: u32 = 0xffffffb3;
 const STROKE: u32 = 0x0000000f;
 const STROKE_ON_LAYER: u32 = 0xeaeaeab8;
 const EDITOR_BACKGROUND: u32 = 0xf9f9f9;
+const TEXT_SECONDARY: u32 = 0x0000007a;
+const UI_FONT: &str = "Segoe UI Variable Small";
 
 const CAPTION_GLYPH: u32 = 0x000000ff;
 const CAPTION_GLYPH_INACTIVE: u32 = 0x0000005c;
@@ -24,6 +26,35 @@ const CLOSE_GLYPH_PRESSED: u32 = 0xffffffb3;
 
 fn separator() -> Div {
     div().flex_none().h(px(1.)).bg(rgba(STROKE_ON_LAYER))
+}
+
+fn group_thousands(n: usize) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
+fn character_count(selected: usize, total: usize) -> String {
+    let noun = if total == 1 {
+        "character"
+    } else {
+        "characters"
+    };
+    if selected > 0 {
+        format!(
+            "{} of {} {noun}",
+            group_thousands(selected),
+            group_thousands(total)
+        )
+    } else {
+        format!("{} {noun}", group_thousands(total))
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -376,11 +407,34 @@ impl Jot {
             )
     }
 
-    fn status_bar(&self) -> impl IntoElement {
-        div()
-            .flex_none()
-            .child(separator())
-            .child(div().h(px(31.)).bg(rgba(LAYER_ON_MICA)))
+    fn status_bar(&self, cx: &App) -> impl IntoElement {
+        let editor = self.editor.read(cx);
+        let text = editor.text();
+        let cursor = editor.cursor();
+        let point = text.offset_to_point(cursor);
+        let column = text.byte_to_char_idx(cursor) - text.byte_to_char_idx(cursor - point.column);
+        let selection = editor.selected_range();
+        let selected =
+            text.byte_to_char_idx(selection.end) - text.byte_to_char_idx(selection.start);
+        let total = text.len_chars();
+
+        div().flex_none().child(separator()).child(
+            div()
+                .flex()
+                .items_center()
+                .h(px(31.))
+                .bg(rgba(LAYER_ON_MICA))
+                .font_family(UI_FONT)
+                .text_size(px(12.))
+                .text_color(rgba(TEXT_SECONDARY))
+                .child(div().flex_none().w(px(96.)).pl(px(22.)).child(format!(
+                    "Ln {}, Col {}",
+                    point.row + 1,
+                    column + 1
+                )))
+                .child(div().flex_none().w(px(1.)).h(px(16.)).bg(rgba(STROKE)))
+                .child(div().pl(px(8.)).child(character_count(selected, total))),
+        )
     }
 }
 
@@ -398,7 +452,7 @@ impl Render for Jot {
             .child(self.title_bar(window))
             .child(self.menu_bar())
             .child(self.editor())
-            .when(status_bar, |this| this.child(self.status_bar()))
+            .when(status_bar, |this| this.child(self.status_bar(cx)))
     }
 }
 
