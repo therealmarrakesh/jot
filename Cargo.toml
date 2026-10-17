@@ -9,3 +9,6 @@ windows-sys = { version = "0.60", features = ["Win32_UI_WindowsAndMessaging"] }
 
 [features]
 bench = []
+
+[patch.crates-io]
+gpui-base = { path = "vendor/gpui-base" }
