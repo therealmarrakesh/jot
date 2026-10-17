@@ -18,7 +18,8 @@ const TEXT_PRIMARY: u32 = 0x000000bc;
 const TEXT_SECONDARY: u32 = 0x0000007a;
 const UI_FONT: &str = "Segoe UI Variable Small";
 const MENU_FONT: &str = "Segoe UI Variable Text";
-const MENU_ITEM_ACTIVE: u32 = 0x00000005;
+const SUBTLE_FILL_SECONDARY: u32 = 0x00000005;
+const SUBTLE_FILL_TERTIARY: u32 = 0x00000003;
 
 const CAPTION_GLYPH: u32 = 0x000000ff;
 const CAPTION_GLYPH_INACTIVE: u32 = 0x0000005c;
@@ -174,6 +175,25 @@ const EDITOR_FONT_SIZE: f32 = 11. * 96. / 72.;
 const EDITOR_LINE_HEIGHT: f32 = 20.;
 const CARET_HEIGHT: f32 = 18.;
 const CARET_COLOR: u32 = 0x060606;
+const TAB_WIDTH: f32 = 240.;
+const TAB_LABEL_INSET: f32 = 8.;
+const CLOSE_BUTTON_TOP: f32 = 5.;
+const CLOSE_BUTTON_RIGHT: f32 = 6.;
+const PLUS_LINE: u32 = 0x000000a4;
+const PLUS_CAP_LEAD: u32 = 0x00000029;
+const PLUS_CAP_TRAIL: u32 = 0x0000004f;
+const PLUS_CENTER: u32 = 0x000000d4;
+const PLUS_SEGMENTS: [(f32, f32, f32, f32, u32); 9] = [
+    (11., 12., 1., 1., PLUS_CAP_LEAD),
+    (12., 12., 4., 1., PLUS_LINE),
+    (16., 12., 1., 1., PLUS_CENTER),
+    (17., 12., 4., 1., PLUS_LINE),
+    (21., 12., 1., 1., PLUS_CAP_TRAIL),
+    (16., 7., 1., 1., PLUS_CAP_LEAD),
+    (16., 8., 1., 4., PLUS_LINE),
+    (16., 13., 1., 4., PLUS_LINE),
+    (16., 17., 1., 1., PLUS_CAP_TRAIL),
+];
 const ZOOM_STEP: f32 = 0.1;
 const ZOOM_MIN: f32 = 0.1;
 const ZOOM_MAX: f32 = 5.;
@@ -322,9 +342,9 @@ impl MenuBar {
             .rounded(px(4.))
             .map(|this| {
                 if popup.is_some() {
-                    this.bg(rgba(MENU_ITEM_ACTIVE))
+                    this.bg(rgba(SUBTLE_FILL_SECONDARY))
                 } else {
-                    this.hover(|style| style.bg(rgba(MENU_ITEM_ACTIVE)))
+                    this.hover(|style| style.bg(rgba(SUBTLE_FILL_SECONDARY)))
                 }
             })
             .on_mouse_down(
@@ -431,10 +451,17 @@ fn caret_key(editor: &TextareaState) -> (usize, Range<usize>, usize) {
     )
 }
 
-pub struct Jot {
+struct Tab {
     editor: Entity<TextareaState>,
-    menu_bar: Entity<MenuBar>,
     zoom: f32,
+    _observer: Subscription,
+}
+
+pub struct Jot {
+    tabs: Vec<Tab>,
+    active: usize,
+    hovered_tab: Option<usize>,
+    menu_bar: Entity<MenuBar>,
     caret_visible: bool,
     caret_key: (usize, Range<usize>, usize),
     _caret_blink: Task<()>,
@@ -443,10 +470,8 @@ pub struct Jot {
 
 impl Jot {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let word_wrap = cx.global::<ViewSettings>().word_wrap;
-        let editor = cx.new(|cx| TextareaState::new(window, cx).soft_wrap(word_wrap));
-        editor.focus_handle(cx).focus(window, cx);
-        let action_context = editor.focus_handle(cx);
+        let tab = Self::create_tab(window, cx);
+        let action_context = tab.editor.focus_handle(cx);
         let menu_bar = cx.new(|_| MenuBar::new(action_context));
 
         let _subscriptions = vec![
@@ -458,33 +483,77 @@ impl Jot {
                     cx.notify();
                 }
             }),
-            cx.observe(&editor, |this, editor, cx| {
-                let key = caret_key(editor.read(cx));
-                if key != this.caret_key {
-                    this.caret_key = key;
-                    this.restart_caret_blink(cx);
-                }
-            }),
             cx.observe_global_in::<ViewSettings>(window, |this, window, cx| {
                 let word_wrap = cx.global::<ViewSettings>().word_wrap;
-                this.editor
-                    .update(cx, |editor, cx| editor.set_soft_wrap(word_wrap, window, cx));
+                for tab in &this.tabs {
+                    tab.editor
+                        .update(cx, |editor, cx| editor.set_soft_wrap(word_wrap, window, cx));
+                }
                 cx.notify();
             }),
         ];
 
-        let caret_key = caret_key(editor.read(cx));
         let mut jot = Self {
-            editor,
+            tabs: vec![tab],
+            active: 0,
+            hovered_tab: None,
             menu_bar,
-            zoom: 1.,
             caret_visible: true,
-            caret_key,
+            caret_key: (0, 0..0, 0),
             _caret_blink: Task::ready(()),
             _subscriptions,
         };
-        jot.restart_caret_blink(cx);
+        jot.activate_tab(0, window, cx);
         jot
+    }
+
+    fn create_tab(window: &mut Window, cx: &mut Context<Self>) -> Tab {
+        let word_wrap = cx.global::<ViewSettings>().word_wrap;
+        let editor = cx.new(|cx| TextareaState::new(window, cx).soft_wrap(word_wrap));
+        let _observer = cx.observe(&editor, |this, editor, cx| {
+            if &editor != this.active_editor() {
+                return;
+            }
+            let key = caret_key(editor.read(cx));
+            if key != this.caret_key {
+                this.caret_key = key;
+                this.restart_caret_blink(cx);
+            }
+        });
+        Tab {
+            editor,
+            zoom: 1.,
+            _observer,
+        }
+    }
+
+    fn active_editor(&self) -> &Entity<TextareaState> {
+        &self.tabs[self.active].editor
+    }
+
+    fn zoom(&self) -> f32 {
+        self.tabs[self.active].zoom
+    }
+
+    fn add_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let tab = Self::create_tab(window, cx);
+        self.tabs.push(tab);
+        self.activate_tab(self.tabs.len() - 1, window, cx);
+    }
+
+    fn activate_tab(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.active = ix;
+        let editor = self.active_editor().clone();
+        let focus = editor.focus_handle(cx);
+        focus.focus(window, cx);
+        self.menu_bar
+            .update(cx, |menu_bar, _| menu_bar.action_context = focus);
+        self.caret_key = caret_key(editor.read(cx));
+        self.restart_caret_blink(cx);
+    }
+
+    fn new_tab(&mut self, _: &NewTab, window: &mut Window, cx: &mut Context<Self>) {
+        self.add_tab(window, cx);
     }
 
     fn restart_caret_blink(&mut self, cx: &mut Context<Self>) {
@@ -509,11 +578,11 @@ impl Jot {
     }
 
     fn caret(&self, window: &Window, cx: &App) -> impl IntoElement {
-        let editor = self.editor.clone();
-        let height = px((CARET_HEIGHT * self.zoom).round());
+        let editor = self.active_editor().clone();
+        let height = px((CARET_HEIGHT * self.zoom()).round());
         let shown = self.caret_visible
             && window.is_window_active()
-            && self.editor.focus_handle(cx).is_focused(window);
+            && editor.focus_handle(cx).is_focused(window);
 
         canvas(
             |_, _, _| {},
@@ -543,11 +612,11 @@ impl Jot {
     }
 
     fn zoom_in(&mut self, _: &ZoomIn, _: &mut Window, cx: &mut Context<Self>) {
-        self.set_zoom(self.zoom + ZOOM_STEP, cx);
+        self.set_zoom(self.zoom() + ZOOM_STEP, cx);
     }
 
     fn zoom_out(&mut self, _: &ZoomOut, _: &mut Window, cx: &mut Context<Self>) {
-        self.set_zoom(self.zoom - ZOOM_STEP, cx);
+        self.set_zoom(self.zoom() - ZOOM_STEP, cx);
     }
 
     fn reset_zoom(&mut self, _: &ResetZoom, _: &mut Window, cx: &mut Context<Self>) {
@@ -555,12 +624,30 @@ impl Jot {
     }
 
     fn set_zoom(&mut self, zoom: f32, cx: &mut Context<Self>) {
-        self.zoom = ((zoom / ZOOM_STEP).round() * ZOOM_STEP).clamp(ZOOM_MIN, ZOOM_MAX);
+        self.tabs[self.active].zoom =
+            ((zoom / ZOOM_STEP).round() * ZOOM_STEP).clamp(ZOOM_MIN, ZOOM_MAX);
         cx.notify();
     }
 
     fn close_window(&mut self, _: &CloseWindow, window: &mut Window, _: &mut Context<Self>) {
         window.remove_window();
+    }
+
+    fn close_active_tab(&mut self, _: &CloseTab, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_tab(self.active, window, cx);
+    }
+
+    fn close_tab(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if self.tabs.len() == 1 {
+            window.remove_window();
+            return;
+        }
+        self.tabs.remove(ix);
+        self.hovered_tab = None;
+        if ix < self.active || self.active == self.tabs.len() {
+            self.active -= 1;
+        }
+        self.activate_tab(self.active, window, cx);
     }
 
     fn caption_buttons(&self, window: &Window) -> impl IntoElement {
@@ -585,31 +672,164 @@ impl Jot {
             .child(div().flex_1().window_control_area(WindowControlArea::Drag))
     }
 
-    fn title_bar(&self, window: &Window) -> impl IntoElement {
+    fn tab(&self, ix: usize, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let active = ix == self.active;
+        let separator = !active && ix + 1 != self.active && ix + 1 < self.tabs.len();
+        let show_close = active || self.hovered_tab == Some(ix);
+        let inset = if active { 1. } else { 0. };
+
+        div()
+            .id(("tab", ix))
+            .relative()
+            .flex_none()
+            .w(px(TAB_WIDTH))
+            .h(px(32.))
+            .when(active, |this| {
+                this.border_t_1()
+                    .border_l_1()
+                    .border_r_1()
+                    .border_color(rgba(STROKE))
+                    .rounded_t(px(8.))
+            })
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, window, cx| this.activate_tab(ix, window, cx)),
+            )
+            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                if *hovered {
+                    this.hovered_tab = Some(ix);
+                } else if this.hovered_tab == Some(ix) {
+                    this.hovered_tab = None;
+                }
+                cx.notify();
+            }))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .size_full()
+                    .pl(px(TAB_LABEL_INSET))
+                    .font_family(UI_FONT)
+                    .text_size(px(12.))
+                    .map(|this| {
+                        if active {
+                            this.rounded_t(px(7.))
+                                .bg(rgba(LAYER_ON_MICA))
+                                .text_color(rgba(TEXT_PRIMARY))
+                                .font_weight(FontWeight::SEMIBOLD)
+                        } else {
+                            this.rounded_t(px(8.))
+                                .text_color(rgba(TEXT_SECONDARY))
+                                .hover(|style| style.bg(rgba(SUBTLE_FILL_SECONDARY)))
+                        }
+                    })
+                    .child("Untitled"),
+            )
+            .when(separator, |this| {
+                this.child(
+                    div()
+                        .absolute()
+                        .right_0()
+                        .top(px(8.))
+                        .w(px(1.))
+                        .h(px(16.))
+                        .bg(rgba(STROKE)),
+                )
+            })
+            .when(show_close, |this| {
+                this.child(
+                    div()
+                        .id(("close-tab", ix))
+                        .absolute()
+                        .top(px(CLOSE_BUTTON_TOP - inset))
+                        .right(px(CLOSE_BUTTON_RIGHT - inset))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .w(px(32.))
+                        .h(px(24.))
+                        .rounded(px(4.))
+                        .font_family("Segoe Fluent Icons")
+                        .text_size(px(12.))
+                        .text_color(rgba(TEXT_PRIMARY))
+                        .hover(|style| style.bg(rgba(SUBTLE_FILL_SECONDARY)))
+                        .active(|style| style.bg(rgba(SUBTLE_FILL_TERTIARY)))
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_click(
+                            cx.listener(move |this, _, window, cx| this.close_tab(ix, window, cx)),
+                        )
+                        .child("\u{E711}"),
+                )
+            })
+    }
+
+    fn new_tab_button(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        div()
+            .id("new-tab")
+            .flex_none()
+            .ml(px(5.))
+            .mt(px(5.))
+            .w(px(32.))
+            .h(px(24.))
+            .rounded(px(4.))
+            .hover(|style| style.bg(rgba(SUBTLE_FILL_SECONDARY)))
+            .active(|style| style.bg(rgba(SUBTLE_FILL_TERTIARY)))
+            .on_click(cx.listener(|this, _, window, cx| this.add_tab(window, cx)))
+            .child(
+                canvas(
+                    |_, _, _| {},
+                    |bounds, _, window, _| {
+                        for (x, y, w, h, color) in PLUS_SEGMENTS {
+                            window.paint_quad(fill(
+                                Bounds::new(
+                                    bounds.origin + point(px(x), px(y)),
+                                    size(px(w), px(h)),
+                                ),
+                                rgba(color),
+                            ));
+                        }
+                    },
+                )
+                .size_full(),
+            )
+    }
+
+    fn title_bar(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let tabs: Vec<_> = (0..self.tabs.len()).map(|ix| self.tab(ix, cx)).collect();
+
         div()
             .flex()
             .flex_none()
             .h(px(42.))
             .child(
                 div()
-                    .relative()
-                    .flex_1()
+                    .flex_none()
+                    .w(px(9.))
                     .h_full()
-                    .window_control_area(WindowControlArea::Drag)
+                    .window_control_area(WindowControlArea::Drag),
+            )
+            .child(
+                div()
+                    .v_flex()
+                    .flex_none()
                     .child(
                         div()
-                            .absolute()
-                            .left(px(9.))
-                            .top(px(10.))
-                            .w(px(240.))
+                            .h(px(10.))
+                            .window_control_area(WindowControlArea::Drag),
+                    )
+                    .child(
+                        div()
+                            .flex()
                             .h(px(32.))
-                            .border_t_1()
-                            .border_l_1()
-                            .border_r_1()
-                            .border_color(rgba(STROKE))
-                            .rounded_t(px(8.))
-                            .child(div().size_full().rounded_t(px(7.)).bg(rgba(LAYER_ON_MICA))),
+                            .children(tabs)
+                            .child(self.new_tab_button(cx)),
                     ),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .h_full()
+                    .window_control_area(WindowControlArea::Drag),
             )
             .child(self.caption_buttons(window))
     }
@@ -636,18 +856,18 @@ impl Jot {
             .pt(px(7.))
             .bg(rgb(EDITOR_BACKGROUND))
             .child(
-                Textarea::new(&self.editor)
+                Textarea::new(self.active_editor())
                     .appearance(false)
                     .h_full()
                     .font_family("Consolas")
-                    .text_size(px(EDITOR_FONT_SIZE * self.zoom))
-                    .line_height(px((EDITOR_LINE_HEIGHT * self.zoom).round())),
+                    .text_size(px(EDITOR_FONT_SIZE * self.zoom()))
+                    .line_height(px((EDITOR_LINE_HEIGHT * self.zoom()).round())),
             )
             .child(self.caret(window, cx))
     }
 
     fn status_bar(&self, cx: &App) -> impl IntoElement {
-        let editor = self.editor.read(cx);
+        let editor = self.active_editor().read(cx);
         let text = editor.text();
         let cursor = editor.cursor();
         let point = text.offset_to_point(cursor);
@@ -674,7 +894,10 @@ impl Jot {
                 .child(status_divider())
                 .child(div().pl(px(8.)).child(character_count(selected, total)))
                 .child(div().flex_1())
-                .child(status_cell(68., format!("{}%", (self.zoom * 100.).round())))
+                .child(status_cell(
+                    68.,
+                    format!("{}%", (self.zoom() * 100.).round()),
+                ))
                 .child(status_cell(144., "UTF-8")),
         )
     }
@@ -705,7 +928,9 @@ impl Render for Jot {
             .on_action(cx.listener(Self::zoom_out))
             .on_action(cx.listener(Self::reset_zoom))
             .on_action(cx.listener(Self::close_window))
-            .child(self.title_bar(window))
+            .on_action(cx.listener(Self::new_tab))
+            .on_action(cx.listener(Self::close_active_tab))
+            .child(self.title_bar(window, cx))
             .child(self.menu_bar())
             .child(self.editor(window, cx))
             .when(status_bar, |this| this.child(self.status_bar(cx)))
