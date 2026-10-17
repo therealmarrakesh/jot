@@ -1,8 +1,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use gpui_kit::component::global_state::GlobalState;
+use gpui_kit::base::actions::{SelectLeft, SelectRight};
 use gpui_kit::component::input::{self, RopeExt as _, Textarea, TextareaState};
-use gpui_kit::component::menu::AppMenuBar;
+use gpui_kit::component::menu::PopupMenu;
 use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -11,8 +11,11 @@ const LAYER_ON_MICA: u32 = 0xffffffb3;
 const STROKE: u32 = 0x0000000f;
 const STROKE_ON_LAYER: u32 = 0xeaeaeab8;
 const EDITOR_BACKGROUND: u32 = 0xf9f9f9;
+const TEXT_PRIMARY: u32 = 0x000000bc;
 const TEXT_SECONDARY: u32 = 0x0000007a;
 const UI_FONT: &str = "Segoe UI Variable Small";
+const MENU_FONT: &str = "Segoe UI Variable Text";
+const MENU_ITEM_ACTIVE: u32 = 0x00000005;
 
 const CAPTION_GLYPH: u32 = 0x000000ff;
 const CAPTION_GLYPH_INACTIVE: u32 = 0x0000005c;
@@ -176,55 +179,191 @@ struct ViewSettings {
 
 impl Global for ViewSettings {}
 
-fn app_menus(view: &ViewSettings) -> Vec<Menu> {
-    vec![
-        Menu::new("File").items([
-            MenuItem::action("New tab", NewTab),
-            MenuItem::action("New window", NewWindow),
-            MenuItem::action("Open", Open),
-            MenuItem::action("Save", Save),
-            MenuItem::action("Save as", SaveAs),
-            MenuItem::action("Save all", SaveAll),
-            MenuItem::separator(),
-            MenuItem::action("Close tab", CloseTab),
-            MenuItem::action("Close window", CloseWindow),
-            MenuItem::action("Exit", Exit),
-        ]),
-        Menu::new("Edit").items([
-            MenuItem::action("Undo", input::Undo),
-            MenuItem::separator(),
-            MenuItem::action("Cut", input::Cut),
-            MenuItem::action("Copy", input::Copy),
-            MenuItem::action("Paste", input::Paste),
-            MenuItem::action("Delete", input::Delete),
-            MenuItem::separator(),
-            MenuItem::action("Find", Find),
-            MenuItem::action("Find next", FindNext),
-            MenuItem::action("Find previous", FindPrevious),
-            MenuItem::action("Replace", Replace),
-            MenuItem::action("Go to", GoTo),
-            MenuItem::separator(),
-            MenuItem::action("Select all", input::SelectAll),
-            MenuItem::action("Time/Date", TimeDate),
-        ]),
-        Menu::new("View").items([
-            MenuItem::submenu(Menu::new("Zoom").items([
-                MenuItem::action("Zoom in", ZoomIn),
-                MenuItem::action("Zoom out", ZoomOut),
-                MenuItem::action("Restore default zoom", ResetZoom),
-            ])),
-            MenuItem::action("Status bar", ToggleStatusBar).checked(view.status_bar),
-            MenuItem::action("Word wrap", ToggleWordWrap).checked(view.word_wrap),
-        ]),
-    ]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MenuKind {
+    File,
+    Edit,
+    View,
 }
 
-fn publish_menus(cx: &mut App) {
-    let menus = app_menus(cx.global::<ViewSettings>())
-        .into_iter()
-        .map(Menu::owned)
-        .collect();
-    GlobalState::global_mut(cx).set_app_menus(menus);
+impl MenuKind {
+    const ALL: [Self; 3] = [Self::File, Self::Edit, Self::View];
+
+    fn title(self) -> &'static str {
+        match self {
+            Self::File => "File",
+            Self::Edit => "Edit",
+            Self::View => "View",
+        }
+    }
+
+    fn index(self) -> usize {
+        Self::ALL.iter().position(|kind| *kind == self).unwrap_or(0)
+    }
+
+    fn build(self, menu: PopupMenu, window: &mut Window, cx: &mut Context<PopupMenu>) -> PopupMenu {
+        match self {
+            Self::File => menu
+                .menu("New tab", Box::new(NewTab))
+                .menu("New window", Box::new(NewWindow))
+                .menu("Open", Box::new(Open))
+                .menu("Save", Box::new(Save))
+                .menu("Save as", Box::new(SaveAs))
+                .menu("Save all", Box::new(SaveAll))
+                .separator()
+                .menu("Close tab", Box::new(CloseTab))
+                .menu("Close window", Box::new(CloseWindow))
+                .menu("Exit", Box::new(Exit)),
+            Self::Edit => menu
+                .menu("Undo", Box::new(input::Undo))
+                .separator()
+                .menu("Cut", Box::new(input::Cut))
+                .menu("Copy", Box::new(input::Copy))
+                .menu("Paste", Box::new(input::Paste))
+                .menu("Delete", Box::new(input::Delete))
+                .separator()
+                .menu("Find", Box::new(Find))
+                .menu("Find next", Box::new(FindNext))
+                .menu("Find previous", Box::new(FindPrevious))
+                .menu("Replace", Box::new(Replace))
+                .menu("Go to", Box::new(GoTo))
+                .separator()
+                .menu("Select all", Box::new(input::SelectAll))
+                .menu("Time/Date", Box::new(TimeDate)),
+            Self::View => {
+                let view = cx.global::<ViewSettings>();
+                let (status_bar, word_wrap) = (view.status_bar, view.word_wrap);
+                menu.submenu("Zoom", window, cx, |menu, _, _| {
+                    menu.menu("Zoom in", Box::new(ZoomIn))
+                        .menu("Zoom out", Box::new(ZoomOut))
+                        .menu("Restore default zoom", Box::new(ResetZoom))
+                })
+                .menu_with_check("Status bar", status_bar, Box::new(ToggleStatusBar))
+                .menu_with_check("Word wrap", word_wrap, Box::new(ToggleWordWrap))
+            }
+        }
+    }
+}
+
+struct MenuBar {
+    action_context: FocusHandle,
+    open: Option<(MenuKind, Entity<PopupMenu>)>,
+    _dismiss: Option<Subscription>,
+}
+
+impl MenuBar {
+    fn new(action_context: FocusHandle) -> Self {
+        Self {
+            action_context,
+            open: None,
+            _dismiss: None,
+        }
+    }
+
+    fn open_kind(&self) -> Option<MenuKind> {
+        self.open.as_ref().map(|(kind, _)| *kind)
+    }
+
+    fn open_menu(&mut self, kind: MenuKind, window: &mut Window, cx: &mut Context<Self>) {
+        let action_context = self.action_context.clone();
+        let popup = PopupMenu::build(window, cx, move |menu, window, cx| {
+            kind.build(menu.action_context(action_context), window, cx)
+        });
+        popup.focus_handle(cx).focus(window, cx);
+        self._dismiss = Some(cx.subscribe_in(
+            &popup,
+            window,
+            |this, popup, _: &DismissEvent, window, cx| {
+                if this.open.as_ref().is_some_and(|(_, open)| open == popup) {
+                    this.close_menu(window, cx);
+                }
+            },
+        ));
+        self.open = Some((kind, popup));
+        cx.notify();
+    }
+
+    fn close_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open = None;
+        self._dismiss = None;
+        self.action_context.focus(window, cx);
+        cx.notify();
+    }
+
+    fn step(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(kind) = self.open_kind() else {
+            return;
+        };
+        let count = MenuKind::ALL.len() as isize;
+        let next = (kind.index() as isize + delta).rem_euclid(count) as usize;
+        self.open_menu(MenuKind::ALL[next], window, cx);
+    }
+
+    fn trigger(&self, kind: MenuKind, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let popup = self
+            .open
+            .as_ref()
+            .filter(|(open, _)| *open == kind)
+            .map(|(_, popup)| popup.clone());
+
+        div()
+            .id(kind.title())
+            .relative()
+            .flex()
+            .items_center()
+            .h_full()
+            .px(px(10.))
+            .rounded(px(4.))
+            .map(|this| {
+                if popup.is_some() {
+                    this.bg(rgba(MENU_ITEM_ACTIVE))
+                } else {
+                    this.hover(|style| style.bg(rgba(MENU_ITEM_ACTIVE)))
+                }
+            })
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, window, cx| {
+                    window.prevent_default();
+                    cx.stop_propagation();
+                    if this.open_kind() == Some(kind) {
+                        this.close_menu(window, cx);
+                    } else {
+                        this.open_menu(kind, window, cx);
+                    }
+                }),
+            )
+            .on_hover(cx.listener(move |this, hovered: &bool, window, cx| {
+                if *hovered && this.open_kind().is_some_and(|open| open != kind) {
+                    this.open_menu(kind, window, cx);
+                }
+            }))
+            .child(div().relative().top(px(1.)).child(kind.title()))
+            .when_some(popup, |this, popup| {
+                this.child(
+                    div()
+                        .absolute()
+                        .left_0()
+                        .top(px(32.))
+                        .child(deferred(anchored().child(popup))),
+                )
+            })
+    }
+}
+
+impl Render for MenuBar {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .flex()
+            .h_full()
+            .gap(px(8.))
+            .font_family(MENU_FONT)
+            .text_size(px(14.))
+            .text_color(rgba(TEXT_PRIMARY))
+            .on_action(cx.listener(|this, _: &SelectLeft, window, cx| this.step(-1, window, cx)))
+            .on_action(cx.listener(|this, _: &SelectRight, window, cx| this.step(1, window, cx)))
+            .children(MenuKind::ALL.map(|kind| self.trigger(kind, cx)))
+    }
 }
 
 fn key_bindings() -> Vec<KeyBinding> {
@@ -275,7 +414,7 @@ fn open_jot_window(cx: &mut App) {
 
 pub struct Jot {
     editor: Entity<TextareaState>,
-    menu_bar: Entity<AppMenuBar>,
+    menu_bar: Entity<MenuBar>,
     zoom: f32,
     _subscriptions: Vec<Subscription>,
 }
@@ -285,7 +424,8 @@ impl Jot {
         let word_wrap = cx.global::<ViewSettings>().word_wrap;
         let editor = cx.new(|cx| TextareaState::new(window, cx).soft_wrap(word_wrap));
         editor.focus_handle(cx).focus(window, cx);
-        let menu_bar = AppMenuBar::new(cx);
+        let action_context = editor.focus_handle(cx);
+        let menu_bar = cx.new(|_| MenuBar::new(action_context));
 
         let _subscriptions = vec![
             cx.observe_window_activation(window, |_, _, cx| cx.notify()),
@@ -293,7 +433,6 @@ impl Jot {
                 let word_wrap = cx.global::<ViewSettings>().word_wrap;
                 this.editor
                     .update(cx, |editor, cx| editor.set_soft_wrap(word_wrap, window, cx));
-                this.menu_bar.update(cx, |menu_bar, cx| menu_bar.reload(cx));
                 cx.notify();
             }),
         ];
@@ -494,18 +633,15 @@ fn main() {
                 status_bar: true,
                 word_wrap: true,
             });
-            publish_menus(cx);
             cx.bind_keys(key_bindings());
 
             cx.on_action(|_: &Exit, cx| cx.quit());
             cx.on_action(|_: &NewWindow, cx| open_jot_window(cx));
             cx.on_action(|_: &ToggleStatusBar, cx| {
                 cx.update_global::<ViewSettings, _>(|view, _| view.status_bar = !view.status_bar);
-                publish_menus(cx);
             });
             cx.on_action(|_: &ToggleWordWrap, cx| {
                 cx.update_global::<ViewSettings, _>(|view, _| view.word_wrap = !view.word_wrap);
-                publish_menus(cx);
             });
 
             open_jot_window(cx);
