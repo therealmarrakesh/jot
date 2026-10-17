@@ -28,7 +28,7 @@ const QUERY_ROW_OUTSET: f32 = 1.;
 const ACTION_GAP: f32 = 10.;
 const ACTION_WIDTH: f32 = 90.;
 const ICON_SIZE: f32 = 16.;
-const CHEVRON_SIZE: f32 = 13.;
+const CHEVRON_SIZE: f32 = 14.;
 const MIN_VISIBLE_SCALE: f32 = 0.05;
 const NOTICE_GAP: f32 = 8.;
 const NOTICE_PADDING_X: f32 = 18.;
@@ -640,6 +640,7 @@ impl Jot {
             .cursor_default()
             .font_family("Segoe Fluent Icons")
             .text_size(u(size))
+            .line_height(u(size))
             .text_color(rgba(p.text_primary))
             .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
             .child(tooltip::anchor(id))
