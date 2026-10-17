@@ -22,7 +22,7 @@ impl Jot {
         window.set_window_title(&format!("{} - Jot", self.tab_name(self.active)));
     }
 
-    fn tab_index(&self, id: EntityId) -> Option<usize> {
+    pub(crate) fn tab_index(&self, id: EntityId) -> Option<usize> {
         self.tabs
             .iter()
             .position(|tab| tab.editor.entity_id() == id)
@@ -65,13 +65,13 @@ impl Jot {
         }
         match document::load(&path) {
             Ok(loaded) => {
-                let tab = Self::create_tab(Some((path, loaded)), window, cx);
+                let mut tab = Self::create_tab(Some((path, loaded)), window, cx);
                 if self.is_blank(self.active, cx) {
+                    tab.slot = self.tabs[self.active].slot;
                     self.tabs[self.active] = tab;
                     self.activate_tab(self.active, window, cx);
                 } else {
-                    self.tabs.push(tab);
-                    self.activate_tab(self.tabs.len() - 1, window, cx);
+                    self.push_tab(tab, window, cx);
                 }
                 cx.notify();
             }

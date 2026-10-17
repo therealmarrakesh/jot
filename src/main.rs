@@ -9,6 +9,7 @@ mod files;
 mod find;
 mod menu;
 mod palette;
+mod tabs;
 
 use gpui_kit::base::animation::cubic_bezier;
 use gpui_kit::component::input::{
@@ -189,44 +190,6 @@ const WINDOW_MAX_SCREEN_SHARE: f32 = 0.9;
 const EDITOR_FONT_SIZE: f32 = 11. * 96. / 72.;
 const EDITOR_LINE_HEIGHT: f32 = 20.;
 const CARET_HEIGHT: f32 = 18.;
-const TAB_WIDTH: f32 = 240.;
-const TAB_LABEL_INSET: f32 = 8.;
-const TAB_LABEL_TRAILING: f32 = 44.;
-const UNSAVED_DOT: f32 = 6.;
-const UNSAVED_DOT_TOP: f32 = 13.;
-const UNSAVED_DOT_RIGHT: f32 = 19.;
-const CLOSE_BUTTON_TOP: f32 = 5.;
-const CLOSE_BUTTON_RIGHT: f32 = 6.;
-#[derive(Clone, Copy)]
-enum Ink {
-    Lead,
-    Line,
-    Center,
-    Trail,
-}
-
-impl Ink {
-    fn color(self, p: &Palette) -> u32 {
-        match self {
-            Self::Lead => p.plus_cap_lead,
-            Self::Line => p.plus_line,
-            Self::Center => p.plus_center,
-            Self::Trail => p.plus_cap_trail,
-        }
-    }
-}
-
-const PLUS_SEGMENTS: [(f32, f32, f32, f32, Ink); 9] = [
-    (11., 12., 1., 1., Ink::Lead),
-    (12., 12., 4., 1., Ink::Line),
-    (16., 12., 1., 1., Ink::Center),
-    (17., 12., 4., 1., Ink::Line),
-    (21., 12., 1., 1., Ink::Trail),
-    (16., 7., 1., 1., Ink::Lead),
-    (16., 8., 1., 4., Ink::Line),
-    (16., 13., 1., 4., Ink::Line),
-    (16., 17., 1., 1., Ink::Trail),
-];
 const CONTEXT: &str = "Jot";
 const ZOOM_STEP: f32 = 0.1;
 const ZOOM_MIN: f32 = 0.1;
@@ -375,6 +338,7 @@ struct Tab {
     path: Option<PathBuf>,
     format: document::Format,
     dirty: bool,
+    slot: tabs::Slot,
     _observer: Subscription,
     _changes: Subscription,
 }
@@ -382,7 +346,8 @@ struct Tab {
 pub struct Jot {
     tabs: Vec<Tab>,
     active: usize,
-    hovered_tab: Option<usize>,
+    hovered_tab: Option<EntityId>,
+    strip: tabs::TabStrip,
     close_confirmed: bool,
     menu_bar: Entity<MenuBar>,
     dialogs: dialog::Dialogs,
@@ -443,6 +408,7 @@ impl Jot {
             tabs: vec![tab],
             active: 0,
             hovered_tab: None,
+            strip: tabs::TabStrip::new(),
             close_confirmed: false,
             menu_bar,
             dialogs,
@@ -507,6 +473,7 @@ impl Jot {
             path,
             format,
             dirty: false,
+            slot: tabs::Slot::at(0., tabs::TAB_WIDTH),
             _observer,
             _changes,
         }
@@ -518,12 +485,6 @@ impl Jot {
 
     fn zoom(&self) -> f32 {
         self.tabs[self.active].zoom
-    }
-
-    fn add_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let tab = Self::create_tab(None, window, cx);
-        self.tabs.push(tab);
-        self.activate_tab(self.tabs.len() - 1, window, cx);
     }
 
     fn activate_tab(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
@@ -619,19 +580,6 @@ impl Jot {
         self.close_tab(self.active, window, cx);
     }
 
-    fn remove_tab(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
-        if self.tabs.len() == 1 {
-            window.remove_window();
-            return;
-        }
-        self.tabs.remove(ix);
-        self.hovered_tab = None;
-        if ix < self.active || self.active == self.tabs.len() {
-            self.active -= 1;
-        }
-        self.activate_tab(self.active, window, cx);
-    }
-
     fn caption_buttons(&self, window: &Window, p: Palette) -> impl IntoElement {
         let active = window.is_window_active();
         let maximize = if window.is_maximized() {
@@ -654,156 +602,8 @@ impl Jot {
             .child(div().flex_1().window_control_area(WindowControlArea::Drag))
     }
 
-    fn tab(&self, ix: usize, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let p = palette(cx);
-        let active = ix == self.active;
-        let separator = !active && ix + 1 != self.active && ix + 1 < self.tabs.len();
-        let dirty = self.tabs[ix].dirty;
-        let show_close = self.hovered_tab == Some(ix) || (active && !dirty);
-        let show_dot = dirty && !show_close;
-        let inset = if active { 1. } else { 0. };
-        let name = self.tab_name(ix);
-
-        div()
-            .id(("tab", ix))
-            .relative()
-            .flex_none()
-            .w(px(TAB_WIDTH))
-            .h(px(32.))
-            .when(active, |this| {
-                this.border_t_1()
-                    .border_l_1()
-                    .border_r_1()
-                    .border_color(rgba(p.stroke))
-                    .rounded_t(px(8.))
-            })
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _, window, cx| this.activate_tab(ix, window, cx)),
-            )
-            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
-                if *hovered {
-                    this.hovered_tab = Some(ix);
-                } else if this.hovered_tab == Some(ix) {
-                    this.hovered_tab = None;
-                }
-                cx.notify();
-            }))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .size_full()
-                    .pl(px(TAB_LABEL_INSET))
-                    .pr(px(TAB_LABEL_TRAILING))
-                    .font_family(UI_FONT)
-                    .text_size(px(12.))
-                    .map(|this| {
-                        if active {
-                            this.rounded_t(px(7.))
-                                .bg(rgba(p.layer))
-                                .text_color(rgba(p.text_primary))
-                                .font_weight(FontWeight::SEMIBOLD)
-                        } else {
-                            this.rounded_t(px(8.))
-                                .text_color(rgba(p.text_secondary))
-                                .hover(move |style| style.bg(rgba(p.subtle_secondary)))
-                        }
-                    })
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_ellipsis()
-                            .child(name),
-                    ),
-            )
-            .when(show_dot, |this| {
-                this.child(
-                    div()
-                        .absolute()
-                        .top(px(UNSAVED_DOT_TOP - inset))
-                        .right(px(UNSAVED_DOT_RIGHT - inset))
-                        .size(px(UNSAVED_DOT))
-                        .rounded_full()
-                        .bg(rgba(p.text_tertiary)),
-                )
-            })
-            .when(separator, |this| {
-                this.child(
-                    div()
-                        .absolute()
-                        .right_0()
-                        .top(px(8.))
-                        .w(px(1.))
-                        .h(px(16.))
-                        .bg(rgba(p.stroke)),
-                )
-            })
-            .when(show_close, |this| {
-                this.child(
-                    div()
-                        .id(("close-tab", ix))
-                        .absolute()
-                        .top(px(CLOSE_BUTTON_TOP - inset))
-                        .right(px(CLOSE_BUTTON_RIGHT - inset))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .w(px(32.))
-                        .h(px(24.))
-                        .rounded(px(4.))
-                        .font_family("Segoe Fluent Icons")
-                        .text_size(px(12.))
-                        .text_color(rgba(p.text_primary))
-                        .hover(move |style| style.bg(rgba(p.subtle_secondary)))
-                        .active(move |style| style.bg(rgba(p.subtle_tertiary)))
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .on_click(
-                            cx.listener(move |this, _, window, cx| this.close_tab(ix, window, cx)),
-                        )
-                        .child("\u{E711}"),
-                )
-            })
-    }
-
-    fn new_tab_button(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let p = palette(cx);
-        div()
-            .id("new-tab")
-            .flex_none()
-            .ml(px(5.))
-            .mt(px(5.))
-            .w(px(32.))
-            .h(px(24.))
-            .rounded(px(4.))
-            .hover(move |style| style.bg(rgba(p.subtle_secondary)))
-            .active(move |style| style.bg(rgba(p.subtle_tertiary)))
-            .on_click(cx.listener(|this, _, window, cx| this.add_tab(window, cx)))
-            .child(
-                canvas(
-                    |_, _, _| {},
-                    move |bounds, _, window, _| {
-                        for (x, y, w, h, ink) in PLUS_SEGMENTS {
-                            window.paint_quad(fill(
-                                Bounds::new(
-                                    bounds.origin + point(px(x), px(y)),
-                                    size(px(w), px(h)),
-                                ),
-                                rgba(ink.color(&p)),
-                            ));
-                        }
-                    },
-                )
-                .size_full(),
-            )
-    }
-
     fn title_bar(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
-        let tabs: Vec<_> = (0..self.tabs.len()).map(|ix| self.tab(ix, cx)).collect();
 
         div()
             .flex()
@@ -812,7 +612,7 @@ impl Jot {
             .child(
                 div()
                     .flex_none()
-                    .w(px(9.))
+                    .w(px(tabs::STRIP_LEFT))
                     .h_full()
                     .window_control_area(WindowControlArea::Drag),
             )
@@ -825,13 +625,7 @@ impl Jot {
                             .h(px(10.))
                             .window_control_area(WindowControlArea::Drag),
                     )
-                    .child(
-                        div()
-                            .flex()
-                            .h(px(32.))
-                            .children(tabs)
-                            .child(self.new_tab_button(cx)),
-                    ),
+                    .child(self.tab_strip(cx)),
             )
             .child(
                 div()
@@ -957,6 +751,7 @@ impl Render for Jot {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
         let status_bar = cx.global::<ViewSettings>().status_bar;
+        self.sample_tabs(window);
         let dialogs = self.render_dialogs(window, cx);
         let find = self.render_find(window, cx);
 
