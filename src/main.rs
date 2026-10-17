@@ -536,6 +536,7 @@ impl Jot {
 
     fn activate_tab(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         self.active = ix;
+        self.reveal_tab(ix, cx);
         let editor = self.active_editor().clone();
         editor.focus_handle(cx).focus(window, cx);
         self.menu_bar
@@ -659,7 +660,7 @@ impl Jot {
             .child(
                 div()
                     .flex_none()
-                    .w(px(tabs::STRIP_LEFT))
+                    .w(px(tabs::HEADER_WIDTH))
                     .h_full()
                     .window_control_area(WindowControlArea::Drag),
             )
