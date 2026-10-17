@@ -2,16 +2,19 @@
 
 #[cfg(feature = "bench")]
 mod bench;
+mod document;
+mod files;
 mod menu;
 
 use gpui_kit::base::animation::cubic_bezier;
-use gpui_kit::component::input::{self, RopeExt as _, Textarea, TextareaState};
+use gpui_kit::component::input::{self, InputEvent, RopeExt as _, Textarea, TextareaState};
 use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use menu::MenuBar;
 use std::cell::Cell;
 use std::ops::Range;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Duration;
 use windows_sys::Win32::UI::WindowsAndMessaging::GetCaretBlinkTime;
@@ -186,6 +189,8 @@ const CARET_HEIGHT: f32 = 18.;
 const CARET_COLOR: u32 = 0x060606;
 const TAB_WIDTH: f32 = 240.;
 const TAB_LABEL_INSET: f32 = 8.;
+const TAB_LABEL_TRAILING: f32 = 44.;
+const UNSAVED_DOT: f32 = 8.;
 const CLOSE_BUTTON_TOP: f32 = 5.;
 const CLOSE_BUTTON_RIGHT: f32 = 6.;
 const PLUS_LINE: u32 = 0x000000a4;
@@ -262,11 +267,11 @@ fn window_options(cx: &App) -> WindowOptions {
     }
 }
 
-fn open_jot_window(cx: &mut App) {
+fn open_jot_window(cx: &mut App) -> (AnyWindowHandle, Entity<Jot>) {
     gpui_kit::open_window(window_options(cx), cx, |window, cx| {
         cx.new(|cx| Jot::new(window, cx))
     })
-    .expect("Failed to open window");
+    .expect("Failed to open window")
 }
 
 fn caret_blink_period() -> Option<Duration> {
@@ -285,13 +290,18 @@ fn caret_key(editor: &TextareaState) -> (usize, Range<usize>, usize) {
 struct Tab {
     editor: Entity<TextareaState>,
     zoom: f32,
+    path: Option<PathBuf>,
+    format: document::Format,
+    dirty: bool,
     _observer: Subscription,
+    _changes: Subscription,
 }
 
 pub struct Jot {
     tabs: Vec<Tab>,
     active: usize,
     hovered_tab: Option<usize>,
+    close_confirmed: bool,
     menu_bar: Entity<MenuBar>,
     caret_visible: bool,
     caret_key: (usize, Range<usize>, usize),
@@ -303,7 +313,7 @@ pub struct Jot {
 
 impl Jot {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let tab = Self::create_tab(window, cx);
+        let tab = Self::create_tab(None, window, cx);
         let action_context = tab.editor.focus_handle(cx);
         let menu_bar = cx.new(|cx| MenuBar::new(action_context, cx));
 
@@ -330,6 +340,7 @@ impl Jot {
             tabs: vec![tab],
             active: 0,
             hovered_tab: None,
+            close_confirmed: false,
             menu_bar,
             caret_visible: true,
             caret_key: (0, 0..0, 0),
@@ -339,14 +350,40 @@ impl Jot {
             painted: Rc::new(Cell::new(None)),
         };
         jot.activate_tab(0, window, cx);
+        let this = cx.weak_entity();
+        window.on_window_should_close(cx, move |window, cx| {
+            this.update(cx, |jot, cx| jot.request_close_window(window, cx))
+                .unwrap_or(true)
+        });
         #[cfg(feature = "bench")]
         bench::schedule(jot.painted.clone(), window, cx);
         jot
     }
 
-    fn create_tab(window: &mut Window, cx: &mut Context<Self>) -> Tab {
+    fn create_tab(
+        content: Option<(PathBuf, document::Loaded)>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Tab {
         let word_wrap = cx.global::<ViewSettings>().word_wrap;
-        let editor = cx.new(|cx| TextareaState::new(window, cx).soft_wrap(word_wrap));
+        let (path, text, format) = match content {
+            Some((path, loaded)) => (Some(path), loaded.text, loaded.format),
+            None => (None, String::new(), document::Format::default()),
+        };
+        let editor = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .soft_wrap(word_wrap)
+                .default_value(text)
+        });
+        let _changes = cx.subscribe(&editor, |this, editor, event: &InputEvent, cx| {
+            if let InputEvent::Change = event
+                && let Some(tab) = this.tabs.iter_mut().find(|tab| tab.editor == editor)
+                && !tab.dirty
+            {
+                tab.dirty = true;
+                cx.notify();
+            }
+        });
         let _observer = cx.observe(&editor, |this, editor, cx| {
             if &editor != this.active_editor() {
                 return;
@@ -360,7 +397,11 @@ impl Jot {
         Tab {
             editor,
             zoom: 1.,
+            path,
+            format,
+            dirty: false,
             _observer,
+            _changes,
         }
     }
 
@@ -373,7 +414,7 @@ impl Jot {
     }
 
     fn add_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let tab = Self::create_tab(window, cx);
+        let tab = Self::create_tab(None, window, cx);
         self.tabs.push(tab);
         self.activate_tab(self.tabs.len() - 1, window, cx);
     }
@@ -387,6 +428,7 @@ impl Jot {
             .update(cx, |menu_bar, _| menu_bar.action_context = focus);
         self.caret_key = caret_key(editor.read(cx));
         self.restart_caret_blink(cx);
+        self.refresh_title(window);
     }
 
     fn new_tab(&mut self, _: &NewTab, window: &mut Window, cx: &mut Context<Self>) {
@@ -466,15 +508,17 @@ impl Jot {
         cx.notify();
     }
 
-    fn close_window(&mut self, _: &CloseWindow, window: &mut Window, _: &mut Context<Self>) {
-        window.remove_window();
+    fn close_window(&mut self, _: &CloseWindow, window: &mut Window, cx: &mut Context<Self>) {
+        if self.request_close_window(window, cx) {
+            window.remove_window();
+        }
     }
 
     fn close_active_tab(&mut self, _: &CloseTab, window: &mut Window, cx: &mut Context<Self>) {
         self.close_tab(self.active, window, cx);
     }
 
-    fn close_tab(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+    fn remove_tab(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         if self.tabs.len() == 1 {
             window.remove_window();
             return;
@@ -512,8 +556,11 @@ impl Jot {
     fn tab(&self, ix: usize, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let active = ix == self.active;
         let separator = !active && ix + 1 != self.active && ix + 1 < self.tabs.len();
-        let show_close = active || self.hovered_tab == Some(ix);
+        let dirty = self.tabs[ix].dirty;
+        let show_close = self.hovered_tab == Some(ix) || (active && !dirty);
+        let show_dot = dirty && !show_close;
         let inset = if active { 1. } else { 0. };
+        let name = self.tab_name(ix);
 
         div()
             .id(("tab", ix))
@@ -546,6 +593,7 @@ impl Jot {
                     .items_center()
                     .size_full()
                     .pl(px(TAB_LABEL_INSET))
+                    .pr(px(TAB_LABEL_TRAILING))
                     .font_family(UI_FONT)
                     .text_size(px(12.))
                     .map(|this| {
@@ -560,8 +608,35 @@ impl Jot {
                                 .hover(|style| style.bg(rgba(SUBTLE_FILL_SECONDARY)))
                         }
                     })
-                    .child("Untitled"),
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .child(name),
+                    ),
             )
+            .when(show_dot, |this| {
+                this.child(
+                    div()
+                        .absolute()
+                        .top(px(CLOSE_BUTTON_TOP - inset))
+                        .right(px(CLOSE_BUTTON_RIGHT - inset))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .w(px(32.))
+                        .h(px(24.))
+                        .child(
+                            div()
+                                .size(px(UNSAVED_DOT))
+                                .rounded_full()
+                                .bg(rgba(TEXT_PRIMARY)),
+                        ),
+                )
+            })
             .when(separator, |this| {
                 this.child(
                     div()
@@ -767,6 +842,10 @@ impl Render for Jot {
             .on_action(cx.listener(Self::close_window))
             .on_action(cx.listener(Self::new_tab))
             .on_action(cx.listener(Self::close_active_tab))
+            .on_action(cx.listener(Self::open))
+            .on_action(cx.listener(Self::save))
+            .on_action(cx.listener(Self::save_as))
+            .on_action(cx.listener(Self::save_all))
             .child(self.title_bar(window, cx))
             .child(self.menu_bar())
             .child(self.editor(window, cx))
@@ -807,8 +886,18 @@ fn main() {
             cx.bind_keys(key_bindings());
             cx.bind_keys(menu::key_bindings());
 
-            cx.on_action(|_: &Exit, cx| cx.quit());
-            cx.on_action(|_: &NewWindow, cx| open_jot_window(cx));
+            cx.on_action(|_: &Exit, cx| {
+                for window in cx.windows() {
+                    window
+                        .update(cx, |_, window, cx| {
+                            window.dispatch_action(Box::new(CloseWindow), cx)
+                        })
+                        .ok();
+                }
+            });
+            cx.on_action(|_: &NewWindow, cx| {
+                open_jot_window(cx);
+            });
             cx.on_action(|_: &ToggleStatusBar, cx| {
                 cx.update_global::<ViewSettings, _>(|view, _| view.status_bar = !view.status_bar);
             });
@@ -816,6 +905,18 @@ fn main() {
                 cx.update_global::<ViewSettings, _>(|view, _| view.word_wrap = !view.word_wrap);
             });
 
-            open_jot_window(cx);
+            let (window, jot) = open_jot_window(cx);
+            let paths: Vec<PathBuf> = std::env::args_os().skip(1).map(PathBuf::from).collect();
+            if !paths.is_empty() {
+                window
+                    .update(cx, |_, window, cx| {
+                        jot.update(cx, |jot, cx| {
+                            for path in paths {
+                                jot.open_path(path, window, cx);
+                            }
+                        })
+                    })
+                    .ok();
+            }
         });
 }
