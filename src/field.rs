@@ -150,16 +150,14 @@ pub(crate) fn button(
                 .border_l_1()
                 .border_r_1()
                 .border_color(edge)
-                .bg(fill)
                 .text_color(text)
-                .hover(move |style| style.bg(hover))
-                .active(move |style| {
-                    style
-                        .bg(pressed)
-                        .border_color(pressed_edge)
-                        .text_color(pressed_text)
+                .child(label.into())
+                .fade_bg(Brushes {
+                    rest: fill,
+                    hover,
+                    pressed,
                 })
-                .child(label.into()),
+                .active(move |style| style.border_color(pressed_edge).text_color(pressed_text)),
         )
         .when(focused, |this| {
             this.child(

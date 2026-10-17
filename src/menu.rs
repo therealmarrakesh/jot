@@ -636,14 +636,6 @@ impl MenuBar {
                             .pt(px(COMMAND_TOP - COMMAND_INSET))
                             .rounded(px(4.))
                             .text_color(rgba(color))
-                            .when(enabled, |this| {
-                                this.hover(move |style| style.bg(rgba(p.subtle_secondary)))
-                                    .active(move |style| {
-                                        style
-                                            .bg(rgba(p.subtle_tertiary))
-                                            .text_color(rgba(p.text_secondary))
-                                    })
-                            })
                             .child(
                                 div()
                                     .h(px(COMMAND_LINE))
@@ -660,7 +652,24 @@ impl MenuBar {
                                     .font_family(UI_FONT)
                                     .text_size(px(COMMAND_LABEL_SIZE))
                                     .child(command.label),
-                            ),
+                            )
+                            .fade_bg(if enabled {
+                                Brushes {
+                                    rest: transparent_black().into(),
+                                    hover: rgba(p.subtle_secondary),
+                                    pressed: rgba(p.subtle_tertiary),
+                                }
+                            } else {
+                                let clear = transparent_black().into();
+                                Brushes {
+                                    rest: clear,
+                                    hover: clear,
+                                    pressed: clear,
+                                }
+                            })
+                            .when(enabled, |this| {
+                                this.active(move |style| style.text_color(rgba(p.text_secondary)))
+                            }),
                     );
                 divider
                     .into_iter()
@@ -905,16 +914,11 @@ impl MenuBar {
         }
     }
 
-    fn trigger(
-        &self,
-        kind: MenuKind,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement + use<> {
+    fn trigger(&self, kind: MenuKind, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let p = palette(cx);
         let open = self.open.as_ref().filter(|open| open.kind == kind);
         let active = open.is_some_and(|open| !open.is_closing());
-        let popup = open.map(|open| self.popup(open, window, cx));
+        let popup = open.map(|open| self.popup(open, cx));
 
         div()
             .id(kind.title())
@@ -956,12 +960,7 @@ impl MenuBar {
             })
     }
 
-    fn popup(
-        &self,
-        open: &OpenMenu,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement + use<> {
+    fn popup(&self, open: &OpenMenu, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let p = palette(cx);
         let panel = &open.panel;
         let width = panel.width;
@@ -983,7 +982,7 @@ impl MenuBar {
             let sub_height = submenu.panel.height();
             let hidden = sub_height * SUBMENU_CLOSED_RATIO * (1. - submenu.motion.unroll);
             let top = panel.row_top(submenu.ix) - 1. - PADDING_Y;
-            let rows = self.panel_rows(&submenu.panel, Some(submenu.ix), 0., window, cx);
+            let rows = self.panel_rows(&submenu.panel, Some(submenu.ix), 0., false, cx);
             let hit_areas = self.hit_areas.clone();
             div()
                 .absolute()
@@ -1046,7 +1045,7 @@ impl MenuBar {
                     .when(bar > 0., |this| {
                         this.child(self.command_row(&open.commands, width, cx))
                     })
-                    .child(self.panel_rows(panel, None, bar, window, cx)),
+                    .child(self.panel_rows(panel, None, bar, bar > 0., cx)),
             ))
             .child(
                 canvas(
@@ -1068,7 +1067,7 @@ impl MenuBar {
         panel: &Panel,
         parent: Option<usize>,
         offset: f32,
-        _: &Window,
+        fade: bool,
         cx: &mut Context<Self>,
     ) -> Div {
         let p = palette(cx);
@@ -1110,6 +1109,18 @@ impl MenuBar {
                     GLYPH_SIZE
                 };
                 let shortcut = panel.shortcuts[ix].clone();
+                let fade = fade && enabled;
+                let mark_color = match entry {
+                    _ if !enabled => Some(p.text_disabled),
+                    Entry::Toggle(..) if !highlighted => Some(p.text_secondary),
+                    _ if fade => None,
+                    _ => Some(p.text_primary),
+                };
+                let label_color = match () {
+                    _ if !enabled => Some(p.text_disabled),
+                    _ if fade => None,
+                    _ => Some(p.text_primary),
+                };
 
                 let row_id = ix + parent.map_or(0, |p| 1000 * (p + 1));
                 div()
@@ -1125,18 +1136,15 @@ impl MenuBar {
                     .on_click(
                         cx.listener(move |this, _, window, cx| this.activate(path, window, cx)),
                     )
-                    .child(
-                        div()
+                    .child({
+                        let face = div()
                             .id(("menu-row-face", row_id))
                             .flex()
                             .items_center()
                             .size_full()
                             .px(px(ROW_PADDING))
                             .rounded(px(4.))
-                            .when(highlighted, |this| this.bg(rgba(p.subtle_secondary)))
-                            .when(enabled, |this| {
-                                this.active(move |style| style.bg(rgba(p.subtle_tertiary)))
-                            })
+                            .text_color(rgba(p.text_primary))
                             .when(checks, |this| {
                                 this.child(
                                     div()
@@ -1144,11 +1152,9 @@ impl MenuBar {
                                         .w(px(CHECK_COLUMN))
                                         .font_family("Segoe Fluent Icons")
                                         .text_size(px(mark_size))
-                                        .text_color(rgba(match entry {
-                                            _ if !enabled => p.text_disabled,
-                                            Entry::Toggle(..) if !highlighted => p.text_secondary,
-                                            _ => p.text_primary,
-                                        }))
+                                        .when_some(mark_color, |this, color| {
+                                            this.text_color(rgba(color))
+                                        })
                                         .children(mark),
                                 )
                             })
@@ -1157,11 +1163,9 @@ impl MenuBar {
                                     .flex_1()
                                     .font_family(MENU_FONT)
                                     .text_size(px(LABEL_SIZE))
-                                    .text_color(rgba(if enabled {
-                                        p.text_primary
-                                    } else {
-                                        p.text_disabled
-                                    }))
+                                    .when_some(label_color, |this, color| {
+                                        this.text_color(rgba(color))
+                                    })
                                     .child(label),
                             )
                             .when_some(shortcut, |this, shortcut| {
@@ -1187,8 +1191,24 @@ impl MenuBar {
                                         .text_color(rgba(p.text_secondary))
                                         .child("\u{E76C}"),
                                 )
-                            }),
-                    )
+                            });
+                        if fade {
+                            face.fade_bg(Brushes {
+                                rest: transparent_black().into(),
+                                hover: rgba(p.subtle_secondary),
+                                pressed: rgba(p.subtle_tertiary),
+                            })
+                            .highlighted(highlighted)
+                            .active(move |style| style.text_color(rgba(p.text_secondary)))
+                            .into_any_element()
+                        } else {
+                            face.when(highlighted, |this| this.bg(rgba(p.subtle_secondary)))
+                                .when(enabled, |this| {
+                                    this.active(move |style| style.bg(rgba(p.subtle_tertiary)))
+                                })
+                                .into_any_element()
+                        }
+                    })
             }))
     }
 }
@@ -1304,14 +1324,7 @@ impl Render for MenuBar {
         let hit_areas = self.hit_areas.clone();
         let flyout = self.open.as_ref().and_then(|open| {
             let anchor = open.anchor?;
-            Some(
-                deferred(
-                    anchored()
-                        .position(anchor)
-                        .child(self.popup(open, window, cx)),
-                )
-                .with_priority(1),
-            )
+            Some(deferred(anchored().position(anchor).child(self.popup(open, cx))).with_priority(1))
         });
 
         div()
@@ -1333,7 +1346,7 @@ impl Render for MenuBar {
             .on_action(cx.listener(Self::on_cancel))
             .on_action(cx.listener(Self::on_left))
             .on_action(cx.listener(Self::on_right))
-            .children(MenuKind::ALL.map(|kind| self.trigger(kind, window, cx)))
+            .children(MenuKind::ALL.map(|kind| self.trigger(kind, cx)))
             .children(flyout)
             .child(
                 canvas(

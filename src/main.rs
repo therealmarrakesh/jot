@@ -2,6 +2,7 @@
 
 #[cfg(feature = "bench")]
 mod bench;
+mod brush;
 mod detach;
 mod dialog;
 mod document;
@@ -14,6 +15,7 @@ mod scrollbar;
 mod tabs;
 mod tooltip;
 
+use brush::{Brushes, FadeBackground as _};
 use gpui_kit::base::animation::cubic_bezier;
 use gpui_kit::component::input::{
     self, InputEvent, PrepaintCaretGeometry, Rope, RopeExt as _, Textarea, TextareaState,

@@ -613,7 +613,7 @@ impl Jot {
         glyph: &'static str,
         size: f32,
         s: f32,
-    ) -> Stateful<Div> {
+    ) -> brush::Faded {
         let u = |v: f32| px(v * s);
         div()
             .id(id)
@@ -628,15 +628,15 @@ impl Jot {
             .font_family("Segoe Fluent Icons")
             .text_size(u(size))
             .text_color(rgba(p.text_primary))
-            .hover(move |style| style.bg(rgba(p.subtle_secondary)))
-            .active(move |style| {
-                style
-                    .bg(rgba(p.subtle_tertiary))
-                    .text_color(rgba(p.text_secondary))
-            })
             .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
             .child(tooltip::anchor(id))
             .child(glyph)
+            .fade_bg(Brushes {
+                rest: transparent_black().into(),
+                hover: rgba(p.subtle_secondary),
+                pressed: rgba(p.subtle_tertiary),
+            })
+            .active(move |style| style.text_color(rgba(p.text_secondary)))
     }
 
     fn find_card(
