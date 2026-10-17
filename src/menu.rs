@@ -1163,6 +1163,7 @@ impl MenuBar {
                                     .flex_1()
                                     .font_family(MENU_FONT)
                                     .text_size(px(LABEL_SIZE))
+                                    .whitespace_nowrap()
                                     .when_some(label_color, |this, color| {
                                         this.text_color(rgba(color))
                                     })
@@ -1174,6 +1175,7 @@ impl MenuBar {
                                         .flex_none()
                                         .font_family(UI_FONT)
                                         .text_size(px(SHORTCUT_SIZE))
+                                        .whitespace_nowrap()
                                         .text_color(rgba(if enabled {
                                             p.text_secondary
                                         } else {
@@ -1268,6 +1270,7 @@ pub(crate) fn text_width(window: &Window, text: &str, family: &'static str, size
         .shape_line(SharedString::new(text), px(size), &[run], None)
         .width
         .as_f32()
+        .ceil()
 }
 
 fn shortcut_text(
