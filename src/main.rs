@@ -11,6 +11,7 @@ mod find;
 mod menu;
 mod palette;
 mod tabs;
+mod tooltip;
 
 use gpui_kit::base::animation::cubic_bezier;
 use gpui_kit::component::input::{
@@ -806,6 +807,7 @@ impl Render for Jot {
         let root = div()
             .relative()
             .size_full()
+            .capture_any_mouse_down(|_, _, cx| tooltip::dismiss(cx))
             .capture_key_down(|event: &KeyDownEvent, _, cx| {
                 if event.keystroke.key == "escape" && detach::dragging(cx) {
                     cx.stop_propagation();
@@ -856,7 +858,11 @@ fn main() {
             gpui_kit::init(cx);
 
             cx.on_window_closed(|cx, _| {
-                if cx.windows().is_empty() {
+                if cx
+                    .windows()
+                    .into_iter()
+                    .all(|window| tooltip::is_popup(window, cx))
+                {
                     cx.quit();
                 }
             })

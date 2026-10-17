@@ -632,6 +632,12 @@ impl Jot {
         };
         let inset = if active { 1. } else { 0. };
         let name = self.tab_name(ix);
+        let tip: SharedString = tab
+            .path
+            .as_ref()
+            .map_or(name.clone(), |path| path.display().to_string())
+            .into();
+        let key = id.as_u64() as usize;
 
         div()
             .id(("tab", id.as_u64() as usize))
@@ -667,6 +673,7 @@ impl Jot {
                 } else if this.hovered_tab == Some(id) {
                     this.hovered_tab = None;
                 }
+                tooltip::hover(("tab", key), 0, tip.clone(), *hovered, cx);
                 cx.notify();
             }))
             .child(tab_face(p, active, trailing, name).when(!active, |this| {
@@ -713,6 +720,15 @@ impl Jot {
                         .hover(move |style| style.bg(rgba(p.subtle_secondary)))
                         .active(move |style| style.bg(rgba(p.subtle_tertiary)))
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_hover(move |hovered, _, cx| {
+                            tooltip::hover(
+                                ("close-tab", key),
+                                1,
+                                "Close tab (Ctrl+W)",
+                                *hovered,
+                                cx,
+                            )
+                        })
                         .on_click(cx.listener(move |this, _, window, cx| {
                             if let Some(ix) = this.tab_index(id) {
                                 this.close_tab(ix, window, cx);
@@ -740,6 +756,9 @@ impl Jot {
             .rounded(px(4.))
             .hover(move |style| style.bg(rgba(p.subtle_secondary)))
             .active(move |style| style.bg(rgba(p.subtle_tertiary)))
+            .on_hover(|hovered, _, cx| {
+                tooltip::hover("new-tab", 0, "New tab (Ctrl+N)", *hovered, cx)
+            })
             .on_click(cx.listener(|this, _, window, cx| this.add_tab(window, cx)))
             .child(
                 canvas(
@@ -769,6 +788,11 @@ impl Jot {
             target > 0.1
         };
         let step = if forward { SCROLL_STEP } else { -SCROLL_STEP };
+        let (key, tip) = if forward {
+            ("scroll-tabs-forward", "Scroll tab list forward")
+        } else {
+            ("scroll-tabs-backward", "Scroll tab list backward")
+        };
         let (left, right) = if forward {
             (SCROLL_INNER_PAD, SCROLL_OUTER_PAD)
         } else {
@@ -782,11 +806,8 @@ impl Jot {
         });
         div().flex_none().h_full().pl(px(left)).pr(px(right)).child(
             div()
-                .id(if forward {
-                    "scroll-tabs-forward"
-                } else {
-                    "scroll-tabs-backward"
-                })
+                .id(key)
+                .on_hover(move |hovered, _, cx| tooltip::hover(key, 0, tip, *hovered, cx))
                 .flex()
                 .items_center()
                 .justify_center()

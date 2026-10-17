@@ -613,6 +613,7 @@ impl Jot {
         &self,
         p: Palette,
         id: &'static str,
+        tip: &'static str,
         glyph: &'static str,
         size: f32,
         s: f32,
@@ -620,6 +621,7 @@ impl Jot {
         let u = |v: f32| px(v * s);
         div()
             .id(id)
+            .on_hover(move |hovered, _, cx| tooltip::hover(id, 0, tip, *hovered, cx))
             .flex_none()
             .flex()
             .items_center()
@@ -672,6 +674,11 @@ impl Jot {
                 self.icon_button(
                     p,
                     "find-expand",
+                    if replace {
+                        "Close replace options"
+                    } else {
+                        "Open replace options"
+                    },
                     if replace { CHEVRON_DOWN } else { CHEVRON_UP },
                     CHEVRON_SIZE,
                     s,
@@ -699,15 +706,15 @@ impl Jot {
                     )),
             )
             .child(
-                self.icon_button(p, "find-next", ARROW_DOWN, ICON_SIZE, s)
+                self.icon_button(p, "find-next", "Search down", ARROW_DOWN, ICON_SIZE, s)
                     .on_click(cx.listener(|this, _, window, cx| this.find_step(true, window, cx))),
             )
             .child(
-                self.icon_button(p, "find-previous", ARROW_UP, ICON_SIZE, s)
+                self.icon_button(p, "find-previous", "Search up", ARROW_UP, ICON_SIZE, s)
                     .on_click(cx.listener(|this, _, window, cx| this.find_step(false, window, cx))),
             )
             .child(
-                self.icon_button(p, "find-options", OPTIONS, ICON_SIZE, s)
+                self.icon_button(p, "find-options", "More options", OPTIONS, ICON_SIZE, s)
                     .on_click(cx.listener(|this, _, window, cx| this.open_find_options(window, cx)))
                     .child(
                         canvas(
@@ -719,8 +726,15 @@ impl Jot {
                     ),
             )
             .child(
-                self.icon_button(p, "find-close", CLOSE, ICON_SIZE, s)
-                    .on_click(cx.listener(|this, _, window, cx| this.close_find(window, cx))),
+                self.icon_button(
+                    p,
+                    "find-close",
+                    "Exit Find and Replace",
+                    CLOSE,
+                    ICON_SIZE,
+                    s,
+                )
+                .on_click(cx.listener(|this, _, window, cx| this.close_find(window, cx))),
             );
         let replace_row = replace.then(|| {
             div()
