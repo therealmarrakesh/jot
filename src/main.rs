@@ -332,7 +332,7 @@ impl Jot {
                     .child(
                         div()
                             .absolute()
-                            .left(px(47.))
+                            .left(px(9.))
                             .top(px(10.))
                             .w(px(240.))
                             .h(px(32.))
