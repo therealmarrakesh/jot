@@ -1,6 +1,8 @@
 use super::*;
 use gpui_kit::base::actions::{Cancel, Confirm, SelectDown, SelectLeft, SelectRight, SelectUp};
 use gpui_kit::base::{MotionStatus, Presence, Transition, transition_with_status};
+use windows_sys::Win32::Foundation::{HWND, POINT};
+use windows_sys::Win32::Graphics::Gdi::ClientToScreen;
 use windows_sys::Win32::System::DataExchange::IsClipboardFormatAvailable;
 use windows_sys::Win32::System::Ole::CF_UNICODETEXT;
 use windows_sys::Win32::UI::WindowsAndMessaging::{SPI_GETMENUSHOWDELAY, SystemParametersInfoW};
@@ -42,12 +44,6 @@ const LABEL_SIZE: f32 = 14.;
 const SHORTCUT_SIZE: f32 = 12.;
 const GLYPH_SIZE: f32 = 12.;
 const SUBMENU_OVERLAP: f32 = 4.;
-const KEY_TIP_FILL: u32 = 0x767676;
-const KEY_TIP_PADDING: f32 = 4.;
-const KEY_TIP_FONT: &str = "Segoe UI";
-const KEY_TIP_SIZE: f32 = 12.;
-const KEY_TIP_LINE: f32 = 16.;
-const KEY_TIP_ROUNDING: f32 = 1.;
 const BAR_RADIUS: f32 = 4.;
 const COMMAND_FOCUS_OUTSET: Edges<f32> = Edges {
     top: 0.,
@@ -169,20 +165,6 @@ fn access_key(label: &str) -> Option<char> {
         "Restore default zoom" => 'R',
         _ => return None,
     })
-}
-
-fn key_tip(key: char) -> Div {
-    div()
-        .flex_none()
-        .m(px(1.))
-        .bg(rgb(KEY_TIP_FILL))
-        .p(px(KEY_TIP_PADDING))
-        .font_family(KEY_TIP_FONT)
-        .text_size(px(KEY_TIP_SIZE))
-        .line_height(px(KEY_TIP_LINE))
-        .text_color(gpui_kit::white())
-        .whitespace_nowrap()
-        .child(key.to_string())
 }
 
 #[derive(Clone)]
@@ -602,6 +584,7 @@ pub struct MenuBar {
     serials: usize,
     submenu_timer: Task<()>,
     hit_areas: Rc<Cell<[Bounds<Pixels>; 3]>>,
+    trigger_areas: Rc<Cell<[Bounds<Pixels>; 3]>>,
     bar_focus: Option<MenuKind>,
     access: bool,
 }
@@ -615,6 +598,7 @@ impl MenuBar {
             serials: 0,
             submenu_timer: Task::ready(()),
             hit_areas: Rc::new(Cell::new([Bounds::default(); 3])),
+            trigger_areas: Rc::new(Cell::new([Bounds::default(); 3])),
             bar_focus: None,
             access: false,
         }
@@ -1273,9 +1257,6 @@ impl MenuBar {
         let active = open.is_some_and(|open| !open.is_closing());
         let popup = open.map(|open| self.popup(open, cx));
         let ring = self.bar_focused(window) == Some(kind);
-        let tip = kind
-            .access_key()
-            .filter(|_| self.access && self.open_kind().is_none());
 
         div()
             .id(kind.title())
@@ -1316,21 +1297,21 @@ impl MenuBar {
                     .with_priority(2),
                 )
             })
-            .when_some(tip, |this, key| {
-                this.child(
-                    deferred(
-                        div()
-                            .absolute()
-                            .top(relative(1.))
-                            .left_0()
-                            .w_full()
-                            .pl(px(KEY_TIP_ROUNDING))
-                            .flex()
-                            .justify_center()
-                            .child(key_tip(key)),
-                    )
-                    .with_priority(2),
+            .child({
+                let trigger_areas = self.trigger_areas.clone();
+                let ix = kind.index();
+                canvas(
+                    move |bounds, _, _| {
+                        let mut areas = trigger_areas.get();
+                        areas[ix] = bounds;
+                        trigger_areas.set(areas);
+                    },
+                    |_, _, _, _| {},
                 )
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
             })
             .when_some(popup, |this, popup| {
                 this.child(
@@ -1343,27 +1324,69 @@ impl MenuBar {
             })
     }
 
-    fn row_tips(&self, panel: &Panel, offset: f32) -> Div {
-        div().absolute().top_0().left_0().size_full().children(
-            panel.entries.iter().enumerate().filter_map(|(ix, entry)| {
+    fn key_tips(&self, window: &Window) -> Vec<keytips::KeyTip> {
+        if !self.access {
+            return Vec::new();
+        }
+        let Some(open) = self.open.as_ref().filter(|open| !open.is_closing()) else {
+            let areas = self.trigger_areas.get();
+            return MenuKind::ALL
+                .into_iter()
+                .filter_map(|kind| {
+                    let key = kind.access_key()?;
+                    let anchor = areas[kind.index()];
+                    Some(keytips::layout(
+                        window,
+                        key,
+                        anchor,
+                        keytips::Placement::Below,
+                    ))
+                })
+                .collect();
+        };
+        if open.kind == MenuKind::Flyout {
+            return Vec::new();
+        }
+        let areas = self.hit_areas.get();
+        let (panel, area, motion) = match open.live_submenu().filter(|_| open.in_submenu()) {
+            Some(submenu) => (&submenu.panel, areas[2], &submenu.motion),
+            None => (&open.panel, areas[1], &open.motion),
+        };
+        if motion.unroll < 1. {
+            return Vec::new();
+        }
+        panel
+            .entries
+            .iter()
+            .enumerate()
+            .filter_map(|(ix, entry)| {
                 let key = entry.access_key()?;
-                Some(
-                    div()
-                        .absolute()
-                        .top(px(panel.row_top(ix) + offset))
-                        .h(px(entry.height()))
-                        .pt(px(KEY_TIP_ROUNDING))
-                        .right(px(panel.width - 1.))
-                        .flex()
-                        .items_center()
-                        .child(key_tip(key)),
-                )
-            }),
-        )
+                let face = Bounds::new(
+                    area.origin + point(px(1. + ROW_INSET), px(panel.row_top(ix) + ROW_MARGIN_Y)),
+                    size(
+                        px(panel.width - 2. - 2. * ROW_INSET),
+                        px(entry.height() - 2. * ROW_MARGIN_Y),
+                    ),
+                );
+                Some(keytips::layout(window, key, face, keytips::Placement::Left))
+            })
+            .collect()
     }
 
-    fn tips_ready(&self, open: &OpenMenu, motion: &Motion) -> bool {
-        self.access && open.kind != MenuKind::Flyout && !open.is_closing() && motion.unroll >= 1.
+    fn sync_key_tips(&self, window: &Window, cx: &mut Context<Self>) {
+        let tips = self.key_tips(window);
+        let owner = window.window_handle();
+        let mut origin = POINT { x: 0, y: 0 };
+        unsafe { ClientToScreen(detach::hwnd(window) as HWND, &mut origin) };
+        let scale = window.scale_factor();
+        cx.defer(move |cx| keytips::show(owner, origin, scale, tips, cx));
+    }
+
+    pub fn exit_access(&mut self, cx: &mut Context<Self>) {
+        if self.access {
+            self.access = false;
+            cx.notify();
+        }
     }
 
     fn popup(&self, open: &OpenMenu, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -1389,8 +1412,6 @@ impl MenuBar {
             let hidden = sub_height * SUBMENU_CLOSED_RATIO * (1. - submenu.motion.unroll);
             let top = panel.row_top(submenu.ix) - 1. - PADDING_Y;
             let rows = self.panel_rows(&submenu.panel, Some(submenu.ix), 0., false, cx);
-            let tips = (self.tips_ready(open, &submenu.motion) && open.in_submenu())
-                .then(|| self.row_tips(&submenu.panel, 0.));
             let hit_areas = self.hit_areas.clone();
             div()
                 .absolute()
@@ -1410,7 +1431,6 @@ impl MenuBar {
                     -hidden,
                     rows,
                 ))
-                .children(tips)
                 .child(
                     canvas(
                         move |bounds, _, _| {
@@ -1467,10 +1487,6 @@ impl MenuBar {
                 )
                 .absolute()
                 .size_full(),
-            )
-            .children(
-                (self.tips_ready(open, &open.motion) && !open.in_submenu())
-                    .then(|| self.row_tips(panel, bar)),
             )
             .children(submenu)
     }
@@ -1747,6 +1763,11 @@ impl EventEmitter<MenuEvent> for MenuBar {}
 impl Render for MenuBar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
+        let this = cx.entity().downgrade();
+        window.defer(cx, move |window, cx| {
+            this.update(cx, |menu_bar, cx| menu_bar.sync_key_tips(window, cx))
+                .ok();
+        });
         if self
             .open
             .as_mut()

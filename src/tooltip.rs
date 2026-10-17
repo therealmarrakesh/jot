@@ -3,14 +3,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 use windows_sys::Win32::Foundation::{HWND, POINT, RECT};
-use windows_sys::Win32::Graphics::Dwm::{
-    DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE, DWMWA_TRANSITIONS_FORCEDISABLED,
-    DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND, DwmSetWindowAttribute,
-};
 use windows_sys::Win32::Graphics::Gdi::{
     ClientToScreen, GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint,
 };
-use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
 use windows_sys::Win32::UI::Controls::{
     CloseThemeData, GetThemeAnimationProperty, GetThemeAnimationTransform, GetThemeTimingFunction,
     OpenThemeData, TA_CUBIC_BEZIER, TA_TRANSFORM_OPACITY, TAP_TRANSFORMCOUNT, TATT_OPACITY,
@@ -18,9 +13,7 @@ use windows_sys::Win32::UI::Controls::{
 };
 use windows_sys::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    GWL_STYLE, GetCursorPos, HWND_TOPMOST, SPI_GETMOUSEHOVERTIME, SW_HIDE, SW_SHOWNOACTIVATE,
-    SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetWindowLongW,
-    SetWindowPos, ShowWindow, SystemParametersInfoW, WS_POPUP,
+    GetCursorPos, SPI_GETMOUSEHOVERTIME, SystemParametersInfoW,
 };
 
 const PADDING_X: f32 = 9.;
@@ -53,52 +46,6 @@ pub(crate) fn acrylic_noise() -> Arc<Image> {
     IMAGE
         .get_or_init(|| Arc::new(Image::from_bytes(ImageFormat::Png, NOISE.to_vec())))
         .clone()
-}
-
-#[repr(C)]
-struct AccentPolicy {
-    state: u32,
-    flags: u32,
-    color: u32,
-    animation: u32,
-}
-
-#[repr(C)]
-struct CompositionAttribute {
-    attribute: u32,
-    data: *mut std::ffi::c_void,
-    size: usize,
-}
-
-const ACCENT_POLICY: u32 = 19;
-const ACCENT_DISABLED: u32 = 0;
-
-type SetCompositionAttribute =
-    unsafe extern "system" fn(hwnd: HWND, data: *mut CompositionAttribute) -> i32;
-
-fn clear_backdrop(hwnd: isize) {
-    let module: Vec<u16> = "user32.dll".encode_utf16().chain(Some(0)).collect();
-    let Some(address) = (unsafe {
-        GetProcAddress(
-            GetModuleHandleW(module.as_ptr()),
-            c"SetWindowCompositionAttribute".as_ptr().cast(),
-        )
-    }) else {
-        return;
-    };
-    let set: SetCompositionAttribute = unsafe { std::mem::transmute(address) };
-    let mut policy = AccentPolicy {
-        state: ACCENT_DISABLED,
-        flags: 0,
-        color: 0,
-        animation: 0,
-    };
-    let mut data = CompositionAttribute {
-        attribute: ACCENT_POLICY,
-        data: (&mut policy as *mut AccentPolicy).cast(),
-        size: size_of::<AccentPolicy>(),
-    };
-    unsafe { set(hwnd as HWND, &mut data) };
 }
 
 #[derive(Clone, Copy)]
@@ -299,12 +246,6 @@ struct Owner {
     entered: POINT,
 }
 
-struct Popup {
-    view: Entity<TooltipView>,
-    handle: AnyWindowHandle,
-    hwnd: isize,
-}
-
 struct Visible {
     id: ElementId,
     owner: RECT,
@@ -314,7 +255,7 @@ struct Visible {
 
 #[derive(Default)]
 struct Tooltips {
-    popup: Option<Popup>,
+    popup: Option<overlay::Overlay<TooltipView>>,
     hovered: Vec<Owner>,
     current: Option<ElementId>,
     visible: Option<Visible>,
@@ -480,12 +421,6 @@ pub(crate) fn prepare(cx: &mut App) {
     popup(cx);
 }
 
-pub(crate) fn is_popup(handle: AnyWindowHandle, cx: &App) -> bool {
-    cx.try_global::<Tooltips>()
-        .and_then(|tips| tips.popup.as_ref())
-        .is_some_and(|popup| popup.handle == handle)
-}
-
 fn show_delay(reshow: bool) -> Duration {
     let mut hover = 0u32;
     let ok = unsafe {
@@ -564,7 +499,7 @@ fn close(cx: &mut App) {
         cx.update(|cx| {
             let tips = cx.default_global::<Tooltips>();
             if tips.visible.is_none() {
-                unsafe { ShowWindow(hwnd as HWND, SW_HIDE) };
+                overlay::hide(hwnd);
             }
             tips.hiding = None;
         });
@@ -576,72 +511,24 @@ fn popup(cx: &mut App) -> Option<(Entity<TooltipView>, AnyWindowHandle, isize)> 
     if let Some(popup) = &cx.default_global::<Tooltips>().popup {
         return Some((popup.view.clone(), popup.handle, popup.hwnd));
     }
-    let options = WindowOptions {
-        window_bounds: Some(WindowBounds::Windowed(Bounds::new(
-            point(px(0.), px(0.)),
-            size(px(1.), px(1.)),
-        ))),
-        titlebar: None,
-        focus: false,
-        show: false,
-        kind: WindowKind::PopUp,
-        is_movable: false,
-        is_resizable: false,
-        is_minimizable: false,
-        inactive_frame_interval: None,
-        window_background: WindowBackgroundAppearance::Transparent,
-        ..Default::default()
-    };
     let (fade_in, fade_out) = (
         theme_fade(FADE_IN_STORYBOARD),
         theme_fade(FADE_OUT_STORYBOARD),
     );
-    let mut created = None;
-    let handle = cx
-        .open_window(options, |window, cx| {
-            let view = cx.new(|_| TooltipView {
-                text: "".into(),
-                size: size(px(0.), px(0.)),
-                noise: acrylic_noise(),
-                phase: Phase::Out(Instant::now(), 0.),
-                fade_in,
-                fade_out,
-            });
-            created = Some((view.clone(), detach::hwnd(window)));
-            view
-        })
-        .ok()?;
-    let (view, hwnd) = created?;
-    let window = hwnd as HWND;
-    let set = |attribute: i32, value: u32| unsafe {
-        DwmSetWindowAttribute(
-            window,
-            attribute as u32,
-            (&value as *const u32).cast(),
-            size_of::<u32>() as u32,
-        )
-    };
-    set(DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND as u32);
-    set(DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE);
-    set(DWMWA_TRANSITIONS_FORCEDISABLED, 1);
-    unsafe {
-        SetWindowLongW(window, GWL_STYLE, WS_POPUP as i32);
-        SetWindowPos(
-            window,
-            std::ptr::null_mut(),
-            0,
-            0,
-            0,
-            0,
-            SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
-        );
-    }
-    cx.default_global::<Tooltips>().popup = Some(Popup {
-        view: view.clone(),
-        handle: handle.into(),
-        hwnd,
-    });
-    Some((view, handle.into(), hwnd))
+    let popup = overlay::open(
+        false,
+        |_| TooltipView {
+            text: "".into(),
+            size: size(px(0.), px(0.)),
+            noise: acrylic_noise(),
+            phase: Phase::Out(Instant::now(), 0.),
+            fade_in,
+            fade_out,
+        },
+        cx,
+    )?;
+    cx.default_global::<Tooltips>().popup = Some(popup.clone());
+    Some((popup.view, popup.handle, popup.hwnd))
 }
 
 fn measure(text: &SharedString, window: &mut Window) -> (f32, f32) {
@@ -722,18 +609,8 @@ fn show(id: ElementId, text: SharedString, entered: POINT, cx: &mut App) {
     unsafe { GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y) };
     let scale = dpi_x as f32 / 96.;
     let work: RECT = info.rcWork;
-    unsafe {
-        SetWindowPos(
-            hwnd as HWND,
-            HWND_TOPMOST,
-            entered.x,
-            entered.y,
-            1,
-            1,
-            SWP_NOACTIVATE,
-        )
-    };
-    clear_backdrop(hwnd);
+    overlay::place(hwnd, entered.x, entered.y, 1, 1);
+    overlay::clear_backdrop(hwnd);
     let Ok((width, height)) = handle.update(cx, |_, window, cx| {
         let measured = measure(&text, window);
         view.update(cx, |view, cx| {
@@ -759,18 +636,14 @@ fn show(id: ElementId, text: SharedString, entered: POINT, cx: &mut App) {
         physical(SHADOW_TOP),
         physical(SHADOW_BOTTOM),
     );
-    unsafe {
-        SetWindowPos(
-            hwnd as HWND,
-            HWND_TOPMOST,
-            left - side,
-            top - above,
-            w + 2 * side,
-            h + above + below,
-            SWP_NOACTIVATE,
-        );
-        ShowWindow(hwnd as HWND, SW_SHOWNOACTIVATE);
-    }
+    overlay::place(
+        hwnd,
+        left - side,
+        top - above,
+        w + 2 * side,
+        h + above + below,
+    );
+    overlay::show(hwnd);
     let tips = cx.default_global::<Tooltips>();
     tips.hiding = None;
     let owner = tips.anchors.get(&id).copied().unwrap_or(RECT {

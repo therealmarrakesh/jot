@@ -9,7 +9,9 @@ mod document;
 mod field;
 mod files;
 mod find;
+mod keytips;
 mod menu;
+mod overlay;
 mod palette;
 mod scrollbar;
 mod tabs;
@@ -447,8 +449,14 @@ impl Jot {
                     this.restart_caret_blink(cx);
                 } else {
                     this._caret_blink = Task::ready(());
+                    this.menu_bar
+                        .update(cx, |menu_bar, cx| menu_bar.exit_access(cx));
                     cx.notify();
                 }
+            }),
+            cx.observe_window_bounds(window, |this, _, cx| {
+                this.menu_bar
+                    .update(cx, |menu_bar, cx| menu_bar.exit_access(cx));
             }),
             cx.observe_global_in::<ViewSettings>(window, |this, window, cx| {
                 let word_wrap = cx.global::<ViewSettings>().word_wrap;
@@ -929,7 +937,7 @@ fn main() {
                 if cx
                     .windows()
                     .into_iter()
-                    .all(|window| tooltip::is_popup(window, cx))
+                    .all(|window| overlay::is_overlay(window, cx))
                 {
                     cx.quit();
                 }
