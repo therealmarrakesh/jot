@@ -1,5 +1,5 @@
 use super::*;
-use field::{BODY_SIZE, CONTROL_HEIGHT, CONTROL_RADIUS, FieldStyle, Surface};
+use field::{BODY_SIZE, CONTROL_HEIGHT, CONTROL_RADIUS, FieldStyle};
 use gpui_kit::base::{MotionStatus, Presence, Transition, transition_with_status};
 use gpui_kit::component::input::InputState;
 use menu::Entry;
@@ -17,8 +17,6 @@ const CARD_WIDTH: f32 = 860.;
 const CARD_TOP: f32 = 12.;
 const CARD_SIDE_MARGIN: f32 = 12.;
 const CARD_RADIUS: f32 = 8.;
-const CARD_BORDER: u32 = 0x75757566;
-const CARD_FILL: u32 = 0xf9f9f9;
 const CARD_PADDING: f32 = 8.;
 const ROW_GAP: f32 = 8.;
 const ICON_GAP: f32 = 8.;
@@ -28,8 +26,6 @@ const ICON_SIZE: f32 = 16.;
 const CHEVRON_SIZE: f32 = 13.;
 const MIN_VISIBLE_SCALE: f32 = 0.05;
 const NOTICE_GAP: f32 = 8.;
-const NOTICE_FILL: u32 = 0xf9f9f9;
-const NOTICE_BORDER: u32 = 0xdcdcdc;
 const NOTICE_PADDING_X: f32 = 18.;
 const NOTICE_PADDING_TOP: f32 = 16.;
 const NOTICE_PADDING_BOTTOM: f32 = 15.;
@@ -40,16 +36,6 @@ const ARROW_DOWN: &str = "\u{E74B}";
 const ARROW_UP: &str = "\u{E74A}";
 const OPTIONS: &str = "\u{E9E9}";
 const CLOSE: &str = "\u{E711}";
-const CARD_SURFACE: Surface = Surface {
-    field_fill: 0xfdfdfd,
-    field_stroke: 0xeaeaea,
-    field_bottom: 0x8a8a8a,
-    button_fill: 0xfdfdfd,
-    button_hover: 0xf9f9f9,
-    button_pressed: 0xf9f9f9,
-    button_stroke: 0xeaeaea,
-    button_bottom: 0xd1d1d1,
-};
 
 pub fn key_bindings() -> Vec<KeyBinding> {
     vec![
@@ -434,7 +420,7 @@ impl Jot {
     }
 
     fn open_find(&mut self, replace: bool, window: &mut Window, cx: &mut Context<Self>) {
-        self.accent = field::accent_color();
+        self.accent = field::accent_color(palette(cx));
         let selected = self.active_editor().read(cx).selected_text().to_string();
         if !selected.is_empty() && !selected.contains('\n') {
             self.find
@@ -552,6 +538,7 @@ impl Jot {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<impl IntoElement + use<>> {
+        let p = palette(cx);
         self.find.sample(window, cx);
         if !self.find.visible {
             return None;
@@ -566,7 +553,7 @@ impl Jot {
             .notice
             .clone()
             .filter(|_| !self.find.closing)
-            .map(|notice| self.notice(notice, CARD_TOP + height + NOTICE_GAP));
+            .map(|notice| self.notice(p, notice, CARD_TOP + height + NOTICE_GAP));
 
         Some(
             div()
@@ -590,7 +577,7 @@ impl Jot {
         )
     }
 
-    fn notice(&self, text: SharedString, top: f32) -> Div {
+    fn notice(&self, p: Palette, text: SharedString, top: f32) -> Div {
         div()
             .absolute()
             .top(px(top))
@@ -603,12 +590,12 @@ impl Jot {
                     .px(px(NOTICE_PADDING_X))
                     .pt(px(NOTICE_PADDING_TOP))
                     .pb(px(NOTICE_PADDING_BOTTOM))
-                    .bg(rgb(NOTICE_FILL))
+                    .bg(rgb(p.notice_fill))
                     .border_1()
-                    .border_color(rgb(NOTICE_BORDER))
+                    .border_color(rgb(p.notice_border))
                     .rounded(px(CARD_RADIUS))
                     .shadow(vec![BoxShadow {
-                        color: hsla(0., 0., 0., 0.14),
+                        color: hsla(0., 0., 0., p.shadow),
                         offset: point(px(0.), px(4.)),
                         blur_radius: px(8.),
                         spread_radius: px(0.),
@@ -617,13 +604,14 @@ impl Jot {
                     .font_family(MENU_FONT)
                     .text_size(px(BODY_SIZE))
                     .line_height(px(NOTICE_LINE))
-                    .text_color(rgba(TEXT_PRIMARY))
+                    .text_color(rgba(p.text_primary))
                     .child(text),
             )
     }
 
     fn icon_button(
         &self,
+        p: Palette,
         id: &'static str,
         glyph: &'static str,
         size: f32,
@@ -641,9 +629,9 @@ impl Jot {
             .cursor_default()
             .font_family("Segoe Fluent Icons")
             .text_size(u(size))
-            .text_color(rgba(TEXT_PRIMARY))
-            .hover(|style| style.bg(rgba(SUBTLE_FILL_SECONDARY)))
-            .active(|style| style.bg(rgba(SUBTLE_FILL_TERTIARY)))
+            .text_color(rgba(p.text_primary))
+            .hover(move |style| style.bg(rgba(p.subtle_secondary)))
+            .active(move |style| style.bg(rgba(p.subtle_tertiary)))
             .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
             .child(glyph)
     }
@@ -656,15 +644,16 @@ impl Jot {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> Div {
+        let p = palette(cx);
         let u = |v: f32| px(v * s);
         let card = div()
             .w(u(width))
             .h(u(height))
             .border_1()
-            .border_color(rgba(CARD_BORDER))
+            .border_color(rgba(p.surface_stroke))
             .rounded(u(CARD_RADIUS))
             .shadow(vec![BoxShadow {
-                color: hsla(0., 0., 0., 0.14),
+                color: hsla(0., 0., 0., p.shadow),
                 offset: point(px(0.), u(8.)),
                 blur_radius: u(16.),
                 spread_radius: px(0.),
@@ -681,6 +670,7 @@ impl Jot {
             .gap(u(ICON_GAP))
             .child(
                 self.icon_button(
+                    p,
                     "find-expand",
                     if replace { CHEVRON_DOWN } else { CHEVRON_UP },
                     CHEVRON_SIZE,
@@ -702,22 +692,22 @@ impl Jot {
                             placeholder: Some("Find"),
                             search_icon: true,
                         },
-                        CARD_SURFACE,
+                        p.card_surface,
                         s,
                         window,
                         cx,
                     )),
             )
             .child(
-                self.icon_button("find-next", ARROW_DOWN, ICON_SIZE, s)
+                self.icon_button(p, "find-next", ARROW_DOWN, ICON_SIZE, s)
                     .on_click(cx.listener(|this, _, window, cx| this.find_step(true, window, cx))),
             )
             .child(
-                self.icon_button("find-previous", ARROW_UP, ICON_SIZE, s)
+                self.icon_button(p, "find-previous", ARROW_UP, ICON_SIZE, s)
                     .on_click(cx.listener(|this, _, window, cx| this.find_step(false, window, cx))),
             )
             .child(
-                self.icon_button("find-options", OPTIONS, ICON_SIZE, s)
+                self.icon_button(p, "find-options", OPTIONS, ICON_SIZE, s)
                     .on_click(cx.listener(|this, _, window, cx| this.open_find_options(window, cx)))
                     .child(
                         canvas(
@@ -729,7 +719,7 @@ impl Jot {
                     ),
             )
             .child(
-                self.icon_button("find-close", CLOSE, ICON_SIZE, s)
+                self.icon_button(p, "find-close", CLOSE, ICON_SIZE, s)
                     .on_click(cx.listener(|this, _, window, cx| this.close_find(window, cx))),
             );
         let replace_row = replace.then(|| {
@@ -749,7 +739,7 @@ impl Jot {
                                 placeholder: Some("Replace"),
                                 search_icon: false,
                             },
-                            CARD_SURFACE,
+                            p.card_surface,
                             s,
                             window,
                             cx,
@@ -762,11 +752,12 @@ impl Jot {
                         .w(u(ACTION_WIDTH))
                         .child(
                             field::button(
+                                p,
                                 "find-replace",
                                 "Replace",
                                 false,
                                 false,
-                                CARD_SURFACE,
+                                p.card_surface,
                                 self.accent,
                                 s,
                             )
@@ -782,11 +773,12 @@ impl Jot {
                         .w(u(ACTION_WIDTH))
                         .child(
                             field::button(
+                                p,
                                 "find-replace-all",
                                 "Replace all",
                                 false,
                                 false,
-                                CARD_SURFACE,
+                                p.card_surface,
                                 self.accent,
                                 s,
                             )
@@ -803,7 +795,7 @@ impl Jot {
                 .size_full()
                 .p(u(CARD_PADDING))
                 .rounded(u(CARD_RADIUS - 1.))
-                .bg(rgb(CARD_FILL))
+                .bg(rgb(p.card_fill))
                 .occlude()
                 .cursor_default()
                 .on_action(

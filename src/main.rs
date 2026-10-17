@@ -8,6 +8,7 @@ mod field;
 mod files;
 mod find;
 mod menu;
+mod palette;
 
 use gpui_kit::base::animation::cubic_bezier;
 use gpui_kit::component::input::{
@@ -17,6 +18,7 @@ use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use menu::MenuBar;
+use palette::{Palette, palette};
 use std::cell::Cell;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -29,29 +31,16 @@ use windows_sys::Win32::Globalization::{
 use windows_sys::Win32::System::SystemInformation::GetLocalTime;
 use windows_sys::Win32::UI::WindowsAndMessaging::GetCaretBlinkTime;
 
-const LAYER_ON_MICA: u32 = 0xffffffb3;
-const STROKE: u32 = 0x0000000f;
-const STROKE_ON_LAYER: u32 = 0xeaeaeab8;
-const EDITOR_BACKGROUND: u32 = 0xf9f9f9;
-const TEXT_PRIMARY: u32 = 0x000000e4;
-const TEXT_SECONDARY: u32 = 0x0000009e;
 const UI_FONT: &str = "Segoe UI Variable Small";
 const MENU_FONT: &str = "Segoe UI Variable Text";
-const SUBTLE_FILL_SECONDARY: u32 = 0x0000000a;
-const SUBTLE_FILL_TERTIARY: u32 = 0x00000006;
 
-const CAPTION_GLYPH: u32 = 0x000000ff;
-const CAPTION_GLYPH_INACTIVE: u32 = 0x0000005c;
-const CAPTION_GLYPH_PRESSED: u32 = 0x0000009e;
-const CAPTION_HOVER: u32 = 0x0000000a;
-const CAPTION_PRESSED: u32 = 0x00000006;
 const CLOSE_HOVER: u32 = 0xc42b1cff;
 const CLOSE_PRESSED: u32 = 0xc42b1ce6;
 const CLOSE_GLYPH_HOVER: u32 = 0xffffffff;
 const CLOSE_GLYPH_PRESSED: u32 = 0xffffffb3;
 
-fn separator() -> Div {
-    div().flex_none().h(px(1.)).bg(rgba(STROKE_ON_LAYER))
+fn separator(p: Palette) -> Div {
+    div().flex_none().h(px(1.)).bg(rgba(p.stroke_on_layer))
 }
 
 fn group_thousands(n: usize) -> String {
@@ -118,7 +107,7 @@ impl Caption {
         }
     }
 
-    fn render(self, active: bool) -> impl IntoElement {
+    fn render(self, active: bool, p: Palette) -> impl IntoElement {
         let (hover_bg, pressed_bg, hover_fg, pressed_fg) = match self {
             Self::Close => (
                 CLOSE_HOVER,
@@ -127,16 +116,16 @@ impl Caption {
                 CLOSE_GLYPH_PRESSED,
             ),
             _ => (
-                CAPTION_HOVER,
-                CAPTION_PRESSED,
-                CAPTION_GLYPH,
-                CAPTION_GLYPH_PRESSED,
+                p.subtle_secondary,
+                p.subtle_tertiary,
+                p.caption_glyph,
+                p.caption_glyph_pressed,
             ),
         };
         let fg = if active {
-            CAPTION_GLYPH
+            p.caption_glyph
         } else {
-            CAPTION_GLYPH_INACTIVE
+            p.caption_glyph_inactive
         };
 
         div()
@@ -200,30 +189,43 @@ const WINDOW_MAX_SCREEN_SHARE: f32 = 0.9;
 const EDITOR_FONT_SIZE: f32 = 11. * 96. / 72.;
 const EDITOR_LINE_HEIGHT: f32 = 20.;
 const CARET_HEIGHT: f32 = 18.;
-const CARET_COLOR: u32 = 0x060606;
 const TAB_WIDTH: f32 = 240.;
 const TAB_LABEL_INSET: f32 = 8.;
 const TAB_LABEL_TRAILING: f32 = 44.;
 const UNSAVED_DOT: f32 = 6.;
 const UNSAVED_DOT_TOP: f32 = 13.;
 const UNSAVED_DOT_RIGHT: f32 = 19.;
-const UNSAVED_DOT_COLOR: u32 = 0x00000072;
 const CLOSE_BUTTON_TOP: f32 = 5.;
 const CLOSE_BUTTON_RIGHT: f32 = 6.;
-const PLUS_LINE: u32 = 0x000000a4;
-const PLUS_CAP_LEAD: u32 = 0x00000029;
-const PLUS_CAP_TRAIL: u32 = 0x0000004f;
-const PLUS_CENTER: u32 = 0x000000d4;
-const PLUS_SEGMENTS: [(f32, f32, f32, f32, u32); 9] = [
-    (11., 12., 1., 1., PLUS_CAP_LEAD),
-    (12., 12., 4., 1., PLUS_LINE),
-    (16., 12., 1., 1., PLUS_CENTER),
-    (17., 12., 4., 1., PLUS_LINE),
-    (21., 12., 1., 1., PLUS_CAP_TRAIL),
-    (16., 7., 1., 1., PLUS_CAP_LEAD),
-    (16., 8., 1., 4., PLUS_LINE),
-    (16., 13., 1., 4., PLUS_LINE),
-    (16., 17., 1., 1., PLUS_CAP_TRAIL),
+#[derive(Clone, Copy)]
+enum Ink {
+    Lead,
+    Line,
+    Center,
+    Trail,
+}
+
+impl Ink {
+    fn color(self, p: &Palette) -> u32 {
+        match self {
+            Self::Lead => p.plus_cap_lead,
+            Self::Line => p.plus_line,
+            Self::Center => p.plus_center,
+            Self::Trail => p.plus_cap_trail,
+        }
+    }
+}
+
+const PLUS_SEGMENTS: [(f32, f32, f32, f32, Ink); 9] = [
+    (11., 12., 1., 1., Ink::Lead),
+    (12., 12., 4., 1., Ink::Line),
+    (16., 12., 1., 1., Ink::Center),
+    (17., 12., 4., 1., Ink::Line),
+    (21., 12., 1., 1., Ink::Trail),
+    (16., 7., 1., 1., Ink::Lead),
+    (16., 8., 1., 4., Ink::Line),
+    (16., 13., 1., 4., Ink::Line),
+    (16., 17., 1., 1., Ink::Trail),
 ];
 const CONTEXT: &str = "Jot";
 const ZOOM_STEP: f32 = 0.1;
@@ -351,7 +353,7 @@ fn caret_canvas(
                 Some(ContentMask {
                     bounds: geometry.input_bounds(),
                 }),
-                |window| window.paint_quad(fill(caret, rgb(CARET_COLOR))),
+                |window| window.paint_quad(fill(caret, rgb(palette(cx).caret))),
             );
         },
     )
@@ -414,6 +416,11 @@ impl Jot {
 
         let _subscriptions = vec![
             menu_events,
+            cx.observe_window_appearance(window, |this, window, cx| {
+                palette::apply(window.appearance(), cx);
+                this.accent = field::accent_color(palette(cx));
+                cx.notify();
+            }),
             cx.observe_window_activation(window, |this, window, cx| {
                 if window.is_window_active() {
                     this.restart_caret_blink(cx);
@@ -440,7 +447,7 @@ impl Jot {
             menu_bar,
             dialogs,
             find,
-            accent: field::accent_color(),
+            accent: field::accent_color(palette(cx)),
             field_caret: None,
             caret_visible: true,
             caret_key: (0, 0..0, 0),
@@ -625,7 +632,7 @@ impl Jot {
         self.activate_tab(self.active, window, cx);
     }
 
-    fn caption_buttons(&self, window: &Window) -> impl IntoElement {
+    fn caption_buttons(&self, window: &Window, p: Palette) -> impl IntoElement {
         let active = window.is_window_active();
         let maximize = if window.is_maximized() {
             Caption::Restore
@@ -640,14 +647,15 @@ impl Jot {
             .child(
                 div()
                     .flex()
-                    .child(Caption::Minimize.render(active))
-                    .child(maximize.render(active))
-                    .child(Caption::Close.render(active)),
+                    .child(Caption::Minimize.render(active, p))
+                    .child(maximize.render(active, p))
+                    .child(Caption::Close.render(active, p)),
             )
             .child(div().flex_1().window_control_area(WindowControlArea::Drag))
     }
 
     fn tab(&self, ix: usize, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let p = palette(cx);
         let active = ix == self.active;
         let separator = !active && ix + 1 != self.active && ix + 1 < self.tabs.len();
         let dirty = self.tabs[ix].dirty;
@@ -666,7 +674,7 @@ impl Jot {
                 this.border_t_1()
                     .border_l_1()
                     .border_r_1()
-                    .border_color(rgba(STROKE))
+                    .border_color(rgba(p.stroke))
                     .rounded_t(px(8.))
             })
             .on_mouse_down(
@@ -693,13 +701,13 @@ impl Jot {
                     .map(|this| {
                         if active {
                             this.rounded_t(px(7.))
-                                .bg(rgba(LAYER_ON_MICA))
-                                .text_color(rgba(TEXT_PRIMARY))
+                                .bg(rgba(p.layer))
+                                .text_color(rgba(p.text_primary))
                                 .font_weight(FontWeight::SEMIBOLD)
                         } else {
                             this.rounded_t(px(8.))
-                                .text_color(rgba(TEXT_SECONDARY))
-                                .hover(|style| style.bg(rgba(SUBTLE_FILL_SECONDARY)))
+                                .text_color(rgba(p.text_secondary))
+                                .hover(move |style| style.bg(rgba(p.subtle_secondary)))
                         }
                     })
                     .child(
@@ -720,7 +728,7 @@ impl Jot {
                         .right(px(UNSAVED_DOT_RIGHT - inset))
                         .size(px(UNSAVED_DOT))
                         .rounded_full()
-                        .bg(rgba(UNSAVED_DOT_COLOR)),
+                        .bg(rgba(p.text_tertiary)),
                 )
             })
             .when(separator, |this| {
@@ -731,7 +739,7 @@ impl Jot {
                         .top(px(8.))
                         .w(px(1.))
                         .h(px(16.))
-                        .bg(rgba(STROKE)),
+                        .bg(rgba(p.stroke)),
                 )
             })
             .when(show_close, |this| {
@@ -749,9 +757,9 @@ impl Jot {
                         .rounded(px(4.))
                         .font_family("Segoe Fluent Icons")
                         .text_size(px(12.))
-                        .text_color(rgba(TEXT_PRIMARY))
-                        .hover(|style| style.bg(rgba(SUBTLE_FILL_SECONDARY)))
-                        .active(|style| style.bg(rgba(SUBTLE_FILL_TERTIARY)))
+                        .text_color(rgba(p.text_primary))
+                        .hover(move |style| style.bg(rgba(p.subtle_secondary)))
+                        .active(move |style| style.bg(rgba(p.subtle_tertiary)))
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .on_click(
                             cx.listener(move |this, _, window, cx| this.close_tab(ix, window, cx)),
@@ -762,6 +770,7 @@ impl Jot {
     }
 
     fn new_tab_button(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let p = palette(cx);
         div()
             .id("new-tab")
             .flex_none()
@@ -770,20 +779,20 @@ impl Jot {
             .w(px(32.))
             .h(px(24.))
             .rounded(px(4.))
-            .hover(|style| style.bg(rgba(SUBTLE_FILL_SECONDARY)))
-            .active(|style| style.bg(rgba(SUBTLE_FILL_TERTIARY)))
+            .hover(move |style| style.bg(rgba(p.subtle_secondary)))
+            .active(move |style| style.bg(rgba(p.subtle_tertiary)))
             .on_click(cx.listener(|this, _, window, cx| this.add_tab(window, cx)))
             .child(
                 canvas(
                     |_, _, _| {},
-                    |bounds, _, window, _| {
-                        for (x, y, w, h, color) in PLUS_SEGMENTS {
+                    move |bounds, _, window, _| {
+                        for (x, y, w, h, ink) in PLUS_SEGMENTS {
                             window.paint_quad(fill(
                                 Bounds::new(
                                     bounds.origin + point(px(x), px(y)),
                                     size(px(w), px(h)),
                                 ),
-                                rgba(color),
+                                rgba(ink.color(&p)),
                             ));
                         }
                     },
@@ -793,6 +802,7 @@ impl Jot {
     }
 
     fn title_bar(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = palette(cx);
         let tabs: Vec<_> = (0..self.tabs.len()).map(|ix| self.tab(ix, cx)).collect();
 
         div()
@@ -829,20 +839,20 @@ impl Jot {
                     .h_full()
                     .window_control_area(WindowControlArea::Drag),
             )
-            .child(self.caption_buttons(window))
+            .child(self.caption_buttons(window, p))
     }
 
-    fn menu_bar(&self) -> impl IntoElement {
+    fn menu_bar(&self, p: Palette) -> impl IntoElement {
         div()
             .flex_none()
             .child(
                 div()
                     .h(px(32.))
                     .pl(px(4.))
-                    .bg(rgba(LAYER_ON_MICA))
+                    .bg(rgba(p.layer))
                     .child(self.menu_bar.clone()),
             )
-            .child(separator())
+            .child(separator(p))
     }
 
     fn open_context_menu(
@@ -863,6 +873,7 @@ impl Jot {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let p = palette(cx);
         let this = cx.weak_entity();
         div()
             .relative()
@@ -870,7 +881,7 @@ impl Jot {
             .min_h_0()
             .pl(px(6.))
             .pt(px(7.))
-            .bg(rgb(EDITOR_BACKGROUND))
+            .bg(rgb(p.editor))
             .child(
                 Textarea::new(self.active_editor())
                     .context_menu(move |menu, window, cx| {
@@ -890,6 +901,7 @@ impl Jot {
     }
 
     fn status_bar(&self, cx: &App) -> impl IntoElement {
+        let p = palette(cx);
         let editor = self.active_editor().read(cx);
         let text = editor.text();
         let cursor = editor.cursor();
@@ -900,48 +912,50 @@ impl Jot {
             text.byte_to_char_idx(selection.end) - text.byte_to_char_idx(selection.start);
         let total = text.len_chars();
 
-        div().flex_none().child(separator()).child(
+        div().flex_none().child(separator(p)).child(
             div()
                 .flex()
                 .items_center()
                 .h(px(31.))
-                .bg(rgba(LAYER_ON_MICA))
+                .bg(rgba(p.layer))
                 .font_family(UI_FONT)
                 .text_size(px(12.))
-                .text_color(rgba(TEXT_SECONDARY))
+                .text_color(rgba(p.text_secondary))
                 .child(div().flex_none().w(px(96.)).pl(px(22.)).child(format!(
                     "Ln {}, Col {}",
                     point.row + 1,
                     column + 1
                 )))
-                .child(status_divider())
+                .child(status_divider(p))
                 .child(div().pl(px(8.)).child(character_count(selected, total)))
                 .child(div().flex_1())
                 .child(status_cell(
+                    p,
                     68.,
                     format!("{}%", (self.zoom() * 100.).round()),
                 ))
-                .child(status_cell(144., "UTF-8")),
+                .child(status_cell(p, 144., "UTF-8")),
         )
     }
 }
 
-fn status_divider() -> Div {
-    div().flex_none().w(px(1.)).h(px(16.)).bg(rgba(STROKE))
+fn status_divider(p: Palette) -> Div {
+    div().flex_none().w(px(1.)).h(px(16.)).bg(rgba(p.stroke))
 }
 
-fn status_cell(width: f32, label: impl Into<SharedString>) -> Div {
+fn status_cell(p: Palette, width: f32, label: impl Into<SharedString>) -> Div {
     div()
         .flex()
         .flex_none()
         .items_center()
         .w(px(width))
-        .child(status_divider())
+        .child(status_divider(p))
         .child(div().pl(px(12.)).child(label.into()))
 }
 
 impl Render for Jot {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = palette(cx);
         let status_bar = cx.global::<ViewSettings>().status_bar;
         let dialogs = self.render_dialogs(window, cx);
         let find = self.render_find(window, cx);
@@ -975,7 +989,7 @@ impl Render for Jot {
                     .v_flex()
                     .size_full()
                     .child(self.title_bar(window, cx))
-                    .child(self.menu_bar())
+                    .child(self.menu_bar(p))
                     .child(self.editor(find, window, cx))
                     .when(status_bar, |this| this.child(self.status_bar(cx))),
             )
@@ -999,11 +1013,7 @@ fn main() {
             })
             .detach();
 
-            let theme = Theme::global_mut(cx);
-            theme.background = transparent_black();
-            theme.tokens.background = transparent_black().into();
-            theme.caret = hsla(0., 0., 0., f32::EPSILON);
-            theme.tokens.caret = hsla(0., 0., 0., f32::EPSILON).into();
+            palette::apply(cx.window_appearance(), cx);
             cx.set_text_rendering_mode(TextRenderingMode::Grayscale);
 
             cx.set_global(ViewSettings {

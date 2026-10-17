@@ -1,5 +1,5 @@
 use super::*;
-use field::{BODY_LINE, BODY_SIZE, FieldStyle, Surface};
+use field::{BODY_LINE, BODY_SIZE, FieldStyle};
 use futures::channel::oneshot;
 use gpui_kit::base::actions::{Cancel, Confirm};
 use gpui_kit::base::input::Position;
@@ -7,11 +7,6 @@ use gpui_kit::base::{MotionStatus, Presence, Transition, transition_with_status}
 use gpui_kit::component::input::InputState;
 
 const CONTEXT: &str = "JotDialog";
-const SMOKE: u32 = 0x0000004d;
-const BORDER: u32 = 0x75757566;
-const CONTENT_FILL: u32 = 0xffffff;
-const COMMAND_FILL: u32 = 0xf3f3f3;
-const DIVIDER: u32 = 0xe5e5e5;
 const TITLE_FONT: &str = "Segoe UI Variable Display";
 const OPEN_SCALE: f32 = 1.05;
 const SHOW_DURATION: Duration = Duration::from_millis(250);
@@ -27,26 +22,6 @@ const TITLE_GAP: f32 = 12.;
 const HEADER_GAP: f32 = 8.;
 const BUTTON_GAP: f32 = 8.;
 const GO_TO_WIDTH: f32 = 312.;
-const CONTENT_SURFACE: Surface = Surface {
-    field_fill: 0xffffff,
-    field_stroke: 0xf0f0f0,
-    field_bottom: 0x8d8d8d,
-    button_fill: 0xffffff,
-    button_hover: 0xf9f9f9,
-    button_pressed: 0xf9f9f9,
-    button_stroke: 0xf0f0f0,
-    button_bottom: 0xd6d6d6,
-};
-const COMMAND_SURFACE: Surface = Surface {
-    field_fill: 0xfbfbfb,
-    field_stroke: 0xe5e5e5,
-    field_bottom: 0x8d8d8d,
-    button_fill: 0xfbfbfb,
-    button_hover: 0xf6f6f6,
-    button_pressed: 0xf5f5f5,
-    button_stroke: 0xe5e5e5,
-    button_bottom: 0xcccccc,
-};
 
 pub fn key_bindings() -> Vec<KeyBinding> {
     vec![
@@ -183,7 +158,7 @@ impl Jot {
     }
 
     fn show_go_to(&mut self, line: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
-        self.accent = field::accent_color();
+        self.accent = field::accent_color(palette(cx));
         self.dialogs.show(DialogKind::GoTo);
         let input = self.dialogs.line.clone();
         input.update(cx, |input, cx| {
@@ -237,7 +212,7 @@ impl Jot {
         cx: &mut Context<Self>,
     ) -> oneshot::Receiver<usize> {
         let (answer, receiver) = oneshot::channel();
-        self.accent = field::accent_color();
+        self.accent = field::accent_color(palette(cx));
         self.dialogs.show(DialogKind::Prompt(Prompt {
             title: title.into(),
             message: message.into(),
@@ -324,6 +299,7 @@ impl Jot {
     }
 
     fn dialog_layer(&self, dialog: &OpenDialog, window: &Window, cx: &mut Context<Self>) -> Div {
+        let p = palette(cx);
         let s = dialog.scale;
         let accent = self.accent;
         let frame = match &dialog.kind {
@@ -344,12 +320,13 @@ impl Jot {
                             placeholder: None,
                             search_icon: false,
                         },
-                        CONTENT_SURFACE,
+                        p.content_surface,
                         s,
                         window,
                         cx,
                     ));
                 dialog_frame(
+                    p,
                     s,
                     GO_TO_WIDTH,
                     "Go to line".into(),
@@ -357,11 +334,12 @@ impl Jot {
                     vec![
                         Some(
                             field::button(
+                                p,
                                 "dialog-go-to",
                                 "Go to",
                                 true,
                                 false,
-                                COMMAND_SURFACE,
+                                p.command_surface,
                                 accent,
                                 s,
                             )
@@ -371,11 +349,12 @@ impl Jot {
                         ),
                         Some(
                             field::button(
+                                p,
                                 "dialog-cancel",
                                 "Cancel",
                                 false,
                                 false,
-                                COMMAND_SURFACE,
+                                p.command_surface,
                                 accent,
                                 s,
                             )
@@ -390,6 +369,7 @@ impl Jot {
                 let message = "The line number is beyond the total number of lines";
                 let width = menu::text_width(window, message, MENU_FONT, BODY_SIZE).ceil();
                 dialog_frame(
+                    p,
                     s,
                     width,
                     "Go to line".into(),
@@ -398,11 +378,12 @@ impl Jot {
                         None,
                         Some(
                             field::button(
+                                p,
                                 "dialog-ok",
                                 "OK",
                                 true,
                                 true,
-                                COMMAND_SURFACE,
+                                p.command_surface,
                                 accent,
                                 s,
                             )
@@ -432,11 +413,12 @@ impl Jot {
                     .map(|(ix, label)| {
                         Some(
                             field::button(
+                                p,
                                 ("dialog-prompt", ix),
                                 label.clone(),
                                 ix == 0,
                                 ix == 0,
-                                COMMAND_SURFACE,
+                                p.command_surface,
                                 accent,
                                 s,
                             )
@@ -450,6 +432,7 @@ impl Jot {
                     buttons.insert(0, None);
                 }
                 dialog_frame(
+                    p,
                     s,
                     width,
                     prompt.title.clone(),
@@ -466,7 +449,7 @@ impl Jot {
             .flex()
             .items_center()
             .justify_center()
-            .bg(rgba(SMOKE))
+            .bg(rgba(p.smoke))
             .opacity(dialog.opacity)
             .when(!dialog.closing, |this| this.occlude())
             .child(frame)
@@ -482,6 +465,7 @@ fn message_body(message: SharedString, s: f32) -> Div {
 }
 
 fn dialog_frame(
+    p: Palette,
     s: f32,
     content_width: f32,
     title: SharedString,
@@ -493,11 +477,11 @@ fn dialog_frame(
     div()
         .w(u(width))
         .border_1()
-        .border_color(rgba(BORDER))
+        .border_color(rgba(p.surface_stroke))
         .rounded(u(RADIUS))
         .shadow(vec![
             BoxShadow {
-                color: hsla(0., 0., 0., 0.14),
+                color: hsla(0., 0., 0., p.shadow),
                 offset: point(px(0.), u(12.)),
                 blur_radius: u(28.),
                 spread_radius: px(0.),
@@ -516,11 +500,11 @@ fn dialog_frame(
                 .flex()
                 .flex_col()
                 .rounded(u(RADIUS - 1.))
-                .bg(rgb(COMMAND_FILL))
+                .bg(rgb(p.dialog_command))
                 .font_family(MENU_FONT)
                 .text_size(u(BODY_SIZE))
-                .text_color(rgba(TEXT_PRIMARY))
-                .child(dialog_content(s, title, body))
+                .text_color(rgba(p.text_primary))
+                .child(dialog_content(p, s, title, body))
                 .child(
                     div().flex().p(u(PADDING)).gap(u(BUTTON_GAP)).children(
                         buttons
@@ -531,14 +515,14 @@ fn dialog_frame(
         )
 }
 
-fn dialog_content(s: f32, title: SharedString, body: Div) -> Div {
+fn dialog_content(p: Palette, s: f32, title: SharedString, body: Div) -> Div {
     let u = |v: f32| px(v * s);
     div()
         .p(u(PADDING))
         .rounded_t(u(RADIUS - 1.))
-        .bg(rgb(CONTENT_FILL))
+        .bg(rgb(p.dialog_content))
         .border_b_1()
-        .border_color(rgb(DIVIDER))
+        .border_color(rgb(p.dialog_divider))
         .child(
             div()
                 .h(u(TITLE_LINE))

@@ -7,14 +7,10 @@ pub(crate) const CONTROL_RADIUS: f32 = 4.;
 pub(crate) const BODY_SIZE: f32 = 14.;
 pub(crate) const BODY_LINE: f32 = 18.;
 const DEFAULT_ACCENT: u32 = 0x005fb8;
-const ON_ACCENT: u32 = 0xffffff;
+const DEFAULT_ACCENT_DARK: u32 = 0x60cdff;
 const ACCENT_TOP_EDGE: f32 = 0x14 as f32 / 255.;
-const ACCENT_BOTTOM_EDGE: f32 = 0x66 as f32 / 255.;
 const ACCENT_HOVER_OPACITY: f32 = 0.9;
 const ACCENT_PRESSED_OPACITY: f32 = 0.8;
-const FOCUS_OUTER: u32 = 0x1a1a1a;
-const FOCUS_INNER: u32 = 0xfbfbfb;
-const FIELD_FOCUSED_FILL: u32 = 0xffffff;
 const FIELD_PADDING: f32 = 10.;
 const FIELD_CARET: f32 = 19.;
 const FIELD_GLYPH_WIDTH: f32 = 31.;
@@ -40,9 +36,9 @@ pub(crate) struct FieldStyle {
     pub search_icon: bool,
 }
 
-pub(crate) fn accent_color() -> Rgba {
-    let mut palette = [0u8; 32];
-    let mut len = palette.len() as u32;
+pub(crate) fn accent_color(p: Palette) -> Rgba {
+    let mut shades = [0u8; 32];
+    let mut len = shades.len() as u32;
     let key: Vec<u16> = r"Software\Microsoft\Windows\CurrentVersion\Explorer\Accent"
         .encode_utf16()
         .chain(Some(0))
@@ -55,18 +51,23 @@ pub(crate) fn accent_color() -> Rgba {
             value.as_ptr(),
             RRF_RT_REG_BINARY,
             std::ptr::null_mut(),
-            palette.as_mut_ptr().cast(),
+            shades.as_mut_ptr().cast(),
             &mut len,
         )
     };
-    if status != 0 || len < 20 {
-        return rgb(DEFAULT_ACCENT);
+    let shade = p.accent_shade * 4;
+    if status != 0 || (len as usize) < shade + 3 {
+        return rgb(if p.dark {
+            DEFAULT_ACCENT_DARK
+        } else {
+            DEFAULT_ACCENT
+        });
     }
     rgb(u32::from_be_bytes([
         0,
-        palette[16],
-        palette[17],
-        palette[18],
+        shades[shade],
+        shades[shade + 1],
+        shades[shade + 2],
     ]))
 }
 
@@ -81,6 +82,7 @@ fn mix(color: Rgba, toward: f32, amount: f32) -> Rgba {
 }
 
 pub(crate) fn button(
+    p: Palette,
     id: impl Into<ElementId>,
     label: impl Into<SharedString>,
     accent_style: bool,
@@ -97,8 +99,8 @@ pub(crate) fn button(
             mix(accent, backdrop, 1. - ACCENT_HOVER_OPACITY),
             mix(accent, backdrop, 1. - ACCENT_PRESSED_OPACITY),
             mix(accent, 1., ACCENT_TOP_EDGE),
-            mix(accent, 0., ACCENT_BOTTOM_EDGE),
-            rgb(ON_ACCENT),
+            mix(accent, 0., p.accent_bottom_edge),
+            rgb(p.on_accent),
         )
     } else {
         (
@@ -107,7 +109,7 @@ pub(crate) fn button(
             rgb(surface.button_pressed),
             rgb(surface.button_stroke),
             rgb(surface.button_bottom),
-            rgba(TEXT_PRIMARY),
+            rgba(p.text_primary),
         )
     };
     div()
@@ -148,19 +150,25 @@ pub(crate) fn button(
                     .bottom(px(-3.))
                     .rounded(u(CONTROL_RADIUS + 3.))
                     .border_2()
-                    .border_color(rgb(FOCUS_OUTER))
+                    .border_color(rgb(p.focus_outer))
                     .child(
                         div()
                             .size_full()
                             .rounded(u(CONTROL_RADIUS + 1.))
                             .border_1()
-                            .border_color(rgb(FOCUS_INNER)),
+                            .border_color(rgb(p.focus_inner)),
                     ),
             )
         })
 }
 
-fn field_glyph(id: impl Into<ElementId>, glyph: &'static str, right: f32, s: f32) -> Stateful<Div> {
+fn field_glyph(
+    p: Palette,
+    id: impl Into<ElementId>,
+    glyph: &'static str,
+    right: f32,
+    s: f32,
+) -> Stateful<Div> {
     let u = |v: f32| px(v * s);
     div()
         .id(id)
@@ -176,7 +184,7 @@ fn field_glyph(id: impl Into<ElementId>, glyph: &'static str, right: f32, s: f32
         .cursor_default()
         .font_family("Segoe Fluent Icons")
         .text_size(u(FIELD_GLYPH_SIZE))
-        .text_color(rgba(TEXT_SECONDARY))
+        .text_color(rgba(p.text_secondary))
         .child(glyph)
 }
 
@@ -226,6 +234,7 @@ impl Jot {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> Div {
+        let p = palette(cx);
         let u = |v: f32| px(v * s);
         let focused = input.focus_handle(cx).is_focused(window);
         let empty = input.read(cx).text().len() == 0;
@@ -245,11 +254,11 @@ impl Jot {
             .relative()
             .h(u(CONTROL_HEIGHT))
             .rounded(u(CONTROL_RADIUS))
-            .bg(rgb(if focused {
-                FIELD_FOCUSED_FILL
+            .bg(if focused {
+                rgba(p.field_focused)
             } else {
-                surface.field_fill
-            }))
+                rgb(surface.field_fill)
+            })
             .border_t_1()
             .border_l_1()
             .border_r_1()
@@ -265,7 +274,7 @@ impl Jot {
                     .font_family(MENU_FONT)
                     .text_size(u(BODY_SIZE))
                     .line_height(u(BODY_LINE + 2.))
-                    .text_color(rgba(TEXT_PRIMARY)),
+                    .text_color(rgba(p.text_primary)),
             )
             .when_some(style.placeholder.filter(|_| empty), |this, placeholder| {
                 this.child(
@@ -278,7 +287,7 @@ impl Jot {
                         .items_center()
                         .font_family(MENU_FONT)
                         .text_size(u(BODY_SIZE))
-                        .text_color(rgba(TEXT_SECONDARY))
+                        .text_color(rgba(p.text_secondary))
                         .child(placeholder),
                 )
             })
@@ -299,6 +308,7 @@ impl Jot {
             )
             .when(style.search_icon, |this| {
                 this.child(field_glyph(
+                    p,
                     ("field-search", id),
                     SEARCH_GLYPH,
                     FIELD_GLYPH_RIGHT,
@@ -307,9 +317,9 @@ impl Jot {
             })
             .when(focused && !empty, |this| {
                 this.child(
-                    field_glyph(("field-clear", id), CLEAR_GLYPH, clear_right, s)
-                        .hover(|style| style.bg(rgba(SUBTLE_FILL_SECONDARY)))
-                        .active(|style| style.bg(rgba(SUBTLE_FILL_TERTIARY)))
+                    field_glyph(p, ("field-clear", id), CLEAR_GLYPH, clear_right, s)
+                        .hover(move |style| style.bg(rgba(p.subtle_secondary)))
+                        .active(move |style| style.bg(rgba(p.subtle_tertiary)))
                         .on_mouse_down(MouseButton::Left, |_, window, cx| {
                             window.prevent_default();
                             cx.stop_propagation();

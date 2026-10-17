@@ -28,10 +28,6 @@ const COMMAND_DIVIDER_TOP: f32 = 14.;
 const COMMAND_DIVIDER_HEIGHT: f32 = 32.;
 const COMMAND_EDGE_TRIM: f32 = 2.;
 const COMMAND_INSET: f32 = 2.;
-const FILL: u32 = 0xfcfcfc;
-const BORDER: u32 = 0xdcdcdc;
-const SEPARATOR_LINE: u32 = 0xededed;
-const TEXT_DISABLED: u32 = 0x0000005c;
 const ROW_COMMAND: f32 = 33.;
 const ROW_COMPACT: f32 = 32.;
 const ROW_SEPARATOR: f32 = 3.;
@@ -585,6 +581,7 @@ impl MenuBar {
     }
 
     fn command_row(&self, commands: &[CommandButton], width: f32, cx: &mut Context<Self>) -> Div {
+        let p = palette(cx);
         let count = commands.len() as f32;
         let cell = ((width - 2. - (count - 1.) + 2. * COMMAND_EDGE_TRIM) / count).floor();
         let last = commands.len().saturating_sub(1);
@@ -602,9 +599,9 @@ impl MenuBar {
                     0.
                 };
                 let color = if command.enabled {
-                    TEXT_PRIMARY
+                    p.text_primary
                 } else {
-                    TEXT_DISABLED
+                    p.text_disabled
                 };
                 let divider = (ix > 0).then(|| {
                     div()
@@ -612,7 +609,7 @@ impl MenuBar {
                         .w(px(1.))
                         .h(px(COMMAND_DIVIDER_HEIGHT))
                         .mt(px(COMMAND_DIVIDER_TOP))
-                        .bg(rgb(SEPARATOR_LINE))
+                        .bg(rgb(p.menu_separator))
                 });
                 let enabled = command.enabled;
                 let button = div()
@@ -635,8 +632,8 @@ impl MenuBar {
                             .rounded(px(4.))
                             .text_color(rgba(color))
                             .when(enabled, |this| {
-                                this.hover(|style| style.bg(rgba(SUBTLE_FILL_SECONDARY)))
-                                    .active(|style| style.bg(rgba(SUBTLE_FILL_TERTIARY)))
+                                this.hover(move |style| style.bg(rgba(p.subtle_secondary)))
+                                    .active(move |style| style.bg(rgba(p.subtle_tertiary)))
                             })
                             .child(
                                 div()
@@ -668,7 +665,7 @@ impl MenuBar {
                     .right_0()
                     .bottom(px(-1.))
                     .h(px(1.))
-                    .bg(rgb(SEPARATOR_LINE)),
+                    .bg(rgb(p.menu_separator)),
             )
     }
 
@@ -905,6 +902,7 @@ impl MenuBar {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
+        let p = palette(cx);
         let open = self.open.as_ref().filter(|open| open.kind == kind);
         let active = open.is_some_and(|open| !open.is_closing());
         let popup = open.map(|open| self.popup(open, window, cx));
@@ -919,9 +917,9 @@ impl MenuBar {
             .rounded(px(4.))
             .map(|this| {
                 if active {
-                    this.bg(rgba(SUBTLE_FILL_SECONDARY))
+                    this.bg(rgba(p.menu_open))
                 } else {
-                    this.hover(|style| style.bg(rgba(SUBTLE_FILL_SECONDARY)))
+                    this.hover(move |style| style.bg(rgba(p.subtle_secondary)))
                 }
             })
             .on_mouse_down(
@@ -959,6 +957,7 @@ impl MenuBar {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
+        let p = palette(cx);
         let panel = &open.panel;
         let width = panel.width;
         let bar = if open.commands.is_empty() {
@@ -984,6 +983,7 @@ impl MenuBar {
                 .occlude()
                 .cursor_default()
                 .children(reveal(
+                    p,
                     sub_width,
                     sub_height,
                     submenu.motion.unroll,
@@ -1023,6 +1023,7 @@ impl MenuBar {
                 }
             }))
             .children(reveal(
+                p,
                 width,
                 height,
                 open.motion.unroll,
@@ -1058,6 +1059,7 @@ impl MenuBar {
         _: &Window,
         cx: &mut Context<Self>,
     ) -> Div {
+        let p = palette(cx);
         let checks = panel
             .entries
             .iter()
@@ -1078,7 +1080,7 @@ impl MenuBar {
                         .id(("menu-separator", ix))
                         .h(px(ROW_SEPARATOR))
                         .py(px(1.))
-                        .child(div().h(px(1.)).bg(rgb(SEPARATOR_LINE)));
+                        .child(div().h(px(1.)).bg(rgb(p.menu_separator)));
                 }
                 let highlighted = panel.highlighted == Some(ix);
                 let enabled = entry.selectable();
@@ -1117,7 +1119,7 @@ impl MenuBar {
                             .size_full()
                             .px(px(ROW_PADDING))
                             .rounded(px(4.))
-                            .when(highlighted, |this| this.bg(rgba(SUBTLE_FILL_SECONDARY)))
+                            .when(highlighted, |this| this.bg(rgba(p.subtle_secondary)))
                             .when(checks, |this| {
                                 this.child(
                                     div()
@@ -1126,9 +1128,9 @@ impl MenuBar {
                                         .font_family("Segoe Fluent Icons")
                                         .text_size(px(mark_size))
                                         .text_color(rgba(if enabled {
-                                            TEXT_PRIMARY
+                                            p.text_primary
                                         } else {
-                                            TEXT_DISABLED
+                                            p.text_disabled
                                         }))
                                         .children(mark),
                                 )
@@ -1139,9 +1141,9 @@ impl MenuBar {
                                     .font_family(MENU_FONT)
                                     .text_size(px(LABEL_SIZE))
                                     .text_color(rgba(if enabled {
-                                        TEXT_PRIMARY
+                                        p.text_primary
                                     } else {
-                                        TEXT_DISABLED
+                                        p.text_disabled
                                     }))
                                     .child(label),
                             )
@@ -1152,9 +1154,9 @@ impl MenuBar {
                                         .font_family(UI_FONT)
                                         .text_size(px(SHORTCUT_SIZE))
                                         .text_color(rgba(if enabled {
-                                            TEXT_SECONDARY
+                                            p.text_secondary
                                         } else {
-                                            TEXT_DISABLED
+                                            p.text_disabled
                                         }))
                                         .child(shortcut),
                                 )
@@ -1165,7 +1167,7 @@ impl MenuBar {
                                         .flex_none()
                                         .font_family("Segoe Fluent Icons")
                                         .text_size(px(GLYPH_SIZE))
-                                        .text_color(rgba(TEXT_SECONDARY))
+                                        .text_color(rgba(p.text_secondary))
                                         .child("\u{E76C}"),
                                 )
                             }),
@@ -1175,6 +1177,7 @@ impl MenuBar {
 }
 
 fn reveal(
+    p: Palette,
     width: f32,
     height: f32,
     unroll: f32,
@@ -1186,7 +1189,7 @@ fn reveal(
     let travel = height * closed_ratio * (1. - unroll);
     let offset = if upward { travel } else { -travel };
     [
-        card(width, height * scale).when(upward, |card| card.top(px(height * (1. - scale)))),
+        card(p, width, height * scale).when(upward, |card| card.top(px(height * (1. - scale)))),
         div()
             .absolute()
             .top_0()
@@ -1205,19 +1208,19 @@ fn reveal(
     ]
 }
 
-fn card(width: f32, height: f32) -> Div {
+fn card(p: Palette, width: f32, height: f32) -> Div {
     div()
         .absolute()
         .top_0()
         .left_0()
         .w(px(width))
         .h(px(height))
-        .bg(rgb(FILL))
+        .bg(rgb(p.menu_fill))
         .border_1()
-        .border_color(rgb(BORDER))
+        .border_color(rgb(p.menu_border))
         .rounded(px(8.))
         .shadow(vec![BoxShadow {
-            color: hsla(0., 0., 0., 0.14),
+            color: hsla(0., 0., 0., p.shadow),
             offset: point(px(0.), px(8.)),
             blur_radius: px(16.),
             spread_radius: px(0.),
@@ -1279,6 +1282,7 @@ impl EventEmitter<MenuEvent> for MenuBar {}
 
 impl Render for MenuBar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = palette(cx);
         if self
             .open
             .as_mut()
@@ -1314,7 +1318,7 @@ impl Render for MenuBar {
             .gap(px(8.))
             .font_family(MENU_FONT)
             .text_size(px(14.))
-            .text_color(rgba(TEXT_PRIMARY))
+            .text_color(rgba(p.text_primary))
             .on_action(cx.listener(Self::on_up))
             .on_action(cx.listener(Self::on_down))
             .on_action(cx.listener(Self::on_first))
