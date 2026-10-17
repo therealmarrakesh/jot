@@ -2867,15 +2867,14 @@ impl<M: InputModeKind> InputBaseState<M> {
         if !self.selections.is_single() {
             self.selections.merge_overlapping();
         }
-        let lines: Vec<String> = new_text.split('\n').map(|s| s.to_string()).collect();
         let count = self.selections.len();
-        if count > 1 && lines.len() == count {
+        if count > 1 && new_text.split('\n').count() == count {
             let mut selections: Vec<CursorSelection> = self.selections.iter().copied().collect();
             selections.sort_by_key(|sel| sel.start);
             let edits: Vec<(Range<usize>, String)> = selections
                 .iter()
-                .zip(lines)
-                .map(|(sel, line)| (sel.start..sel.end, line))
+                .zip(new_text.split('\n'))
+                .map(|(sel, line)| (sel.start..sel.end, line.to_string()))
                 .collect();
             self.replace_text_in_ranges(&edits, window, cx);
         } else {
