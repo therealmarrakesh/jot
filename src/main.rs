@@ -1,5 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+#[cfg(feature = "bench")]
+mod bench;
 mod menu;
 
 use gpui_kit::base::animation::cubic_bezier;
@@ -295,6 +297,8 @@ pub struct Jot {
     caret_key: (usize, Range<usize>, usize),
     _caret_blink: Task<()>,
     _subscriptions: Vec<Subscription>,
+    #[cfg(feature = "bench")]
+    painted: bench::FrameProbe,
 }
 
 impl Jot {
@@ -331,8 +335,12 @@ impl Jot {
             caret_key: (0, 0..0, 0),
             _caret_blink: Task::ready(()),
             _subscriptions,
+            #[cfg(feature = "bench")]
+            painted: Rc::new(Cell::new(None)),
         };
         jot.activate_tab(0, window, cx);
+        #[cfg(feature = "bench")]
+        bench::schedule(jot.painted.clone(), window, cx);
         jot
     }
 
@@ -750,7 +758,7 @@ impl Render for Jot {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let status_bar = cx.global::<ViewSettings>().status_bar;
 
-        div()
+        let root = div()
             .v_flex()
             .size_full()
             .on_action(cx.listener(Self::zoom_in))
@@ -762,7 +770,10 @@ impl Render for Jot {
             .child(self.title_bar(window, cx))
             .child(self.menu_bar())
             .child(self.editor(window, cx))
-            .when(status_bar, |this| this.child(self.status_bar(cx)))
+            .when(status_bar, |this| this.child(self.status_bar(cx)));
+        #[cfg(feature = "bench")]
+        let root = root.child(bench::probe(&self.painted));
+        root
     }
 }
 
@@ -788,7 +799,10 @@ fn main() {
 
             cx.set_global(ViewSettings {
                 status_bar: true,
+                #[cfg(not(feature = "bench"))]
                 word_wrap: true,
+                #[cfg(feature = "bench")]
+                word_wrap: bench::word_wrap(),
             });
             cx.bind_keys(key_bindings());
             cx.bind_keys(menu::key_bindings());
