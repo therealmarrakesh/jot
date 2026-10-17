@@ -158,6 +158,7 @@ pub(crate) struct TabStrip {
     drag: Option<Drag>,
     lifted: Option<EntityId>,
     repeat: Task<()>,
+    middle: Option<EntityId>,
 }
 
 impl TabStrip {
@@ -173,6 +174,7 @@ impl TabStrip {
             drag: None,
             lifted: None,
             repeat: Task::ready(()),
+            middle: None,
         }
     }
 
@@ -664,6 +666,31 @@ impl Jot {
                         );
                         detach::press(this.owner(window, cx), id, ix, grab, x, cx);
                         cx.notify();
+                    }
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Middle,
+                cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                    this.strip.middle = Some(id);
+                    cx.stop_propagation();
+                }),
+            )
+            .on_mouse_up(
+                MouseButton::Middle,
+                cx.listener(move |this, _: &MouseUpEvent, window, cx| {
+                    if this.strip.middle.take() == Some(id)
+                        && let Some(ix) = this.tab_index(id)
+                    {
+                        this.close_tab(ix, window, cx);
+                    }
+                }),
+            )
+            .on_mouse_up_out(
+                MouseButton::Middle,
+                cx.listener(move |this, _: &MouseUpEvent, _, _| {
+                    if this.strip.middle == Some(id) {
+                        this.strip.middle = None;
                     }
                 }),
             )
