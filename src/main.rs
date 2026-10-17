@@ -2,12 +2,15 @@
 
 #[cfg(feature = "bench")]
 mod bench;
+mod dialog;
 mod document;
 mod files;
 mod menu;
 
 use gpui_kit::base::animation::cubic_bezier;
-use gpui_kit::component::input::{self, InputEvent, RopeExt as _, Textarea, TextareaState};
+use gpui_kit::component::input::{
+    self, InputEvent, PrepaintCaretGeometry, Rope, RopeExt as _, Textarea, TextareaState,
+};
 use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -315,6 +318,37 @@ fn time_date() -> String {
     format!("{} {}", text(&time, time_len), text(&date, date_len))
 }
 
+fn caret_canvas(
+    geometry: impl Fn(&App) -> Option<PrepaintCaretGeometry> + 'static,
+    height: Pixels,
+    shown: bool,
+) -> impl IntoElement {
+    canvas(
+        |_, _, _| {},
+        move |_, _, window, cx| {
+            if !shown {
+                return;
+            }
+            let Some(geometry) = geometry(cx) else {
+                return;
+            };
+            let origin = geometry.cursor_bounds().origin;
+            let caret = Bounds::new(
+                point(origin.x, origin.y + geometry.scroll_offset().y),
+                size(px(1.), height),
+            );
+            window.with_content_mask(
+                Some(ContentMask {
+                    bounds: geometry.input_bounds(),
+                }),
+                |window| window.paint_quad(fill(caret, rgb(CARET_COLOR))),
+            );
+        },
+    )
+    .absolute()
+    .size_full()
+}
+
 fn caret_key(editor: &TextareaState) -> (usize, Range<usize>, usize) {
     (
         editor.cursor(),
@@ -339,6 +373,7 @@ pub struct Jot {
     hovered_tab: Option<usize>,
     close_confirmed: bool,
     menu_bar: Entity<MenuBar>,
+    dialogs: dialog::Dialogs,
     caret_visible: bool,
     caret_key: (usize, Range<usize>, usize),
     _caret_blink: Task<()>,
@@ -352,6 +387,7 @@ impl Jot {
         let tab = Self::create_tab(None, window, cx);
         let editor = tab.editor.clone();
         let menu_bar = cx.new(|cx| MenuBar::new(editor, cx));
+        let dialogs = dialog::Dialogs::new(window, cx);
 
         let _subscriptions = vec![
             cx.observe_window_activation(window, |this, window, cx| {
@@ -378,6 +414,7 @@ impl Jot {
             hovered_tab: None,
             close_confirmed: false,
             menu_bar,
+            dialogs,
             caret_visible: true,
             caret_key: (0, 0..0, 0),
             _caret_blink: Task::ready(()),
@@ -498,31 +535,18 @@ impl Jot {
             && window.is_window_active()
             && editor.focus_handle(cx).is_focused(window);
 
-        canvas(
-            |_, _, _| {},
-            move |_, _, window, cx| {
+        caret_canvas(
+            move |cx| {
                 let editor = editor.read(cx);
-                if !shown || !editor.selected_range().is_empty() {
-                    return;
-                }
-                let Some(geometry) = editor.prepaint_caret_geometry() else {
-                    return;
-                };
-                let origin = geometry.cursor_bounds().origin;
-                let caret = Bounds::new(
-                    point(origin.x, origin.y + geometry.scroll_offset().y),
-                    size(px(1.), height),
-                );
-                window.with_content_mask(
-                    Some(ContentMask {
-                        bounds: geometry.input_bounds(),
-                    }),
-                    |window| window.paint_quad(fill(caret, rgb(CARET_COLOR))),
-                );
+                editor
+                    .selected_range()
+                    .is_empty()
+                    .then(|| editor.prepaint_caret_geometry())
+                    .flatten()
             },
+            height,
+            shown,
         )
-        .absolute()
-        .size_full()
     }
 
     fn insert_time_date(&mut self, _: &TimeDate, window: &mut Window, cx: &mut Context<Self>) {
@@ -874,6 +898,7 @@ fn status_cell(width: f32, label: impl Into<SharedString>) -> Div {
 impl Render for Jot {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let status_bar = cx.global::<ViewSettings>().status_bar;
+        let dialogs = self.render_dialogs(window, cx);
 
         let root = div()
             .v_flex()
@@ -889,10 +914,12 @@ impl Render for Jot {
             .on_action(cx.listener(Self::save_as))
             .on_action(cx.listener(Self::save_all))
             .on_action(cx.listener(Self::insert_time_date))
+            .on_action(cx.listener(Self::go_to))
             .child(self.title_bar(window, cx))
             .child(self.menu_bar())
             .child(self.editor(window, cx))
-            .when(status_bar, |this| this.child(self.status_bar(cx)));
+            .when(status_bar, |this| this.child(self.status_bar(cx)))
+            .children(dialogs);
         #[cfg(feature = "bench")]
         let root = root.child(bench::probe(&self.painted));
         root
@@ -928,6 +955,7 @@ fn main() {
             });
             cx.bind_keys(key_bindings());
             cx.bind_keys(menu::key_bindings());
+            cx.bind_keys(dialog::key_bindings());
 
             cx.on_action(|_: &Exit, cx| {
                 for window in cx.windows() {

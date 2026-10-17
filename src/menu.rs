@@ -924,7 +924,7 @@ fn card(width: f32, height: f32) -> Div {
         }])
 }
 
-fn text_width(window: &Window, text: &str, family: &'static str, size: f32) -> f32 {
+pub(crate) fn text_width(window: &Window, text: &str, family: &'static str, size: f32) -> f32 {
     let run = TextRun {
         len: text.len(),
         font: font(family),
