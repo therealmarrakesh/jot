@@ -461,7 +461,6 @@ impl Jot {
                 Part::PageIncrease
             }
         };
-        let part_at_move = part_at.clone();
         Some(
             div()
                 .id(id)
@@ -475,7 +474,7 @@ impl Jot {
                     this.hover_bar(axis, *hovered, cx)
                 }))
                 .on_mouse_move(cx.listener(move |this, event: &MouseMoveEvent, _, cx| {
-                    let part = Some(part_at_move(along(event.position)));
+                    let part = Some(part_at(along(event.position)));
                     let bar = this.scroll.bar(axis);
                     if bar.hovered_part != part {
                         bar.hovered_part = part;
