@@ -3,11 +3,14 @@ use gpui_kit::base::actions::{
     Cancel, Confirm, SelectDown, SelectFirst, SelectLast, SelectLeft, SelectRight, SelectUp,
 };
 use gpui_kit::base::{MotionStatus, Presence, Transition, transition_with_status};
+use windows_sys::Win32::UI::WindowsAndMessaging::{SPI_GETMENUSHOWDELAY, SystemParametersInfoW};
 
 const CONTEXT: &str = "JotMenu";
 const OPEN_DURATION: Duration = Duration::from_millis(250);
 const CLOSE_DURATION: Duration = Duration::from_millis(83);
 const CLOSED_RATIO: f32 = 0.5;
+const SUBMENU_CLOSED_RATIO: f32 = 0.67;
+const DEFAULT_MENU_SHOW_DELAY_MS: u64 = 400;
 const MIN_WIDTH: f32 = 232.;
 const FILL: u32 = 0xfcfcfc;
 const BORDER: u32 = 0xdcdcdc;
@@ -226,19 +229,33 @@ impl Panel {
     }
 }
 
-struct OpenMenu {
-    kind: MenuKind,
-    panel: Panel,
-    submenu: Option<(usize, Panel)>,
+fn menu_show_delay() -> Duration {
+    let mut millis: u32 = 0;
+    let read = unsafe {
+        SystemParametersInfoW(SPI_GETMENUSHOWDELAY, 0, (&mut millis as *mut u32).cast(), 0)
+    };
+    Duration::from_millis(if read != 0 {
+        millis.into()
+    } else {
+        DEFAULT_MENU_SHOW_DELAY_MS
+    })
+}
+
+struct Motion {
     serial: usize,
     closing: bool,
     unroll: f32,
     opacity: f32,
 }
 
-impl OpenMenu {
-    fn is_closing(&self) -> bool {
-        self.closing
+impl Motion {
+    fn new(serial: usize) -> Self {
+        Self {
+            serial,
+            closing: false,
+            unroll: 0.,
+            opacity: 1.,
+        }
     }
 
     fn sample(&mut self, window: &mut Window, cx: &mut App) -> bool {
@@ -260,11 +277,56 @@ impl OpenMenu {
     }
 }
 
+struct Submenu {
+    ix: usize,
+    panel: Panel,
+    motion: Motion,
+}
+
+struct OpenMenu {
+    kind: MenuKind,
+    panel: Panel,
+    submenu: Option<Submenu>,
+    motion: Motion,
+}
+
+impl OpenMenu {
+    fn is_closing(&self) -> bool {
+        self.motion.closing
+    }
+
+    fn live_submenu(&self) -> Option<&Submenu> {
+        self.submenu.as_ref().filter(|sub| !sub.motion.closing)
+    }
+
+    fn live_submenu_mut(&mut self) -> Option<&mut Submenu> {
+        self.submenu.as_mut().filter(|sub| !sub.motion.closing)
+    }
+
+    fn sample(&mut self, window: &mut Window, cx: &mut App) -> bool {
+        if self
+            .submenu
+            .as_mut()
+            .is_some_and(|sub| sub.motion.sample(window, cx))
+        {
+            self.submenu = None;
+        }
+        self.motion.sample(window, cx)
+    }
+}
+
+enum SubmenuChange {
+    Keep,
+    Open(usize),
+    Close,
+}
+
 pub struct MenuBar {
     pub action_context: FocusHandle,
     focus: FocusHandle,
     open: Option<OpenMenu>,
-    openings: usize,
+    serials: usize,
+    submenu_timer: Task<()>,
     hit_areas: Rc<Cell<[Bounds<Pixels>; 3]>>,
 }
 
@@ -274,9 +336,15 @@ impl MenuBar {
             action_context,
             focus: cx.focus_handle(),
             open: None,
-            openings: 0,
+            serials: 0,
+            submenu_timer: Task::ready(()),
             hit_areas: Rc::new(Cell::new([Bounds::default(); 3])),
         }
+    }
+
+    fn next_serial(&mut self) -> usize {
+        self.serials += 1;
+        self.serials
     }
 
     fn open_kind(&self) -> Option<MenuKind> {
@@ -288,25 +356,23 @@ impl MenuBar {
 
     fn open_menu(&mut self, kind: MenuKind, window: &mut Window, cx: &mut Context<Self>) {
         let panel = Panel::new(kind.entries(cx), &self.action_context, window);
-        self.openings += 1;
+        let motion = Motion::new(self.next_serial());
         self.open = Some(OpenMenu {
             kind,
             panel,
             submenu: None,
-            serial: self.openings,
-            closing: false,
-            unroll: 0.,
-            opacity: 1.,
+            motion,
         });
+        self.submenu_timer = Task::ready(());
         self.focus.focus(window, cx);
         cx.notify();
     }
 
     fn close_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(open) = self.open.as_mut().filter(|open| !open.is_closing()) {
-            open.closing = true;
-            open.submenu = None;
+            open.motion.closing = true;
         }
+        self.submenu_timer = Task::ready(());
         self.action_context.focus(window, cx);
         cx.notify();
     }
@@ -322,8 +388,8 @@ impl MenuBar {
         };
         let entry = match path {
             (ix, None) => open.panel.entries[ix].clone(),
-            (_, Some(sub)) => match &open.submenu {
-                Some((_, panel)) => panel.entries[sub].clone(),
+            (_, Some(sub)) => match open.live_submenu() {
+                Some(submenu) => submenu.panel.entries[sub].clone(),
                 None => return,
             },
         };
@@ -351,26 +417,67 @@ impl MenuBar {
         cx: &mut Context<Self>,
     ) {
         let action_context = self.action_context.clone();
+        let serial = self.next_serial();
+        self.submenu_timer = Task::ready(());
         let Some(open) = self.open.as_mut().filter(|open| !open.is_closing()) else {
             return;
         };
         let Entry::Submenu(_, entries) = &open.panel.entries[ix] else {
-            open.submenu = None;
-            cx.notify();
             return;
         };
-        if open
-            .submenu
-            .as_ref()
-            .is_none_or(|(open_ix, _)| *open_ix != ix)
-        {
-            open.submenu = Some((ix, Panel::new(entries.clone(), &action_context, window)));
+        if open.live_submenu().is_none_or(|submenu| submenu.ix != ix) {
+            open.submenu = Some(Submenu {
+                ix,
+                panel: Panel::new(entries.clone(), &action_context, window),
+                motion: Motion::new(serial),
+            });
         }
-        if highlight_first && let Some((_, panel)) = open.submenu.as_mut() {
-            panel.highlighted = None;
-            panel.step(1);
+        if highlight_first && let Some(submenu) = open.live_submenu_mut() {
+            submenu.panel.highlighted = None;
+            submenu.panel.step(1);
         }
         cx.notify();
+    }
+
+    fn close_submenu(&mut self, cx: &mut Context<Self>) -> bool {
+        self.submenu_timer = Task::ready(());
+        let closed = self
+            .open
+            .as_mut()
+            .and_then(OpenMenu::live_submenu_mut)
+            .map(|submenu| submenu.motion.closing = true)
+            .is_some();
+        if closed {
+            cx.notify();
+        }
+        closed
+    }
+
+    fn schedule_submenu(
+        &mut self,
+        change: SubmenuChange,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let target = match change {
+            SubmenuChange::Keep => {
+                self.submenu_timer = Task::ready(());
+                return;
+            }
+            SubmenuChange::Open(ix) => Some(ix),
+            SubmenuChange::Close => None,
+        };
+        let delay = menu_show_delay();
+        self.submenu_timer = cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor().timer(delay).await;
+            this.update_in(cx, |this, window, cx| match target {
+                Some(ix) => this.open_submenu(ix, false, window, cx),
+                None => {
+                    this.close_submenu(cx);
+                }
+            })
+            .ok();
+        });
     }
 
     fn hover_row(
@@ -382,21 +489,25 @@ impl MenuBar {
         let Some(open) = self.open.as_mut().filter(|open| !open.is_closing()) else {
             return;
         };
-        match path {
+        let change = match path {
             (ix, None) => {
                 open.panel.highlighted = Some(ix);
-                if matches!(open.panel.entries[ix], Entry::Submenu(..)) {
-                    self.open_submenu(ix, false, window, cx);
-                } else {
-                    open.submenu = None;
+                let current = open.live_submenu().map(|submenu| submenu.ix);
+                match (&open.panel.entries[ix], current) {
+                    (Entry::Submenu(..), Some(open_ix)) if open_ix == ix => SubmenuChange::Keep,
+                    (Entry::Submenu(..), _) => SubmenuChange::Open(ix),
+                    (_, Some(_)) => SubmenuChange::Close,
+                    (_, None) => SubmenuChange::Keep,
                 }
             }
             (_, Some(sub)) => {
-                if let Some((_, panel)) = open.submenu.as_mut() {
-                    panel.highlighted = Some(sub);
+                if let Some(submenu) = open.live_submenu_mut() {
+                    submenu.panel.highlighted = Some(sub);
                 }
+                SubmenuChange::Keep
             }
-        }
+        };
+        self.schedule_submenu(change, window, cx);
         cx.notify();
     }
 
@@ -430,12 +541,11 @@ impl MenuBar {
 
     fn jump_active(&mut self, delta: isize, cx: &mut Context<Self>) {
         if let Some(open) = self.open.as_mut().filter(|open| !open.is_closing()) {
-            let panel = match open
-                .submenu
-                .as_mut()
-                .filter(|(_, panel)| panel.highlighted.is_some())
-            {
-                Some((_, panel)) => panel,
+            let in_submenu = open
+                .live_submenu()
+                .is_some_and(|submenu| submenu.panel.highlighted.is_some());
+            let panel = match open.live_submenu_mut().filter(|_| in_submenu) {
+                Some(submenu) => &mut submenu.panel,
                 None => &mut open.panel,
             };
             panel.highlighted = None;
@@ -446,12 +556,11 @@ impl MenuBar {
 
     fn step_active(&mut self, delta: isize, cx: &mut Context<Self>) {
         if let Some(open) = self.open.as_mut().filter(|open| !open.is_closing()) {
-            match open
-                .submenu
-                .as_mut()
-                .filter(|(_, panel)| panel.highlighted.is_some())
-            {
-                Some((_, panel)) => panel.step(delta),
+            let in_submenu = open
+                .live_submenu()
+                .is_some_and(|submenu| submenu.panel.highlighted.is_some());
+            match open.live_submenu_mut().filter(|_| in_submenu) {
+                Some(submenu) => submenu.panel.step(delta),
                 None => open.panel.step(delta),
             }
             cx.notify();
@@ -463,25 +572,22 @@ impl MenuBar {
             return;
         };
         let sub = open
-            .submenu
-            .as_ref()
-            .and_then(|(_, panel)| panel.highlighted);
+            .live_submenu()
+            .and_then(|submenu| submenu.panel.highlighted);
         if let Some(ix) = open.panel.highlighted {
             self.activate((ix, sub), window, cx);
         }
     }
 
     fn on_cancel(&mut self, _: &Cancel, window: &mut Window, cx: &mut Context<Self>) {
-        match self.open.as_mut().and_then(|open| open.submenu.take()) {
-            Some(_) => cx.notify(),
-            None => self.close_menu(window, cx),
+        if !self.close_submenu(cx) {
+            self.close_menu(window, cx);
         }
     }
 
     fn on_left(&mut self, _: &SelectLeft, window: &mut Window, cx: &mut Context<Self>) {
-        match self.open.as_mut().and_then(|open| open.submenu.take()) {
-            Some(_) => cx.notify(),
-            None => self.switch(-1, window, cx),
+        if !self.close_submenu(cx) {
+            self.switch(-1, window, cx);
         }
     }
 
@@ -557,32 +663,49 @@ impl MenuBar {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
-        let eased = open.unroll;
-        let opacity = open.opacity;
         let panel = &open.panel;
-        let height = panel.height();
         let width = panel.width;
-        let scale = 1. - CLOSED_RATIO * (1. - eased);
-        let offset = -height * CLOSED_RATIO * (1. - eased);
+        let height = panel.height();
         let hit_areas = self.hit_areas.clone();
-        let submenu = open.submenu.as_ref().map(|(ix, sub)| {
-            (
-                *ix,
-                self.panel_rows(sub, Some(*ix), window, cx),
-                sub.width,
-                sub.height(),
-            )
+        let submenu = open.submenu.as_ref().map(|submenu| {
+            let sub_width = submenu.panel.width;
+            let sub_height = submenu.panel.height();
+            let top = panel.row_top(submenu.ix) - 1. - PADDING_Y;
+            let rows = self.panel_rows(&submenu.panel, Some(submenu.ix), window, cx);
+            let hit_areas = self.hit_areas.clone();
+            div()
+                .absolute()
+                .left(px(width - SUBMENU_OVERLAP))
+                .top(px(top))
+                .w(px(sub_width))
+                .h(px(sub_height))
+                .opacity(submenu.motion.opacity)
+                .children(reveal(
+                    sub_width,
+                    sub_height,
+                    submenu.motion.unroll,
+                    SUBMENU_CLOSED_RATIO,
+                    rows,
+                ))
+                .child(
+                    canvas(
+                        move |bounds, _, _| {
+                            let mut areas = hit_areas.get();
+                            areas[2] = bounds;
+                            hit_areas.set(areas);
+                        },
+                        |_, _, _, _| {},
+                    )
+                    .absolute()
+                    .size_full(),
+                )
         });
-        let submenu_top = open
-            .submenu
-            .as_ref()
-            .map(|(ix, _)| panel.row_top(*ix) - 1. - PADDING_Y);
 
         div()
             .relative()
             .w(px(width))
             .h(px(height))
-            .opacity(opacity)
+            .opacity(open.motion.opacity)
             .on_mouse_down_out(cx.listener(|this, event: &MouseDownEvent, window, cx| {
                 let inside = this
                     .hit_areas
@@ -593,24 +716,13 @@ impl MenuBar {
                     this.close_menu(window, cx);
                 }
             }))
-            .child(card(width, height * scale))
-            .child(
-                div()
-                    .absolute()
-                    .top_0()
-                    .left_0()
-                    .size_full()
-                    .overflow_hidden()
-                    .child(
-                        div()
-                            .absolute()
-                            .left_0()
-                            .top(px(offset))
-                            .w(px(width))
-                            .h(px(height))
-                            .child(self.panel_rows(panel, None, window, cx)),
-                    ),
-            )
+            .children(reveal(
+                width,
+                height,
+                open.motion.unroll,
+                CLOSED_RATIO,
+                self.panel_rows(panel, None, window, cx),
+            ))
             .child(
                 canvas(
                     move |bounds, _, _| {
@@ -623,34 +735,7 @@ impl MenuBar {
                 .absolute()
                 .size_full(),
             )
-            .when_some(
-                submenu.zip(submenu_top),
-                |this, ((_, rows, sub_width, sub_height), top)| {
-                    let hit_areas = self.hit_areas.clone();
-                    this.child(
-                        div()
-                            .absolute()
-                            .left(px(width - SUBMENU_OVERLAP))
-                            .top(px(top))
-                            .w(px(sub_width))
-                            .h(px(sub_height))
-                            .child(card(sub_width, sub_height))
-                            .child(div().absolute().top_0().left_0().size_full().child(rows))
-                            .child(
-                                canvas(
-                                    move |bounds, _, _| {
-                                        let mut areas = hit_areas.get();
-                                        areas[2] = bounds;
-                                        hit_areas.set(areas);
-                                    },
-                                    |_, _, _, _| {},
-                                )
-                                .absolute()
-                                .size_full(),
-                            ),
-                    )
-                },
-            )
+            .children(submenu)
     }
 
     fn panel_rows(
@@ -755,6 +840,29 @@ impl MenuBar {
     }
 }
 
+fn reveal(width: f32, height: f32, unroll: f32, closed_ratio: f32, rows: Div) -> [Div; 2] {
+    let scale = 1. - closed_ratio * (1. - unroll);
+    let offset = -height * closed_ratio * (1. - unroll);
+    [
+        card(width, height * scale),
+        div()
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
+            .overflow_hidden()
+            .child(
+                div()
+                    .absolute()
+                    .left_0()
+                    .top(px(offset))
+                    .w(px(width))
+                    .h(px(height))
+                    .child(rows),
+            ),
+    ]
+}
+
 fn card(width: f32, height: f32) -> Div {
     div()
         .absolute()
@@ -833,6 +941,11 @@ impl Render for MenuBar {
             .is_some_and(|open| open.sample(window, cx))
         {
             self.open = None;
+        }
+        if self.open.as_ref().is_none_or(|open| open.submenu.is_none()) {
+            let mut areas = self.hit_areas.get();
+            areas[2] = Bounds::default();
+            self.hit_areas.set(areas);
         }
         let hit_areas = self.hit_areas.clone();
 
