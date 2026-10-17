@@ -14,7 +14,9 @@ pub(crate) struct Palette {
     pub text_disabled: u32,
     pub subtle_secondary: u32,
     pub subtle_tertiary: u32,
-    pub menu_open: u32,
+    pub layer_hover: u32,
+    pub divider: u32,
+    pub on_accent_secondary: u32,
     pub caption_glyph: u32,
     pub caption_glyph_inactive: u32,
     pub caption_glyph_pressed: u32,
@@ -26,7 +28,6 @@ pub(crate) struct Palette {
     pub menu_fill: u32,
     pub menu_border: u32,
     pub menu_separator: u32,
-    pub shadow: f32,
     pub smoke: u32,
     pub surface_stroke: u32,
     pub dialog_content: u32,
@@ -62,9 +63,11 @@ pub(crate) const LIGHT: Palette = Palette {
     text_secondary: 0x0000009e,
     text_tertiary: 0x00000072,
     text_disabled: 0x0000005c,
-    subtle_secondary: 0x0000000a,
+    subtle_secondary: 0x00000009,
     subtle_tertiary: 0x00000006,
-    menu_open: 0x0000000a,
+    layer_hover: 0x0000000a,
+    divider: 0x0000000f,
+    on_accent_secondary: 0xffffffb3,
     caption_glyph: 0x000000ff,
     caption_glyph_inactive: 0x0000005c,
     caption_glyph_pressed: 0x0000009e,
@@ -76,7 +79,6 @@ pub(crate) const LIGHT: Palette = Palette {
     menu_fill: 0xfcfcfc,
     menu_border: 0xdcdcdc,
     menu_separator: 0xededed,
-    shadow: 0.14,
     smoke: 0x0000004d,
     surface_stroke: 0x75757566,
     dialog_content: 0xffffff,
@@ -139,7 +141,9 @@ pub(crate) const DARK: Palette = Palette {
     text_disabled: 0xffffff5d,
     subtle_secondary: 0xffffff0f,
     subtle_tertiary: 0xffffff0a,
-    menu_open: 0xffffff0a,
+    layer_hover: 0xffffff0f,
+    divider: 0xffffff15,
+    on_accent_secondary: 0x00000080,
     caption_glyph: 0xffffffff,
     caption_glyph_inactive: 0xffffff5d,
     caption_glyph_pressed: 0xffffffc5,
@@ -151,7 +155,6 @@ pub(crate) const DARK: Palette = Palette {
     menu_fill: 0x2c2c2c,
     menu_border: 0x1c1c1c,
     menu_separator: 0x3d3d3d,
-    shadow: 0.26,
     smoke: 0x0000004d,
     surface_stroke: 0x75757566,
     dialog_content: 0x2b2b2b,
@@ -204,6 +207,31 @@ pub(crate) const DARK: Palette = Palette {
 
 pub(crate) fn palette(cx: &App) -> Palette {
     cx.try_global::<Palette>().copied().unwrap_or(LIGHT)
+}
+
+pub(crate) fn theme_shadow(p: Palette, z: f32, scale: f32) -> Vec<BoxShadow> {
+    let elevation = (z / 2.).min(64.);
+    let (ambient, directional) = match (elevation, p.dark) {
+        (e, _) if e < 2. => (0., 0.),
+        (e, false) if e <= 16. => (0., (e / 100. + 0.06).min(0.14)),
+        (e, true) if e <= 16. => (0., 0.26),
+        (_, false) => (0.15, 0.19),
+        (_, true) => (0.37, 0.37),
+    };
+    [
+        (ambient, elevation / 3., 2.),
+        (directional, elevation, elevation / 2.),
+    ]
+    .into_iter()
+    .filter(|(opacity, ..)| *opacity > 0.)
+    .map(|(opacity, blur, y)| BoxShadow {
+        color: hsla(0., 0., 0., opacity),
+        offset: point(px(0.), px(y * scale)),
+        blur_radius: px(blur * scale),
+        spread_radius: px(0.),
+        inset: false,
+    })
+    .collect()
 }
 
 pub(crate) fn apply(appearance: WindowAppearance, cx: &mut App) {

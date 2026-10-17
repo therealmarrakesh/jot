@@ -9,6 +9,7 @@ use gpui_kit::component::input::InputState;
 const CONTEXT: &str = "JotDialog";
 const TITLE_FONT: &str = "Segoe UI Variable Display";
 const OPEN_SCALE: f32 = 1.05;
+const DIALOG_Z: f32 = 128.;
 const SHOW_DURATION: Duration = Duration::from_millis(250);
 const HIDE_DURATION: Duration = Duration::from_millis(167);
 const FADE_DURATION: Duration = Duration::from_millis(83);
@@ -479,22 +480,7 @@ fn dialog_frame(
         .border_1()
         .border_color(rgba(p.surface_stroke))
         .rounded(u(RADIUS))
-        .shadow(vec![
-            BoxShadow {
-                color: hsla(0., 0., 0., p.shadow),
-                offset: point(px(0.), u(12.)),
-                blur_radius: u(28.),
-                spread_radius: px(0.),
-                inset: false,
-            },
-            BoxShadow {
-                color: hsla(0., 0., 0., 0.1),
-                offset: point(px(0.), u(24.)),
-                blur_radius: u(48.),
-                spread_radius: px(0.),
-                inset: false,
-            },
-        ])
+        .shadow(theme_shadow(p, DIALOG_Z, s))
         .child(
             div()
                 .flex()

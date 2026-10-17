@@ -259,13 +259,7 @@ impl Render for TooltipView {
                     .rounded(px(RADIUS))
                     .border_1()
                     .border_color(rgba(p.tooltip_border))
-                    .shadow(vec![BoxShadow {
-                        color: hsla(0., 0., 0., p.shadow),
-                        offset: point(px(0.), px(ELEVATION / 2.)),
-                        blur_radius: px(ELEVATION),
-                        spread_radius: px(0.),
-                        inset: false,
-                    }])
+                    .shadow(theme_shadow(p, ELEVATION * 2., 1.))
                     .child(
                         div()
                             .relative()

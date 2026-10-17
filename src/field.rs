@@ -93,7 +93,7 @@ pub(crate) fn button(
 ) -> Stateful<Div> {
     let u = |v: f32| px(v * s);
     let (fill, hover, pressed, edge, bottom, text) = if accent_style {
-        let backdrop = (surface.button_fill & 0xff) as f32 / 255.;
+        let backdrop = (p.dialog_command & 0xff) as f32 / 255.;
         (
             accent,
             mix(accent, backdrop, 1. - ACCENT_HOVER_OPACITY),
@@ -112,12 +112,18 @@ pub(crate) fn button(
             rgba(p.text_primary),
         )
     };
+    let (pressed_edge, pressed_bottom, pressed_text) = if accent_style {
+        (pressed, pressed, rgba(p.on_accent_secondary))
+    } else {
+        (edge, edge, rgba(p.text_secondary))
+    };
     div()
         .id(id)
         .relative()
         .h(u(CONTROL_HEIGHT))
         .rounded(u(CONTROL_RADIUS))
         .bg(bottom)
+        .active(move |style| style.bg(pressed_bottom))
         .pb(px(1.))
         .cursor_default()
         .font_family(MENU_FONT)
@@ -137,7 +143,12 @@ pub(crate) fn button(
                 .bg(fill)
                 .text_color(text)
                 .hover(move |style| style.bg(hover))
-                .active(move |style| style.bg(pressed))
+                .active(move |style| {
+                    style
+                        .bg(pressed)
+                        .border_color(pressed_edge)
+                        .text_color(pressed_text)
+                })
                 .child(label.into()),
         )
         .when(focused, |this| {
@@ -263,6 +274,9 @@ impl Jot {
             .border_l_1()
             .border_r_1()
             .border_color(rgb(surface.field_stroke))
+            .when(!focused, |this| {
+                this.hover(move |style| style.bg(rgb(surface.button_hover)))
+            })
             .pb(px(1.))
             .child(
                 Input::new(input)
@@ -319,7 +333,11 @@ impl Jot {
                 this.child(
                     field_glyph(p, ("field-clear", id), CLEAR_GLYPH, clear_right, s)
                         .hover(move |style| style.bg(rgba(p.subtle_secondary)))
-                        .active(move |style| style.bg(rgba(p.subtle_tertiary)))
+                        .active(move |style| {
+                            style
+                                .bg(rgba(p.subtle_tertiary))
+                                .text_color(rgba(p.text_tertiary))
+                        })
                         .on_mouse_down(MouseButton::Left, |_, window, cx| {
                             window.prevent_default();
                             cx.stop_propagation();

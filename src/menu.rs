@@ -11,6 +11,8 @@ const CONTEXT: &str = "JotMenu";
 const OPEN_DURATION: Duration = Duration::from_millis(250);
 const CLOSE_DURATION: Duration = Duration::from_millis(83);
 const CLOSED_RATIO: f32 = 0.5;
+const MENU_Z: f32 = 32.;
+const SUBMENU_Z: f32 = 40.;
 const SUBMENU_CLOSED_RATIO: f32 = 0.67;
 const DEFAULT_MENU_SHOW_DELAY_MS: u64 = 400;
 const MIN_WIDTH: f32 = 232.;
@@ -346,15 +348,17 @@ fn menu_show_delay() -> Duration {
 struct Motion {
     serial: usize,
     closing: bool,
+    fade_in: bool,
     unroll: f32,
     opacity: f32,
 }
 
 impl Motion {
-    fn new(serial: usize) -> Self {
+    fn new(serial: usize, fade_in: bool) -> Self {
         Self {
             serial,
             closing: false,
+            fade_in,
             unroll: 0.,
             opacity: 1.,
         }
@@ -367,6 +371,14 @@ impl Motion {
                 .sample(window, cx)
                 .progress;
         }
+        let appear = if self.fade_in {
+            Presence::new(ElementId::from(("jot-menu-appear", self.serial)), true)
+                .transition(close_transition())
+                .sample(window, cx)
+                .progress
+        } else {
+            1.
+        };
         let fade = transition_with_status(
             ElementId::from(("jot-menu-fade", self.serial)),
             if self.closing { 0. } else { 1. },
@@ -374,7 +386,7 @@ impl Motion {
             window,
             cx,
         );
-        self.opacity = fade.value;
+        self.opacity = fade.value * appear;
         self.closing && fade.status == MotionStatus::Finished
     }
 }
@@ -531,7 +543,7 @@ impl MenuBar {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let motion = Motion::new(self.next_serial());
+        let motion = Motion::new(self.next_serial(), !commands.is_empty());
         self.open = Some(OpenMenu {
             kind,
             anchor,
@@ -633,7 +645,11 @@ impl MenuBar {
                             .text_color(rgba(color))
                             .when(enabled, |this| {
                                 this.hover(move |style| style.bg(rgba(p.subtle_secondary)))
-                                    .active(move |style| style.bg(rgba(p.subtle_tertiary)))
+                                    .active(move |style| {
+                                        style
+                                            .bg(rgba(p.subtle_tertiary))
+                                            .text_color(rgba(p.text_secondary))
+                                    })
                             })
                             .child(
                                 div()
@@ -721,7 +737,7 @@ impl MenuBar {
             open.submenu = Some(Submenu {
                 ix,
                 panel: Panel::new(entries.clone(), MIN_WIDTH, &action_context, window),
-                motion: Motion::new(serial),
+                motion: Motion::new(serial, false),
             });
         }
         if highlight_first && let Some(submenu) = open.live_submenu_mut() {
@@ -915,13 +931,9 @@ impl MenuBar {
             .h_full()
             .px(px(10.))
             .rounded(px(4.))
-            .map(|this| {
-                if active {
-                    this.bg(rgba(p.menu_open))
-                } else {
-                    this.hover(move |style| style.bg(rgba(p.subtle_secondary)))
-                }
-            })
+            .when(active, |this| this.bg(rgba(p.subtle_tertiary)))
+            .hover(move |style| style.bg(rgba(p.subtle_secondary)))
+            .active(move |style| style.bg(rgba(p.subtle_tertiary)))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _, window, cx| {
@@ -966,10 +978,17 @@ impl MenuBar {
             COMMAND_ROW + 1.
         };
         let height = panel.height() + bar;
+        let hidden = panel.height() * CLOSED_RATIO * (1. - open.motion.unroll);
+        let (top, offset) = match (bar > 0., open.upward) {
+            (true, _) => (0., 0.),
+            (false, true) => (hidden, hidden),
+            (false, false) => (0., -hidden),
+        };
         let hit_areas = self.hit_areas.clone();
         let submenu = open.submenu.as_ref().map(|submenu| {
             let sub_width = submenu.panel.width;
             let sub_height = submenu.panel.height();
+            let hidden = sub_height * SUBMENU_CLOSED_RATIO * (1. - submenu.motion.unroll);
             let top = panel.row_top(submenu.ix) - 1. - PADDING_Y;
             let rows = self.panel_rows(&submenu.panel, Some(submenu.ix), 0., window, cx);
             let hit_areas = self.hit_areas.clone();
@@ -984,11 +1003,11 @@ impl MenuBar {
                 .cursor_default()
                 .children(reveal(
                     p,
-                    sub_width,
+                    SUBMENU_Z,
                     sub_height,
-                    submenu.motion.unroll,
-                    SUBMENU_CLOSED_RATIO,
-                    false,
+                    0.,
+                    sub_height - hidden,
+                    -hidden,
                     rows,
                 ))
                 .child(
@@ -1024,11 +1043,11 @@ impl MenuBar {
             }))
             .children(reveal(
                 p,
-                width,
+                MENU_Z,
                 height,
-                open.motion.unroll,
-                CLOSED_RATIO,
-                open.upward,
+                top,
+                height - hidden,
+                offset,
                 div()
                     .size_full()
                     .when(bar > 0., |this| {
@@ -1099,8 +1118,9 @@ impl MenuBar {
                 };
                 let shortcut = panel.shortcuts[ix].clone();
 
+                let row_id = ix + parent.map_or(0, |p| 1000 * (p + 1));
                 div()
-                    .id(("menu-row", ix + parent.map_or(0, |p| 1000 * (p + 1))))
+                    .id(("menu-row", row_id))
                     .h(px(entry.height()))
                     .px(px(ROW_INSET))
                     .py(px(ROW_MARGIN_Y))
@@ -1114,12 +1134,16 @@ impl MenuBar {
                     )
                     .child(
                         div()
+                            .id(("menu-row-face", row_id))
                             .flex()
                             .items_center()
                             .size_full()
                             .px(px(ROW_PADDING))
                             .rounded(px(4.))
                             .when(highlighted, |this| this.bg(rgba(p.subtle_secondary)))
+                            .when(enabled, |this| {
+                                this.active(move |style| style.bg(rgba(p.subtle_tertiary)))
+                            })
                             .when(checks, |this| {
                                 this.child(
                                     div()
@@ -1127,10 +1151,10 @@ impl MenuBar {
                                         .w(px(CHECK_COLUMN))
                                         .font_family("Segoe Fluent Icons")
                                         .text_size(px(mark_size))
-                                        .text_color(rgba(if enabled {
-                                            p.text_primary
-                                        } else {
-                                            p.text_disabled
+                                        .text_color(rgba(match entry {
+                                            _ if !enabled => p.text_disabled,
+                                            Entry::Toggle(..) if !highlighted => p.text_secondary,
+                                            _ => p.text_primary,
                                         }))
                                         .children(mark),
                                 )
@@ -1178,54 +1202,43 @@ impl MenuBar {
 
 fn reveal(
     p: Palette,
-    width: f32,
+    z: f32,
     height: f32,
-    unroll: f32,
-    closed_ratio: f32,
-    upward: bool,
+    top: f32,
+    shown: f32,
+    offset: f32,
     rows: Div,
 ) -> [Div; 2] {
-    let scale = 1. - closed_ratio * (1. - unroll);
-    let travel = height * closed_ratio * (1. - unroll);
-    let offset = if upward { travel } else { -travel };
+    let card = div()
+        .absolute()
+        .top(px(top))
+        .left_0()
+        .w_full()
+        .h(px(shown))
+        .bg(rgb(p.menu_fill))
+        .border_1()
+        .border_color(rgb(p.menu_border))
+        .rounded(px(8.))
+        .shadow(theme_shadow(p, z, 1.));
     [
-        card(p, width, height * scale).when(upward, |card| card.top(px(height * (1. - scale)))),
+        card,
         div()
             .absolute()
-            .top_0()
+            .top(px(top))
             .left_0()
-            .size_full()
+            .w_full()
+            .h(px(shown))
             .overflow_hidden()
             .child(
                 div()
                     .absolute()
                     .left_0()
-                    .top(px(offset))
-                    .w(px(width))
+                    .top(px(offset - top))
+                    .w_full()
                     .h(px(height))
                     .child(rows),
             ),
     ]
-}
-
-fn card(p: Palette, width: f32, height: f32) -> Div {
-    div()
-        .absolute()
-        .top_0()
-        .left_0()
-        .w(px(width))
-        .h(px(height))
-        .bg(rgb(p.menu_fill))
-        .border_1()
-        .border_color(rgb(p.menu_border))
-        .rounded(px(8.))
-        .shadow(vec![BoxShadow {
-            color: hsla(0., 0., 0., p.shadow),
-            offset: point(px(0.), px(8.)),
-            blur_radius: px(16.),
-            spread_radius: px(0.),
-            inset: false,
-        }])
 }
 
 pub(crate) fn text_width(window: &Window, text: &str, family: &'static str, size: f32) -> f32 {

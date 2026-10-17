@@ -159,6 +159,7 @@ pub(crate) struct TabStrip {
     lifted: Option<EntityId>,
     repeat: Task<()>,
     middle: Option<EntityId>,
+    plus_pressed: bool,
 }
 
 impl TabStrip {
@@ -175,6 +176,7 @@ impl TabStrip {
             lifted: None,
             repeat: Task::ready(()),
             middle: None,
+            plus_pressed: false,
         }
     }
 
@@ -623,7 +625,9 @@ impl Jot {
         let tab = &self.tabs[ix];
         let id = tab.editor.entity_id();
         let active = ix == self.active;
-        let separator = !active && ix + 1 != self.active && ix + 1 < self.tabs.len();
+        let hovered = self.hovered_tab.and_then(|hovered| self.tab_index(hovered));
+        let separator =
+            !active && ix + 1 != self.active && hovered != Some(ix) && hovered != Some(ix + 1);
         let dirty = tab.dirty;
         let show_close = self.hovered_tab == Some(id) || (active && !dirty);
         let show_dot = dirty && !show_close;
@@ -704,7 +708,7 @@ impl Jot {
                 cx.notify();
             }))
             .child(tab_face(p, active, trailing, name).when(!active, |this| {
-                this.hover(move |style| style.bg(rgba(p.subtle_secondary)))
+                this.hover(move |style| style.bg(rgba(p.layer_hover)))
             }))
             .child(tooltip::anchor(("tab", key)))
             .when(show_dot, |this| {
@@ -726,7 +730,7 @@ impl Jot {
                         .top(px(8.))
                         .w(px(1.))
                         .h(px(16.))
-                        .bg(rgba(p.stroke)),
+                        .bg(rgba(p.divider)),
                 )
             })
             .when(show_close, |this| {
@@ -746,7 +750,11 @@ impl Jot {
                         .text_size(px(12.))
                         .text_color(rgba(p.text_primary))
                         .hover(move |style| style.bg(rgba(p.subtle_secondary)))
-                        .active(move |style| style.bg(rgba(p.subtle_tertiary)))
+                        .active(move |style| {
+                            style
+                                .bg(rgba(p.subtle_tertiary))
+                                .text_color(rgba(p.text_secondary))
+                        })
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .on_hover(move |hovered, _, cx| {
                             tooltip::hover(
@@ -770,6 +778,11 @@ impl Jot {
 
     fn new_tab_button(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let p = palette(cx);
+        let ink = if self.strip.plus_pressed {
+            (p.text_secondary & 0xff) as f32 / (p.text_primary & 0xff) as f32
+        } else {
+            1.
+        };
         let gap = if self.strip.overflow {
             NEW_TAB_GAP_SCROLLING
         } else {
@@ -788,19 +801,44 @@ impl Jot {
             .on_hover(|hovered, _, cx| {
                 tooltip::hover("new-tab", 0, "New tab (Ctrl+N)", *hovered, cx)
             })
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                    this.strip.plus_pressed = true;
+                    cx.notify();
+                }),
+            )
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseUpEvent, _, cx| {
+                    this.strip.plus_pressed = false;
+                    cx.notify();
+                }),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseUpEvent, _, cx| {
+                    this.strip.plus_pressed = false;
+                    cx.notify();
+                }),
+            )
             .on_click(cx.listener(|this, _, window, cx| this.add_tab(window, cx)))
             .child(tooltip::anchor("new-tab"))
             .child(
                 canvas(
                     |_, _, _| {},
                     move |bounds, _, window, _| {
-                        for (x, y, w, h, ink) in PLUS_SEGMENTS {
+                        for (x, y, w, h, segment) in PLUS_SEGMENTS {
                             window.paint_quad(fill(
                                 Bounds::new(
                                     bounds.origin + point(px(x), px(y)),
                                     size(px(w), px(h)),
                                 ),
-                                rgba(ink.color(&p)),
+                                {
+                                    let color = segment.color(&p);
+                                    let alpha = ((color & 0xff) as f32 * ink).round() as u32;
+                                    rgba((color & !0xff) | alpha)
+                                },
                             ));
                         }
                     },

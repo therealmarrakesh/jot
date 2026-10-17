@@ -8,6 +8,8 @@ use regex::bytes::{Regex, RegexBuilder};
 const QUERY_CONTEXT: &str = "JotFindQuery";
 const REPLACEMENT_CONTEXT: &str = "JotFindReplacement";
 const SHOW_DURATION: Duration = Duration::from_millis(167);
+const CARD_Z: f32 = 32.;
+const NOTICE_Z: f32 = 16.;
 const HIDE_DURATION: Duration = Duration::from_millis(200);
 const NOTICE_DURATION: Duration = Duration::from_secs(3);
 const BLOCK_SIZE: usize = 256 * 1024;
@@ -594,13 +596,7 @@ impl Jot {
                     .border_1()
                     .border_color(rgb(p.notice_border))
                     .rounded(px(CARD_RADIUS))
-                    .shadow(vec![BoxShadow {
-                        color: hsla(0., 0., 0., p.shadow),
-                        offset: point(px(0.), px(4.)),
-                        blur_radius: px(8.),
-                        spread_radius: px(0.),
-                        inset: false,
-                    }])
+                    .shadow(theme_shadow(p, NOTICE_Z, 1.))
                     .font_family(MENU_FONT)
                     .text_size(px(BODY_SIZE))
                     .line_height(px(NOTICE_LINE))
@@ -633,7 +629,11 @@ impl Jot {
             .text_size(u(size))
             .text_color(rgba(p.text_primary))
             .hover(move |style| style.bg(rgba(p.subtle_secondary)))
-            .active(move |style| style.bg(rgba(p.subtle_tertiary)))
+            .active(move |style| {
+                style
+                    .bg(rgba(p.subtle_tertiary))
+                    .text_color(rgba(p.text_secondary))
+            })
             .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
             .child(tooltip::anchor(id))
             .child(glyph)
@@ -655,13 +655,7 @@ impl Jot {
             .border_1()
             .border_color(rgba(p.surface_stroke))
             .rounded(u(CARD_RADIUS))
-            .shadow(vec![BoxShadow {
-                color: hsla(0., 0., 0., p.shadow),
-                offset: point(px(0.), u(8.)),
-                blur_radius: u(16.),
-                spread_radius: px(0.),
-                inset: false,
-            }]);
+            .shadow(theme_shadow(p, CARD_Z, s));
         if s < MIN_VISIBLE_SCALE {
             return card;
         }

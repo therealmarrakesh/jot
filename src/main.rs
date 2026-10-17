@@ -22,7 +22,7 @@ use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use menu::MenuBar;
-use palette::{Palette, palette};
+use palette::{Palette, palette, theme_shadow};
 use std::cell::Cell;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -120,7 +120,7 @@ impl Caption {
                 CLOSE_GLYPH_PRESSED,
             ),
             _ => (
-                p.subtle_secondary,
+                p.layer_hover,
                 p.subtle_tertiary,
                 p.caption_glyph,
                 p.caption_glyph_pressed,
