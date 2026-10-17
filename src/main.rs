@@ -432,10 +432,27 @@ impl Jot {
                     point.row + 1,
                     column + 1
                 )))
-                .child(div().flex_none().w(px(1.)).h(px(16.)).bg(rgba(STROKE)))
-                .child(div().pl(px(8.)).child(character_count(selected, total))),
+                .child(status_divider())
+                .child(div().pl(px(8.)).child(character_count(selected, total)))
+                .child(div().flex_1())
+                .child(status_cell(68., format!("{}%", (self.zoom * 100.).round())))
+                .child(status_cell(144., "UTF-8")),
         )
     }
+}
+
+fn status_divider() -> Div {
+    div().flex_none().w(px(1.)).h(px(16.)).bg(rgba(STROKE))
+}
+
+fn status_cell(width: f32, label: impl Into<SharedString>) -> Div {
+    div()
+        .flex()
+        .flex_none()
+        .items_center()
+        .w(px(width))
+        .child(status_divider())
+        .child(div().pl(px(12.)).child(label.into()))
 }
 
 impl Render for Jot {
