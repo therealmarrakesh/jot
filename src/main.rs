@@ -16,6 +16,7 @@ mod tabs;
 mod tooltip;
 
 use brush::{Brushes, FadeBackground as _};
+use gpui_kit::Edges;
 use gpui_kit::base::animation::cubic_bezier;
 use gpui_kit::component::input::{
     self, InputEvent, PrepaintCaretGeometry, Rope, RopeExt as _, Textarea, TextareaState,
@@ -186,6 +187,7 @@ gpui_kit::actions!(
         ToggleWrapAround,
         ReplaceNext,
         ReplaceAll,
+        ShowContextMenu,
     ]
 );
 
@@ -223,6 +225,8 @@ fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("ctrl-h", Replace, Some(CONTEXT)),
         KeyBinding::new("ctrl-g", GoTo, Some(CONTEXT)),
         KeyBinding::new("f5", TimeDate, Some(CONTEXT)),
+        KeyBinding::new("shift-f10", ShowContextMenu, Some(CONTEXT)),
+        KeyBinding::new("menu", ShowContextMenu, Some(CONTEXT)),
         KeyBinding::new("ctrl-=", ZoomIn, Some(CONTEXT)),
         KeyBinding::new("ctrl--", ZoomOut, Some(CONTEXT)),
         KeyBinding::new("ctrl-0", ResetZoom, Some(CONTEXT)),
@@ -413,8 +417,26 @@ impl Jot {
         let dialogs = dialog::Dialogs::new(window, cx);
         let find = find::FindBar::new(window, cx);
 
+        let access_keys = {
+            let menu_bar = menu_bar.downgrade();
+            let handle = window.window_handle();
+            cx.intercept_keystrokes(move |event, window, cx| {
+                if window.window_handle() != handle {
+                    return;
+                }
+                if menu_bar
+                    .update(cx, |menu_bar, cx| {
+                        menu_bar.key_down(&event.keystroke, window, cx)
+                    })
+                    .unwrap_or(false)
+                {
+                    cx.stop_propagation();
+                }
+            })
+        };
         let _subscriptions = vec![
             menu_events,
+            access_keys,
             cx.observe_window_appearance(window, |this, window, cx| {
                 palette::apply(window.appearance(), cx);
                 this.accent = field::accent_color(palette(cx));
@@ -584,6 +606,7 @@ impl Jot {
         let editor = self.active_editor().clone();
         let height = px((CARET_HEIGHT * self.zoom()).round());
         let shown = self.caret_visible
+            && !self.menu_bar.read(cx).access_active()
             && window.is_window_active()
             && editor.focus_handle(cx).is_focused(window);
 
@@ -703,6 +726,29 @@ impl Jot {
                     .child(self.menu_bar.clone()),
             )
             .child(separator(p))
+    }
+
+    fn show_context_menu(
+        &mut self,
+        _: &ShowContextMenu,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let editor = self.active_editor().clone();
+        if !editor.focus_handle(cx).is_focused(window) {
+            cx.propagate();
+            return;
+        }
+        let Some(geometry) = editor.read(cx).prepaint_caret_geometry() else {
+            return;
+        };
+        let caret = geometry.cursor_bounds().origin;
+        let height = px((CARET_HEIGHT * self.zoom()).round());
+        let anchor = point(
+            caret.x + px(1.),
+            caret.y + geometry.scroll_offset().y + height,
+        );
+        self.open_context_menu(anchor, window, cx);
     }
 
     fn open_context_menu(
@@ -831,6 +877,11 @@ impl Render for Jot {
                     cx.defer(detach::cancel);
                 }
             })
+            .capture_any_mouse_down(cx.listener(|this, _, _, cx| {
+                this.menu_bar
+                    .update(cx, |menu_bar, cx| menu_bar.pointer_down(cx));
+            }))
+            .on_action(cx.listener(Self::show_context_menu))
             .on_action(cx.listener(Self::zoom_in))
             .on_action(cx.listener(Self::zoom_out))
             .on_action(cx.listener(Self::reset_zoom))

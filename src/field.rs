@@ -160,25 +160,27 @@ pub(crate) fn button(
                 .active(move |style| style.border_color(pressed_edge).text_color(pressed_text)),
         )
         .when(focused, |this| {
-            this.child(
-                div()
-                    .absolute()
-                    .top(px(-3.))
-                    .left(px(-3.))
-                    .right(px(-3.))
-                    .bottom(px(-3.))
-                    .rounded(u(CONTROL_RADIUS + 3.))
-                    .border_2()
-                    .border_color(rgb(p.focus_outer))
-                    .child(
-                        div()
-                            .size_full()
-                            .rounded(u(CONTROL_RADIUS + 1.))
-                            .border_1()
-                            .border_color(rgb(p.focus_inner)),
-                    ),
-            )
+            this.child(focus_ring(p, Edges::all(3.), u(CONTROL_RADIUS + 3.)))
         })
+}
+
+pub(crate) fn focus_ring(p: Palette, outset: Edges<f32>, radius: Pixels) -> Div {
+    div()
+        .absolute()
+        .top(px(-outset.top))
+        .left(px(-outset.left))
+        .right(px(-outset.right))
+        .bottom(px(-outset.bottom))
+        .rounded(radius)
+        .border_2()
+        .border_color(rgb(p.focus_outer))
+        .child(
+            div()
+                .size_full()
+                .rounded(radius - px(2.))
+                .border_1()
+                .border_color(rgb(p.focus_inner)),
+        )
 }
 
 fn field_glyph(

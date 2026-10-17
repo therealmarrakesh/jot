@@ -43,7 +43,6 @@ impl Interpolate for Brush {
 pub(crate) struct Faded {
     element: Stateful<Div>,
     brushes: Brushes,
-    highlighted: Option<bool>,
 }
 
 pub(crate) trait FadeBackground {
@@ -55,15 +54,7 @@ impl FadeBackground for Stateful<Div> {
         Faded {
             element: self,
             brushes,
-            highlighted: None,
         }
-    }
-}
-
-impl Faded {
-    pub fn highlighted(mut self, highlighted: bool) -> Self {
-        self.highlighted = Some(highlighted);
-        self
     }
 }
 
@@ -137,7 +128,7 @@ impl Element for Faded {
         } = self.brushes;
         let target = if state.pressed {
             pressed
-        } else if self.highlighted.unwrap_or(state.hovered) {
+        } else if state.hovered {
             hover
         } else {
             rest
