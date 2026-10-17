@@ -30,6 +30,7 @@ const BORDER: f32 = 1.;
 const MAX_WIDTH: f32 = 320.;
 const FONT_SIZE: f32 = 12.;
 const LINE_HEIGHT: f32 = 16.;
+const SINGLE_HEIGHT: f32 = PADDING_TOP + LINE_HEIGHT + PADDING_BOTTOM + 2. * BORDER;
 const RADIUS: f32 = 4.;
 const ELEVATION: f32 = 8.;
 const SHADOW_SIDE: f32 = ELEVATION;
@@ -281,6 +282,9 @@ impl Render for TooltipView {
                                     .text_size(px(FONT_SIZE))
                                     .line_height(px(LINE_HEIGHT))
                                     .text_color(rgba(p.text_primary))
+                                    .when(self.size.height <= px(SINGLE_HEIGHT), |this| {
+                                        this.whitespace_nowrap()
+                                    })
                                     .child(self.text.clone()),
                             ),
                     ),
@@ -651,13 +655,12 @@ fn measure(text: &SharedString, window: &mut Window) -> (f32, f32) {
     }];
     let chrome = 2. * (PADDING_X + BORDER);
     let wrap = MAX_WIDTH - chrome;
-    let single = PADDING_TOP + LINE_HEIGHT + PADDING_BOTTOM + 2. * BORDER;
     let Ok(lines) =
         window
             .text_system()
             .shape_text(text.clone(), px(FONT_SIZE), &runs, Some(px(wrap)), None)
     else {
-        return (MAX_WIDTH, single);
+        return (MAX_WIDTH, SINGLE_HEIGHT);
     };
     let count: usize = lines
         .iter()
@@ -674,8 +677,8 @@ fn measure(text: &SharedString, window: &mut Window) -> (f32, f32) {
         })
         .fold(0., f32::max);
     (
-        (widest.round() + chrome).min(MAX_WIDTH),
-        single + (count.max(1) - 1) as f32 * LINE_HEIGHT,
+        (widest.ceil() + chrome).min(MAX_WIDTH),
+        SINGLE_HEIGHT + (count.max(1) - 1) as f32 * LINE_HEIGHT,
     )
 }
 
