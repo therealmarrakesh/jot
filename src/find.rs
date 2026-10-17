@@ -99,16 +99,28 @@ impl Matcher {
             .is_some_and(|found| found.range() == (0..text.len()))
     }
 
-    fn next(&self, text: &Rope, from: usize, buffer: &mut Vec<u8>) -> Option<Range<usize>> {
+    fn next(
+        &self,
+        text: &Rope,
+        from: usize,
+        limit: usize,
+        buffer: &mut Vec<u8>,
+    ) -> Option<Range<usize>> {
         let len = text.len();
+        let limit = limit.min(len);
         let mut pos = from.min(len);
         loop {
-            let end = (pos + self.block + self.overlap).min(len);
+            if pos >= limit {
+                return None;
+            }
+            let end = (pos + self.block + self.overlap)
+                .min(len)
+                .min(limit + self.overlap);
             let start = Self::fill(text, pos..end, buffer);
             let safe = if end == len {
-                usize::MAX
+                limit
             } else {
-                end - self.overlap
+                (end - self.overlap).min(limit)
             };
             if let Some(found) = self.pattern.find_at(buffer, pos - start) {
                 let range = start + found.start()..start + found.end();
@@ -119,14 +131,21 @@ impl Matcher {
             if end == len {
                 return None;
             }
-            pos = safe;
+            pos = end - self.overlap;
         }
     }
 
-    fn previous(&self, text: &Rope, before: usize, buffer: &mut Vec<u8>) -> Option<Range<usize>> {
+    fn previous(
+        &self,
+        text: &Rope,
+        before: usize,
+        floor: usize,
+        buffer: &mut Vec<u8>,
+    ) -> Option<Range<usize>> {
+        let floor = text.floor_char_boundary(floor.min(text.len()));
         let mut end = text.floor_char_boundary(before.min(text.len()));
         loop {
-            let begin = end.saturating_sub(self.block + self.overlap);
+            let begin = end.saturating_sub(self.block + self.overlap).max(floor);
             let start = Self::fill(text, begin..end, buffer);
             let limit = (end - start).min(buffer.len());
             if let Some(found) = self.pattern.find_iter(&buffer[..limit]).last() {
@@ -136,7 +155,7 @@ impl Matcher {
                 }
                 return Some(start + range.start..start + range.end);
             }
-            if begin == 0 {
+            if begin <= floor {
                 return None;
             }
             end = text.floor_char_boundary(begin + self.overlap);
@@ -180,17 +199,18 @@ impl Matcher {
         buffer: &mut Vec<u8>,
     ) -> Option<(Range<usize>, bool)> {
         if forward {
-            if let Some(range) = self.next(text, selection.end, buffer) {
+            if let Some(range) = self.next(text, selection.end, usize::MAX, buffer) {
                 return Some((range, false));
             }
-            wrap.then(|| self.next(text, 0, buffer))
+            wrap.then(|| self.next(text, 0, selection.end, buffer))
                 .flatten()
                 .map(|range| (range, true))
         } else {
-            if let Some(range) = self.previous(text, selection.start, buffer) {
+            if let Some(range) = self.previous(text, selection.start, 0, buffer) {
                 return Some((range, false));
             }
-            wrap.then(|| self.previous(text, text.len(), buffer))
+            let floor = selection.start.saturating_sub(self.overlap);
+            wrap.then(|| self.previous(text, text.len(), floor, buffer))
                 .flatten()
                 .map(|range| (range, true))
         }
@@ -871,19 +891,31 @@ mod tests {
                             .map(|found| found.range())
                             .collect();
                         assert_eq!(matcher.all(&rope, &mut buffer), expected);
+                        let first = expected_next(&matcher.pattern, &source, 0);
+                        let last = expected_previous(&matcher.pattern, &source, source.len());
                         for offset in (0..=source.len())
                             .filter(|i| source.is_char_boundary(*i))
                             .step_by(11)
                         {
                             assert_eq!(
-                                matcher.next(&rope, offset, &mut buffer),
+                                matcher.next(&rope, offset, usize::MAX, &mut buffer),
                                 expected_next(&matcher.pattern, &source, offset),
                                 "next {query:?} case={match_case} block={block} from={offset}"
                             );
                             assert_eq!(
-                                matcher.previous(&rope, offset, &mut buffer),
+                                matcher.previous(&rope, offset, 0, &mut buffer),
                                 expected_previous(&matcher.pattern, &source, offset),
                                 "previous {query:?} case={match_case} block={block} before={offset}"
+                            );
+                            assert_eq!(
+                                matcher.next(&rope, 0, offset, &mut buffer),
+                                first.clone().filter(|range| range.start < offset),
+                                "wrapped next {query:?} case={match_case} block={block} limit={offset}"
+                            );
+                            assert_eq!(
+                                matcher.previous(&rope, source.len(), offset, &mut buffer),
+                                last.clone().filter(|range| range.start >= offset),
+                                "wrapped previous {query:?} case={match_case} block={block} floor={offset}"
                             );
                         }
                     }
