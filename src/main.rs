@@ -6,6 +6,9 @@ use gpui_kit::component::menu::PopupMenu;
 use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use std::ops::Range;
+use std::time::Duration;
+use windows_sys::Win32::UI::WindowsAndMessaging::GetCaretBlinkTime;
 
 const LAYER_ON_MICA: u32 = 0xffffffb3;
 const STROKE: u32 = 0x0000000f;
@@ -168,6 +171,9 @@ gpui_kit::actions!(
 );
 
 const EDITOR_FONT_SIZE: f32 = 11. * 96. / 72.;
+const EDITOR_LINE_HEIGHT: f32 = 20.;
+const CARET_HEIGHT: f32 = 18.;
+const CARET_COLOR: u32 = 0x060606;
 const ZOOM_STEP: f32 = 0.1;
 const ZOOM_MIN: f32 = 0.1;
 const ZOOM_MAX: f32 = 5.;
@@ -412,10 +418,26 @@ fn open_jot_window(cx: &mut App) {
     .expect("Failed to open window");
 }
 
+fn caret_blink_period() -> Option<Duration> {
+    let millis = unsafe { GetCaretBlinkTime() };
+    (millis != 0 && millis != u32::MAX).then(|| Duration::from_millis(millis.into()))
+}
+
+fn caret_key(editor: &TextareaState) -> (usize, Range<usize>, usize) {
+    (
+        editor.cursor(),
+        editor.selected_range(),
+        editor.text().len(),
+    )
+}
+
 pub struct Jot {
     editor: Entity<TextareaState>,
     menu_bar: Entity<MenuBar>,
     zoom: f32,
+    caret_visible: bool,
+    caret_key: (usize, Range<usize>, usize),
+    _caret_blink: Task<()>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -428,7 +450,21 @@ impl Jot {
         let menu_bar = cx.new(|_| MenuBar::new(action_context));
 
         let _subscriptions = vec![
-            cx.observe_window_activation(window, |_, _, cx| cx.notify()),
+            cx.observe_window_activation(window, |this, window, cx| {
+                if window.is_window_active() {
+                    this.restart_caret_blink(cx);
+                } else {
+                    this._caret_blink = Task::ready(());
+                    cx.notify();
+                }
+            }),
+            cx.observe(&editor, |this, editor, cx| {
+                let key = caret_key(editor.read(cx));
+                if key != this.caret_key {
+                    this.caret_key = key;
+                    this.restart_caret_blink(cx);
+                }
+            }),
             cx.observe_global_in::<ViewSettings>(window, |this, window, cx| {
                 let word_wrap = cx.global::<ViewSettings>().word_wrap;
                 this.editor
@@ -437,12 +473,73 @@ impl Jot {
             }),
         ];
 
-        Self {
+        let caret_key = caret_key(editor.read(cx));
+        let mut jot = Self {
             editor,
             menu_bar,
             zoom: 1.,
+            caret_visible: true,
+            caret_key,
+            _caret_blink: Task::ready(()),
             _subscriptions,
-        }
+        };
+        jot.restart_caret_blink(cx);
+        jot
+    }
+
+    fn restart_caret_blink(&mut self, cx: &mut Context<Self>) {
+        self.caret_visible = true;
+        cx.notify();
+        let Some(period) = caret_blink_period() else {
+            self._caret_blink = Task::ready(());
+            return;
+        };
+        self._caret_blink = cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(period).await;
+                let toggled = this.update(cx, |this, cx| {
+                    this.caret_visible = !this.caret_visible;
+                    cx.notify();
+                });
+                if toggled.is_err() {
+                    break;
+                }
+            }
+        });
+    }
+
+    fn caret(&self, window: &Window, cx: &App) -> impl IntoElement {
+        let editor = self.editor.clone();
+        let height = px((CARET_HEIGHT * self.zoom).round());
+        let shown = self.caret_visible
+            && window.is_window_active()
+            && self.editor.focus_handle(cx).is_focused(window);
+
+        canvas(
+            |_, _, _| {},
+            move |_, _, window, cx| {
+                let editor = editor.read(cx);
+                if !shown || !editor.selected_range().is_empty() {
+                    return;
+                }
+                let Some(geometry) = editor.prepaint_caret_geometry() else {
+                    return;
+                };
+                let origin = geometry.cursor_bounds().origin;
+                let caret = Bounds::new(
+                    point(origin.x, origin.y + geometry.scroll_offset().y),
+                    size(px(1.), height),
+                );
+                window.with_content_mask(
+                    Some(ContentMask {
+                        bounds: geometry.input_bounds(),
+                    }),
+                    |window| window.paint_quad(fill(caret, rgb(CARET_COLOR))),
+                );
+            },
+        )
+        .absolute()
+        .size_full()
     }
 
     fn zoom_in(&mut self, _: &ZoomIn, _: &mut Window, cx: &mut Context<Self>) {
@@ -530,8 +627,9 @@ impl Jot {
             .child(separator())
     }
 
-    fn editor(&self) -> impl IntoElement {
+    fn editor(&self, window: &Window, cx: &App) -> impl IntoElement {
         div()
+            .relative()
             .flex_1()
             .min_h_0()
             .pl(px(6.))
@@ -542,8 +640,10 @@ impl Jot {
                     .appearance(false)
                     .h_full()
                     .font_family("Consolas")
-                    .text_size(px(EDITOR_FONT_SIZE * self.zoom)),
+                    .text_size(px(EDITOR_FONT_SIZE * self.zoom))
+                    .line_height(px((EDITOR_LINE_HEIGHT * self.zoom).round())),
             )
+            .child(self.caret(window, cx))
     }
 
     fn status_bar(&self, cx: &App) -> impl IntoElement {
@@ -607,7 +707,7 @@ impl Render for Jot {
             .on_action(cx.listener(Self::close_window))
             .child(self.title_bar(window))
             .child(self.menu_bar())
-            .child(self.editor())
+            .child(self.editor(window, cx))
             .when(status_bar, |this| this.child(self.status_bar(cx)))
     }
 }
@@ -628,6 +728,9 @@ fn main() {
             let theme = Theme::global_mut(cx);
             theme.background = transparent_black();
             theme.tokens.background = transparent_black().into();
+            theme.caret = hsla(0., 0., 0., f32::EPSILON);
+            theme.tokens.caret = hsla(0., 0., 0., f32::EPSILON).into();
+            cx.set_text_rendering_mode(TextRenderingMode::Grayscale);
 
             cx.set_global(ViewSettings {
                 status_bar: true,

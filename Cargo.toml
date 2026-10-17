@@ -5,3 +5,4 @@ edition = "2024"
 
 [dependencies]
 gpui-kit = "0.7"
+windows-sys = { version = "0.60", features = ["Win32_UI_WindowsAndMessaging"] }
