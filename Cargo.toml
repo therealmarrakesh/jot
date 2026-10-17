@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 gpui-kit = "0.7"
+regex = "1"
 windows-sys = { version = "0.60", features = [
     "Win32_Foundation",
     "Win32_Globalization",

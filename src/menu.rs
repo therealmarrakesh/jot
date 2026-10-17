@@ -14,6 +14,8 @@ const CLOSED_RATIO: f32 = 0.5;
 const SUBMENU_CLOSED_RATIO: f32 = 0.67;
 const DEFAULT_MENU_SHOW_DELAY_MS: u64 = 400;
 const MIN_WIDTH: f32 = 232.;
+const FLYOUT_MIN_WIDTH: f32 = 198.;
+const FLYOUT_GAP: f32 = 3.;
 const FILL: u32 = 0xfcfcfc;
 const BORDER: u32 = 0xdcdcdc;
 const SEPARATOR_LINE: u32 = 0xededed;
@@ -55,7 +57,7 @@ fn close_transition() -> Transition {
 }
 
 #[derive(Clone)]
-enum Entry {
+pub(crate) enum Entry {
     Command(&'static str, fn() -> Box<dyn Action>),
     Disabled(&'static str, fn() -> Box<dyn Action>),
     Toggle(&'static str, bool, fn() -> Box<dyn Action>),
@@ -99,6 +101,7 @@ enum MenuKind {
     File,
     Edit,
     View,
+    Flyout,
 }
 
 impl MenuKind {
@@ -109,6 +112,7 @@ impl MenuKind {
             Self::File => "File",
             Self::Edit => "Edit",
             Self::View => "View",
+            Self::Flyout => "",
         }
     }
 
@@ -168,6 +172,7 @@ impl MenuKind {
                     Toggle("Word wrap", view.word_wrap, || Box::new(ToggleWordWrap)),
                 ]
             }
+            Self::Flyout => Vec::new(),
         }
     }
 }
@@ -180,7 +185,12 @@ struct Panel {
 }
 
 impl Panel {
-    fn new(entries: Vec<Entry>, action_context: &FocusHandle, window: &Window) -> Self {
+    fn new(
+        entries: Vec<Entry>,
+        min_width: f32,
+        action_context: &FocusHandle,
+        window: &Window,
+    ) -> Self {
         let shortcuts: Vec<_> = entries
             .iter()
             .map(|entry| {
@@ -219,7 +229,7 @@ impl Panel {
         Self {
             entries,
             shortcuts,
-            width: width.max(MIN_WIDTH),
+            width: width.max(min_width),
             highlighted: None,
         }
     }
@@ -305,6 +315,9 @@ struct Submenu {
 
 struct OpenMenu {
     kind: MenuKind,
+    anchor: Option<Point<Pixels>>,
+    upward: bool,
+    return_focus: Option<FocusHandle>,
     panel: Panel,
     submenu: Option<Submenu>,
     motion: Motion,
@@ -380,10 +393,48 @@ impl MenuBar {
 
     fn open_menu(&mut self, kind: MenuKind, window: &mut Window, cx: &mut Context<Self>) {
         let entries = kind.entries(self.editor.read(cx), cx);
-        let panel = Panel::new(entries, &self.action_context(cx), window);
+        let panel = Panel::new(entries, MIN_WIDTH, &self.action_context(cx), window);
+        self.show(kind, panel, None, None, window, cx);
+    }
+
+    pub fn open_flyout_above(
+        &mut self,
+        entries: Vec<Entry>,
+        target: Bounds<Pixels>,
+        return_focus: FocusHandle,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let panel = Panel::new(entries, FLYOUT_MIN_WIDTH, &self.action_context(cx), window);
+        let anchor = point(
+            target.center().x - px((panel.width / 2.).floor()),
+            target.top() - px(FLYOUT_GAP + panel.height()),
+        );
+        self.show(
+            MenuKind::Flyout,
+            panel,
+            Some(anchor),
+            Some(return_focus),
+            window,
+            cx,
+        );
+    }
+
+    fn show(
+        &mut self,
+        kind: MenuKind,
+        panel: Panel,
+        anchor: Option<Point<Pixels>>,
+        return_focus: Option<FocusHandle>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let motion = Motion::new(self.next_serial());
         self.open = Some(OpenMenu {
             kind,
+            anchor,
+            upward: anchor.is_some(),
+            return_focus,
             panel,
             submenu: None,
             motion,
@@ -394,11 +445,15 @@ impl MenuBar {
     }
 
     fn close_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let mut return_focus = None;
         if let Some(open) = self.open.as_mut().filter(|open| !open.is_closing()) {
             open.motion.closing = true;
+            return_focus = open.return_focus.clone();
         }
         self.submenu_timer = Task::ready(());
-        self.action_context(cx).focus(window, cx);
+        return_focus
+            .unwrap_or_else(|| self.action_context(cx))
+            .focus(window, cx);
         cx.notify();
     }
 
@@ -453,7 +508,7 @@ impl MenuBar {
         if open.live_submenu().is_none_or(|submenu| submenu.ix != ix) {
             open.submenu = Some(Submenu {
                 ix,
-                panel: Panel::new(entries.clone(), &action_context, window),
+                panel: Panel::new(entries.clone(), MIN_WIDTH, &action_context, window),
                 motion: Motion::new(serial),
             });
         }
@@ -538,7 +593,7 @@ impl MenuBar {
     }
 
     fn switch(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(kind) = self.open_kind() else {
+        let Some(kind) = self.open_kind().filter(|kind| *kind != MenuKind::Flyout) else {
             return;
         };
         let count = MenuKind::ALL.len() as isize;
@@ -713,6 +768,7 @@ impl MenuBar {
                     sub_height,
                     submenu.motion.unroll,
                     SUBMENU_CLOSED_RATIO,
+                    false,
                     rows,
                 ))
                 .child(
@@ -751,6 +807,7 @@ impl MenuBar {
                 height,
                 open.motion.unroll,
                 CLOSED_RATIO,
+                open.upward,
                 self.panel_rows(panel, None, window, cx),
             ))
             .child(
@@ -881,11 +938,19 @@ impl MenuBar {
     }
 }
 
-fn reveal(width: f32, height: f32, unroll: f32, closed_ratio: f32, rows: Div) -> [Div; 2] {
+fn reveal(
+    width: f32,
+    height: f32,
+    unroll: f32,
+    closed_ratio: f32,
+    upward: bool,
+    rows: Div,
+) -> [Div; 2] {
     let scale = 1. - closed_ratio * (1. - unroll);
-    let offset = -height * closed_ratio * (1. - unroll);
+    let travel = height * closed_ratio * (1. - unroll);
+    let offset = if upward { travel } else { -travel };
     [
-        card(width, height * scale),
+        card(width, height * scale).when(upward, |card| card.top(px(height * (1. - scale)))),
         div()
             .absolute()
             .top_0()
@@ -989,6 +1054,17 @@ impl Render for MenuBar {
             self.hit_areas.set(areas);
         }
         let hit_areas = self.hit_areas.clone();
+        let flyout = self.open.as_ref().and_then(|open| {
+            let anchor = open.anchor?;
+            Some(
+                deferred(
+                    anchored()
+                        .position(anchor)
+                        .child(self.popup(open, window, cx)),
+                )
+                .with_priority(1),
+            )
+        });
 
         div()
             .id("menu-bar")
@@ -1010,6 +1086,7 @@ impl Render for MenuBar {
             .on_action(cx.listener(Self::on_left))
             .on_action(cx.listener(Self::on_right))
             .children(MenuKind::ALL.map(|kind| self.trigger(kind, window, cx)))
+            .children(flyout)
             .child(
                 canvas(
                     move |bounds, _, _| {

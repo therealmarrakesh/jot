@@ -3292,6 +3292,7 @@ name = "jot"
 version = "0.1.0"
 dependencies = [
  "gpui-kit",
+ "regex",
  "windows-sys 0.60.2",
 ]
 

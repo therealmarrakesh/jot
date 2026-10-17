@@ -4,7 +4,9 @@
 mod bench;
 mod dialog;
 mod document;
+mod field;
 mod files;
+mod find;
 mod menu;
 
 use gpui_kit::base::animation::cubic_bezier;
@@ -185,6 +187,10 @@ gpui_kit::actions!(
         ResetZoom,
         ToggleStatusBar,
         ToggleWordWrap,
+        ToggleMatchCase,
+        ToggleWrapAround,
+        ReplaceNext,
+        ReplaceAll,
     ]
 );
 
@@ -377,6 +383,9 @@ pub struct Jot {
     close_confirmed: bool,
     menu_bar: Entity<MenuBar>,
     dialogs: dialog::Dialogs,
+    find: find::FindBar,
+    accent: Rgba,
+    field_caret: Option<(EntityId, usize, Range<usize>)>,
     caret_visible: bool,
     caret_key: (usize, Range<usize>, usize),
     _caret_blink: Task<()>,
@@ -391,6 +400,7 @@ impl Jot {
         let editor = tab.editor.clone();
         let menu_bar = cx.new(|cx| MenuBar::new(editor, cx));
         let dialogs = dialog::Dialogs::new(window, cx);
+        let find = find::FindBar::new(window, cx);
 
         let _subscriptions = vec![
             cx.observe_window_activation(window, |this, window, cx| {
@@ -418,6 +428,9 @@ impl Jot {
             close_confirmed: false,
             menu_bar,
             dialogs,
+            find,
+            accent: field::accent_color(),
+            field_caret: None,
             caret_visible: true,
             caret_key: (0, 0..0, 0),
             _caret_blink: Task::ready(()),
@@ -502,6 +515,7 @@ impl Jot {
         self.menu_bar
             .update(cx, |menu_bar, _| menu_bar.editor = editor.clone());
         self.caret_key = caret_key(editor.read(cx));
+        self.sync_find_selection(cx);
         self.restart_caret_blink(cx);
         self.refresh_title(window);
     }
@@ -820,7 +834,12 @@ impl Jot {
             .child(separator())
     }
 
-    fn editor(&self, window: &Window, cx: &App) -> impl IntoElement {
+    fn editor(
+        &self,
+        find: Option<impl IntoElement>,
+        window: &Window,
+        cx: &App,
+    ) -> impl IntoElement {
         div()
             .relative()
             .flex_1()
@@ -837,6 +856,7 @@ impl Jot {
                     .line_height(px((EDITOR_LINE_HEIGHT * self.zoom()).round())),
             )
             .child(self.caret(window, cx))
+            .children(find)
     }
 
     fn status_bar(&self, cx: &App) -> impl IntoElement {
@@ -894,6 +914,7 @@ impl Render for Jot {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let status_bar = cx.global::<ViewSettings>().status_bar;
         let dialogs = self.render_dialogs(window, cx);
+        let find = self.render_find(window, cx);
 
         let root = div()
             .v_flex()
@@ -910,9 +931,17 @@ impl Render for Jot {
             .on_action(cx.listener(Self::save_all))
             .on_action(cx.listener(Self::insert_time_date))
             .on_action(cx.listener(Self::go_to))
+            .on_action(cx.listener(Self::find))
+            .on_action(cx.listener(Self::replace))
+            .on_action(cx.listener(Self::find_next))
+            .on_action(cx.listener(Self::find_previous))
+            .on_action(cx.listener(Self::toggle_match_case))
+            .on_action(cx.listener(Self::toggle_wrap_around))
+            .on_action(cx.listener(Self::replace_next))
+            .on_action(cx.listener(Self::replace_all))
             .child(self.title_bar(window, cx))
             .child(self.menu_bar())
-            .child(self.editor(window, cx))
+            .child(self.editor(find, window, cx))
             .when(status_bar, |this| this.child(self.status_bar(cx)))
             .children(dialogs);
         #[cfg(feature = "bench")]
@@ -951,6 +980,7 @@ fn main() {
             cx.bind_keys(key_bindings());
             cx.bind_keys(menu::key_bindings());
             cx.bind_keys(dialog::key_bindings());
+            cx.bind_keys(find::key_bindings());
 
             cx.on_action(|_: &Exit, cx| {
                 for window in cx.windows() {

@@ -1133,6 +1133,16 @@ impl<M: InputModeKind> InputBaseState<M> {
         });
     }
 
+    pub fn replace_ranges(
+        &mut self,
+        edits: &[(Range<usize>, String)],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.undo_manager.set_pending_intent(EditIntent::Atomic);
+        self.replace_text_in_ranges(edits, window, cx);
+    }
+
     fn replace_text(
         &mut self,
         text: impl Into<SharedString>,
