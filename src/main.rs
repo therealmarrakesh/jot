@@ -1,12 +1,16 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use gpui_kit::base::actions::{SelectLeft, SelectRight};
+mod menu;
+
+use gpui_kit::base::animation::cubic_bezier;
 use gpui_kit::component::input::{self, RopeExt as _, Textarea, TextareaState};
-use gpui_kit::component::menu::PopupMenu;
 use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use menu::MenuBar;
+use std::cell::Cell;
 use std::ops::Range;
+use std::rc::Rc;
 use std::time::Duration;
 use windows_sys::Win32::UI::WindowsAndMessaging::GetCaretBlinkTime;
 
@@ -171,6 +175,9 @@ gpui_kit::actions!(
     ]
 );
 
+const WINDOW_WIDTH: f32 = 2213.;
+const WINDOW_HEIGHT: f32 = 1107.;
+const WINDOW_MAX_SCREEN_SHARE: f32 = 0.9;
 const EDITOR_FONT_SIZE: f32 = 11. * 96. / 72.;
 const EDITOR_LINE_HEIGHT: f32 = 20.;
 const CARET_HEIGHT: f32 = 18.;
@@ -205,193 +212,6 @@ struct ViewSettings {
 
 impl Global for ViewSettings {}
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum MenuKind {
-    File,
-    Edit,
-    View,
-}
-
-impl MenuKind {
-    const ALL: [Self; 3] = [Self::File, Self::Edit, Self::View];
-
-    fn title(self) -> &'static str {
-        match self {
-            Self::File => "File",
-            Self::Edit => "Edit",
-            Self::View => "View",
-        }
-    }
-
-    fn index(self) -> usize {
-        Self::ALL.iter().position(|kind| *kind == self).unwrap_or(0)
-    }
-
-    fn build(self, menu: PopupMenu, window: &mut Window, cx: &mut Context<PopupMenu>) -> PopupMenu {
-        match self {
-            Self::File => menu
-                .menu("New tab", Box::new(NewTab))
-                .menu("New window", Box::new(NewWindow))
-                .menu("Open", Box::new(Open))
-                .menu("Save", Box::new(Save))
-                .menu("Save as", Box::new(SaveAs))
-                .menu("Save all", Box::new(SaveAll))
-                .separator()
-                .menu("Close tab", Box::new(CloseTab))
-                .menu("Close window", Box::new(CloseWindow))
-                .menu("Exit", Box::new(Exit)),
-            Self::Edit => menu
-                .menu("Undo", Box::new(input::Undo))
-                .separator()
-                .menu("Cut", Box::new(input::Cut))
-                .menu("Copy", Box::new(input::Copy))
-                .menu("Paste", Box::new(input::Paste))
-                .menu("Delete", Box::new(input::Delete))
-                .separator()
-                .menu("Find", Box::new(Find))
-                .menu("Find next", Box::new(FindNext))
-                .menu("Find previous", Box::new(FindPrevious))
-                .menu("Replace", Box::new(Replace))
-                .menu("Go to", Box::new(GoTo))
-                .separator()
-                .menu("Select all", Box::new(input::SelectAll))
-                .menu("Time/Date", Box::new(TimeDate)),
-            Self::View => {
-                let view = cx.global::<ViewSettings>();
-                let (status_bar, word_wrap) = (view.status_bar, view.word_wrap);
-                menu.submenu("Zoom", window, cx, |menu, _, _| {
-                    menu.menu("Zoom in", Box::new(ZoomIn))
-                        .menu("Zoom out", Box::new(ZoomOut))
-                        .menu("Restore default zoom", Box::new(ResetZoom))
-                })
-                .menu_with_check("Status bar", status_bar, Box::new(ToggleStatusBar))
-                .menu_with_check("Word wrap", word_wrap, Box::new(ToggleWordWrap))
-            }
-        }
-    }
-}
-
-struct MenuBar {
-    action_context: FocusHandle,
-    open: Option<(MenuKind, Entity<PopupMenu>)>,
-    _dismiss: Option<Subscription>,
-}
-
-impl MenuBar {
-    fn new(action_context: FocusHandle) -> Self {
-        Self {
-            action_context,
-            open: None,
-            _dismiss: None,
-        }
-    }
-
-    fn open_kind(&self) -> Option<MenuKind> {
-        self.open.as_ref().map(|(kind, _)| *kind)
-    }
-
-    fn open_menu(&mut self, kind: MenuKind, window: &mut Window, cx: &mut Context<Self>) {
-        let action_context = self.action_context.clone();
-        let popup = PopupMenu::build(window, cx, move |menu, window, cx| {
-            kind.build(menu.action_context(action_context), window, cx)
-        });
-        popup.focus_handle(cx).focus(window, cx);
-        self._dismiss = Some(cx.subscribe_in(
-            &popup,
-            window,
-            |this, popup, _: &DismissEvent, window, cx| {
-                if this.open.as_ref().is_some_and(|(_, open)| open == popup) {
-                    this.close_menu(window, cx);
-                }
-            },
-        ));
-        self.open = Some((kind, popup));
-        cx.notify();
-    }
-
-    fn close_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.open = None;
-        self._dismiss = None;
-        self.action_context.focus(window, cx);
-        cx.notify();
-    }
-
-    fn step(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(kind) = self.open_kind() else {
-            return;
-        };
-        let count = MenuKind::ALL.len() as isize;
-        let next = (kind.index() as isize + delta).rem_euclid(count) as usize;
-        self.open_menu(MenuKind::ALL[next], window, cx);
-    }
-
-    fn trigger(&self, kind: MenuKind, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let popup = self
-            .open
-            .as_ref()
-            .filter(|(open, _)| *open == kind)
-            .map(|(_, popup)| popup.clone());
-
-        div()
-            .id(kind.title())
-            .relative()
-            .flex()
-            .items_center()
-            .h_full()
-            .px(px(10.))
-            .rounded(px(4.))
-            .map(|this| {
-                if popup.is_some() {
-                    this.bg(rgba(SUBTLE_FILL_SECONDARY))
-                } else {
-                    this.hover(|style| style.bg(rgba(SUBTLE_FILL_SECONDARY)))
-                }
-            })
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _, window, cx| {
-                    window.prevent_default();
-                    cx.stop_propagation();
-                    if this.open_kind() == Some(kind) {
-                        this.close_menu(window, cx);
-                    } else {
-                        this.open_menu(kind, window, cx);
-                    }
-                }),
-            )
-            .on_hover(cx.listener(move |this, hovered: &bool, window, cx| {
-                if *hovered && this.open_kind().is_some_and(|open| open != kind) {
-                    this.open_menu(kind, window, cx);
-                }
-            }))
-            .child(div().relative().top(px(1.)).child(kind.title()))
-            .when_some(popup, |this, popup| {
-                this.child(
-                    div()
-                        .absolute()
-                        .left_0()
-                        .top(px(32.))
-                        .child(deferred(anchored().child(popup))),
-                )
-            })
-    }
-}
-
-impl Render for MenuBar {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .flex()
-            .h_full()
-            .gap(px(8.))
-            .font_family(MENU_FONT)
-            .text_size(px(14.))
-            .text_color(rgba(TEXT_PRIMARY))
-            .on_action(cx.listener(|this, _: &SelectLeft, window, cx| this.step(-1, window, cx)))
-            .on_action(cx.listener(|this, _: &SelectRight, window, cx| this.step(1, window, cx)))
-            .children(MenuKind::ALL.map(|kind| self.trigger(kind, cx)))
-    }
-}
-
 fn key_bindings() -> Vec<KeyBinding> {
     vec![
         KeyBinding::new("ctrl-n", NewTab, None),
@@ -415,10 +235,19 @@ fn key_bindings() -> Vec<KeyBinding> {
 }
 
 fn window_options(cx: &App) -> WindowOptions {
+    let screen = cx
+        .primary_display()
+        .map(|display| display.visible_bounds().size)
+        .unwrap_or(size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT)));
+    let window_size = size(
+        px(WINDOW_WIDTH).min(screen.width * WINDOW_MAX_SCREEN_SHARE),
+        px(WINDOW_HEIGHT).min(screen.height * WINDOW_MAX_SCREEN_SHARE),
+    );
+
     WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
             None,
-            size(px(2213.), px(1107.)),
+            window_size,
             cx,
         ))),
         titlebar: Some(TitlebarOptions {
@@ -472,7 +301,7 @@ impl Jot {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let tab = Self::create_tab(window, cx);
         let action_context = tab.editor.focus_handle(cx);
-        let menu_bar = cx.new(|_| MenuBar::new(action_context));
+        let menu_bar = cx.new(|cx| MenuBar::new(action_context, cx));
 
         let _subscriptions = vec![
             cx.observe_window_activation(window, |this, window, cx| {
@@ -962,6 +791,7 @@ fn main() {
                 word_wrap: true,
             });
             cx.bind_keys(key_bindings());
+            cx.bind_keys(menu::key_bindings());
 
             cx.on_action(|_: &Exit, cx| cx.quit());
             cx.on_action(|_: &NewWindow, cx| open_jot_window(cx));
