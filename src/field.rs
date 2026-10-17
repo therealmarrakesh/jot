@@ -333,7 +333,7 @@ impl Jot {
             .when(style.search_icon, |this| {
                 this.child(
                     field_glyph(p, ("field-search", id), SEARCH_GLYPH, FIELD_GLYPH_RIGHT, s)
-                        .text_color(rgba(p.text_primary)),
+                        .when(!focused, |this| this.text_color(rgba(p.text_primary))),
                 )
             })
             .when(focused && !empty, |this| {

@@ -26,7 +26,7 @@ const SCROLL_REPEAT_INTERVAL: Duration = Duration::from_millis(100);
 const WHEEL_SHARE: f32 = 0.15;
 const BUTTON_WIDTH: f32 = 32.;
 const BUTTON_HEIGHT: f32 = 24.;
-const BUTTON_TOP: f32 = 5.;
+const BUTTON_TOP: f32 = 6.;
 const SCROLL_GLYPH_SIZE: f32 = 8.;
 const NEW_TAB_GAP: f32 = 5.;
 const NEW_TAB_GAP_SCROLLING: f32 = 3.;
@@ -53,15 +53,15 @@ impl Ink {
 }
 
 const PLUS_SEGMENTS: [(f32, f32, f32, f32, Ink); 9] = [
-    (11., 12., 1., 1., Ink::Lead),
-    (12., 12., 4., 1., Ink::Line),
-    (16., 12., 1., 1., Ink::Center),
-    (17., 12., 4., 1., Ink::Line),
-    (21., 12., 1., 1., Ink::Trail),
-    (16., 7., 1., 1., Ink::Lead),
-    (16., 8., 1., 4., Ink::Line),
-    (16., 13., 1., 4., Ink::Line),
-    (16., 17., 1., 1., Ink::Trail),
+    (10., 11., 1., 1., Ink::Lead),
+    (11., 11., 4., 1., Ink::Line),
+    (15., 11., 1., 1., Ink::Center),
+    (16., 11., 4., 1., Ink::Line),
+    (20., 11., 1., 1., Ink::Trail),
+    (15., 6., 1., 1., Ink::Lead),
+    (15., 7., 1., 4., Ink::Line),
+    (15., 12., 1., 4., Ink::Line),
+    (15., 16., 1., 1., Ink::Trail),
 ];
 
 #[derive(Clone, Copy)]
@@ -917,11 +917,7 @@ impl Jot {
                 .child(tooltip::anchor(key))
                 .on_mouse_up(MouseButton::Left, stop)
                 .on_mouse_up_out(MouseButton::Left, stop_out)
-                .child(div().relative().left(px(-1.)).child(if forward {
-                    "\u{EDDA}"
-                } else {
-                    "\u{EDD9}"
-                })),
+                .child(div().child(if forward { "\u{EDDA}" } else { "\u{EDD9}" })),
         )
     }
 

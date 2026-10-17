@@ -23,8 +23,8 @@ const CARD_SIDE_MARGIN: f32 = 12.;
 const CARD_RADIUS: f32 = 8.;
 const CARD_PADDING: f32 = 8.;
 const ROW_GAP: f32 = 8.;
-const ICON_GAP: f32 = 8.;
-const QUERY_ROW_OUTSET: f32 = 1.;
+const ICON_GAP: f32 = 10.;
+const ICON_BUTTON_SIZE: f32 = 30.;
 const ACTION_GAP: f32 = 10.;
 const ACTION_WIDTH: f32 = 90.;
 const ICON_SIZE: f32 = 16.;
@@ -635,7 +635,7 @@ impl Jot {
             .flex()
             .items_center()
             .justify_center()
-            .size(u(CONTROL_HEIGHT))
+            .size(u(ICON_BUTTON_SIZE))
             .rounded(u(CONTROL_RADIUS))
             .cursor_default()
             .font_family("Segoe Fluent Icons")
@@ -684,7 +684,6 @@ impl Jot {
         let query_row = div()
             .flex()
             .items_center()
-            .mx(u(-QUERY_ROW_OUTSET))
             .gap(u(ICON_GAP))
             .child(
                 self.icon_button(
@@ -708,7 +707,6 @@ impl Jot {
                 div()
                     .flex_1()
                     .min_w_0()
-                    .mx(u(QUERY_ROW_OUTSET))
                     .key_context(QUERY_CONTEXT)
                     .child(self.text_field(
                         &self.find.query,
@@ -758,7 +756,7 @@ impl Jot {
                 .flex()
                 .items_center()
                 .mt(u(ROW_GAP))
-                .child(div().flex_none().w(u(CONTROL_HEIGHT + ICON_GAP)))
+                .child(div().flex_none().w(u(ICON_BUTTON_SIZE + ICON_GAP)))
                 .child(
                     div()
                         .flex_1()
