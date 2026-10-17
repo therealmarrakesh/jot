@@ -1,7 +1,7 @@
 use super::inline_line::InputLine;
 use gpui::Half;
 use std::borrow::Cow;
-use std::ops::Range;
+use std::ops::{Range, RangeInclusive};
 use std::rc::Rc;
 
 use gpui::{
@@ -25,6 +25,49 @@ pub enum WrappingIndent {
     /// Continuation lines keep the same indentation as the first line.
     #[default]
     Same,
+}
+
+const PRINTABLE_ASCII: RangeInclusive<u32> = 0x20..=0x7e;
+const LATIN_EXTENDED_AND_SPACING_MODIFIERS: RangeInclusive<u32> = 0xa0..=0x2ff;
+const GREEK_AND_CYRILLIC_LETTERS: RangeInclusive<u32> = 0x370..=0x482;
+const CYRILLIC_AFTER_COMBINING_MARKS: RangeInclusive<u32> = 0x48a..=0x52f;
+const LATIN_AND_GREEK_EXTENDED_ADDITIONAL: RangeInclusive<u32> = 0x1e00..=0x1fff;
+const DASHES_QUOTES_AND_BULLETS: RangeInclusive<u32> = 0x2010..=0x2027;
+const VISIBLE_GENERAL_PUNCTUATION: RangeInclusive<u32> = 0x2030..=0x205e;
+const SCRIPTS_AND_CURRENCY: RangeInclusive<u32> = 0x2070..=0x20cf;
+const LETTERLIKE_ARROWS_MATH_AND_SYMBOLS: RangeInclusive<u32> = 0x2100..=0x2bff;
+const CJK_PUNCTUATION_BEFORE_TONE_MARKS: RangeInclusive<u32> = 0x3000..=0x3029;
+const CJK_PUNCTUATION_AND_HIRAGANA: RangeInclusive<u32> = 0x3030..=0x3098;
+const KANA_AFTER_VOICING_MARKS: RangeInclusive<u32> = 0x309b..=0x30ff;
+const CJK_IDEOGRAPHS_EXTENSION_A: RangeInclusive<u32> = 0x3400..=0x4dbf;
+const CJK_UNIFIED_IDEOGRAPHS: RangeInclusive<u32> = 0x4e00..=0x9fff;
+const HANGUL_SYLLABLES: RangeInclusive<u32> = 0xac00..=0xd7a3;
+const CJK_COMPATIBILITY_IDEOGRAPHS: RangeInclusive<u32> = 0xf900..=0xfaff;
+const HALFWIDTH_AND_FULLWIDTH_FORMS: RangeInclusive<u32> = 0xff01..=0xffee;
+
+const UNSHAPED_RANGES: [RangeInclusive<u32>; 17] = [
+    PRINTABLE_ASCII,
+    LATIN_EXTENDED_AND_SPACING_MODIFIERS,
+    GREEK_AND_CYRILLIC_LETTERS,
+    CYRILLIC_AFTER_COMBINING_MARKS,
+    LATIN_AND_GREEK_EXTENDED_ADDITIONAL,
+    DASHES_QUOTES_AND_BULLETS,
+    VISIBLE_GENERAL_PUNCTUATION,
+    SCRIPTS_AND_CURRENCY,
+    LETTERLIKE_ARROWS_MATH_AND_SYMBOLS,
+    CJK_PUNCTUATION_BEFORE_TONE_MARKS,
+    CJK_PUNCTUATION_AND_HIRAGANA,
+    KANA_AFTER_VOICING_MARKS,
+    CJK_IDEOGRAPHS_EXTENSION_A,
+    CJK_UNIFIED_IDEOGRAPHS,
+    HANGUL_SYLLABLES,
+    CJK_COMPATIBILITY_IDEOGRAPHS,
+    HALFWIDTH_AND_FULLWIDTH_FORMS,
+];
+
+fn wraps_by_char_widths(text: &str) -> bool {
+    text.chars()
+        .all(|c| UNSHAPED_RANGES.iter().any(|range| range.contains(&(c as u32))))
 }
 
 /// Choose Unicode line-break opportunities using the same shaped widths as
@@ -405,6 +448,15 @@ impl TextWrapper {
                     offset = range.end;
                 }
                 if fragments.is_empty() {
+                    if wraps_by_char_widths(line_str) {
+                        let indent = match wrapping_indent {
+                            WrappingIndent::Same => gpui::IndentAdjustment::SameIndent,
+                            WrappingIndent::None => gpui::IndentAdjustment::NoIndent,
+                        };
+                        return line_wrapper
+                            .wrap_line(&[LineFragment::text(line_str)], wrap_width, indent)
+                            .collect();
+                    }
                     return measured_wrap_boundaries(
                         line_str,
                         wrap_width,
