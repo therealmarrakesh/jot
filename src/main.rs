@@ -225,6 +225,7 @@ const PLUS_SEGMENTS: [(f32, f32, f32, f32, u32); 9] = [
     (16., 13., 1., 4., PLUS_LINE),
     (16., 17., 1., 1., PLUS_CAP_TRAIL),
 ];
+const CONTEXT: &str = "Jot";
 const ZOOM_STEP: f32 = 0.1;
 const ZOOM_MIN: f32 = 0.1;
 const ZOOM_MAX: f32 = 5.;
@@ -238,23 +239,23 @@ impl Global for ViewSettings {}
 
 fn key_bindings() -> Vec<KeyBinding> {
     vec![
-        KeyBinding::new("ctrl-n", NewTab, None),
-        KeyBinding::new("ctrl-shift-n", NewWindow, None),
-        KeyBinding::new("ctrl-o", Open, None),
-        KeyBinding::new("ctrl-s", Save, None),
-        KeyBinding::new("ctrl-shift-s", SaveAs, None),
-        KeyBinding::new("ctrl-alt-s", SaveAll, None),
-        KeyBinding::new("ctrl-w", CloseTab, None),
-        KeyBinding::new("ctrl-shift-w", CloseWindow, None),
-        KeyBinding::new("ctrl-f", Find, None),
-        KeyBinding::new("f3", FindNext, None),
-        KeyBinding::new("shift-f3", FindPrevious, None),
-        KeyBinding::new("ctrl-h", Replace, None),
-        KeyBinding::new("ctrl-g", GoTo, None),
-        KeyBinding::new("f5", TimeDate, None),
-        KeyBinding::new("ctrl-=", ZoomIn, None),
-        KeyBinding::new("ctrl--", ZoomOut, None),
-        KeyBinding::new("ctrl-0", ResetZoom, None),
+        KeyBinding::new("ctrl-n", NewTab, Some(CONTEXT)),
+        KeyBinding::new("ctrl-shift-n", NewWindow, Some(CONTEXT)),
+        KeyBinding::new("ctrl-o", Open, Some(CONTEXT)),
+        KeyBinding::new("ctrl-s", Save, Some(CONTEXT)),
+        KeyBinding::new("ctrl-shift-s", SaveAs, Some(CONTEXT)),
+        KeyBinding::new("ctrl-alt-s", SaveAll, Some(CONTEXT)),
+        KeyBinding::new("ctrl-w", CloseTab, Some(CONTEXT)),
+        KeyBinding::new("ctrl-shift-w", CloseWindow, Some(CONTEXT)),
+        KeyBinding::new("ctrl-f", Find, Some(CONTEXT)),
+        KeyBinding::new("f3", FindNext, Some(CONTEXT)),
+        KeyBinding::new("shift-f3", FindPrevious, Some(CONTEXT)),
+        KeyBinding::new("ctrl-h", Replace, Some(CONTEXT)),
+        KeyBinding::new("ctrl-g", GoTo, Some(CONTEXT)),
+        KeyBinding::new("f5", TimeDate, Some(CONTEXT)),
+        KeyBinding::new("ctrl-=", ZoomIn, Some(CONTEXT)),
+        KeyBinding::new("ctrl--", ZoomOut, Some(CONTEXT)),
+        KeyBinding::new("ctrl-0", ResetZoom, Some(CONTEXT)),
     ]
 }
 
@@ -917,7 +918,7 @@ impl Render for Jot {
         let find = self.render_find(window, cx);
 
         let root = div()
-            .v_flex()
+            .relative()
             .size_full()
             .on_action(cx.listener(Self::zoom_in))
             .on_action(cx.listener(Self::zoom_out))
@@ -939,10 +940,16 @@ impl Render for Jot {
             .on_action(cx.listener(Self::toggle_wrap_around))
             .on_action(cx.listener(Self::replace_next))
             .on_action(cx.listener(Self::replace_all))
-            .child(self.title_bar(window, cx))
-            .child(self.menu_bar())
-            .child(self.editor(find, window, cx))
-            .when(status_bar, |this| this.child(self.status_bar(cx)))
+            .child(
+                div()
+                    .key_context(CONTEXT)
+                    .v_flex()
+                    .size_full()
+                    .child(self.title_bar(window, cx))
+                    .child(self.menu_bar())
+                    .child(self.editor(find, window, cx))
+                    .when(status_bar, |this| this.child(self.status_bar(cx))),
+            )
             .children(dialogs);
         #[cfg(feature = "bench")]
         let root = root.child(bench::probe(&self.painted));

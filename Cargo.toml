@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+futures = "0.3"
 gpui-kit = "0.7"
 regex = "1"
 windows-sys = { version = "0.60", features = [

@@ -3,16 +3,17 @@ use document::{LoadError, default_directory, display_name};
 
 const UNTITLED_FILE_NAME: &str = "Untitled.txt";
 
-fn show_error(message: &str, detail: Option<&str>, window: &mut Window, cx: &mut App) {
-    let answer = window.prompt(PromptLevel::Critical, message, detail, &["OK"], cx);
-    cx.foreground_executor()
-        .spawn(async move {
-            answer.await.ok();
-        })
-        .detach();
-}
-
 impl Jot {
+    fn show_error(
+        &mut self,
+        title: String,
+        message: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let _ = self.prompt(title, message, &["OK"], window, cx);
+    }
+
     pub(crate) fn tab_name(&self, ix: usize) -> String {
         display_name(self.tabs[ix].path.as_deref())
     }
@@ -79,8 +80,8 @@ impl Jot {
                     LoadError::NotUtf8 => "Jot only opens UTF-8 text files.".to_string(),
                     LoadError::Io(error) => error.to_string(),
                 };
-                let message = format!("Can't open {}", display_name(Some(&path)));
-                show_error(&message, Some(&detail), window, cx);
+                let title = format!("Can't open {}", display_name(Some(&path)));
+                self.show_error(title, detail, window, cx);
             }
         }
     }
@@ -186,8 +187,8 @@ impl Jot {
                 true
             }
             Err(error) => {
-                let message = format!("Can't save {}", display_name(Some(&path)));
-                show_error(&message, Some(&error.to_string()), window, cx);
+                let title = format!("Can't save {}", display_name(Some(&path)));
+                self.show_error(title, error.to_string(), window, cx);
                 false
             }
         }
@@ -223,12 +224,16 @@ impl Jot {
         let Some(ix) = self.tab_index(id) else {
             return Task::ready(true);
         };
-        let message = format!("Do you want to save changes to {}?", self.tab_name(ix));
-        let answer = window.prompt(
-            PromptLevel::Warning,
-            &message,
-            None,
+        let name = self.tabs[ix]
+            .path
+            .as_deref()
+            .map(|path| display_name(Some(path)))
+            .unwrap_or_else(|| UNTITLED_FILE_NAME.into());
+        let answer = self.prompt(
+            "Jot",
+            format!("Do you want to save changes to {name}?"),
             &["Save", "Don't save", "Cancel"],
+            window,
             cx,
         );
         cx.spawn_in(window, async move |this, cx| match answer.await {

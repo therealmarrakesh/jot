@@ -82,7 +82,7 @@ fn mix(color: Rgba, toward: f32, amount: f32) -> Rgba {
 
 pub(crate) fn button(
     id: impl Into<ElementId>,
-    label: &'static str,
+    label: impl Into<SharedString>,
     accent_style: bool,
     focused: bool,
     surface: Surface,
@@ -136,7 +136,7 @@ pub(crate) fn button(
                 .text_color(text)
                 .hover(move |style| style.bg(hover))
                 .active(move |style| style.bg(pressed))
-                .child(label),
+                .child(label.into()),
         )
         .when(focused, |this| {
             this.child(
