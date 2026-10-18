@@ -1,6 +1,6 @@
 use std::ffi::OsString;
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::ptr::{null, null_mut};
 use windows_sys::Win32::Globalization::{
@@ -10,6 +10,7 @@ use windows_sys::Win32::Globalization::{
 const UTF8_BOM: &[u8] = b"\xef\xbb\xbf";
 const UTF16_LE_BOM: &[u8] = b"\xff\xfe";
 const UTF16_BE_BOM: &[u8] = b"\xfe\xff";
+const TEMP_ATTEMPTS: usize = 100;
 
 pub(crate) const UNTITLED: &str = "Untitled";
 
@@ -153,11 +154,30 @@ pub(crate) fn encode(text: String, format: Format) -> io::Result<Encoded> {
 }
 
 pub(crate) fn write(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let temp = temp_path(path);
-    fs::write(&temp, bytes)?;
-    fs::rename(&temp, path).inspect_err(|_| {
-        fs::remove_file(&temp).ok();
-    })
+    let (temp, mut file) = create_temp(path)?;
+    let written = file.write_all(bytes);
+    drop(file);
+    written
+        .and_then(|()| fs::rename(&temp, path))
+        .inspect_err(|_| {
+            fs::remove_file(&temp).ok();
+        })
+}
+
+fn create_temp(path: &Path) -> io::Result<(PathBuf, fs::File)> {
+    for attempt in 0..TEMP_ATTEMPTS {
+        let temp = temp_path(path, attempt);
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)
+        {
+            Ok(file) => return Ok((temp, file)),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Err(io::Error::from(io::ErrorKind::AlreadyExists))
 }
 
 fn ansi_decode(bytes: &[u8]) -> Option<String> {
@@ -252,16 +272,20 @@ pub(crate) fn default_directory(path: Option<&Path>) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
-fn temp_path(path: &Path) -> PathBuf {
+fn temp_path(path: &Path, attempt: usize) -> PathBuf {
     let mut name = OsString::from(".");
     name.push(path.file_name().unwrap_or_default());
+    if attempt > 0 {
+        name.push(format!(".{attempt}"));
+    }
     name.push(".jot-save");
     path.with_file_name(name)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Encoding, Format, LineEnding, encode};
+    use super::{Encoding, Format, LineEnding, encode, write};
+    use std::fs;
     use windows_sys::Win32::Globalization::{CP_UTF8, GetACP};
 
     const TEXT: &str = "Café — £3.50\nNaïve 😀\n";
@@ -338,5 +362,21 @@ mod tests {
         let lossy = encode("Cafe 😀".into(), ansi).unwrap();
         assert!(lossy.lossy);
         assert_eq!(lossy.bytes, b"Cafe ??");
+    }
+
+    #[test]
+    fn saving_never_touches_an_existing_temp_name() {
+        let dir = std::env::temp_dir().join(format!("jot-save-test-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("notes.txt");
+        let decoy = dir.join(".notes.txt.jot-save");
+        fs::write(&path, b"old").unwrap();
+        fs::write(&decoy, b"keep").unwrap();
+        write(&path, b"new").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"new");
+        assert_eq!(fs::read(&decoy).unwrap(), b"keep");
+        let leftovers = fs::read_dir(&dir).unwrap().count();
+        fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(leftovers, 2);
     }
 }
