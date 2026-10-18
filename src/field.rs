@@ -250,7 +250,6 @@ impl Jot {
         } else {
             (FIELD_GLYPH_WIDTH + FIELD_GLYPH_RIGHT, FIELD_GLYPH_RIGHT)
         };
-        let field = input.clone();
         div()
             .relative()
             .h(u(CONTROL_HEIGHT))
@@ -296,20 +295,15 @@ impl Jot {
                 )
             })
             .child(self.field_caret(input, window, cx))
-            .child(
-                div()
-                    .absolute()
-                    .left(px(-1.))
-                    .right(px(-1.))
-                    .bottom_0()
-                    .h(px(if focused { 2. } else { 1. }))
-                    .rounded_b(u(CONTROL_RADIUS))
-                    .bg(if focused {
-                        self.accent
-                    } else {
-                        rgb(surface.field_bottom)
-                    }),
-            )
+            .child(bottom_edge(
+                focused,
+                if focused {
+                    self.accent
+                } else {
+                    rgb(surface.field_bottom)
+                },
+                s,
+            ))
             .when(style.search_icon, |this| {
                 this.child(
                     field_glyph(p, ("field-search", id), SEARCH_GLYPH, FIELD_GLYPH_RIGHT, s)
@@ -317,25 +311,38 @@ impl Jot {
                 )
             })
             .when(focused && !empty, |this| {
-                this.child(
-                    field_glyph(p, ("field-clear", id), CLEAR_GLYPH, clear_right, s)
-                        .hover(move |style| style.bg(rgba(p.subtle_secondary)))
-                        .active(move |style| {
-                            style
-                                .bg(rgba(p.subtle_tertiary))
-                                .text_color(rgba(p.text_tertiary))
-                        })
-                        .on_mouse_down(MouseButton::Left, |_, window, cx| {
-                            window.prevent_default();
-                            cx.stop_propagation();
-                        })
-                        .on_click(move |_, window, cx| {
-                            field.update(cx, |input, cx| {
-                                input.set_value("", window, cx);
-                                input.focus(window, cx);
-                            });
-                        }),
-                )
+                this.child(clear_button(p, input.clone(), clear_right, s))
             })
     }
+}
+
+fn bottom_edge(focused: bool, color: Rgba, s: f32) -> Div {
+    div()
+        .absolute()
+        .left(px(-1.))
+        .right(px(-1.))
+        .bottom_0()
+        .h(px(if focused { 2. } else { 1. }))
+        .rounded_b(px(CONTROL_RADIUS * s))
+        .bg(color)
+}
+
+fn clear_button(p: Palette, input: Entity<InputState>, right: f32, s: f32) -> Stateful<Div> {
+    field_glyph(p, ("field-clear", input.entity_id()), CLEAR_GLYPH, right, s)
+        .hover(move |style| style.bg(rgba(p.subtle_secondary)))
+        .active(move |style| {
+            style
+                .bg(rgba(p.subtle_tertiary))
+                .text_color(rgba(p.text_tertiary))
+        })
+        .on_mouse_down(MouseButton::Left, |_, window, cx| {
+            window.prevent_default();
+            cx.stop_propagation();
+        })
+        .on_click(move |_, window, cx| {
+            input.update(cx, |input, cx| {
+                input.set_value("", window, cx);
+                input.focus(window, cx);
+            });
+        })
 }
