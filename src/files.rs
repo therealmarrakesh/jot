@@ -2,6 +2,7 @@ use super::*;
 use document::{LoadError, default_directory, display_name};
 
 const UNTITLED_FILE_NAME: &str = "Untitled.txt";
+const LOSSY_ANSI_WARNING: &str = "This file contains characters in Unicode format which will be lost if you save this file as an ANSI encoded text file. To keep the Unicode information, click Cancel below and then select one of the Unicode options from the Encoding drop down list. Continue?";
 
 impl Jot {
     fn show_error(
@@ -77,7 +78,7 @@ impl Jot {
             }
             Err(error) => {
                 let detail = match error {
-                    LoadError::NotUtf8 => "Jot only opens UTF-8 text files.".to_string(),
+                    LoadError::Undecodable => "Jot can't decode the text in this file.".to_string(),
                     LoadError::Io(error) => error.to_string(),
                 };
                 let title = format!("Can't open {}", display_name(Some(&path)));
@@ -134,7 +135,7 @@ impl Jot {
             return Task::ready(false);
         };
         match self.tabs[ix].path.clone() {
-            Some(path) => Task::ready(self.write_tab(ix, path, window, cx)),
+            Some(path) => self.write_tab(ix, path, window, cx),
             None => self.save_tab_as(id, window, cx),
         }
     }
@@ -160,11 +161,13 @@ impl Jot {
             let Ok(Ok(Some(path))) = target.await else {
                 return false;
             };
-            this.update_in(cx, |this, window, cx| match this.tab_index(id) {
+            let Ok(write) = this.update_in(cx, |this, window, cx| match this.tab_index(id) {
                 Some(ix) => this.write_tab(ix, path, window, cx),
-                None => false,
-            })
-            .unwrap_or(false)
+                None => Task::ready(false),
+            }) else {
+                return false;
+            };
+            write.await
         })
     }
 
@@ -174,10 +177,46 @@ impl Jot {
         path: PathBuf,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> bool {
+    ) -> Task<bool> {
         let tab = &self.tabs[ix];
+        let id = tab.editor.entity_id();
         let text = tab.editor.read(cx).text().to_string();
-        match document::save(&path, &text, tab.format) {
+        let encoded = document::encode(&text, tab.format);
+        if !encoded.lossy {
+            return Task::ready(self.commit_tab(ix, path, &encoded.bytes, window, cx));
+        }
+        let answer = self.prompt(
+            "Jot",
+            format!(
+                "{}
+{LOSSY_ANSI_WARNING}",
+                path.display()
+            ),
+            &["OK", "Cancel"],
+            window,
+            cx,
+        );
+        cx.spawn_in(window, async move |this, cx| {
+            if answer.await != Ok(0) {
+                return false;
+            }
+            this.update_in(cx, |this, window, cx| match this.tab_index(id) {
+                Some(ix) => this.commit_tab(ix, path, &encoded.bytes, window, cx),
+                None => false,
+            })
+            .unwrap_or(false)
+        })
+    }
+
+    fn commit_tab(
+        &mut self,
+        ix: usize,
+        path: PathBuf,
+        bytes: &[u8],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        match document::write(&path, bytes) {
             Ok(()) => {
                 let tab = &mut self.tabs[ix];
                 tab.path = Some(path);

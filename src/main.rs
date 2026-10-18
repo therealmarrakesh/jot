@@ -869,7 +869,11 @@ impl Jot {
                     68.,
                     format!("{}%", (self.zoom() * 100.).round()),
                 ))
-                .child(status_cell(p, 144., "UTF-8")),
+                .child(status_cell(
+                    p,
+                    144.,
+                    self.tabs[self.active].format.encoding.label(),
+                )),
         )
     }
 }
