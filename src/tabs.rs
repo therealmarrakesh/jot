@@ -408,12 +408,14 @@ impl Jot {
         let editor = data.editor;
         editor.update(cx, |editor, cx| editor.attach_window(window, cx));
         let _changes = cx.subscribe(&editor, |this, editor, event: &InputEvent, cx| {
-            if let InputEvent::Change = event
-                && let Some(tab) = this.tabs.iter_mut().find(|tab| tab.editor == editor)
-                && !tab.dirty
-            {
-                tab.dirty = true;
-                cx.notify();
+            if let InputEvent::Change = event {
+                let dirty = editor.read(cx).text().len() > 0;
+                if let Some(tab) = this.tabs.iter_mut().find(|tab| tab.editor == editor)
+                    && tab.dirty != dirty
+                {
+                    tab.dirty = dirty;
+                    cx.notify();
+                }
             }
         });
         let _observer = cx.observe(&editor, |this, editor, cx| {
