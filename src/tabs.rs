@@ -374,6 +374,80 @@ fn tab_separator(p: Palette) -> Div {
 }
 
 impl Jot {
+    pub(crate) fn create_tab(
+        content: Option<(PathBuf, document::Loaded)>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Tab {
+        let word_wrap = cx.global::<ViewSettings>().word_wrap;
+        let (path, text, format) = match content {
+            Some((path, loaded)) => (Some(path), loaded.text, loaded.format),
+            None => (None, String::new(), document::Format::default()),
+        };
+        let editor = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .soft_wrap(word_wrap)
+                .hide_scrollbar()
+                .viewport_wheel_step()
+                .default_value(text)
+        });
+        Self::adopt_tab(
+            TabData {
+                editor,
+                zoom: 1.,
+                path,
+                format,
+                dirty: false,
+            },
+            window,
+            cx,
+        )
+    }
+
+    pub(crate) fn adopt_tab(data: TabData, window: &mut Window, cx: &mut Context<Self>) -> Tab {
+        let editor = data.editor;
+        editor.update(cx, |editor, cx| editor.attach_window(window, cx));
+        let _changes = cx.subscribe(&editor, |this, editor, event: &InputEvent, cx| {
+            if let InputEvent::Change = event
+                && let Some(tab) = this.tabs.iter_mut().find(|tab| tab.editor == editor)
+                && !tab.dirty
+            {
+                tab.dirty = true;
+                cx.notify();
+            }
+        });
+        let _observer = cx.observe(&editor, |this, editor, cx| {
+            if &editor != this.active_editor() {
+                return;
+            }
+            let key = caret_key(editor.read(cx));
+            if key != this.caret_key {
+                this.caret_key = key;
+                this.restart_caret_blink(cx);
+            }
+        });
+        Tab {
+            editor,
+            zoom: data.zoom,
+            path: data.path,
+            format: data.format,
+            dirty: data.dirty,
+            slot: tabs::Slot::at(0., tabs::TAB_WIDTH),
+            _observer,
+            _changes,
+        }
+    }
+
+    pub(crate) fn tab_name(&self, ix: usize) -> String {
+        document::display_name(self.tabs[ix].path.as_deref())
+    }
+
+    pub(crate) fn tab_index(&self, id: EntityId) -> Option<usize> {
+        self.tabs
+            .iter()
+            .position(|tab| tab.editor.entity_id() == id)
+    }
+
     pub(crate) fn add_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let tab = Self::create_tab(None, window, cx);
         self.push_tab(tab, window, cx);

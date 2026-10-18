@@ -33,18 +33,8 @@ impl Jot {
         self.show_error(title, error.to_string(), window, cx);
     }
 
-    pub(crate) fn tab_name(&self, ix: usize) -> String {
-        display_name(self.tabs[ix].path.as_deref())
-    }
-
     pub(crate) fn refresh_title(&self, window: &mut Window) {
         window.set_window_title(&format!("{} - {APP_NAME}", self.tab_name(self.active)));
-    }
-
-    pub(crate) fn tab_index(&self, id: EntityId) -> Option<usize> {
-        self.tabs
-            .iter()
-            .position(|tab| tab.editor.entity_id() == id)
     }
 
     fn is_blank(&self, ix: usize, cx: &App) -> bool {
