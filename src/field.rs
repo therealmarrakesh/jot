@@ -4,6 +4,7 @@ use windows_sys::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_BINARY,
 
 pub(crate) const CONTROL_HEIGHT: f32 = 32.;
 pub(crate) const CONTROL_RADIUS: f32 = 4.;
+pub(crate) const OVERLAY_RADIUS: f32 = 8.;
 pub(crate) const BODY_SIZE: f32 = 14.;
 pub(crate) const BODY_LINE: f32 = 18.;
 const DEFAULT_ACCENT: u32 = 0x005fb8;
@@ -184,7 +185,7 @@ pub(crate) fn icon_button(
         .h(size.height)
         .rounded(radius)
         .cursor_default()
-        .font_family("Segoe Fluent Icons")
+        .font_family(ICON_FONT)
         .text_size(glyph_size)
         .line_height(glyph_size)
         .text_color(rgba(p.text_primary))
@@ -238,7 +239,7 @@ fn field_glyph(
         .justify_center()
         .rounded(u(CONTROL_RADIUS))
         .cursor_default()
-        .font_family("Segoe Fluent Icons")
+        .font_family(ICON_FONT)
         .text_size(u(FIELD_GLYPH_SIZE))
         .text_color(rgba(p.text_secondary))
         .child(glyph)

@@ -349,7 +349,7 @@ impl Jot {
             .items_center()
             .justify_center()
             .opacity(opacity)
-            .font_family("Segoe Fluent Icons")
+            .font_family(ICON_FONT)
             .text_size(px(size))
             .line_height(px(size))
             .text_color(rgba(color))

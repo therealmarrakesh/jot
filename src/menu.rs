@@ -48,8 +48,6 @@ const LABEL_SIZE: f32 = 14.;
 const SHORTCUT_SIZE: f32 = 12.;
 const GLYPH_SIZE: f32 = 12.;
 const SUBMENU_OVERLAP: f32 = 4.;
-const BAR_RADIUS: f32 = 4.;
-const CARD_RADIUS: f32 = 8.;
 const BAR_FOCUS_OUTSET: Edges<f32> = Edges {
     top: 0.,
     right: 1.,
@@ -954,13 +952,13 @@ impl MenuBar {
                             .flex_col()
                             .items_center()
                             .pt(px(COMMAND_ICON_TOP))
-                            .rounded(px(4.))
+                            .rounded(px(field::CONTROL_RADIUS))
                             .text_color(rgba(color))
                             .child(
                                 div()
                                     .h(px(COMMAND_LINE))
                                     .line_height(px(COMMAND_LINE))
-                                    .font_family("Segoe Fluent Icons")
+                                    .font_family(ICON_FONT)
                                     .text_size(px(ICON_SIZE))
                                     .child(command.glyph),
                             )
@@ -995,7 +993,11 @@ impl MenuBar {
                                 this.active(move |style| style.text_color(rgba(p.text_secondary)))
                             })
                             .when(ring == Some(ix), |this| {
-                                this.child(field::focus_ring(p, Edges::default(), px(4.)))
+                                this.child(field::focus_ring(
+                                    p,
+                                    Edges::default(),
+                                    px(field::CONTROL_RADIUS),
+                                ))
                             }),
                     );
                 divider
@@ -1275,7 +1277,7 @@ impl MenuBar {
             .items_center()
             .h_full()
             .px(px(10.))
-            .rounded(px(4.))
+            .rounded(px(field::CONTROL_RADIUS))
             .when(active, |this| this.bg(rgba(p.subtle_tertiary)))
             .hover(move |style| style.bg(rgba(p.subtle_secondary)))
             .active(move |style| style.bg(rgba(p.subtle_tertiary)))
@@ -1302,7 +1304,7 @@ impl MenuBar {
                     deferred(field::focus_ring(
                         p,
                         BAR_FOCUS_OUTSET,
-                        px(BAR_RADIUS + BAR_FOCUS_OUTSET.left),
+                        px(field::CONTROL_RADIUS + BAR_FOCUS_OUTSET.left),
                     ))
                     .with_priority(2),
                 )
@@ -1581,7 +1583,11 @@ impl MenuBar {
                     .px(px(ROW_INSET))
                     .py(px(ROW_MARGIN_Y))
                     .when(ring, |this| {
-                        this.child(field::focus_ring(p, Edges::all(0.), px(4.)))
+                        this.child(field::focus_ring(
+                            p,
+                            Edges::default(),
+                            px(field::CONTROL_RADIUS),
+                        ))
                     })
                     .on_hover(cx.listener(move |this, hovered: &bool, window, cx| {
                         if *hovered {
@@ -1598,7 +1604,7 @@ impl MenuBar {
                             .items_center()
                             .size_full()
                             .px(px(ROW_PADDING))
-                            .rounded(px(4.))
+                            .rounded(px(field::CONTROL_RADIUS))
                             .group("menu-row")
                             .text_color(rgba(p.text_primary))
                             .when(checks, |this| {
@@ -1606,7 +1612,7 @@ impl MenuBar {
                                     div()
                                         .flex_none()
                                         .w(px(CHECK_COLUMN))
-                                        .font_family("Segoe Fluent Icons")
+                                        .font_family(ICON_FONT)
                                         .text_size(px(mark_size))
                                         .line_height(px(mark_size))
                                         .when_some(mark_color, |this, color| {
@@ -1653,7 +1659,7 @@ impl MenuBar {
                                 this.child(
                                     div()
                                         .flex_none()
-                                        .font_family("Segoe Fluent Icons")
+                                        .font_family(ICON_FONT)
                                         .text_size(px(GLYPH_SIZE))
                                         .line_height(px(GLYPH_SIZE))
                                         .text_color(rgba(p.text_secondary))
@@ -1700,12 +1706,12 @@ fn reveal(
         .h(px(shown))
         .border_1()
         .border_color(rgba(p.flyout_stroke))
-        .rounded(px(CARD_RADIUS))
+        .rounded(px(field::OVERLAY_RADIUS))
         .shadow(theme_shadow(p, z, 1.))
         .child(
             div()
                 .size_full()
-                .rounded(px(CARD_RADIUS - 1.))
+                .rounded(px(field::OVERLAY_RADIUS - 1.))
                 .bg(rgb(p.menu_fill)),
         );
     [

@@ -1,5 +1,5 @@
 use super::*;
-use field::{BODY_SIZE, CONTROL_HEIGHT, CONTROL_RADIUS, FieldStyle};
+use field::{BODY_SIZE, CONTROL_HEIGHT, CONTROL_RADIUS, FieldStyle, OVERLAY_RADIUS};
 use gpui_kit::base::{MotionStatus, Presence, Transition, transition_with_status};
 use gpui_kit::component::input::InputState;
 use menu::Entry;
@@ -22,7 +22,6 @@ const CARD_TOP: f32 = 12.;
 const CARD_SHADOW_CLIP_TOP: f32 = 6.;
 const CARD_SHADOW_CLIP_BOTTOM: f32 = 14.;
 const CARD_SIDE_MARGIN: f32 = 12.;
-const CARD_RADIUS: f32 = 8.;
 const CARD_PADDING: f32 = 8.;
 const ROW_GAP: f32 = 8.;
 const ICON_GAP: f32 = 10.;
@@ -609,14 +608,14 @@ impl Jot {
                 div()
                     .border_1()
                     .border_color(rgba(p.flyout_stroke))
-                    .rounded(px(CARD_RADIUS))
+                    .rounded(px(OVERLAY_RADIUS))
                     .shadow(theme_shadow(p, NOTICE_Z, 1.))
                     .child(
                         div()
                             .px(px(NOTICE_PADDING_X))
                             .pt(px(NOTICE_PADDING_TOP))
                             .pb(px(NOTICE_PADDING_BOTTOM))
-                            .rounded(px(CARD_RADIUS - 1.))
+                            .rounded(px(OVERLAY_RADIUS - 1.))
                             .bg(rgb(p.notice_fill))
                             .font_family(MENU_FONT)
                             .text_size(px(BODY_SIZE))
@@ -664,7 +663,7 @@ impl Jot {
             .h(px(height * scale.y))
             .border_1()
             .border_color(rgba(p.surface_stroke))
-            .rounded(px(CARD_RADIUS * scale.x.min(scale.y)))
+            .rounded(px(OVERLAY_RADIUS * scale.x.min(scale.y)))
             .shadow(theme_shadow(p, CARD_Z, s));
         if s < MIN_VISIBLE_SCALE {
             return card;
@@ -810,7 +809,7 @@ impl Jot {
                 .flex_col()
                 .justify_center()
                 .p(u(CARD_PADDING))
-                .rounded(u(CARD_RADIUS - 1.))
+                .rounded(u(OVERLAY_RADIUS - 1.))
                 .bg(rgb(p.card_fill))
                 .occlude()
                 .cursor_default()

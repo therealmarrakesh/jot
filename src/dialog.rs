@@ -16,7 +16,6 @@ const FADE_DURATION: Duration = Duration::from_millis(83);
 const MIN_WIDTH: f32 = 320.;
 const MAX_WIDTH: f32 = 548.;
 const PADDING: f32 = 24.;
-const RADIUS: f32 = 8.;
 const TITLE_SIZE: f32 = 20.;
 const TITLE_LINE: f32 = 28.;
 const TITLE_GAP: f32 = 12.;
@@ -451,13 +450,13 @@ fn dialog_frame(
         .w(u(width))
         .border_1()
         .border_color(rgba(p.surface_stroke))
-        .rounded(u(RADIUS))
+        .rounded(u(field::OVERLAY_RADIUS))
         .shadow(theme_shadow(p, DIALOG_Z, s))
         .child(
             div()
                 .flex()
                 .flex_col()
-                .rounded(u(RADIUS - 1.))
+                .rounded(u(field::OVERLAY_RADIUS - 1.))
                 .bg(rgb(p.dialog_command))
                 .font_family(MENU_FONT)
                 .text_size(u(BODY_SIZE))
@@ -477,7 +476,7 @@ fn dialog_content(p: Palette, s: f32, title: SharedString, body: Div) -> Div {
     let u = |v: f32| px(v * s);
     div()
         .p(u(PADDING))
-        .rounded_t(u(RADIUS - 1.))
+        .rounded_t(u(field::OVERLAY_RADIUS - 1.))
         .bg(rgb(p.dialog_content))
         .border_b_1()
         .border_color(rgb(p.dialog_divider))

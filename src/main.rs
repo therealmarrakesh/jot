@@ -42,6 +42,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::GetCaretBlinkTime;
 
 const UI_FONT: &str = "Segoe UI Variable Small";
 const MENU_FONT: &str = "Segoe UI Variable Text";
+const ICON_FONT: &str = "Segoe Fluent Icons";
 
 const CLOSE_HOVER: u32 = 0xc42b1cff;
 const CLOSE_PRESSED: u32 = 0xc42b1ce6;
@@ -145,7 +146,7 @@ impl Caption {
             .h(px(30.))
             .items_center()
             .justify_center()
-            .font_family("Segoe Fluent Icons")
+            .font_family(ICON_FONT)
             .text_size(px(10.))
             .text_color(rgba(fg))
             .window_control_area(self.area())

@@ -307,12 +307,13 @@ fn tab_face(p: Palette, active: bool, trailing: f32, name: impl Into<SharedStrin
         .text_size(px(12.))
         .map(|this| {
             if active {
-                this.rounded_t(px(7.))
+                this.rounded_t(px(field::OVERLAY_RADIUS - 1.))
                     .bg(rgba(p.layer))
                     .text_color(rgba(p.text_primary))
                     .font_weight(FontWeight::SEMIBOLD)
             } else {
-                this.rounded_t(px(8.)).text_color(rgba(p.text_secondary))
+                this.rounded_t(px(field::OVERLAY_RADIUS))
+                    .text_color(rgba(p.text_secondary))
             }
         })
         .child(
@@ -656,7 +657,7 @@ impl Jot {
                     .border_l_1()
                     .border_r_1()
                     .border_color(rgba(p.stroke))
-                    .rounded_t(px(8.))
+                    .rounded_t(px(field::OVERLAY_RADIUS))
             })
             .on_mouse_down(
                 MouseButton::Left,
@@ -746,8 +747,8 @@ impl Jot {
                         .justify_center()
                         .w(px(BUTTON_WIDTH))
                         .h(px(BUTTON_HEIGHT))
-                        .rounded(px(4.))
-                        .font_family("Segoe Fluent Icons")
+                        .rounded(px(field::CONTROL_RADIUS))
+                        .font_family(ICON_FONT)
                         .text_size(px(12.))
                         .text_color(rgba(p.text_primary))
                         .hover(move |style| style.bg(rgba(p.subtle_secondary)))
@@ -796,7 +797,7 @@ impl Jot {
             .mt(px(BUTTON_TOP))
             .w(px(BUTTON_WIDTH))
             .h(px(BUTTON_HEIGHT))
-            .rounded(px(4.))
+            .rounded(px(field::CONTROL_RADIUS))
             .hover(move |style| style.bg(rgba(p.subtle_secondary)))
             .active(move |style| style.bg(rgba(p.subtle_tertiary)))
             .on_hover(|hovered, _, cx| {
@@ -883,8 +884,8 @@ impl Jot {
                 .mt(px(BUTTON_TOP))
                 .w(px(BUTTON_WIDTH))
                 .h(px(BUTTON_HEIGHT))
-                .rounded(px(4.))
-                .font_family("Segoe Fluent Icons")
+                .rounded(px(field::CONTROL_RADIUS))
+                .font_family(ICON_FONT)
                 .text_size(px(SCROLL_GLYPH_SIZE))
                 .line_height(px(SCROLL_GLYPH_SIZE))
                 .text_color(rgba(if enabled {

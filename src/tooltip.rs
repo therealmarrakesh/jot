@@ -24,7 +24,6 @@ const MAX_WIDTH: f32 = 320.;
 const FONT_SIZE: f32 = 12.;
 const LINE_HEIGHT: f32 = 16.;
 const SINGLE_HEIGHT: f32 = PADDING_TOP + LINE_HEIGHT + PADDING_BOTTOM + 2. * BORDER;
-const RADIUS: f32 = 4.;
 const ELEVATION: f32 = 8.;
 const SHADOW_SIDE: f32 = ELEVATION;
 const SHADOW_TOP: f32 = ELEVATION / 2.;
@@ -200,7 +199,7 @@ impl Render for TooltipView {
                 .top(px(SHADOW_TOP))
                 .w(self.size.width)
                 .h(self.size.height)
-                .rounded(px(RADIUS))
+                .rounded(px(field::CONTROL_RADIUS))
                 .border_1()
                 .border_color(rgba(p.flyout_stroke))
                 .shadow(theme_shadow(p, ELEVATION * 2., 1.))
@@ -208,7 +207,7 @@ impl Render for TooltipView {
                     div()
                         .relative()
                         .size_full()
-                        .rounded(px(RADIUS - BORDER))
+                        .rounded(px(field::CONTROL_RADIUS - BORDER))
                         .overflow_hidden()
                         .bg(rgb(p.tooltip_fallback))
                         .child(div().absolute().size_full().bg(rgba(p.tooltip_luminosity)))
