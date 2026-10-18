@@ -46,6 +46,7 @@ pub struct WindowsWindowState {
     pub origin: Cell<Point<Pixels>>,
     pub logical_size: Cell<Size<Pixels>>,
     pub min_size: Cell<Option<Size<Pixels>>>,
+    pub in_size_move_loop: Cell<bool>,
     pub fullscreen_restore_bounds: Cell<Bounds<Pixels>>,
     pub border_offset: WindowBorderOffset,
     pub appearance: Cell<WindowAppearance>,
@@ -168,6 +169,7 @@ impl WindowsWindowState {
             scale_factor: Cell::new(scale_factor),
             restore_from_minimized: Cell::new(restore_from_minimized),
             min_size: Cell::new(min_size),
+            in_size_move_loop: Cell::new(false),
             callbacks,
             frame_signal: Arc::new(PlatformFrameSignal::new()),
             input_handler: Cell::new(input_handler),
@@ -690,6 +692,9 @@ impl PlatformWindow for WindowsWindow {
     }
 
     fn mouse_position(&self) -> Point<Pixels> {
+        if self.0.state.in_size_move_loop.get() {
+            return point(px(-1.), px(-1.));
+        }
         let scale_factor = self.scale_factor();
         let point = unsafe {
             let mut point: POINT = std::mem::zeroed();
