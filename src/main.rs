@@ -75,6 +75,8 @@ const SEPARATOR_HEIGHT: f32 = 1.;
 const MENU_BAR_HEIGHT: f32 = 32.;
 const MENU_BAR_LEFT: f32 = 4.;
 const STATUS_BAR_HEIGHT: f32 = 31.;
+const STATUS_DIVIDER_WIDTH: f32 = 1.;
+const STATUS_DIVIDER_HEIGHT: f32 = 16.;
 const THEME_BUTTON_WIDTH: f32 = 30.;
 const THEME_BUTTON_RIGHT: f32 = 8.;
 const THEME_GLYPH_SIZE: f32 = 16.;
@@ -928,7 +930,7 @@ impl Jot {
                 .child(format!("Ln {}, Col {}", point.row + 1, column + 1))
                 .child(status_divider(p))
                 .child(character_count(selected, total))
-                .child(div().flex_1())
+                .child(status_spacer(p))
                 .child(format!("{}%", (self.zoom() * 100.).round()))
                 .child(status_divider(p))
                 .child(self.tabs[self.active].format.line_ending.label())
@@ -939,7 +941,31 @@ impl Jot {
 }
 
 fn status_divider(p: Palette) -> Div {
-    div().flex_none().w(px(1.)).h(px(16.)).bg(rgba(p.stroke))
+    div()
+        .flex_none()
+        .w(px(STATUS_DIVIDER_WIDTH))
+        .h(px(STATUS_DIVIDER_HEIGHT))
+        .bg(rgba(p.stroke))
+}
+
+fn status_spacer(p: Palette) -> Canvas<()> {
+    canvas(
+        |_, _, _| {},
+        move |bounds, _, window, _| {
+            let width = bounds.size.width.as_f32();
+            if width < STATUS_DIVIDER_WIDTH + 0.5 {
+                let x = bounds.origin.x + px(((width - STATUS_DIVIDER_WIDTH) / 2.).round());
+                let line = Bounds::new(
+                    point(x, bounds.origin.y),
+                    size(px(STATUS_DIVIDER_WIDTH), bounds.size.height),
+                );
+                window.paint_quad(fill(line, rgba(p.stroke)));
+            }
+        },
+    )
+    .flex_1()
+    .min_w(px(STATUS_DIVIDER_WIDTH))
+    .h(px(STATUS_DIVIDER_HEIGHT))
 }
 
 impl Render for Jot {
