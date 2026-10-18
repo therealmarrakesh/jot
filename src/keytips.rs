@@ -142,7 +142,7 @@ pub(crate) fn show(
     let overlay = match state.overlay.clone() {
         Some(overlay) => overlay,
         None => {
-            let Some(overlay) = overlay::open(true, |_| KeyTipView { tips: Vec::new() }, cx) else {
+            let Some(overlay) = overlay::open(|_| KeyTipView { tips: Vec::new() }, cx) else {
                 return;
             };
             cx.default_global::<KeyTips>().overlay = Some(overlay.clone());

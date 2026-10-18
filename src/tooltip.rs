@@ -193,49 +193,45 @@ impl Render for TooltipView {
                     .opacity(NOISE_OPACITY)
             })
             .collect();
-        div()
-            .size_full()
-            .opacity(self.opacity(now))
-            .on_mouse_move(|_, _, cx| pointer_moved(cx))
-            .child(
-                div()
-                    .absolute()
-                    .left(px(SHADOW_SIDE))
-                    .top(px(SHADOW_TOP))
-                    .w(self.size.width)
-                    .h(self.size.height)
-                    .rounded(px(RADIUS))
-                    .border_1()
-                    .border_color(rgba(p.flyout_stroke))
-                    .shadow(theme_shadow(p, ELEVATION * 2., 1.))
-                    .child(
-                        div()
-                            .relative()
-                            .size_full()
-                            .rounded(px(RADIUS - BORDER))
-                            .overflow_hidden()
-                            .bg(rgb(p.tooltip_fallback))
-                            .child(div().absolute().size_full().bg(rgba(p.tooltip_luminosity)))
-                            .children(noise)
-                            .child(
-                                div()
-                                    .relative()
-                                    .size_full()
-                                    .pl(px(PADDING_X))
-                                    .pr(px(PADDING_X))
-                                    .pt(px(PADDING_TOP))
-                                    .pb(px(PADDING_BOTTOM))
-                                    .font_family(UI_FONT)
-                                    .text_size(px(FONT_SIZE))
-                                    .line_height(px(LINE_HEIGHT))
-                                    .text_color(rgba(p.text_primary))
-                                    .when(self.size.height <= px(SINGLE_HEIGHT), |this| {
-                                        this.whitespace_nowrap()
-                                    })
-                                    .child(self.text.clone()),
-                            ),
-                    ),
-            )
+        div().size_full().opacity(self.opacity(now)).child(
+            div()
+                .absolute()
+                .left(px(SHADOW_SIDE))
+                .top(px(SHADOW_TOP))
+                .w(self.size.width)
+                .h(self.size.height)
+                .rounded(px(RADIUS))
+                .border_1()
+                .border_color(rgba(p.flyout_stroke))
+                .shadow(theme_shadow(p, ELEVATION * 2., 1.))
+                .child(
+                    div()
+                        .relative()
+                        .size_full()
+                        .rounded(px(RADIUS - BORDER))
+                        .overflow_hidden()
+                        .bg(rgb(p.tooltip_fallback))
+                        .child(div().absolute().size_full().bg(rgba(p.tooltip_luminosity)))
+                        .children(noise)
+                        .child(
+                            div()
+                                .relative()
+                                .size_full()
+                                .pl(px(PADDING_X))
+                                .pr(px(PADDING_X))
+                                .pt(px(PADDING_TOP))
+                                .pb(px(PADDING_BOTTOM))
+                                .font_family(UI_FONT)
+                                .text_size(px(FONT_SIZE))
+                                .line_height(px(LINE_HEIGHT))
+                                .text_color(rgba(p.text_primary))
+                                .when(self.size.height <= px(SINGLE_HEIGHT), |this| {
+                                    this.whitespace_nowrap()
+                                })
+                                .child(self.text.clone()),
+                        ),
+                ),
+        )
     }
 }
 
@@ -516,7 +512,6 @@ fn popup(cx: &mut App) -> Option<(Entity<TooltipView>, AnyWindowHandle, isize)> 
         theme_fade(FADE_OUT_STORYBOARD),
     );
     let popup = overlay::open(
-        false,
         |_| TooltipView {
             text: "".into(),
             size: size(px(0.), px(0.)),
