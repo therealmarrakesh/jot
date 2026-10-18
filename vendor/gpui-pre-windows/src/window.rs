@@ -45,7 +45,7 @@ impl std::ops::Deref for WindowsWindow {
 pub struct WindowsWindowState {
     pub origin: Cell<Point<Pixels>>,
     pub logical_size: Cell<Size<Pixels>>,
-    pub min_size: Option<Size<Pixels>>,
+    pub min_size: Cell<Option<Size<Pixels>>>,
     pub fullscreen_restore_bounds: Cell<Bounds<Pixels>>,
     pub border_offset: WindowBorderOffset,
     pub appearance: Cell<WindowAppearance>,
@@ -167,7 +167,7 @@ impl WindowsWindowState {
             background_appearance: Cell::new(WindowBackgroundAppearance::Opaque),
             scale_factor: Cell::new(scale_factor),
             restore_from_minimized: Cell::new(restore_from_minimized),
-            min_size,
+            min_size: Cell::new(min_size),
             callbacks,
             frame_signal: Arc::new(PlatformFrameSignal::new()),
             input_handler: Cell::new(input_handler),
@@ -1483,6 +1483,12 @@ unsafe extern "system" fn window_procedure(
     }
 
     result
+}
+
+pub fn set_window_min_size(window: isize, size: Option<Size<Pixels>>) {
+    if let Some(window) = window_from_hwnd(HWND(window as _)) {
+        window.state.min_size.set(size);
+    }
 }
 
 pub(crate) fn window_from_hwnd(hwnd: HWND) -> Option<Rc<WindowsWindowInner>> {

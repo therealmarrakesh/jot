@@ -13,3 +13,4 @@ The crates in this folder are copies of crates.io releases, licensed under the A
 - `src/directx_renderer.rs`: alpha blending composites correctly over transparent windows.
 - `src/events.rs`, `src/util.rs`, `src/window.rs`, `src/platform.rs`: an app-wide light or dark appearance override (`set_window_appearance`).
 - `src/platform.rs`, `src/gpui_windows.rs`: a save dialog with a title, file types, a default extension and a choice drop-down (`prompt_for_save_path`).
+- `src/window.rs`, `src/events.rs`, `src/gpui_windows.rs`: a minimum window size that can be changed after the window is created (`set_window_min_size`).

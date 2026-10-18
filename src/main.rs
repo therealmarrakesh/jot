@@ -71,7 +71,10 @@ const CLOSE_PRESSED: u32 = 0xc42b1ce6;
 const CLOSE_GLYPH_HOVER: u32 = 0xffffffff;
 const CLOSE_GLYPH_PRESSED: u32 = 0xffffffb3;
 
+const SEPARATOR_HEIGHT: f32 = 1.;
 const MENU_BAR_HEIGHT: f32 = 32.;
+const MENU_BAR_LEFT: f32 = 4.;
+const STATUS_BAR_HEIGHT: f32 = 31.;
 const THEME_BUTTON_WIDTH: f32 = 30.;
 const THEME_BUTTON_RIGHT: f32 = 8.;
 const THEME_GLYPH_SIZE: f32 = 16.;
@@ -80,6 +83,8 @@ const SUN_GLYPH: &str = "\u{E706}";
 
 const EDITOR_FONT_SIZE: f32 = 11. * 96. / 72.;
 const EDITOR_LINE_HEIGHT: f32 = 20.;
+const EDITOR_PADDING_LEFT: f32 = 6.;
+const EDITOR_PADDING_TOP: f32 = 7.;
 const CARET_WIDTH: f32 = 1.;
 const CARET_HEIGHT: f32 = 18.;
 const ZOOM_STEP: f32 = 0.1;
@@ -89,7 +94,10 @@ const ZOOM_MAX: f32 = 5.;
 type CaretKey = (usize, Range<usize>, usize);
 
 fn separator(p: Palette) -> Div {
-    div().flex_none().h(px(1.)).bg(rgba(p.stroke_on_layer))
+    div()
+        .flex_none()
+        .h(px(SEPARATOR_HEIGHT))
+        .bg(rgba(p.stroke_on_layer))
 }
 
 fn group_thousands(n: usize) -> String {
@@ -612,6 +620,45 @@ impl Jot {
         self.tabs[self.active].zoom
     }
 
+    fn line_height(&self) -> f32 {
+        (EDITOR_LINE_HEIGHT * self.zoom()).round()
+    }
+
+    fn editor_min_height(&self) -> f32 {
+        let inset = EDITOR_PADDING_TOP + gpui_kit::component::Size::default().input_py().as_f32();
+        2. * inset + self.line_height()
+    }
+
+    fn min_size_probe(&self, status_bar: bool, cx: &App) -> impl IntoElement + use<> {
+        let hwnd = self.hwnd;
+        let menu_bar = self.menu_bar.clone();
+        let status = status_bar.then(|| self.status_bar(cx).into_any_element());
+        let rows = tabs::STRIP_TOP
+            + tabs::TAB_HEIGHT
+            + MENU_BAR_HEIGHT
+            + SEPARATOR_HEIGHT
+            + self.editor_min_height();
+        canvas(
+            move |_, window, cx| {
+                let status = status.map(|mut status| {
+                    status.layout_as_root(AvailableSpace::min_size(), window, cx)
+                });
+                let menu_row = MENU_BAR_LEFT
+                    + menu_bar.read(cx).width()
+                    + THEME_BUTTON_WIDTH
+                    + THEME_BUTTON_RIGHT;
+                let width = status
+                    .map_or(0., |status| status.width.as_f32())
+                    .max(menu_row)
+                    .max(tabs::TITLE_BAR_MIN_WIDTH);
+                let height = rows + status.map_or(0., |status| status.height.as_f32());
+                gpui_windows::set_window_min_size(hwnd, Some(size(px(width), px(height))));
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+    }
+
     fn caret_height(&self) -> Pixels {
         px((CARET_HEIGHT * self.zoom()).round())
     }
@@ -751,7 +798,7 @@ impl Jot {
                 div()
                     .flex()
                     .h(px(MENU_BAR_HEIGHT))
-                    .pl(px(4.))
+                    .pl(px(MENU_BAR_LEFT))
                     .pr(px(THEME_BUTTON_RIGHT))
                     .bg(rgba(p.layer))
                     .child(self.menu_bar.clone())
@@ -818,9 +865,9 @@ impl Jot {
             .id("editor-area")
             .relative()
             .flex_1()
-            .min_h_0()
-            .pl(px(6.))
-            .pt(px(7.))
+            .min_h(px(self.editor_min_height()))
+            .pl(px(EDITOR_PADDING_LEFT))
+            .pt(px(EDITOR_PADDING_TOP))
             .bg(rgb(p.editor))
             .on_mouse_move(cx.listener(|this, _, _, cx| this.scroll_activity(cx)))
             .on_hover(cx.listener(|this, _, _, cx| this.scroll_activity(cx)))
@@ -847,7 +894,7 @@ impl Jot {
                             .h_full()
                             .font_family("Consolas")
                             .text_size(px(EDITOR_FONT_SIZE * self.zoom()))
-                            .line_height(px((EDITOR_LINE_HEIGHT * self.zoom()).round())),
+                            .line_height(px(self.line_height())),
                     )
                     .child(self.caret(window, cx)),
             )
@@ -872,7 +919,7 @@ impl Jot {
                 .flex()
                 .items_center()
                 .gap(px(24.))
-                .h(px(31.))
+                .h(px(STATUS_BAR_HEIGHT))
                 .px(px(22.))
                 .bg(rgba(p.layer))
                 .font_family(SMALL_FONT)
@@ -903,6 +950,7 @@ impl Render for Jot {
         self.sample_scrollbars(cx);
         let scrollbars = self.scrollbars(window, cx);
         let dialogs = self.render_dialogs(window, cx);
+        let min_size = self.min_size_probe(status_bar, cx);
         let find = self.render_find(window, cx);
 
         let root = div()
@@ -952,7 +1000,8 @@ impl Render for Jot {
                     .child(self.editor(find, scrollbars, window, cx))
                     .when(status_bar, |this| this.child(self.status_bar(cx))),
             )
-            .children(dialogs);
+            .children(dialogs)
+            .child(min_size);
         #[cfg(feature = "bench")]
         let root = root.child(bench::probe(&self.painted));
         root

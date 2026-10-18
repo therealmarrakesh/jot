@@ -618,6 +618,10 @@ impl MenuBar {
         }
     }
 
+    pub(crate) fn width(&self) -> f32 {
+        self.hit_areas.get()[BAR_AREA].size.width.as_f32()
+    }
+
     pub(crate) fn pointer_down(&mut self, cx: &mut Context<Self>) {
         self.bar_focus = None;
         self.exit_access(cx);

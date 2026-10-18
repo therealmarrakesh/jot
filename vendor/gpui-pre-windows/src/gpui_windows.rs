@@ -39,5 +39,6 @@ pub(crate) use window::*;
 pub(crate) use wrapper::*;
 
 pub use platform::{SaveChoice, SavePathOptions, WindowsPlatform, prompt_for_save_path};
+pub use window::set_window_min_size;
 
 pub(crate) use windows::Win32::Foundation::HWND;
