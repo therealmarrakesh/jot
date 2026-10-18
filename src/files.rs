@@ -63,6 +63,17 @@ impl Jot {
         .detach();
     }
 
+    pub(crate) fn open_dropped(
+        &mut self,
+        paths: &ExternalPaths,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        for path in paths.paths() {
+            self.open_path(path.clone(), window, cx);
+        }
+    }
+
     pub(crate) fn open_path(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(ix) = self
             .tabs

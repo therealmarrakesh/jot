@@ -929,6 +929,7 @@ impl Render for Jot {
                 this.menu_bar
                     .update(cx, |menu_bar, cx| menu_bar.pointer_down(cx));
             }))
+            .on_drop(cx.listener(Self::open_dropped))
             .on_action(cx.listener(Self::show_context_menu))
             .on_action(cx.listener(Self::zoom_in))
             .on_action(cx.listener(Self::zoom_out))
