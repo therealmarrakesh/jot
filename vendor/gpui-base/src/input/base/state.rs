@@ -2954,6 +2954,9 @@ impl<M: InputModeKind> InputBaseState<M> {
         let Some(mut new_text) = clipboard.text().filter(|text| !text.is_empty()) else {
             return;
         };
+        if new_text.contains('\r') {
+            new_text = new_text.replace("\r\n", "\n");
+        }
         // A paste is one atomic edit, never part of a typing run.
         self.undo_manager.set_pending_intent(EditIntent::Atomic);
 
