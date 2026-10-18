@@ -829,20 +829,28 @@ impl Jot {
                 move |bounds, _, _| area.set(bounds)
             })
             .child(
-                Textarea::new(self.active_editor())
-                    .context_menu(move |menu, window, cx| {
-                        let position = window.mouse_position();
-                        this.update(cx, |jot, cx| jot.open_context_menu(position, window, cx))
-                            .ok();
-                        menu
-                    })
-                    .appearance(false)
-                    .h_full()
-                    .font_family("Consolas")
-                    .text_size(px(EDITOR_FONT_SIZE * self.zoom()))
-                    .line_height(px((EDITOR_LINE_HEIGHT * self.zoom()).round())),
+                div()
+                    .relative()
+                    .size_full()
+                    .overflow_hidden()
+                    .child(
+                        Textarea::new(self.active_editor())
+                            .context_menu(move |menu, window, cx| {
+                                let position = window.mouse_position();
+                                this.update(cx, |jot, cx| {
+                                    jot.open_context_menu(position, window, cx)
+                                })
+                                .ok();
+                                menu
+                            })
+                            .appearance(false)
+                            .h_full()
+                            .font_family("Consolas")
+                            .text_size(px(EDITOR_FONT_SIZE * self.zoom()))
+                            .line_height(px((EDITOR_LINE_HEIGHT * self.zoom()).round())),
+                    )
+                    .child(self.caret(window, cx)),
             )
-            .child(self.caret(window, cx))
             .child(scrollbars)
             .children(find)
     }
