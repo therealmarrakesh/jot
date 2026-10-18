@@ -5,9 +5,9 @@ const SETTLE: Duration = Duration::from_millis(1500);
 const POLL: Duration = Duration::from_millis(1);
 const TYPING_SAMPLES: usize = 20;
 
-pub type FrameProbe = Rc<Cell<Option<Instant>>>;
+pub(crate) type FrameProbe = Rc<Cell<Option<Instant>>>;
 
-pub fn probe(painted: &FrameProbe) -> impl IntoElement {
+pub(crate) fn probe(painted: &FrameProbe) -> impl IntoElement {
     let painted = painted.clone();
     canvas(
         |_, _, _| {},
@@ -17,11 +17,11 @@ pub fn probe(painted: &FrameProbe) -> impl IntoElement {
     .size_0()
 }
 
-pub fn word_wrap() -> bool {
+pub(crate) fn word_wrap() -> bool {
     std::env::var("JOT_BENCH_WRAP").map_or(true, |value| value != "0")
 }
 
-pub fn schedule(painted: FrameProbe, window: &mut Window, cx: &mut Context<Jot>) {
+pub(crate) fn schedule(painted: FrameProbe, window: &mut Window, cx: &mut Context<Jot>) {
     let Ok(path) = std::env::var("JOT_BENCH_FILE") else {
         return;
     };
@@ -49,7 +49,7 @@ pub fn schedule(painted: FrameProbe, window: &mut Window, cx: &mut Context<Jot>)
 
         let started = Instant::now();
         this.update_in(cx, |jot, window, cx| {
-            let editor = jot.active_editor().clone();
+            let editor = jot.active_editor();
             if real_paste {
                 let focus = editor.focus_handle(cx);
                 focus.dispatch_action(&input::Paste, window, cx);
@@ -71,8 +71,8 @@ pub fn schedule(painted: FrameProbe, window: &mut Window, cx: &mut Context<Jot>)
         for _ in 0..TYPING_SAMPLES {
             let started = Instant::now();
             this.update_in(cx, |jot, window, cx| {
-                let editor = jot.active_editor().clone();
-                editor.update(cx, |editor, cx| editor.insert("x", window, cx));
+                jot.active_editor()
+                    .update(cx, |editor, cx| editor.insert("x", window, cx));
                 window.refresh();
             })
             .ok();

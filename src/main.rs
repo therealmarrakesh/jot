@@ -46,23 +46,46 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     GetCaretBlinkTime, GetCursorPos, SystemParametersInfoW, USER_DEFAULT_SCREEN_DPI,
 };
 
+const APP_NAME: &str = "Jot";
+const CONTEXT: &str = "Jot";
+
+const WINDOW_WIDTH: f32 = 2213.;
+const WINDOW_HEIGHT: f32 = 1107.;
+const WINDOW_MAX_SCREEN_SHARE: f32 = 0.9;
+
 const SMALL_FONT: &str = "Segoe UI Variable Small";
 const TEXT_FONT: &str = "Segoe UI Variable Text";
-const MENU_BAR_HEIGHT: f32 = 32.;
-const CAPTION_BUTTON_WIDTH: f32 = 46.;
-const APP_NAME: &str = "Jot";
+const ICON_FONT: &str = "Segoe Fluent Icons";
+
 const DECELERATE: Easing = Easing::CubicBezier {
     x1: 0.,
     y1: 0.,
     x2: 0.,
     y2: 1.,
 };
-const ICON_FONT: &str = "Segoe Fluent Icons";
 
+const CAPTION_BUTTON_WIDTH: f32 = 46.;
 const CLOSE_HOVER: u32 = 0xc42b1cff;
 const CLOSE_PRESSED: u32 = 0xc42b1ce6;
 const CLOSE_GLYPH_HOVER: u32 = 0xffffffff;
 const CLOSE_GLYPH_PRESSED: u32 = 0xffffffb3;
+
+const MENU_BAR_HEIGHT: f32 = 32.;
+const THEME_BUTTON_WIDTH: f32 = 30.;
+const THEME_BUTTON_RIGHT: f32 = 8.;
+const THEME_GLYPH_SIZE: f32 = 16.;
+const MOON_GLYPH: &str = "\u{E708}";
+const SUN_GLYPH: &str = "\u{E706}";
+
+const EDITOR_FONT_SIZE: f32 = 11. * 96. / 72.;
+const EDITOR_LINE_HEIGHT: f32 = 20.;
+const CARET_WIDTH: f32 = 1.;
+const CARET_HEIGHT: f32 = 18.;
+const ZOOM_STEP: f32 = 0.1;
+const ZOOM_MIN: f32 = 0.1;
+const ZOOM_MAX: f32 = 5.;
+
+type CaretKey = (usize, Range<usize>, usize);
 
 fn separator(p: Palette) -> Div {
     div().flex_none().h(px(1.)).bg(rgba(p.stroke_on_layer))
@@ -178,6 +201,28 @@ impl Caption {
     }
 }
 
+fn caption_buttons(window: &Window, p: Palette) -> impl IntoElement {
+    let active = window.is_window_active();
+    let maximize = if window.is_maximized() {
+        Caption::Restore
+    } else {
+        Caption::Maximize
+    };
+
+    div()
+        .v_flex()
+        .flex_none()
+        .h_full()
+        .child(
+            div()
+                .flex()
+                .child(Caption::Minimize.render(active, p))
+                .child(maximize.render(active, p))
+                .child(Caption::Close.render(active, p)),
+        )
+        .child(div().flex_1().window_control_area(WindowControlArea::Drag))
+}
+
 gpui_kit::actions!(
     jot,
     [
@@ -209,22 +254,6 @@ gpui_kit::actions!(
         ToggleTheme,
     ]
 );
-
-const WINDOW_WIDTH: f32 = 2213.;
-const THEME_BUTTON_WIDTH: f32 = 30.;
-const THEME_BUTTON_RIGHT: f32 = 8.;
-const THEME_GLYPH_SIZE: f32 = 16.;
-const MOON_GLYPH: &str = "\u{E708}";
-const SUN_GLYPH: &str = "\u{E706}";
-const WINDOW_HEIGHT: f32 = 1107.;
-const WINDOW_MAX_SCREEN_SHARE: f32 = 0.9;
-const EDITOR_FONT_SIZE: f32 = 11. * 96. / 72.;
-const EDITOR_LINE_HEIGHT: f32 = 20.;
-const CARET_HEIGHT: f32 = 18.;
-const CONTEXT: &str = "Jot";
-const ZOOM_STEP: f32 = 0.1;
-const ZOOM_MIN: f32 = 0.1;
-const ZOOM_MAX: f32 = 5.;
 
 struct ViewSettings {
     status_bar: bool,
@@ -260,8 +289,9 @@ fn key_bindings() -> Vec<KeyBinding> {
 fn window_options(window_size: Option<gpui_kit::Size<Pixels>>, cx: &App) -> WindowOptions {
     let screen = cx
         .primary_display()
-        .map(|display| display.visible_bounds().size)
-        .unwrap_or(size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT)));
+        .map_or(size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT)), |display| {
+            display.visible_bounds().size
+        });
     let window_size = window_size.unwrap_or(size(
         px(WINDOW_WIDTH).min(screen.width * WINDOW_MAX_SCREEN_SHARE),
         px(WINDOW_HEIGHT).min(screen.height * WINDOW_MAX_SCREEN_SHARE),
@@ -372,7 +402,10 @@ fn caret_canvas(
             let Some(geometry) = geometry(cx) else {
                 return;
             };
-            let caret = Bounds::new(caret_origin(&geometry, window), size(px(1.), height));
+            let caret = Bounds::new(
+                caret_origin(&geometry, window),
+                size(px(CARET_WIDTH), height),
+            );
             window.with_content_mask(
                 Some(ContentMask {
                     bounds: geometry.input_bounds(),
@@ -407,7 +440,7 @@ fn caret_origin(geometry: &PrepaintCaretGeometry, window: &Window) -> Point<Pixe
     window.pixel_snap_point(point(origin.x, origin.y + geometry.scroll_offset().y))
 }
 
-fn caret_key(editor: &TextareaState) -> (usize, Range<usize>, usize) {
+fn caret_key(editor: &TextareaState) -> CaretKey {
     (
         editor.cursor(),
         editor.selected_range(),
@@ -446,7 +479,7 @@ impl Tab {
     }
 }
 
-pub struct Jot {
+struct Jot {
     tabs: Vec<Tab>,
     active: usize,
     hovered_tab: Option<EntityId>,
@@ -460,7 +493,7 @@ pub struct Jot {
     accent: Rgba,
     field_caret: Option<(EntityId, usize, Range<usize>)>,
     caret_visible: bool,
-    caret_key: (usize, Range<usize>, usize),
+    caret_key: CaretKey,
     _caret_blink: Task<()>,
     _subscriptions: Vec<Subscription>,
     #[cfg(feature = "bench")]
@@ -479,7 +512,6 @@ impl Jot {
             menu::MenuEvent::Opened => {
                 let focus = menu_bar.read(cx).focus_handle().clone();
                 this.active_editor()
-                    .clone()
                     .update(cx, |editor, cx| editor.set_selection_focus(Some(focus), cx));
             }
             menu::MenuEvent::Closed => this.sync_find_selection(cx),
@@ -554,7 +586,7 @@ impl Jot {
             _caret_blink: Task::ready(()),
             _subscriptions,
             #[cfg(feature = "bench")]
-            painted: Rc::new(Cell::new(None)),
+            painted: bench::FrameProbe::default(),
         };
         jot.activate_tab(0, window, cx);
         detach::register(jot.owner(window, cx), cx);
@@ -640,6 +672,10 @@ impl Jot {
         self.tabs[self.active].zoom
     }
 
+    fn caret_height(&self) -> Pixels {
+        px((CARET_HEIGHT * self.zoom()).round())
+    }
+
     fn activate_tab(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         self.active = ix;
         self.reveal_tab(ix, cx);
@@ -680,7 +716,7 @@ impl Jot {
 
     fn caret(&self, window: &Window, cx: &App) -> impl IntoElement {
         let editor = self.active_editor().clone();
-        let height = px((CARET_HEIGHT * self.zoom()).round());
+        let height = self.caret_height();
         let shown = self.caret_visible
             && !self.menu_bar.read(cx).access_active()
             && window.is_window_active()
@@ -703,7 +739,6 @@ impl Jot {
     fn insert_time_date(&mut self, _: &TimeDate, window: &mut Window, cx: &mut Context<Self>) {
         let stamp = time_date();
         self.active_editor()
-            .clone()
             .update(cx, |editor, cx| editor.replace(stamp, window, cx));
     }
 
@@ -733,28 +768,6 @@ impl Jot {
 
     fn close_active_tab(&mut self, _: &CloseTab, window: &mut Window, cx: &mut Context<Self>) {
         self.close_tab(self.active, window, cx);
-    }
-
-    fn caption_buttons(&self, window: &Window, p: Palette) -> impl IntoElement {
-        let active = window.is_window_active();
-        let maximize = if window.is_maximized() {
-            Caption::Restore
-        } else {
-            Caption::Maximize
-        };
-
-        div()
-            .v_flex()
-            .flex_none()
-            .h_full()
-            .child(
-                div()
-                    .flex()
-                    .child(Caption::Minimize.render(active, p))
-                    .child(maximize.render(active, p))
-                    .child(Caption::Close.render(active, p)),
-            )
-            .child(div().flex_1().window_control_area(WindowControlArea::Drag))
     }
 
     fn title_bar(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -788,10 +801,10 @@ impl Jot {
                     .h_full()
                     .window_control_area(WindowControlArea::Drag),
             )
-            .child(self.caption_buttons(window, p))
+            .child(caption_buttons(window, p))
     }
 
-    fn menu_bar(&self, p: Palette) -> impl IntoElement {
+    fn render_menu_bar(&self, p: Palette) -> impl IntoElement {
         div()
             .flex_none()
             .child(
@@ -817,7 +830,7 @@ impl Jot {
                                     px(field::CONTROL_RADIUS),
                                 )
                                 .on_click(|_, window, cx| {
-                                    window.dispatch_action(Box::new(ToggleTheme), cx)
+                                    window.dispatch_action(Box::new(ToggleTheme), cx);
                                 }),
                             ),
                     ),
@@ -840,8 +853,7 @@ impl Jot {
             return;
         };
         let caret = caret_origin(&geometry, window);
-        let height = px((CARET_HEIGHT * self.zoom()).round());
-        let anchor = point(caret.x + px(1.), caret.y + height);
+        let anchor = point(caret.x + px(CARET_WIDTH), caret.y + self.caret_height());
         self.open_context_menu(anchor, window, cx);
     }
 
@@ -1008,7 +1020,7 @@ impl Render for Jot {
                     .v_flex()
                     .size_full()
                     .child(self.title_bar(window, cx))
-                    .child(self.menu_bar(p))
+                    .child(self.render_menu_bar(p))
                     .child(self.editor(find, scrollbars, window, cx))
                     .when(status_bar, |this| this.child(self.status_bar(cx))),
             )
@@ -1022,7 +1034,7 @@ impl Render for Jot {
 fn main() {
     gpui_kit::application()
         .with_assets(gpui_kit::assets::Assets)
-        .run(move |cx| {
+        .run(|cx| {
             gpui_kit::init(cx);
 
             cx.on_window_closed(|cx, _| {
@@ -1055,7 +1067,7 @@ fn main() {
                 for window in cx.windows() {
                     window
                         .update(cx, |_, window, cx| {
-                            window.dispatch_action(Box::new(CloseWindow), cx)
+                            window.dispatch_action(Box::new(CloseWindow), cx);
                         })
                         .ok();
                 }

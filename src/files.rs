@@ -1,6 +1,7 @@
 use super::*;
-use document::{Encoding, Format, LoadError, default_directory, display_name};
+use document::{Encoding, Format, LoadError, default_directory, display_name, file_name};
 use gpui_windows::{SaveChoice, SavePathOptions};
+use std::io;
 
 const UNTITLED_FILE_NAME: &str = "Untitled.txt";
 const SAVE_AS_TITLE: &str = "Save as";
@@ -13,12 +14,23 @@ const LOSSY_ANSI_WARNING: &str = "This file contains characters in Unicode forma
 impl Jot {
     fn show_error(
         &mut self,
-        title: String,
-        message: String,
+        title: impl Into<SharedString>,
+        message: impl Into<SharedString>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         drop(self.prompt(title, message, &["OK"], window, cx));
+    }
+
+    fn show_save_error(
+        &mut self,
+        path: &Path,
+        error: &io::Error,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let title = format!("Can't save {}", display_name(Some(path)));
+        self.show_error(title, error.to_string(), window, cx);
     }
 
     pub(crate) fn tab_name(&self, ix: usize) -> String {
@@ -80,12 +92,11 @@ impl Jot {
                 } else {
                     self.push_tab(tab, window, cx);
                 }
-                cx.notify();
             }
             Err(error) => {
-                let detail = match error {
-                    LoadError::Undecodable => "Jot can't decode the text in this file.".to_string(),
-                    LoadError::Io(error) => error.to_string(),
+                let detail: SharedString = match error {
+                    LoadError::Undecodable => "Jot can't decode the text in this file.".into(),
+                    LoadError::Io(error) => error.to_string().into(),
                 };
                 let title = format!("Can't open {}", display_name(Some(&path)));
                 self.show_error(title, detail, window, cx);
@@ -106,19 +117,7 @@ impl Jot {
     pub(crate) fn save_all(&mut self, _: &SaveAll, window: &mut Window, cx: &mut Context<Self>) {
         let dirty = self.dirty_tabs();
         cx.spawn_in(window, async move |this, cx| {
-            for id in dirty {
-                let Ok(save) = this.update_in(cx, |this, window, cx| {
-                    if let Some(ix) = this.tab_index(id) {
-                        this.activate_tab(ix, window, cx);
-                    }
-                    this.save_tab(id, window, cx)
-                }) else {
-                    return;
-                };
-                if !save.await {
-                    return;
-                }
-            }
+            visit_tabs(&this, dirty, Self::save_tab, cx).await;
         })
         .detach();
     }
@@ -160,11 +159,7 @@ impl Jot {
         };
         let current = self.tabs[ix].path.clone();
         let format = self.tabs[ix].format;
-        let suggested = current
-            .as_deref()
-            .and_then(Path::file_name)
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| UNTITLED_FILE_NAME.into());
+        let suggested = file_name(current.as_deref()).unwrap_or_else(|| UNTITLED_FILE_NAME.into());
         let target = gpui_windows::prompt_for_save_path(
             self.hwnd,
             cx.foreground_executor(),
@@ -219,17 +214,19 @@ impl Jot {
         let tab = &self.tabs[ix];
         let id = tab.editor.entity_id();
         let text = tab.editor.read(cx).text().to_string();
-        let encoded = document::encode(&text, format);
+        let encoded = match document::encode(text, format) {
+            Ok(encoded) => encoded,
+            Err(error) => {
+                self.show_save_error(&path, &error, window, cx);
+                return Task::ready(false);
+            }
+        };
         if !encoded.lossy {
             return Task::ready(self.commit_tab(ix, path, format, &encoded.bytes, window, cx));
         }
         let answer = self.prompt(
             APP_NAME,
-            format!(
-                "{}
-{LOSSY_ANSI_WARNING}",
-                path.display()
-            ),
+            format!("{}\n{LOSSY_ANSI_WARNING}", path.display()),
             &["OK", "Cancel"],
             window,
             cx,
@@ -271,8 +268,7 @@ impl Jot {
                 true
             }
             Err(error) => {
-                let title = format!("Can't save {}", display_name(Some(&path)));
-                self.show_error(title, error.to_string(), window, cx);
+                self.show_save_error(&path, &error, window, cx);
                 false
             }
         }
@@ -308,11 +304,10 @@ impl Jot {
         let Some(ix) = self.tab_index(id) else {
             return Task::ready(true);
         };
-        let name = self.tabs[ix]
-            .path
-            .as_deref()
-            .map(|path| display_name(Some(path)))
-            .unwrap_or_else(|| UNTITLED_FILE_NAME.into());
+        let name = self.tabs[ix].path.as_deref().map_or_else(
+            || UNTITLED_FILE_NAME.into(),
+            |path| display_name(Some(path)),
+        );
         let answer = self.prompt(
             APP_NAME,
             format!("Do you want to save changes to {name}?"),
@@ -343,26 +338,37 @@ impl Jot {
             return true;
         }
         cx.spawn_in(window, async move |this, cx| {
-            for id in dirty {
-                let Ok(confirm) = this.update_in(cx, |this, window, cx| {
-                    if let Some(ix) = this.tab_index(id) {
-                        this.activate_tab(ix, window, cx);
-                    }
-                    this.confirm_discard(id, window, cx)
-                }) else {
-                    return;
-                };
-                if !confirm.await {
-                    return;
-                }
+            if visit_tabs(&this, dirty, Self::confirm_discard, cx).await {
+                this.update_in(cx, |this, window, _| {
+                    this.close_confirmed = true;
+                    window.remove_window();
+                })
+                .ok();
             }
-            this.update_in(cx, |this, window, _| {
-                this.close_confirmed = true;
-                window.remove_window();
-            })
-            .ok();
         })
         .detach();
         false
     }
+}
+
+async fn visit_tabs(
+    this: &WeakEntity<Jot>,
+    ids: Vec<EntityId>,
+    step: fn(&mut Jot, EntityId, &mut Window, &mut Context<Jot>) -> Task<bool>,
+    cx: &mut AsyncWindowContext,
+) -> bool {
+    for id in ids {
+        let Ok(task) = this.update_in(cx, |this, window, cx| {
+            if let Some(ix) = this.tab_index(id) {
+                this.activate_tab(ix, window, cx);
+            }
+            step(this, id, window, cx)
+        }) else {
+            return false;
+        };
+        if !task.await {
+            return false;
+        }
+    }
+    true
 }
