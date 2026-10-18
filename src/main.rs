@@ -967,81 +967,80 @@ impl Render for Jot {
 }
 
 fn main() {
-    gpui_kit::application()
-        .run(|cx| {
-            gpui_kit::init(cx);
+    gpui_kit::application().run(|cx| {
+        gpui_kit::init(cx);
 
-            cx.on_window_closed(|cx, _| {
-                if cx
-                    .windows()
-                    .into_iter()
-                    .all(|window| overlay::is_overlay(window, cx))
-                {
-                    cx.quit();
-                }
-            })
-            .detach();
-
-            palette::apply(cx.window_appearance(), cx);
-            cx.set_text_rendering_mode(TextRenderingMode::Grayscale);
-
-            cx.set_global(ViewSettings {
-                status_bar: true,
-                #[cfg(not(feature = "bench"))]
-                word_wrap: true,
-                #[cfg(feature = "bench")]
-                word_wrap: bench::word_wrap(),
-            });
-            cx.bind_keys(key_bindings());
-            cx.bind_keys(menu::key_bindings());
-            cx.bind_keys(dialog::key_bindings());
-            cx.bind_keys(find::key_bindings());
-
-            cx.on_action(|_: &Exit, cx| {
-                for window in cx.windows() {
-                    window
-                        .update(cx, |_, window, cx| {
-                            window.dispatch_action(Box::new(CloseWindow), cx);
-                        })
-                        .ok();
-                }
-            });
-            cx.on_action(|_: &NewWindow, cx| {
-                open_jot_window(None, None, cx);
-            });
-            cx.on_action(|_: &ToggleStatusBar, cx| {
-                cx.update_global::<ViewSettings, _>(|view, _| view.status_bar = !view.status_bar);
-            });
-            cx.on_action(|_: &ToggleTheme, cx| {
-                cx.set_window_appearance(Some(if palette(cx).dark {
-                    WindowAppearance::Light
-                } else {
-                    WindowAppearance::Dark
-                }));
-            });
-            cx.on_action(|_: &ToggleWordWrap, cx| {
-                cx.update_global::<ViewSettings, _>(|view, _| view.word_wrap = !view.word_wrap);
-            });
-
-            let (window, jot) = open_jot_window(None, None, cx);
-            tooltip::prepare(cx);
-            let (flags, mut paths): (Vec<_>, Vec<_>) = std::env::args_os()
-                .skip(1)
-                .map(PathBuf::from)
-                .partition(|arg| arg.as_os_str() == NOTICES_FLAG);
-            if !flags.is_empty() {
-                paths.extend(document::write_notices().ok());
+        cx.on_window_closed(|cx, _| {
+            if cx
+                .windows()
+                .into_iter()
+                .all(|window| overlay::is_overlay(window, cx))
+            {
+                cx.quit();
             }
-            if !paths.is_empty() {
+        })
+        .detach();
+
+        palette::apply(cx.window_appearance(), cx);
+        cx.set_text_rendering_mode(TextRenderingMode::Grayscale);
+
+        cx.set_global(ViewSettings {
+            status_bar: true,
+            #[cfg(not(feature = "bench"))]
+            word_wrap: true,
+            #[cfg(feature = "bench")]
+            word_wrap: bench::word_wrap(),
+        });
+        cx.bind_keys(key_bindings());
+        cx.bind_keys(menu::key_bindings());
+        cx.bind_keys(dialog::key_bindings());
+        cx.bind_keys(find::key_bindings());
+
+        cx.on_action(|_: &Exit, cx| {
+            for window in cx.windows() {
                 window
                     .update(cx, |_, window, cx| {
-                        jot.update(cx, |jot, cx| {
-                            for path in paths {
-                                jot.open_path(path, window, cx);
-                            }
-                        })
+                        window.dispatch_action(Box::new(CloseWindow), cx);
                     })
                     .ok();
             }
         });
+        cx.on_action(|_: &NewWindow, cx| {
+            open_jot_window(None, None, cx);
+        });
+        cx.on_action(|_: &ToggleStatusBar, cx| {
+            cx.update_global::<ViewSettings, _>(|view, _| view.status_bar = !view.status_bar);
+        });
+        cx.on_action(|_: &ToggleTheme, cx| {
+            cx.set_window_appearance(Some(if palette(cx).dark {
+                WindowAppearance::Light
+            } else {
+                WindowAppearance::Dark
+            }));
+        });
+        cx.on_action(|_: &ToggleWordWrap, cx| {
+            cx.update_global::<ViewSettings, _>(|view, _| view.word_wrap = !view.word_wrap);
+        });
+
+        let (window, jot) = open_jot_window(None, None, cx);
+        tooltip::prepare(cx);
+        let (flags, mut paths): (Vec<_>, Vec<_>) = std::env::args_os()
+            .skip(1)
+            .map(PathBuf::from)
+            .partition(|arg| arg.as_os_str() == NOTICES_FLAG);
+        if !flags.is_empty() {
+            paths.extend(document::write_notices().ok());
+        }
+        if !paths.is_empty() {
+            window
+                .update(cx, |_, window, cx| {
+                    jot.update(cx, |jot, cx| {
+                        for path in paths {
+                            jot.open_path(path, window, cx);
+                        }
+                    })
+                })
+                .ok();
+        }
+    });
 }
