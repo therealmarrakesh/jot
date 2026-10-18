@@ -19,6 +19,8 @@ const MAX_UTF8_LEN: usize = 4;
 const MERGE_GAP: usize = 512;
 const CARD_WIDTH: f32 = 860.;
 const CARD_TOP: f32 = 12.;
+const CARD_SHADOW_CLIP_TOP: f32 = 6.;
+const CARD_SHADOW_CLIP_BOTTOM: f32 = 14.;
 const CARD_SIDE_MARGIN: f32 = 12.;
 const CARD_RADIUS: f32 = 8.;
 const CARD_PADDING: f32 = 8.;
@@ -579,10 +581,13 @@ impl Jot {
                 .child(
                     div()
                         .absolute()
-                        .top(px(CARD_TOP))
+                        .top(px(CARD_TOP - CARD_SHADOW_CLIP_TOP))
                         .left_0()
                         .right_0()
-                        .h(px(height))
+                        .h(px(height + CARD_SHADOW_CLIP_TOP + CARD_SHADOW_CLIP_BOTTOM))
+                        .pt(px(CARD_SHADOW_CLIP_TOP))
+                        .pb(px(CARD_SHADOW_CLIP_BOTTOM))
+                        .overflow_hidden()
                         .flex()
                         .items_center()
                         .justify_center()
