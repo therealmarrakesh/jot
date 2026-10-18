@@ -780,7 +780,12 @@ impl Platform for WindowsPlatform {
     }
 
     fn window_appearance(&self) -> WindowAppearance {
-        system_appearance().log_err().unwrap_or_default()
+        app_appearance().log_err().unwrap_or_default()
+    }
+
+    fn set_window_appearance(&self, appearance: Option<WindowAppearance>) {
+        set_appearance_override(appearance);
+        self.post_message(WM_GPUI_APPEARANCE_CHANGED, WPARAM(0), LPARAM(0));
     }
 
     fn open_url(&self, url: &str) {

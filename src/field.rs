@@ -164,6 +164,41 @@ pub(crate) fn button(
         })
 }
 
+pub(crate) fn icon_button(
+    p: Palette,
+    id: &'static str,
+    tip: &'static str,
+    glyph: &'static str,
+    glyph_size: Pixels,
+    size: gpui::Size<Pixels>,
+    radius: Pixels,
+) -> brush::Faded {
+    div()
+        .id(id)
+        .on_hover(move |hovered, _, cx| tooltip::hover(id, 0, tip, *hovered, cx))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .w(size.width)
+        .h(size.height)
+        .rounded(radius)
+        .cursor_default()
+        .font_family("Segoe Fluent Icons")
+        .text_size(glyph_size)
+        .line_height(glyph_size)
+        .text_color(rgba(p.text_primary))
+        .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
+        .child(tooltip::anchor(id))
+        .child(glyph)
+        .fade_bg(Brushes {
+            rest: transparent_black().into(),
+            hover: rgba(p.subtle_secondary),
+            pressed: rgba(p.subtle_tertiary),
+        })
+        .active(move |style| style.text_color(rgba(p.text_secondary)))
+}
+
 pub(crate) fn focus_ring(p: Palette, outset: Edges<f32>, radius: Pixels) -> Div {
     div()
         .absolute()

@@ -632,29 +632,15 @@ impl Jot {
         s: f32,
     ) -> brush::Faded {
         let u = |v: f32| px(v * s);
-        div()
-            .id(id)
-            .on_hover(move |hovered, _, cx| tooltip::hover(id, 0, tip, *hovered, cx))
-            .flex_none()
-            .flex()
-            .items_center()
-            .justify_center()
-            .size(u(ICON_BUTTON_SIZE))
-            .rounded(u(CONTROL_RADIUS))
-            .cursor_default()
-            .font_family("Segoe Fluent Icons")
-            .text_size(u(size))
-            .line_height(u(size))
-            .text_color(rgba(p.text_primary))
-            .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
-            .child(tooltip::anchor(id))
-            .child(glyph)
-            .fade_bg(Brushes {
-                rest: transparent_black().into(),
-                hover: rgba(p.subtle_secondary),
-                pressed: rgba(p.subtle_tertiary),
-            })
-            .active(move |style| style.text_color(rgba(p.text_secondary)))
+        field::icon_button(
+            p,
+            id,
+            tip,
+            glyph,
+            u(size),
+            gpui::size(u(ICON_BUTTON_SIZE), u(ICON_BUTTON_SIZE)),
+            u(CONTROL_RADIUS),
+        )
     }
 
     fn find_card(

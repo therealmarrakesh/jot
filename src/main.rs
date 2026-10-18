@@ -190,10 +190,16 @@ gpui_kit::actions!(
         ReplaceNext,
         ReplaceAll,
         ShowContextMenu,
+        ToggleTheme,
     ]
 );
 
 const WINDOW_WIDTH: f32 = 2213.;
+const THEME_BUTTON_WIDTH: f32 = 30.;
+const THEME_BUTTON_RIGHT: f32 = 8.;
+const THEME_GLYPH_SIZE: f32 = 16.;
+const MOON_GLYPH: &str = "\u{E708}";
+const SUN_GLYPH: &str = "\u{E706}";
 const WINDOW_HEIGHT: f32 = 1107.;
 const WINDOW_MAX_SCREEN_SHARE: f32 = 0.9;
 const EDITOR_FONT_SIZE: f32 = 11. * 96. / 72.;
@@ -729,10 +735,31 @@ impl Jot {
             .flex_none()
             .child(
                 div()
+                    .relative()
                     .h(px(32.))
                     .pl(px(4.))
                     .bg(rgba(p.layer))
-                    .child(self.menu_bar.clone()),
+                    .child(self.menu_bar.clone())
+                    .child(
+                        div()
+                            .absolute()
+                            .top_0()
+                            .right(px(THEME_BUTTON_RIGHT))
+                            .child(
+                                field::icon_button(
+                                    p,
+                                    "theme",
+                                    "Switch theme",
+                                    if p.dark { SUN_GLYPH } else { MOON_GLYPH },
+                                    px(THEME_GLYPH_SIZE),
+                                    size(px(THEME_BUTTON_WIDTH), px(32.)),
+                                    px(field::CONTROL_RADIUS),
+                                )
+                                .on_click(|_, window, cx| {
+                                    window.dispatch_action(Box::new(ToggleTheme), cx)
+                                }),
+                            ),
+                    ),
             )
             .child(separator(p))
     }
@@ -971,6 +998,13 @@ fn main() {
             });
             cx.on_action(|_: &ToggleStatusBar, cx| {
                 cx.update_global::<ViewSettings, _>(|view, _| view.status_bar = !view.status_bar);
+            });
+            cx.on_action(|_: &ToggleTheme, cx| {
+                cx.set_window_appearance(Some(if palette(cx).dark {
+                    WindowAppearance::Light
+                } else {
+                    WindowAppearance::Dark
+                }));
             });
             cx.on_action(|_: &ToggleWordWrap, cx| {
                 cx.update_global::<ViewSettings, _>(|view, _| view.word_wrap = !view.word_wrap);

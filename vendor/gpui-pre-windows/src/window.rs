@@ -522,7 +522,7 @@ impl WindowsWindow {
         }
         .or_else(WindowsDisplay::primary_monitor)
         .context("failed to find any monitor")?;
-        let appearance = system_appearance().unwrap_or_default();
+        let appearance = app_appearance().unwrap_or_default();
         let mut context = WindowCreateContext {
             inner: None,
             handle,

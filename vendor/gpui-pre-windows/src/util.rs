@@ -1,4 +1,4 @@
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock, PoisonError};
 
 use anyhow::Context;
 use gpui_util::ResultExt;
@@ -155,9 +155,27 @@ pub(crate) fn logical_point(x: f32, y: f32, scale_factor: f32) -> Point<Pixels> 
     }
 }
 
+static APPEARANCE_OVERRIDE: Mutex<Option<WindowAppearance>> = Mutex::new(None);
+
+pub(crate) fn set_appearance_override(appearance: Option<WindowAppearance>) {
+    *APPEARANCE_OVERRIDE
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner) = appearance;
+}
+
+pub(crate) fn app_appearance() -> Result<WindowAppearance> {
+    match *APPEARANCE_OVERRIDE
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+    {
+        Some(appearance) => Ok(appearance),
+        None => system_appearance(),
+    }
+}
+
 // https://learn.microsoft.com/en-us/windows/apps/desktop/modernize/apply-windows-themes
 #[inline]
-pub(crate) fn system_appearance() -> Result<WindowAppearance> {
+fn system_appearance() -> Result<WindowAppearance> {
     let ui_settings = UISettings::new()?;
     let foreground_color = ui_settings.GetColorValue(UIColorType::Foreground)?;
     // If the foreground is light, then is_color_light will evaluate to true,
