@@ -258,3 +258,85 @@ fn temp_path(path: &Path) -> PathBuf {
     name.push(".jot-save");
     path.with_file_name(name)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{Encoding, Format, LineEnding, encode};
+    use windows_sys::Win32::Globalization::{CP_UTF8, GetACP};
+
+    const TEXT: &str = "Café — £3.50\nNaïve 😀\n";
+
+    fn format(encoding: Encoding, line_ending: LineEnding) -> Format {
+        Format {
+            line_ending,
+            encoding,
+        }
+    }
+
+    fn round_trip(encoding: Encoding) -> String {
+        let bytes = encode(TEXT.into(), format(encoding, LineEnding::Lf))
+            .unwrap()
+            .bytes;
+        let (detected, bom) = Encoding::detect(&bytes);
+        assert_eq!(detected, encoding);
+        detected.decode(bytes[bom..].to_vec()).unwrap()
+    }
+
+    #[test]
+    fn unicode_encodings_round_trip() {
+        for encoding in [
+            Encoding::Utf8,
+            Encoding::Utf8Bom,
+            Encoding::Utf16Le,
+            Encoding::Utf16Be,
+        ] {
+            assert_eq!(round_trip(encoding), TEXT);
+        }
+    }
+
+    #[test]
+    fn byte_order_marks_are_written() {
+        let bytes = |encoding| {
+            encode("a".into(), format(encoding, LineEnding::Lf))
+                .unwrap()
+                .bytes
+        };
+        assert_eq!(bytes(Encoding::Utf8), b"a");
+        assert_eq!(bytes(Encoding::Utf8Bom), b"\xef\xbb\xbfa");
+        assert_eq!(bytes(Encoding::Utf16Le), b"\xff\xfea\x00");
+        assert_eq!(bytes(Encoding::Utf16Be), b"\xfe\xff\x00a");
+    }
+
+    #[test]
+    fn invalid_utf8_without_bom_is_ansi() {
+        assert_eq!(Encoding::detect(b"plain").0, Encoding::Utf8);
+        assert_eq!(Encoding::detect(b"Caf\xe9").0, Encoding::Ansi);
+    }
+
+    #[test]
+    fn odd_utf16_is_undecodable() {
+        assert!(Encoding::Utf16Le.decode(vec![0x41, 0x00, 0x42]).is_none());
+    }
+
+    #[test]
+    fn crlf_is_restored_on_save() {
+        let bytes = encode("a\nb".into(), format(Encoding::Utf8, LineEnding::Crlf))
+            .unwrap()
+            .bytes;
+        assert_eq!(bytes, b"a\r\nb");
+    }
+
+    #[test]
+    fn ansi_flags_characters_it_cannot_hold() {
+        if unsafe { GetACP() } == CP_UTF8 {
+            return;
+        }
+        let ansi = format(Encoding::Ansi, LineEnding::Lf);
+        let fits = encode("Cafe".into(), ansi).unwrap();
+        assert!(!fits.lossy);
+        assert_eq!(fits.bytes, b"Cafe");
+        let lossy = encode("Cafe 😀".into(), ansi).unwrap();
+        assert!(lossy.lossy);
+        assert_eq!(lossy.bytes, b"Cafe ??");
+    }
+}
