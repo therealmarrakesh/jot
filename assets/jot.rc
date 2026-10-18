@@ -12,8 +12,8 @@ FILETYPE 0x1
         {
             VALUE "FileDescription", "Jot"
             VALUE "FileVersion", "{version}"
-            VALUE "InternalName", "jot"
-            VALUE "OriginalFilename", "jot.exe"
+            VALUE "InternalName", "Jot"
+            VALUE "OriginalFilename", "Jot.exe"
             VALUE "ProductName", "Jot"
             VALUE "ProductVersion", "{version}"
         }
