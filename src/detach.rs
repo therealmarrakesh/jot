@@ -171,16 +171,17 @@ fn moved(cx: &mut App) {
         }
         drag.started = true;
     }
-    if in_strip(drag.owner.hwnd, point) {
+    let alone = with_jot(&drag.owner, cx, |jot, _, _| jot.tabs.len() == 1).unwrap_or(true);
+    if !alone && in_strip(drag.owner.hwnd, point) {
         let x = local(drag.owner.hwnd, point).x;
         let (tab, grab, start) = (drag.tab, drag.grab.x, drag.start);
         with_jot(&drag.owner, cx, |jot, _, cx| {
             jot.drag_tab(tab, x, grab, start, cx)
         });
-    } else if let Some(target) = strip_window(point, 0, cx) {
+    } else if !alone && let Some(target) = strip_window(point, 0, cx) {
         attach(&mut drag, target, point, cx);
     } else {
-        detach(&mut drag, point, cx);
+        detach(&mut drag, alone, point, cx);
     }
     cx.set_global(drag);
 }
@@ -258,10 +259,9 @@ fn attach(drag: &mut TabDrag, target: Owner, point: POINT, cx: &mut App) {
     drag.moving = None;
 }
 
-fn detach(drag: &mut TabDrag, point: POINT, cx: &mut App) {
+fn detach(drag: &mut TabDrag, alone: bool, point: POINT, cx: &mut App) {
     let tab = drag.tab;
-    let count = with_jot(&drag.owner, cx, |jot, _, _| jot.tabs.len()).unwrap_or(0);
-    if count > 1 {
+    if !alone {
         let Some((data, size)) = with_jot(&drag.owner, cx, |jot, window, cx| {
             let size = window.window_bounds().get_bounds().size;
             jot.take_tab(tab, window, cx).map(|data| (data, size))
