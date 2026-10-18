@@ -26,7 +26,7 @@ impl Jot {
     }
 
     pub(crate) fn refresh_title(&self, window: &mut Window) {
-        window.set_window_title(&format!("{} - Jot", self.tab_name(self.active)));
+        window.set_window_title(&format!("{} - {APP_NAME}", self.tab_name(self.active)));
     }
 
     pub(crate) fn tab_index(&self, id: EntityId) -> Option<usize> {
@@ -224,7 +224,7 @@ impl Jot {
             return Task::ready(self.commit_tab(ix, path, format, &encoded.bytes, window, cx));
         }
         let answer = self.prompt(
-            "Jot",
+            APP_NAME,
             format!(
                 "{}
 {LOSSY_ANSI_WARNING}",
@@ -314,7 +314,7 @@ impl Jot {
             .map(|path| display_name(Some(path)))
             .unwrap_or_else(|| UNTITLED_FILE_NAME.into());
         let answer = self.prompt(
-            "Jot",
+            APP_NAME,
             format!("Do you want to save changes to {name}?"),
             &["Save", "Don't save", "Cancel"],
             window,

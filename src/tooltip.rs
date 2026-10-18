@@ -1,6 +1,6 @@
 use super::*;
 use std::collections::HashMap;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::Instant;
 use windows_sys::Win32::Foundation::{POINT, RECT};
 use windows_sys::Win32::Graphics::Gdi::{
@@ -36,17 +36,6 @@ const FADE_IN_STORYBOARD: i32 = 4;
 const FADE_OUT_STORYBOARD: i32 = 5;
 const FADE_TARGET: i32 = 1;
 const DEFAULT_FADE: Duration = Duration::from_millis(167);
-const NOISE: &[u8] = include_bytes!("../assets/acrylic-noise.png");
-pub(crate) const NOISE_SIZE: f32 = 256.;
-pub(crate) const NOISE_OPACITY: f32 = 0.02;
-
-pub(crate) fn acrylic_noise() -> Arc<Image> {
-    static IMAGE: OnceLock<Arc<Image>> = OnceLock::new();
-    IMAGE
-        .get_or_init(|| Arc::new(Image::from_bytes(ImageFormat::Png, NOISE.to_vec())))
-        .clone()
-}
-
 #[derive(Clone, Copy)]
 struct Fade {
     delay: Duration,
@@ -200,15 +189,15 @@ impl Render for TooltipView {
                 .rounded(px(field::CONTROL_RADIUS))
                 .border_1()
                 .border_color(rgba(p.flyout_stroke))
-                .shadow(theme_shadow(p, ELEVATION * 2., 1.))
+                .shadow(theme_shadow(p.dark, ELEVATION * 2., 1.))
                 .child(
                     div()
                         .relative()
                         .size_full()
                         .rounded(px(field::CONTROL_RADIUS - BORDER))
                         .overflow_hidden()
-                        .bg(rgb(p.tooltip_fallback))
-                        .child(div().absolute().size_full().bg(rgba(p.tooltip_luminosity)))
+                        .bg(rgb(p.acrylic_fallback))
+                        .child(div().absolute().size_full().bg(rgba(p.acrylic_luminosity)))
                         .children(noise)
                         .child(
                             div()
@@ -218,7 +207,7 @@ impl Render for TooltipView {
                                 .pr(px(PADDING_X))
                                 .pt(px(PADDING_TOP))
                                 .pb(px(PADDING_BOTTOM))
-                                .font_family(UI_FONT)
+                                .font_family(SMALL_FONT)
                                 .text_size(px(FONT_SIZE))
                                 .line_height(px(LINE_HEIGHT))
                                 .text_color(rgba(p.text_primary))
@@ -519,7 +508,7 @@ fn popup(cx: &mut App) -> Option<(Entity<TooltipView>, AnyWindowHandle, isize)> 
 fn measure(text: &SharedString, window: &mut Window) -> (f32, f32) {
     let runs = [TextRun {
         len: text.len(),
-        font: gpui_kit::font(UI_FONT),
+        font: gpui_kit::font(SMALL_FONT),
         color: gpui_kit::black(),
         background_color: None,
         underline: None,

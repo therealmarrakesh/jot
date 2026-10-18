@@ -16,7 +16,8 @@ pub(crate) const HEADER_WIDTH: f32 = 5.;
 const LIST_PAD: f32 = 4.;
 pub(crate) const STRIP_LEFT: f32 = HEADER_WIDTH + LIST_PAD;
 pub(crate) const STRIP_TOP: f32 = 10.;
-const STRIP_RESERVED: f32 = 3. * 46. + 43. + 3. + 32.;
+pub(crate) const CAPTION_WIDTH: f32 = 3. * CAPTION_BUTTON_WIDTH;
+const STRIP_RESERVED: f32 = CAPTION_WIDTH + 43. + NEW_TAB_GAP_SCROLLING + BUTTON_WIDTH;
 const SCROLL_AREA: f32 = 43.;
 const SCROLL_OUTER_PAD: f32 = 8.;
 const SCROLL_INNER_PAD: f32 = 3.;
@@ -303,7 +304,7 @@ fn tab_face(p: Palette, active: bool, trailing: f32, name: impl Into<SharedStrin
         .size_full()
         .pl(px(TAB_LABEL_INSET))
         .pr(px(trailing))
-        .font_family(UI_FONT)
+        .font_family(SMALL_FONT)
         .text_size(px(12.))
         .map(|this| {
             if active {

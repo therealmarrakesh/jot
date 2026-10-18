@@ -62,7 +62,7 @@ struct Press {
 
 pub(crate) struct ScrollChrome {
     bars: [Bar; 2],
-    area: Rc<Cell<Bounds<Pixels>>>,
+    pub(crate) area: Rc<Cell<Bounds<Pixels>>>,
     shown: bool,
     press: Option<Press>,
     last_offset: Option<Point<Pixels>>,
@@ -279,13 +279,6 @@ impl Jot {
         self.scroll.last_offset = Some(offset);
     }
 
-    pub(crate) fn scroll_area(&self) -> impl IntoElement + use<> {
-        let area = self.scroll.area.clone();
-        canvas(move |bounds, _, _| area.set(bounds), |_, _, _, _| {})
-            .absolute()
-            .size_full()
-    }
-
     fn arrow(
         &self,
         axis: Axis,
@@ -432,8 +425,8 @@ impl Jot {
                 fill_breadth,
             ),
         };
-        let noise = tooltip::acrylic_noise();
-        let tiles = (length / tooltip::NOISE_SIZE).ceil() as usize;
+        let noise = acrylic_noise();
+        let tiles = (length / NOISE_SIZE).ceil() as usize;
         let id = match axis {
             Axis::Vertical => "scrollbar-vertical",
             Axis::Horizontal => "scrollbar-horizontal",
@@ -492,15 +485,15 @@ impl Jot {
                         .overflow_hidden()
                         .opacity(chrome)
                         .bg(rgb(p.editor))
-                        .child(div().absolute().size_full().bg(rgba(p.tooltip_luminosity)))
+                        .child(div().absolute().size_full().bg(rgba(p.acrylic_luminosity)))
                         .children((0..tiles).map(|tile| {
-                            let offset = tile as f32 * tooltip::NOISE_SIZE;
+                            let offset = tile as f32 * NOISE_SIZE;
                             img(noise.clone())
                                 .absolute()
                                 .when(axis == Axis::Vertical, |this| this.top(px(offset)))
                                 .when(axis == Axis::Horizontal, |this| this.left(px(offset)))
-                                .size(px(tooltip::NOISE_SIZE))
-                                .opacity(tooltip::NOISE_OPACITY)
+                                .size(px(NOISE_SIZE))
+                                .opacity(NOISE_OPACITY)
                         })),
                 )
                 .child(self.arrow(axis, Part::Decrease, chrome, length, cx))

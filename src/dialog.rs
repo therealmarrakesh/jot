@@ -158,7 +158,7 @@ impl Jot {
     }
 
     fn show_go_to(&mut self, line: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
-        self.accent = field::accent_color(palette(cx));
+        self.accent = accent_color(cx);
         self.dialogs.show(DialogKind::GoTo);
         let input = self.dialogs.line.clone();
         input.update(cx, |input, cx| {
@@ -212,7 +212,7 @@ impl Jot {
         cx: &mut Context<Self>,
     ) -> oneshot::Receiver<usize> {
         let (answer, receiver) = oneshot::channel();
-        self.accent = field::accent_color(palette(cx));
+        self.accent = accent_color(cx);
         self.dialogs.show(DialogKind::Prompt(Prompt {
             title: title.into(),
             message: message.into(),
@@ -355,7 +355,7 @@ impl Jot {
                 }
                 DialogKind::LineOutOfRange => {
                     let message = "The line number is beyond the total number of lines";
-                    let width = text_width(window, message, MENU_FONT, BODY_SIZE);
+                    let width = text_width(window, message, TEXT_FONT, BODY_SIZE);
                     dialog_frame(
                         p,
                         s,
@@ -375,7 +375,7 @@ impl Jot {
                     )
                 }
                 DialogKind::Prompt(prompt) => {
-                    let width = text_width(window, &prompt.message, MENU_FONT, BODY_SIZE)
+                    let width = text_width(window, &prompt.message, TEXT_FONT, BODY_SIZE)
                         .max(text_width(window, &prompt.title, TITLE_FONT, TITLE_SIZE));
                     let count = prompt.buttons.len();
                     let mut buttons: Vec<_> = prompt
@@ -449,14 +449,14 @@ fn dialog_frame(
         .border_1()
         .border_color(rgba(p.surface_stroke))
         .rounded(u(field::OVERLAY_RADIUS))
-        .shadow(theme_shadow(p, DIALOG_Z, s))
+        .shadow(theme_shadow(p.dark, DIALOG_Z, s))
         .child(
             div()
                 .flex()
                 .flex_col()
                 .rounded(u(field::OVERLAY_RADIUS - 1.))
                 .bg(rgb(p.dialog_command))
-                .font_family(MENU_FONT)
+                .font_family(TEXT_FONT)
                 .text_size(u(BODY_SIZE))
                 .text_color(rgba(p.text_primary))
                 .child(dialog_content(p, s, title, body))

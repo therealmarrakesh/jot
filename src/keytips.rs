@@ -56,10 +56,6 @@ struct KeyTips {
 
 impl Global for KeyTips {}
 
-pub(crate) fn round_half_up(value: f32) -> f32 {
-    (value + 0.5).floor()
-}
-
 pub(crate) fn layout(
     window: &Window,
     key: char,

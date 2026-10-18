@@ -451,7 +451,7 @@ impl Jot {
     }
 
     fn open_find(&mut self, replace: bool, window: &mut Window, cx: &mut Context<Self>) {
-        self.accent = field::accent_color(palette(cx));
+        self.accent = accent_color(cx);
         let selected = self.active_editor().read(cx).selected_text().to_string();
         if !selected.is_empty() && !selected.contains('\n') {
             self.find
@@ -621,7 +621,7 @@ impl Jot {
                     .border_1()
                     .border_color(rgba(p.flyout_stroke))
                     .rounded(px(OVERLAY_RADIUS))
-                    .shadow(theme_shadow(p, NOTICE_Z, 1.))
+                    .shadow(theme_shadow(p.dark, NOTICE_Z, 1.))
                     .child(
                         div()
                             .px(px(NOTICE_PADDING_X))
@@ -629,7 +629,7 @@ impl Jot {
                             .pb(px(NOTICE_PADDING_BOTTOM))
                             .rounded(px(OVERLAY_RADIUS - 1.))
                             .bg(rgb(p.notice_fill))
-                            .font_family(MENU_FONT)
+                            .font_family(TEXT_FONT)
                             .text_size(px(BODY_SIZE))
                             .line_height(px(NOTICE_LINE))
                             .text_color(rgba(p.text_primary))
@@ -676,7 +676,7 @@ impl Jot {
             .border_1()
             .border_color(rgba(p.surface_stroke))
             .rounded(px(OVERLAY_RADIUS * scale.x.min(scale.y)))
-            .shadow(theme_shadow(p, CARD_Z, s));
+            .shadow(theme_shadow(p.dark, CARD_Z, s));
         if s < MIN_VISIBLE_SCALE {
             return card;
         }

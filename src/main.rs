@@ -28,7 +28,9 @@ use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use menu::MenuBar;
-use palette::{Palette, palette, theme_shadow};
+use palette::{
+    NOISE_OPACITY, NOISE_SIZE, Palette, Surface, accent_color, acrylic_noise, palette, theme_shadow,
+};
 use std::cell::Cell;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -44,9 +46,11 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     GetCaretBlinkTime, GetCursorPos, SystemParametersInfoW, USER_DEFAULT_SCREEN_DPI,
 };
 
-const UI_FONT: &str = "Segoe UI Variable Small";
-const MENU_FONT: &str = "Segoe UI Variable Text";
+const SMALL_FONT: &str = "Segoe UI Variable Small";
+const TEXT_FONT: &str = "Segoe UI Variable Text";
 const MENU_BAR_HEIGHT: f32 = 32.;
+const CAPTION_BUTTON_WIDTH: f32 = 46.;
+const APP_NAME: &str = "Jot";
 const DECELERATE: Easing = Easing::CubicBezier {
     x1: 0.,
     y1: 0.,
@@ -153,7 +157,7 @@ impl Caption {
             .id(self.id())
             .flex()
             .flex_none()
-            .w(px(46.))
+            .w(px(CAPTION_BUTTON_WIDTH))
             .h(px(30.))
             .items_center()
             .justify_center()
@@ -270,7 +274,7 @@ fn window_options(window_size: Option<gpui_kit::Size<Pixels>>, cx: &App) -> Wind
             cx,
         ))),
         titlebar: Some(TitlebarOptions {
-            title: Some("Jot".into()),
+            title: Some(APP_NAME.into()),
             appears_transparent: true,
             traffic_light_position: None,
         }),
@@ -293,6 +297,10 @@ fn open_jot_window(
 fn caret_blink_period() -> Option<Duration> {
     let millis = unsafe { GetCaretBlinkTime() };
     (millis != 0 && millis != u32::MAX).then(|| Duration::from_millis(millis.into()))
+}
+
+fn round_half_up(value: f32) -> f32 {
+    (value + 0.5).floor()
 }
 
 fn window_hwnd(window: &Window) -> isize {
@@ -501,7 +509,7 @@ impl Jot {
             access_keys,
             cx.observe_window_appearance(window, |this, window, cx| {
                 palette::apply(window.appearance(), cx);
-                this.accent = field::accent_color(palette(cx));
+                this.accent = accent_color(cx);
                 cx.notify();
             }),
             cx.observe_window_activation(window, |this, window, cx| {
@@ -539,7 +547,7 @@ impl Jot {
             menu_bar,
             dialogs,
             find,
-            accent: field::accent_color(palette(cx)),
+            accent: accent_color(cx),
             field_caret: None,
             caret_visible: true,
             caret_key: (0, 0..0, 0),
@@ -755,7 +763,7 @@ impl Jot {
         div()
             .flex()
             .flex_none()
-            .h(px(42.))
+            .h(px(tabs::STRIP_TOP + tabs::TAB_HEIGHT))
             .child(
                 div()
                     .flex_none()
@@ -769,7 +777,7 @@ impl Jot {
                     .flex_none()
                     .child(
                         div()
-                            .h(px(10.))
+                            .h(px(tabs::STRIP_TOP))
                             .window_control_area(WindowControlArea::Drag),
                     )
                     .child(self.tab_strip(cx)),
@@ -867,7 +875,10 @@ impl Jot {
             .bg(rgb(p.editor))
             .on_mouse_move(cx.listener(|this, _, _, cx| this.scroll_activity(cx)))
             .on_hover(cx.listener(|this, _, _, cx| this.scroll_activity(cx)))
-            .child(self.scroll_area())
+            .on_prepaint({
+                let area = self.scroll.area.clone();
+                move |bounds, _, _| area.set(bounds)
+            })
             .child(
                 Textarea::new(self.active_editor())
                     .context_menu(move |menu, window, cx| {
@@ -905,7 +916,7 @@ impl Jot {
                 .items_center()
                 .h(px(31.))
                 .bg(rgba(p.layer))
-                .font_family(UI_FONT)
+                .font_family(SMALL_FONT)
                 .text_size(px(12.))
                 .text_color(rgba(p.text_secondary))
                 .child(div().flex_none().w(px(96.)).pl(px(22.)).child(format!(

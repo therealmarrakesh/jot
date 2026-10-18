@@ -1,14 +1,11 @@
 use super::*;
 use gpui_kit::component::input::{Input, InputState};
-use windows_sys::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_BINARY, RegGetValueW};
 
 pub(crate) const CONTROL_HEIGHT: f32 = 32.;
 pub(crate) const CONTROL_RADIUS: f32 = 4.;
 pub(crate) const OVERLAY_RADIUS: f32 = 8.;
 pub(crate) const BODY_SIZE: f32 = 14.;
 pub(crate) const BODY_LINE: f32 = 18.;
-const DEFAULT_ACCENT: u32 = 0x005fb8;
-const DEFAULT_ACCENT_DARK: u32 = 0x60cdff;
 const ACCENT_TOP_EDGE: f32 = 0x14 as f32 / 255.;
 const ACCENT_HOVER_OPACITY: f32 = 0.9;
 const ACCENT_PRESSED_OPACITY: f32 = 0.8;
@@ -20,51 +17,9 @@ const FIELD_GLYPH_SIZE: f32 = 12.;
 const CLEAR_GLYPH: &str = "\u{E894}";
 const SEARCH_GLYPH: &str = "\u{E721}";
 
-#[derive(Clone, Copy)]
-pub(crate) struct Surface {
-    pub field_fill: u32,
-    pub field_stroke: u32,
-    pub field_bottom: u32,
-    pub button_fill: u32,
-    pub button_hover: u32,
-    pub button_pressed: u32,
-    pub button_stroke: u32,
-    pub button_bottom: u32,
-}
-
 pub(crate) struct FieldStyle {
     pub placeholder: Option<&'static str>,
     pub search_icon: bool,
-}
-
-pub(crate) fn accent_color(p: Palette) -> Rgba {
-    let mut shades = [0u8; 32];
-    let mut len = shades.len() as u32;
-    let status = unsafe {
-        RegGetValueW(
-            HKEY_CURRENT_USER,
-            windows_sys::w!(r"Software\Microsoft\Windows\CurrentVersion\Explorer\Accent"),
-            windows_sys::w!("AccentPalette"),
-            RRF_RT_REG_BINARY,
-            std::ptr::null_mut(),
-            shades.as_mut_ptr().cast(),
-            &mut len,
-        )
-    };
-    let shade = p.accent_shade * 4;
-    if status != 0 || (len as usize) < shade + 3 {
-        return rgb(if p.dark {
-            DEFAULT_ACCENT_DARK
-        } else {
-            DEFAULT_ACCENT
-        });
-    }
-    rgb(u32::from_be_bytes([
-        0,
-        shades[shade],
-        shades[shade + 1],
-        shades[shade + 2],
-    ]))
 }
 
 fn mix(color: Rgba, toward: f32, amount: f32) -> Rgba {
@@ -132,7 +87,7 @@ pub(crate) fn button(
         .active(move |style| style.bg(pressed_bottom))
         .pb(px(1.))
         .cursor_default()
-        .font_family(MENU_FONT)
+        .font_family(TEXT_FONT)
         .text_size(u(BODY_SIZE))
         .child(
             div()
@@ -322,7 +277,7 @@ impl Jot {
                     .py(px(0.))
                     .pl(u(FIELD_PADDING - 1.))
                     .pr(u(trailing))
-                    .font_family(MENU_FONT)
+                    .font_family(TEXT_FONT)
                     .text_size(u(BODY_SIZE))
                     .line_height(u(BODY_LINE + 2.))
                     .text_color(rgba(p.text_primary)),
@@ -336,7 +291,7 @@ impl Jot {
                         .left(u(FIELD_PADDING - 1.))
                         .flex()
                         .items_center()
-                        .font_family(MENU_FONT)
+                        .font_family(TEXT_FONT)
                         .text_size(u(BODY_SIZE))
                         .text_color(rgba(p.text_secondary))
                         .child(placeholder),

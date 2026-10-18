@@ -1,5 +1,24 @@
 use super::*;
-use field::Surface;
+use std::sync::{Arc, OnceLock};
+use windows_sys::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_BINARY, RegGetValueW};
+
+const DEFAULT_ACCENT: u32 = 0x005fb8;
+const DEFAULT_ACCENT_DARK: u32 = 0x60cdff;
+const NOISE: &[u8] = include_bytes!("../assets/acrylic-noise.png");
+pub(crate) const NOISE_SIZE: f32 = 256.;
+pub(crate) const NOISE_OPACITY: f32 = 0.02;
+
+#[derive(Clone, Copy)]
+pub(crate) struct Surface {
+    pub field_fill: u32,
+    pub field_stroke: u32,
+    pub field_bottom: u32,
+    pub button_fill: u32,
+    pub button_hover: u32,
+    pub button_pressed: u32,
+    pub button_stroke: u32,
+    pub button_bottom: u32,
+}
 
 #[derive(Clone, Copy)]
 pub(crate) struct Palette {
@@ -41,8 +60,8 @@ pub(crate) struct Palette {
     pub focus_outer: u32,
     pub focus_inner: u32,
     pub scrollbar_thumb: u32,
-    pub tooltip_fallback: u32,
-    pub tooltip_luminosity: u32,
+    pub acrylic_fallback: u32,
+    pub acrylic_luminosity: u32,
     pub flyout_stroke: u32,
     pub on_accent: u32,
     pub accent_shade: usize,
@@ -117,8 +136,8 @@ pub(crate) const LIGHT: Palette = Palette {
     focus_outer: 0x1a1a1a,
     focus_inner: 0xfbfbfb,
     scrollbar_thumb: 0x00000072,
-    tooltip_fallback: 0xf9f9f9,
-    tooltip_luminosity: 0xfcfcfcd9,
+    acrylic_fallback: 0xf9f9f9,
+    acrylic_luminosity: 0xfcfcfcd9,
     flyout_stroke: 0x0000000f,
     on_accent: 0xffffff,
     accent_shade: 4,
@@ -191,8 +210,8 @@ pub(crate) const DARK: Palette = Palette {
     focus_outer: 0xffffff,
     focus_inner: 0x0a0a0a,
     scrollbar_thumb: 0xffffff8b,
-    tooltip_fallback: 0x2c2c2c,
-    tooltip_luminosity: 0x2c2c2cf5,
+    acrylic_fallback: 0x2c2c2c,
+    acrylic_luminosity: 0x2c2c2cf5,
     flyout_stroke: 0x00000033,
     on_accent: 0x000000,
     accent_shade: 1,
@@ -206,9 +225,9 @@ pub(crate) fn palette(cx: &App) -> Palette {
 const BLUR_RADIUS_PER_SIGMA: f32 = 3.;
 const CASTER_INSET: f32 = 1.;
 
-pub(crate) fn theme_shadow(p: Palette, z: f32, scale: f32) -> Vec<BoxShadow> {
+pub(crate) fn theme_shadow(dark: bool, z: f32, scale: f32) -> Vec<BoxShadow> {
     let elevation = (z / 2.).min(64.);
-    let (ambient, directional) = match (elevation, p.dark) {
+    let (ambient, directional) = match (elevation, dark) {
         (e, _) if e < 2. => (0., 0.),
         (e, false) if e <= 16. => (0., (e / 100. + 0.06).min(0.14)),
         (e, true) if e <= 16. => (0., 0.26),
@@ -258,4 +277,42 @@ pub(crate) fn apply(appearance: WindowAppearance, cx: &mut App) {
     theme.caret = hsla(0., 0., 0., f32::EPSILON);
     theme.tokens.caret = hsla(0., 0., 0., f32::EPSILON).into();
     cx.refresh_windows();
+}
+
+pub(crate) fn accent_color(cx: &App) -> Rgba {
+    let p = palette(cx);
+    let mut shades = [0u8; 32];
+    let mut len = shades.len() as u32;
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            windows_sys::w!(r"Software\Microsoft\Windows\CurrentVersion\Explorer\Accent"),
+            windows_sys::w!("AccentPalette"),
+            RRF_RT_REG_BINARY,
+            std::ptr::null_mut(),
+            shades.as_mut_ptr().cast(),
+            &mut len,
+        )
+    };
+    let shade = p.accent_shade * 4;
+    if status != 0 || (len as usize) < shade + 3 {
+        return rgb(if p.dark {
+            DEFAULT_ACCENT_DARK
+        } else {
+            DEFAULT_ACCENT
+        });
+    }
+    rgb(u32::from_be_bytes([
+        0,
+        shades[shade],
+        shades[shade + 1],
+        shades[shade + 2],
+    ]))
+}
+
+pub(crate) fn acrylic_noise() -> Arc<Image> {
+    static IMAGE: OnceLock<Arc<Image>> = OnceLock::new();
+    IMAGE
+        .get_or_init(|| Arc::new(Image::from_bytes(ImageFormat::Png, NOISE.to_vec())))
+        .clone()
 }

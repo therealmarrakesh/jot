@@ -357,11 +357,11 @@ impl Panel {
             .map(|(entry, shortcut)| {
                 let label = entry
                     .label()
-                    .map_or(0., |label| text_width(window, label, MENU_FONT, LABEL_SIZE));
+                    .map_or(0., |label| text_width(window, label, TEXT_FONT, LABEL_SIZE));
                 let trailing = match (entry, shortcut) {
                     (Entry::Submenu(..), _) => SHORTCUT_GAP + CHEVRON_WIDTH,
                     (_, Some(shortcut)) => {
-                        SHORTCUT_GAP + text_width(window, shortcut, UI_FONT, SHORTCUT_SIZE)
+                        SHORTCUT_GAP + text_width(window, shortcut, SMALL_FONT, SHORTCUT_SIZE)
                     }
                     _ => 0.,
                 };
@@ -925,9 +925,9 @@ impl MenuBar {
                         .mt(px(COMMAND_DIVIDER_TOP))
                         .bg(rgb(p.menu_separator))
                 });
-                let label_width = text_width(window, command.label, UI_FONT, COMMAND_LABEL_SIZE);
+                let label_width = text_width(window, command.label, SMALL_FONT, COMMAND_LABEL_SIZE);
                 let label_left = (face - COMMAND_LABEL_PANEL) / 2.
-                    + keytips::round_half_up((COMMAND_LABEL_PANEL - label_width) / 2.);
+                    + round_half_up((COMMAND_LABEL_PANEL - label_width) / 2.);
                 let button = div()
                     .id(("menu-command", ix))
                     .flex_none()
@@ -966,7 +966,7 @@ impl MenuBar {
                                     .mt(px(COMMAND_LABEL_GAP))
                                     .h(px(COMMAND_LINE))
                                     .line_height(px(COMMAND_LINE))
-                                    .font_family(UI_FONT)
+                                    .font_family(SMALL_FONT)
                                     .text_size(px(COMMAND_LABEL_SIZE))
                                     .child(command.label),
                             )
@@ -1546,7 +1546,7 @@ impl MenuBar {
                             .child(
                                 div()
                                     .flex_1()
-                                    .font_family(MENU_FONT)
+                                    .font_family(TEXT_FONT)
                                     .text_size(px(LABEL_SIZE))
                                     .whitespace_nowrap()
                                     .when_some(label_color, |this, color| {
@@ -1558,7 +1558,7 @@ impl MenuBar {
                                 this.child(
                                     div()
                                         .flex_none()
-                                        .font_family(UI_FONT)
+                                        .font_family(SMALL_FONT)
                                         .text_size(px(SHORTCUT_SIZE))
                                         .whitespace_nowrap()
                                         .text_color(rgba(if enabled {
@@ -1617,7 +1617,7 @@ fn reveal(
         .border_1()
         .border_color(rgba(p.flyout_stroke))
         .rounded(px(field::OVERLAY_RADIUS))
-        .shadow(theme_shadow(p, z, 1.))
+        .shadow(theme_shadow(p.dark, z, 1.))
         .child(
             div()
                 .size_full()
@@ -1734,7 +1734,7 @@ impl Render for MenuBar {
             .flex()
             .h_full()
             .gap(px(BAR_GAP))
-            .font_family(MENU_FONT)
+            .font_family(TEXT_FONT)
             .text_size(px(LABEL_SIZE))
             .text_color(rgba(p.text_primary))
             .on_action(cx.listener(Self::on_up))

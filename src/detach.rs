@@ -1,6 +1,6 @@
 use super::*;
 use std::ffi::c_void;
-use tabs::{STRIP_LEFT, STRIP_TOP, TAB_HEIGHT};
+use tabs::{CAPTION_WIDTH, STRIP_LEFT, STRIP_TOP, TAB_HEIGHT};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, POINT, RECT};
 use windows_sys::Win32::Graphics::Dwm::{
     DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute,
@@ -20,7 +20,6 @@ use windows_sys::core::BOOL;
 
 const DRAG_THRESHOLD: f32 = 10.;
 const DETACH_MAGNETISM: f32 = 15.;
-const CAPTION_WIDTH: f32 = 3. * 46.;
 const CAPTION_HIT: usize = 2;
 const MOVE_POLL: Duration = Duration::from_millis(10);
 const MOVE_LOOP_WAIT: u32 = 50;
