@@ -54,7 +54,7 @@ pub(crate) fn button(
     } = style;
     let u = |v: f32| px(v * s);
     let (fill, hover, pressed, edge, bottom, text) = if accent_style {
-        let backdrop = (p.dialog_command & 0xff) as f32 / 255.;
+        let backdrop = f32::from(p.dialog_command.to_be_bytes()[3]) / 255.;
         (
             accent,
             mix(accent, backdrop, 1. - ACCENT_HOVER_OPACITY),
@@ -241,16 +241,14 @@ impl Jot {
         let u = |v: f32| px(v * s);
         let focused = input.focus_handle(cx).is_focused(window);
         let empty = input.read(cx).text().len() == 0;
-        let id = input.entity_id().as_u64() as usize;
-        let trailing = if style.search_icon {
-            2. * FIELD_GLYPH_WIDTH + FIELD_GLYPH_RIGHT
+        let id = input.entity_id();
+        let (trailing, clear_right) = if style.search_icon {
+            (
+                2. * FIELD_GLYPH_WIDTH + FIELD_GLYPH_RIGHT,
+                FIELD_GLYPH_RIGHT + FIELD_GLYPH_WIDTH - 1.,
+            )
         } else {
-            FIELD_GLYPH_WIDTH + FIELD_GLYPH_RIGHT
-        };
-        let clear_right = if style.search_icon {
-            FIELD_GLYPH_RIGHT + FIELD_GLYPH_WIDTH - 1.
-        } else {
-            FIELD_GLYPH_RIGHT
+            (FIELD_GLYPH_WIDTH + FIELD_GLYPH_RIGHT, FIELD_GLYPH_RIGHT)
         };
         let field = input.clone();
         div()

@@ -1,7 +1,7 @@
 use super::*;
 use gpui_kit::base::{Interpolate, Transition, transition};
 
-const BRUSH_TRANSITION: Duration = Duration::from_millis(83);
+const FADE_DURATION: Duration = Duration::from_millis(83);
 
 #[derive(Clone, Copy)]
 pub(crate) struct Brushes {
@@ -154,11 +154,11 @@ impl Element for Faded {
         let Brush(color) = transition(
             "brush",
             Brush(target),
-            Transition::new(BRUSH_TRANSITION).easing(Easing::Linear),
+            Transition::new(FADE_DURATION).easing(Easing::Linear),
             window,
             cx,
         );
-        self.element.style().background = Some(Hsla::from(color).into());
+        self.element.style().background = Some(color.into());
         self.element.extend([sensor(pointer).into_any_element()]);
         self.element.request_layout(id, inspector_id, window, cx)
     }
