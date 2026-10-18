@@ -204,6 +204,7 @@ pub(crate) fn palette(cx: &App) -> Palette {
 }
 
 const BLUR_RADIUS_PER_SIGMA: f32 = 3.;
+const CASTER_INSET: f32 = 1.;
 
 pub(crate) fn theme_shadow(p: Palette, z: f32, scale: f32) -> Vec<BoxShadow> {
     let elevation = (z / 2.).min(64.);
@@ -221,10 +222,10 @@ pub(crate) fn theme_shadow(p: Palette, z: f32, scale: f32) -> Vec<BoxShadow> {
     .into_iter()
     .filter(|(opacity, ..)| *opacity > 0.)
     .map(|(opacity, blur, y)| BoxShadow {
-        color: hsla(0., 0., 0., opacity),
+        color: hsla(0., 0., 0., (opacity * 255.).floor() / 255.),
         offset: point(px(0.), px(y * scale)),
-        blur_radius: px(blur * scale / BLUR_RADIUS_PER_SIGMA),
-        spread_radius: px(0.),
+        blur_radius: px((blur + CASTER_INSET) * scale / BLUR_RADIUS_PER_SIGMA),
+        spread_radius: px(-CASTER_INSET * scale),
         inset: false,
     })
     .collect()
