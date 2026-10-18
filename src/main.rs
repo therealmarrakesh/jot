@@ -749,30 +749,27 @@ impl Jot {
             .flex_none()
             .child(
                 div()
-                    .relative()
+                    .flex()
                     .h(px(MENU_BAR_HEIGHT))
                     .pl(px(4.))
+                    .pr(px(THEME_BUTTON_RIGHT))
                     .bg(rgba(p.layer))
                     .child(self.menu_bar.clone())
+                    .child(div().flex_1())
                     .child(
-                        div()
-                            .absolute()
-                            .top_0()
-                            .right(px(THEME_BUTTON_RIGHT))
-                            .child(
-                                field::icon_button(
-                                    p,
-                                    "theme",
-                                    "Switch theme",
-                                    if p.dark { SUN_GLYPH } else { MOON_GLYPH },
-                                    px(THEME_GLYPH_SIZE),
-                                    size(px(THEME_BUTTON_WIDTH), px(MENU_BAR_HEIGHT)),
-                                    px(field::CONTROL_RADIUS),
-                                )
-                                .on_click(|_, window, cx| {
-                                    window.dispatch_action(Box::new(ToggleTheme), cx);
-                                }),
-                            ),
+                        field::icon_button(
+                            p,
+                            "theme",
+                            "Switch theme",
+                            if p.dark { SUN_GLYPH } else { MOON_GLYPH },
+                            px(THEME_GLYPH_SIZE),
+                            size(px(THEME_BUTTON_WIDTH), px(MENU_BAR_HEIGHT)),
+                            px(field::CONTROL_RADIUS),
+                        )
+                        .flex_none()
+                        .on_click(|_, window, cx| {
+                            window.dispatch_action(Box::new(ToggleTheme), cx);
+                        }),
                     ),
             )
             .child(separator(p))
