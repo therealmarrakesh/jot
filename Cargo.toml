@@ -1,7 +1,8 @@
 [package]
 name = "jot"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2024"
+publish = false
 
 [dependencies]
 futures = "0.3"
@@ -34,3 +35,8 @@ bench = []
 [patch.crates-io]
 gpui-base = { path = "vendor/gpui-base" }
 gpui-pre-windows = { path = "vendor/gpui-pre-windows" }
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
