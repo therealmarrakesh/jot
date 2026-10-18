@@ -1,11 +1,9 @@
 use super::*;
 use gpui_kit::base::actions::{Cancel, Confirm, SelectDown, SelectLeft, SelectRight, SelectUp};
 use gpui_kit::base::{MotionStatus, Presence, Transition, transition_with_status};
-use windows_sys::Win32::Foundation::{HWND, POINT};
-use windows_sys::Win32::Graphics::Gdi::ClientToScreen;
 use windows_sys::Win32::System::DataExchange::IsClipboardFormatAvailable;
 use windows_sys::Win32::System::Ole::CF_UNICODETEXT;
-use windows_sys::Win32::UI::WindowsAndMessaging::{SPI_GETMENUSHOWDELAY, SystemParametersInfoW};
+use windows_sys::Win32::UI::WindowsAndMessaging::SPI_GETMENUSHOWDELAY;
 
 const CONTEXT: &str = "JotMenu";
 const OPEN_DURATION: Duration = Duration::from_millis(250);
@@ -76,11 +74,11 @@ pub(crate) fn key_bindings() -> Vec<KeyBinding> {
 }
 
 fn open_transition() -> Transition {
-    Transition::new(OPEN_DURATION).ease(cubic_bezier(0., 0., 0., 1.))
+    Transition::new(OPEN_DURATION).easing(DECELERATE)
 }
 
 fn fade_transition() -> Transition {
-    Transition::new(FADE_DURATION).ease(|t| t)
+    Transition::new(FADE_DURATION).easing(Easing::Linear)
 }
 
 pub(crate) type ActionFn = fn() -> Box<dyn Action>;
@@ -421,15 +419,9 @@ fn cycle(
 }
 
 fn menu_show_delay() -> Duration {
-    let mut millis: u32 = 0;
-    let read = unsafe {
-        SystemParametersInfoW(SPI_GETMENUSHOWDELAY, 0, (&mut millis as *mut u32).cast(), 0)
-    };
-    Duration::from_millis(if read != 0 {
-        millis.into()
-    } else {
-        DEFAULT_MENU_SHOW_DELAY_MS
-    })
+    Duration::from_millis(
+        system_u32(SPI_GETMENUSHOWDELAY).map_or(DEFAULT_MENU_SHOW_DELAY_MS, u64::from),
+    )
 }
 
 struct Motion {
@@ -1347,8 +1339,7 @@ impl MenuBar {
     fn sync_key_tips(&self, window: &Window, cx: &mut Context<Self>) {
         let tips = self.key_tips(window);
         let owner = window.window_handle();
-        let mut origin = POINT { x: 0, y: 0 };
-        unsafe { ClientToScreen(detach::hwnd(window) as HWND, &mut origin) };
+        let origin = client_origin(window_hwnd(window));
         let scale = window.scale_factor();
         cx.defer(move |cx| keytips::show(owner, origin, scale, tips, cx));
     }

@@ -287,13 +287,25 @@ impl FindBar {
             return;
         }
         let shown = Presence::new(ElementId::from(("jot-find-show", self.serial)), true)
-            .transition(Transition::new(EXPAND_DURATION).ease(cubic_bezier(0.1, 0.9, 0.2, 1.)))
+            .transition(
+                Transition::new(EXPAND_DURATION).easing(Easing::CubicBezier {
+                    x1: 0.1,
+                    y1: 0.9,
+                    x2: 0.2,
+                    y2: 1.,
+                }),
+            )
             .sample(window, cx)
             .progress;
         let hidden = transition_with_status(
             ElementId::from(("jot-find-hide", self.serial)),
             if self.closing { 1. } else { 0. },
-            Transition::new(CONTRACT_DURATION).ease(cubic_bezier(0.7, 0., 1., 0.5)),
+            Transition::new(CONTRACT_DURATION).easing(Easing::CubicBezier {
+                x1: 0.7,
+                y1: 0.,
+                x2: 1.,
+                y2: 0.5,
+            }),
             window,
             cx,
         );

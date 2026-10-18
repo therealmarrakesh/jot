@@ -34,10 +34,9 @@ type SetCompositionAttribute =
     unsafe extern "system" fn(hwnd: HWND, data: *mut CompositionAttribute) -> i32;
 
 pub(crate) fn clear_backdrop(hwnd: isize) {
-    let module: Vec<u16> = "user32.dll".encode_utf16().chain(Some(0)).collect();
     let Some(address) = (unsafe {
         GetProcAddress(
-            GetModuleHandleW(module.as_ptr()),
+            GetModuleHandleW(windows_sys::w!("user32.dll")),
             c"SetWindowCompositionAttribute".as_ptr().cast(),
         )
     }) else {
@@ -52,7 +51,7 @@ pub(crate) fn clear_backdrop(hwnd: isize) {
     };
     let mut data = CompositionAttribute {
         attribute: ACCENT_POLICY,
-        data: (&mut policy as *mut AccentPolicy).cast(),
+        data: (&raw mut policy).cast(),
         size: size_of::<AccentPolicy>(),
     };
     unsafe { set(hwnd as HWND, &mut data) };
@@ -108,7 +107,7 @@ pub(crate) fn open<V: Render>(
     let handle = cx
         .open_window(options, |window, cx| {
             let view = cx.new(build);
-            created = Some((view.clone(), detach::hwnd(window)));
+            created = Some((view.clone(), window_hwnd(window)));
             view
         })
         .ok()?;
@@ -118,7 +117,7 @@ pub(crate) fn open<V: Render>(
         DwmSetWindowAttribute(
             window,
             attribute as u32,
-            (&value as *const u32).cast(),
+            (&raw const value).cast(),
             size_of::<u32>() as u32,
         )
     };

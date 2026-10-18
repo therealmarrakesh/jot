@@ -19,6 +19,7 @@ mod tooltip;
 
 use brush::{Brushes, FadeBackground as _};
 use gpui_kit::Edges;
+use gpui_kit::base::Easing;
 use gpui_kit::base::animation::cubic_bezier;
 use gpui_kit::component::input::{
     self, InputEvent, PrepaintCaretGeometry, Rope, RopeExt as _, Textarea, TextareaState,
@@ -33,16 +34,25 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Duration;
-use windows_sys::Win32::Foundation::SYSTEMTIME;
+use windows_sys::Win32::Foundation::{HWND, POINT, SYSTEMTIME};
 use windows_sys::Win32::Globalization::{
     DATE_SHORTDATE, GetDateFormatEx, GetTimeFormatEx, TIME_NOSECONDS,
 };
+use windows_sys::Win32::Graphics::Gdi::ClientToScreen;
 use windows_sys::Win32::System::SystemInformation::GetLocalTime;
-use windows_sys::Win32::UI::WindowsAndMessaging::GetCaretBlinkTime;
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    GetCaretBlinkTime, GetCursorPos, SystemParametersInfoW, USER_DEFAULT_SCREEN_DPI,
+};
 
 const UI_FONT: &str = "Segoe UI Variable Small";
 const MENU_FONT: &str = "Segoe UI Variable Text";
 const MENU_BAR_HEIGHT: f32 = 32.;
+const DECELERATE: Easing = Easing::CubicBezier {
+    x1: 0.,
+    y1: 0.,
+    x2: 0.,
+    y2: 1.,
+};
 const ICON_FONT: &str = "Segoe Fluent Icons";
 
 const CLOSE_HOVER: u32 = 0xc42b1cff;
@@ -285,8 +295,32 @@ fn caret_blink_period() -> Option<Duration> {
     (millis != 0 && millis != u32::MAX).then(|| Duration::from_millis(millis.into()))
 }
 
+fn window_hwnd(window: &Window) -> isize {
+    match raw_window_handle::HasWindowHandle::window_handle(window).map(|handle| handle.as_raw()) {
+        Ok(raw_window_handle::RawWindowHandle::Win32(handle)) => handle.hwnd.get(),
+        _ => 0,
+    }
+}
+
+fn cursor() -> POINT {
+    let mut point = POINT::default();
+    unsafe { GetCursorPos(&mut point) };
+    point
+}
+
+fn client_origin(hwnd: isize) -> POINT {
+    let mut origin = POINT::default();
+    unsafe { ClientToScreen(hwnd as HWND, &mut origin) };
+    origin
+}
+
+fn system_u32(action: u32) -> Option<u32> {
+    let mut value = 0u32;
+    (unsafe { SystemParametersInfoW(action, 0, (&raw mut value).cast(), 0) } != 0).then_some(value)
+}
+
 fn time_date() -> String {
-    let mut now: SYSTEMTIME = unsafe { std::mem::zeroed() };
+    let mut now = SYSTEMTIME::default();
     let mut time = [0u16; 128];
     let mut date = [0u16; 128];
     let (time_len, date_len) = unsafe {
@@ -500,7 +534,7 @@ impl Jot {
             hovered_tab: None,
             strip: tabs::TabStrip::new(),
             scroll: scrollbar::ScrollChrome::new(),
-            hwnd: detach::hwnd(window),
+            hwnd: window_hwnd(window),
             close_confirmed: false,
             menu_bar,
             dialogs,

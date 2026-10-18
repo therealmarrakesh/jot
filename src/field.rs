@@ -40,16 +40,11 @@ pub(crate) struct FieldStyle {
 pub(crate) fn accent_color(p: Palette) -> Rgba {
     let mut shades = [0u8; 32];
     let mut len = shades.len() as u32;
-    let key: Vec<u16> = r"Software\Microsoft\Windows\CurrentVersion\Explorer\Accent"
-        .encode_utf16()
-        .chain(Some(0))
-        .collect();
-    let value: Vec<u16> = "AccentPalette".encode_utf16().chain(Some(0)).collect();
     let status = unsafe {
         RegGetValueW(
             HKEY_CURRENT_USER,
-            key.as_ptr(),
-            value.as_ptr(),
+            windows_sys::w!(r"Software\Microsoft\Windows\CurrentVersion\Explorer\Accent"),
+            windows_sys::w!("AccentPalette"),
             RRF_RT_REG_BINARY,
             std::ptr::null_mut(),
             shades.as_mut_ptr().cast(),

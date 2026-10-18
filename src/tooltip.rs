@@ -1,10 +1,10 @@
 use super::*;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
-use windows_sys::Win32::Foundation::{HWND, POINT, RECT};
+use windows_sys::Win32::Foundation::{POINT, RECT};
 use windows_sys::Win32::Graphics::Gdi::{
-    ClientToScreen, GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint,
+    GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint,
 };
 use windows_sys::Win32::UI::Controls::{
     CloseThemeData, GetThemeAnimationProperty, GetThemeAnimationTransform, GetThemeTimingFunction,
@@ -12,9 +12,7 @@ use windows_sys::Win32::UI::Controls::{
     TTFT_CUBIC_BEZIER,
 };
 use windows_sys::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
-use windows_sys::Win32::UI::WindowsAndMessaging::{
-    GetCursorPos, SPI_GETMOUSEHOVERTIME, SystemParametersInfoW,
-};
+use windows_sys::Win32::UI::WindowsAndMessaging::SPI_GETMOUSEHOVERTIME;
 
 const PADDING_X: f32 = 9.;
 const PADDING_TOP: f32 = 6.;
@@ -30,6 +28,8 @@ const SHADOW_TOP: f32 = ELEVATION / 2.;
 const SHADOW_BOTTOM: f32 = ELEVATION * 1.5;
 const POINTER_OFFSET: f32 = 20.;
 const DEFAULT_HOVER_TIME: u32 = 400;
+const SHOW_DELAY_FACTOR: f32 = 2.;
+const RESHOW_DELAY_FACTOR: f32 = 1.5;
 const RESHOW_WINDOW: Duration = Duration::from_millis(200);
 const SAFE_ZONE_CHECK: Duration = Duration::from_secs(1);
 const FADE_IN_STORYBOARD: i32 = 4;
@@ -41,7 +41,7 @@ pub(crate) const NOISE_SIZE: f32 = 256.;
 pub(crate) const NOISE_OPACITY: f32 = 0.02;
 
 pub(crate) fn acrylic_noise() -> Arc<Image> {
-    static IMAGE: std::sync::OnceLock<Arc<Image>> = std::sync::OnceLock::new();
+    static IMAGE: OnceLock<Arc<Image>> = OnceLock::new();
     IMAGE
         .get_or_init(|| Arc::new(Image::from_bytes(ImageFormat::Png, NOISE.to_vec())))
         .clone()
@@ -80,11 +80,9 @@ impl Fade {
 }
 
 fn theme_fade(storyboard: i32) -> Fade {
-    let class: Vec<u16> = "Animations".encode_utf16().chain(Some(0)).collect();
-    let timing_class: Vec<u16> = "timingfunction".encode_utf16().chain(Some(0)).collect();
     unsafe {
-        let theme = OpenThemeData(std::ptr::null_mut(), class.as_ptr());
-        let timing = OpenThemeData(std::ptr::null_mut(), timing_class.as_ptr());
+        let theme = OpenThemeData(std::ptr::null_mut(), windows_sys::w!("Animations"));
+        let timing = OpenThemeData(std::ptr::null_mut(), windows_sys::w!("timingfunction"));
         let mut fade = None;
         let mut count = 0u32;
         let mut written = 0u32;
@@ -93,19 +91,19 @@ fn theme_fade(storyboard: i32) -> Fade {
             storyboard,
             FADE_TARGET,
             TAP_TRANSFORMCOUNT,
-            (&mut count as *mut u32).cast(),
+            (&raw mut count).cast(),
             size_of::<u32>() as u32,
             &mut written,
         ) == 0
         {
             for index in 0..count {
-                let mut transform: TA_TRANSFORM_OPACITY = std::mem::zeroed();
+                let mut transform = TA_TRANSFORM_OPACITY::default();
                 if GetThemeAnimationTransform(
                     theme,
                     storyboard,
                     FADE_TARGET,
                     index,
-                    (&mut transform as *mut TA_TRANSFORM_OPACITY).cast(),
+                    (&raw mut transform).cast(),
                     size_of::<TA_TRANSFORM_OPACITY>() as u32,
                     &mut written,
                 ) != 0
@@ -113,11 +111,11 @@ fn theme_fade(storyboard: i32) -> Fade {
                 {
                     continue;
                 }
-                let mut bezier: TA_CUBIC_BEZIER = std::mem::zeroed();
+                let mut bezier = TA_CUBIC_BEZIER::default();
                 let curve = if GetThemeTimingFunction(
                     timing,
                     transform.header.dwTimingFunctionId as i32,
-                    (&mut bezier as *mut TA_CUBIC_BEZIER).cast(),
+                    (&raw mut bezier).cast(),
                     size_of::<TA_CUBIC_BEZIER>() as u32,
                     &mut written,
                 ) == 0
@@ -264,12 +262,6 @@ struct Tooltips {
 
 impl Global for Tooltips {}
 
-fn cursor() -> POINT {
-    let mut point = POINT { x: 0, y: 0 };
-    unsafe { GetCursorPos(&mut point) };
-    point
-}
-
 pub(crate) fn hover(
     id: impl Into<ElementId>,
     depth: u8,
@@ -341,8 +333,7 @@ pub(crate) fn anchor(id: impl Into<ElementId>) -> impl IntoElement {
                 return;
             }
             let scale = window.scale_factor();
-            let mut origin = POINT { x: 0, y: 0 };
-            unsafe { ClientToScreen(detach::hwnd(window) as HWND, &mut origin) };
+            let origin = client_origin(window_hwnd(window));
             let physical = |v: Pixels| (v.as_f32() * scale).round() as i32;
             let rect = RECT {
                 left: origin.x + physical(bounds.origin.x),
@@ -417,12 +408,12 @@ pub(crate) fn prepare(cx: &mut App) {
 }
 
 fn show_delay(reshow: bool) -> Duration {
-    let mut hover = 0u32;
-    let ok = unsafe {
-        SystemParametersInfoW(SPI_GETMOUSEHOVERTIME, 0, (&mut hover as *mut u32).cast(), 0)
+    let hover = system_u32(SPI_GETMOUSEHOVERTIME).unwrap_or(DEFAULT_HOVER_TIME) as f32;
+    let factor = if reshow {
+        RESHOW_DELAY_FACTOR
+    } else {
+        SHOW_DELAY_FACTOR
     };
-    let hover = if ok == 0 { DEFAULT_HOVER_TIME } else { hover } as f32;
-    let factor = if reshow { 1.5 } else { 2. };
     Duration::from_millis((hover * factor) as u64)
 }
 
@@ -596,13 +587,15 @@ fn show(id: ElementId, text: SharedString, entered: POINT, cx: &mut App) {
         return;
     };
     let monitor = unsafe { MonitorFromPoint(entered, MONITOR_DEFAULTTONEAREST) };
-    let mut info: MONITORINFO = unsafe { std::mem::zeroed() };
-    info.cbSize = size_of::<MONITORINFO>() as u32;
+    let mut info = MONITORINFO {
+        cbSize: size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
     unsafe { GetMonitorInfoW(monitor, &mut info) };
-    let (mut dpi_x, mut dpi_y) = (96u32, 96u32);
+    let (mut dpi_x, mut dpi_y) = (USER_DEFAULT_SCREEN_DPI, USER_DEFAULT_SCREEN_DPI);
     unsafe { GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y) };
-    let scale = dpi_x as f32 / 96.;
-    let work: RECT = info.rcWork;
+    let scale = dpi_x as f32 / USER_DEFAULT_SCREEN_DPI as f32;
+    let work = info.rcWork;
     overlay::place(hwnd, entered.x, entered.y, 1, 1);
     overlay::clear_backdrop(hwnd);
     let Ok((width, height)) = handle.update(cx, |_, window, cx| {

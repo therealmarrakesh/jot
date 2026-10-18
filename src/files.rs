@@ -166,7 +166,7 @@ impl Jot {
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| UNTITLED_FILE_NAME.into());
         let target = gpui_windows::prompt_for_save_path(
-            detach::hwnd(window),
+            self.hwnd,
             cx.foreground_executor(),
             SavePathOptions {
                 title: Some(SAVE_AS_TITLE.into()),

@@ -154,7 +154,7 @@ impl Element for Faded {
         let Brush(color) = transition(
             "brush",
             Brush(target),
-            Transition::new(BRUSH_TRANSITION).ease(|t| t),
+            Transition::new(BRUSH_TRANSITION).easing(Easing::Linear),
             window,
             cx,
         );

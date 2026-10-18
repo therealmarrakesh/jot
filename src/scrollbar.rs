@@ -89,21 +89,16 @@ impl ScrollChrome {
 }
 
 fn auto_hide() -> bool {
-    let key: Vec<u16> = r"Control Panel\Accessibility"
-        .encode_utf16()
-        .chain(Some(0))
-        .collect();
-    let value: Vec<u16> = "DynamicScrollbars".encode_utf16().chain(Some(0)).collect();
     let mut data = 1u32;
     let mut size = size_of::<u32>() as u32;
     let status = unsafe {
         RegGetValueW(
             HKEY_CURRENT_USER,
-            key.as_ptr(),
-            value.as_ptr(),
+            windows_sys::w!(r"Control Panel\Accessibility"),
+            windows_sys::w!("DynamicScrollbars"),
             RRF_RT_REG_DWORD,
             std::ptr::null_mut(),
-            (&mut data as *mut u32).cast(),
+            (&raw mut data).cast(),
             &mut size,
         )
     };
@@ -379,7 +374,7 @@ impl Jot {
             } else {
                 OPACITY_CHANGE
             })
-            .ease(|t| t),
+            .easing(Easing::Linear),
             window,
             cx,
         );
@@ -396,9 +391,7 @@ impl Jot {
         let expansion = transition_with_status(
             ElementId::from(("scrollbar-expansion", axis as usize)),
             target,
-            Transition::new(EXPAND)
-                .delay(delay)
-                .ease(cubic_bezier(0., 0., 0., 1.)),
+            Transition::new(EXPAND).delay(delay).easing(DECELERATE),
             window,
             cx,
         )
@@ -406,7 +399,9 @@ impl Jot {
         let chrome = transition_with_status(
             ElementId::from(("scrollbar-chrome", axis as usize)),
             target,
-            Transition::new(OPACITY_CHANGE).delay(delay).ease(|t| t),
+            Transition::new(OPACITY_CHANGE)
+                .delay(delay)
+                .easing(Easing::Linear),
             window,
             cx,
         )

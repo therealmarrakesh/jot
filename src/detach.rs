@@ -1,23 +1,20 @@
 use super::*;
-use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::ffi::c_void;
 use tabs::{STRIP_LEFT, STRIP_TOP, TAB_HEIGHT};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, POINT, RECT};
 use windows_sys::Win32::Graphics::Dwm::{
     DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute,
 };
-use windows_sys::Win32::Graphics::Gdi::ClientToScreen;
 use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, ReleaseCapture, SetCapture, VK_LBUTTON, VK_RBUTTON,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GUI_INMOVESIZE, GUITHREADINFO, GWL_EXSTYLE, GetClientRect, GetCursorPos,
-    GetGUIThreadInfo, GetSystemMetrics, GetWindowLongW, GetWindowPlacement, GetWindowRect,
-    GetWindowThreadProcessId, IsIconic, IsWindowVisible, IsZoomed, PostMessageW, SC_MOVE,
-    SM_SWAPBUTTON, SW_RESTORE, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SetForegroundWindow,
-    SetWindowPlacement, SetWindowPos, ShowWindow, WINDOWPLACEMENT, WM_CANCELMODE, WM_SYSCOMMAND,
-    WS_EX_TRANSPARENT,
+    EnumWindows, GUI_INMOVESIZE, GUITHREADINFO, GWL_EXSTYLE, GetClientRect, GetGUIThreadInfo,
+    GetSystemMetrics, GetWindowLongW, GetWindowPlacement, GetWindowRect, GetWindowThreadProcessId,
+    IsIconic, IsWindowVisible, IsZoomed, PostMessageW, SC_MOVE, SM_SWAPBUTTON, SW_RESTORE,
+    SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SetForegroundWindow, SetWindowPlacement,
+    SetWindowPos, ShowWindow, WINDOWPLACEMENT, WM_CANCELMODE, WM_SYSCOMMAND, WS_EX_TRANSPARENT,
 };
 use windows_sys::core::BOOL;
 
@@ -62,13 +59,6 @@ struct TabDrag {
 }
 
 impl Global for TabDrag {}
-
-pub(crate) fn hwnd(window: &Window) -> isize {
-    match HasWindowHandle::window_handle(window).map(|handle| handle.as_raw()) {
-        Ok(RawWindowHandle::Win32(handle)) => handle.hwnd.get(),
-        _ => 0,
-    }
-}
 
 pub(crate) fn register(owner: Owner, cx: &mut App) {
     let windows = &mut cx.default_global::<JotWindows>().0;
@@ -385,12 +375,6 @@ fn strip_window(point: POINT, exclude: isize, cx: &App) -> Option<Owner> {
         .cloned()
 }
 
-fn cursor() -> POINT {
-    let mut point = POINT { x: 0, y: 0 };
-    unsafe { GetCursorPos(&mut point) };
-    point
-}
-
 fn button_down() -> bool {
     let button = if unsafe { GetSystemMetrics(SM_SWAPBUTTON) } != 0 {
         VK_RBUTTON
@@ -403,14 +387,8 @@ fn button_down() -> bool {
 fn scale(hwnd: isize) -> f32 {
     match unsafe { GetDpiForWindow(hwnd as HWND) } {
         0 => 1.,
-        dpi => dpi as f32 / 96.,
+        dpi => dpi as f32 / USER_DEFAULT_SCREEN_DPI as f32,
     }
-}
-
-fn client_origin(hwnd: isize) -> POINT {
-    let mut origin = POINT { x: 0, y: 0 };
-    unsafe { ClientToScreen(hwnd as HWND, &mut origin) };
-    origin
 }
 
 fn local(hwnd: isize, point: POINT) -> Point<f32> {
@@ -423,12 +401,7 @@ fn local(hwnd: isize, point: POINT) -> Point<f32> {
 }
 
 fn in_strip(hwnd: isize, point: POINT) -> bool {
-    let mut client = RECT {
-        left: 0,
-        top: 0,
-        right: 0,
-        bottom: 0,
-    };
+    let mut client = RECT::default();
     unsafe { GetClientRect(hwnd as HWND, &mut client) };
     let width = client.right as f32 / scale(hwnd);
     let position = local(hwnd, point);
@@ -441,12 +414,7 @@ fn in_strip(hwnd: isize, point: POINT) -> bool {
 fn place(hwnd: isize, point: POINT, offset: Point<f32>) {
     let scale = scale(hwnd);
     let origin = client_origin(hwnd);
-    let mut frame = RECT {
-        left: 0,
-        top: 0,
-        right: 0,
-        bottom: 0,
-    };
+    let mut frame = RECT::default();
     unsafe { GetWindowRect(hwnd as HWND, &mut frame) };
     let x = point.x - (offset.x * scale).round() as i32 - (origin.x - frame.left);
     let y = point.y - (offset.y * scale).round() as i32 - (origin.y - frame.top);
@@ -464,8 +432,10 @@ fn place(hwnd: isize, point: POINT, offset: Point<f32>) {
 }
 
 fn placement(hwnd: isize) -> Option<WINDOWPLACEMENT> {
-    let mut placement: WINDOWPLACEMENT = unsafe { std::mem::zeroed() };
-    placement.length = size_of::<WINDOWPLACEMENT>() as u32;
+    let mut placement = WINDOWPLACEMENT {
+        length: size_of::<WINDOWPLACEMENT>() as u32,
+        ..Default::default()
+    };
     (unsafe { GetWindowPlacement(hwnd as HWND, &mut placement) } != 0).then_some(placement)
 }
 
@@ -503,7 +473,7 @@ fn shown(hwnd: HWND) -> bool {
             && (DwmGetWindowAttribute(
                 hwnd,
                 DWMWA_CLOAKED as _,
-                (&mut cloaked as *mut u32).cast::<c_void>(),
+                (&raw mut cloaked).cast::<c_void>(),
                 size_of::<u32>() as u32,
             ) != 0
                 || cloaked == 0)
@@ -511,17 +481,12 @@ fn shown(hwnd: HWND) -> bool {
 }
 
 fn frame(hwnd: HWND) -> RECT {
-    let mut frame = RECT {
-        left: 0,
-        top: 0,
-        right: 0,
-        bottom: 0,
-    };
+    let mut frame = RECT::default();
     let status = unsafe {
         DwmGetWindowAttribute(
             hwnd,
             DWMWA_EXTENDED_FRAME_BOUNDS as _,
-            (&mut frame as *mut RECT).cast::<c_void>(),
+            (&raw mut frame).cast::<c_void>(),
             size_of::<RECT>() as u32,
         )
     };
@@ -555,6 +520,6 @@ fn window_at(point: POINT, exclude: isize) -> isize {
         exclude,
         found: 0,
     };
-    unsafe { EnumWindows(Some(visit), (&mut search as *mut Search) as LPARAM) };
+    unsafe { EnumWindows(Some(visit), (&raw mut search) as LPARAM) };
     search.found
 }

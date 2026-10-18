@@ -58,24 +58,24 @@ pub(crate) struct OpenDialog {
 impl OpenDialog {
     fn sample(&mut self, window: &mut Window, cx: &mut App) -> bool {
         let shown = Presence::new(ElementId::from(("jot-dialog-show", self.serial)), true)
-            .transition(Transition::new(SHOW_DURATION).ease(cubic_bezier(0., 0., 0., 1.)))
+            .transition(Transition::new(SHOW_DURATION).easing(DECELERATE))
             .sample(window, cx)
             .progress;
         let faded_in = Presence::new(ElementId::from(("jot-dialog-fade-in", self.serial)), true)
-            .transition(Transition::new(FADE_DURATION).ease(|t| t))
+            .transition(Transition::new(FADE_DURATION).easing(Easing::Linear))
             .sample(window, cx)
             .progress;
         let hidden = transition_with_status(
             ElementId::from(("jot-dialog-hide", self.serial)),
             if self.closing { 1. } else { 0. },
-            Transition::new(HIDE_DURATION).ease(cubic_bezier(0., 0., 0., 1.)),
+            Transition::new(HIDE_DURATION).easing(DECELERATE),
             window,
             cx,
         );
         let fade_out = transition_with_status(
             ElementId::from(("jot-dialog-fade-out", self.serial)),
             if self.closing { 0. } else { 1. },
-            Transition::new(FADE_DURATION).ease(|t| t),
+            Transition::new(FADE_DURATION).easing(Easing::Linear),
             window,
             cx,
         );
