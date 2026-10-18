@@ -21,6 +21,32 @@ pub(crate) enum LineEnding {
     #[default]
     Crlf,
     Lf,
+    Cr,
+}
+
+impl LineEnding {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Crlf => "Windows (CRLF)",
+            Self::Lf => "Unix (LF)",
+            Self::Cr => "Macintosh (CR)",
+        }
+    }
+
+    fn split(text: String) -> (String, Self) {
+        let line_ending = match text.find(['\r', '\n']) {
+            Some(ix) if text[ix..].starts_with("\r\n") => Self::Crlf,
+            Some(ix) if text[ix..].starts_with('\r') => Self::Cr,
+            Some(_) => Self::Lf,
+            None => Self::Crlf,
+        };
+        let text = if text.contains('\r') {
+            text.replace("\r\n", "\n").replace('\r', "\n")
+        } else {
+            text
+        };
+        (text, line_ending)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -131,13 +157,7 @@ pub(crate) fn load(path: &Path) -> Result<Loaded, LoadError> {
     let (encoding, bom) = Encoding::detect(&bytes);
     bytes.drain(..bom);
     let text = encoding.decode(bytes).ok_or(LoadError::Undecodable)?;
-    let (text, line_ending) = if text.contains("\r\n") {
-        (text.replace("\r\n", "\n"), LineEnding::Crlf)
-    } else if text.contains('\n') {
-        (text, LineEnding::Lf)
-    } else {
-        (text, LineEnding::Crlf)
-    };
+    let (text, line_ending) = LineEnding::split(text);
     Ok(Loaded {
         text,
         format: Format {
@@ -150,6 +170,7 @@ pub(crate) fn load(path: &Path) -> Result<Loaded, LoadError> {
 pub(crate) fn encode(text: String, format: Format) -> io::Result<Encoded> {
     let body = match format.line_ending {
         LineEnding::Crlf => text.replace('\n', "\r\n"),
+        LineEnding::Cr => text.replace('\n', "\r"),
         LineEnding::Lf => text,
     };
     format.encoding.encode(body)
@@ -353,11 +374,24 @@ mod tests {
     }
 
     #[test]
-    fn crlf_is_restored_on_save() {
-        let bytes = encode("a\nb".into(), format(Encoding::Utf8, LineEnding::Crlf))
-            .unwrap()
-            .bytes;
-        assert_eq!(bytes, b"a\r\nb");
+    fn line_endings_are_restored_on_save() {
+        let bytes = |line_ending| {
+            encode("a\nb".into(), format(Encoding::Utf8, line_ending))
+                .unwrap()
+                .bytes
+        };
+        assert_eq!(bytes(LineEnding::Crlf), b"a\r\nb");
+        assert_eq!(bytes(LineEnding::Lf), b"a\nb");
+        assert_eq!(bytes(LineEnding::Cr), b"a\rb");
+    }
+
+    #[test]
+    fn first_line_ending_decides_and_all_are_normalized() {
+        let split = |text: &str| LineEnding::split(text.into());
+        assert_eq!(split("a\nb\r\nc\rd"), ("a\nb\nc\nd".into(), LineEnding::Lf));
+        assert_eq!(split("a\r\nb\nc"), ("a\nb\nc".into(), LineEnding::Crlf));
+        assert_eq!(split("a\rb\r\nc"), ("a\nb\nc".into(), LineEnding::Cr));
+        assert_eq!(split("a"), ("a".into(), LineEnding::Crlf));
     }
 
     #[test]

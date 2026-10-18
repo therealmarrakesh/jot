@@ -2955,7 +2955,7 @@ impl<M: InputModeKind> InputBaseState<M> {
             return;
         };
         if new_text.contains('\r') {
-            new_text = new_text.replace("\r\n", "\n");
+            new_text = new_text.replace("\r\n", "\n").replace('\r', "\n");
         }
         // A paste is one atomic edit, never part of a typing run.
         self.undo_manager.set_pending_intent(EditIntent::Atomic);

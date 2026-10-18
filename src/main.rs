@@ -879,6 +879,8 @@ impl Jot {
                 .child(div().flex_1())
                 .child(format!("{}%", (self.zoom() * 100.).round()))
                 .child(status_divider(p))
+                .child(self.tabs[self.active].format.line_ending.label())
+                .child(status_divider(p))
                 .child(self.tabs[self.active].format.encoding.label()),
         )
     }
