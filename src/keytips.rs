@@ -66,21 +66,7 @@ pub(crate) fn layout(
     anchor: Bounds<Pixels>,
     placement: Placement,
 ) -> KeyTip {
-    let text = key.to_string();
-    let run = TextRun {
-        len: text.len(),
-        font: font(FONT),
-        color: gpui_kit::black(),
-        background_color: None,
-        underline: None,
-        strikethrough: None,
-    };
-    let width = window
-        .text_system()
-        .shape_line(text.into(), px(FONT_SIZE), &[run], None)
-        .width
-        .as_f32()
-        .ceil();
+    let width = text_width(window, &key.to_string(), FONT, FONT_SIZE);
     let fill = size(width + 2. * PADDING, LINE_HEIGHT + 2. * PADDING);
     let (outer_width, outer_height) = (fill.width + 2. * MARGIN, fill.height + 2. * MARGIN);
     let (x, y) = match placement {

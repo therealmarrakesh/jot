@@ -42,6 +42,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::GetCaretBlinkTime;
 
 const UI_FONT: &str = "Segoe UI Variable Small";
 const MENU_FONT: &str = "Segoe UI Variable Text";
+const MENU_BAR_HEIGHT: f32 = 32.;
 const ICON_FONT: &str = "Segoe Fluent Icons";
 
 const CLOSE_HOVER: u32 = 0xc42b1cff;
@@ -340,6 +341,23 @@ fn caret_canvas(
     )
     .absolute()
     .size_full()
+}
+
+pub(crate) fn text_width(window: &Window, text: &str, family: &'static str, size: f32) -> f32 {
+    let run = TextRun {
+        len: text.len(),
+        font: font(family),
+        color: gpui_kit::black(),
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
+    window
+        .text_system()
+        .shape_line(SharedString::new(text), px(size), &[run], None)
+        .width
+        .as_f32()
+        .ceil()
 }
 
 fn caret_origin(geometry: &PrepaintCaretGeometry, window: &Window) -> Point<Pixels> {
@@ -737,7 +755,7 @@ impl Jot {
             .child(
                 div()
                     .relative()
-                    .h(px(32.))
+                    .h(px(MENU_BAR_HEIGHT))
                     .pl(px(4.))
                     .bg(rgba(p.layer))
                     .child(self.menu_bar.clone())
@@ -753,7 +771,7 @@ impl Jot {
                                     "Switch theme",
                                     if p.dark { SUN_GLYPH } else { MOON_GLYPH },
                                     px(THEME_GLYPH_SIZE),
-                                    size(px(THEME_BUTTON_WIDTH), px(32.)),
+                                    size(px(THEME_BUTTON_WIDTH), px(MENU_BAR_HEIGHT)),
                                     px(field::CONTROL_RADIUS),
                                 )
                                 .on_click(|_, window, cx| {
@@ -791,9 +809,8 @@ impl Jot {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let (commands, entries) = menu::context_menu(self.active_editor().read(cx));
         self.menu_bar.update(cx, |menu_bar, cx| {
-            menu_bar.open_context_menu(commands, entries, position, window, cx)
+            menu_bar.open_context_menu(position, window, cx);
         });
     }
 

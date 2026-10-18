@@ -307,112 +307,110 @@ impl Jot {
             accent,
             scale: s,
         };
-        let frame = match &dialog.kind {
-            DialogKind::GoTo => {
-                let body = div()
-                    .child(
-                        div()
-                            .h(px(BODY_LINE * s))
-                            .mb(px(HEADER_GAP * s))
-                            .relative()
-                            .top(px(-1.))
-                            .line_height(px(BODY_LINE * s))
-                            .child("Line number"),
-                    )
-                    .child(self.text_field(
-                        &self.dialogs.line,
-                        FieldStyle {
-                            placeholder: None,
-                            search_icon: false,
-                        },
-                        p.content_surface,
+        let frame =
+            match &dialog.kind {
+                DialogKind::GoTo => {
+                    let body = div()
+                        .child(
+                            div()
+                                .h(px(BODY_LINE * s))
+                                .mb(px(HEADER_GAP * s))
+                                .relative()
+                                .top(px(-1.))
+                                .line_height(px(BODY_LINE * s))
+                                .child("Line number"),
+                        )
+                        .child(self.text_field(
+                            &self.dialogs.line,
+                            FieldStyle {
+                                placeholder: None,
+                                search_icon: false,
+                            },
+                            p.content_surface,
+                            s,
+                            window,
+                            cx,
+                        ));
+                    dialog_frame(
+                        p,
                         s,
-                        window,
-                        cx,
-                    ));
-                dialog_frame(
-                    p,
-                    s,
-                    GO_TO_WIDTH,
-                    "Go to line".into(),
-                    body,
-                    vec![
-                        Some(
-                            field::button(p, buttons, "dialog-go-to", "Go to", true, false)
-                                .on_click(
-                                    cx.listener(|this, _, window, cx| {
+                        GO_TO_WIDTH,
+                        "Go to line".into(),
+                        body,
+                        vec![
+                            Some(
+                                field::button(p, buttons, "dialog-go-to", "Go to", true, false)
+                                    .on_click(cx.listener(|this, _, window, cx| {
                                         this.submit_go_to(window, cx)
+                                    })),
+                            ),
+                            Some(
+                                field::button(p, buttons, "dialog-cancel", "Cancel", false, false)
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.close_dialogs(window, cx)
+                                    })),
+                            ),
+                        ],
+                    )
+                }
+                DialogKind::LineOutOfRange => {
+                    let message = "The line number is beyond the total number of lines";
+                    let width = text_width(window, message, MENU_FONT, BODY_SIZE);
+                    dialog_frame(
+                        p,
+                        s,
+                        width,
+                        "Go to line".into(),
+                        message_body(message.into(), s),
+                        vec![
+                            None,
+                            Some(
+                                field::button(p, buttons, "dialog-ok", "OK", true, true).on_click(
+                                    cx.listener(|this, _, window, cx| {
+                                        this.show_go_to(None, window, cx)
                                     }),
                                 ),
-                        ),
-                        Some(
-                            field::button(p, buttons, "dialog-cancel", "Cancel", false, false)
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.close_dialogs(window, cx)
-                                })),
-                        ),
-                    ],
-                )
-            }
-            DialogKind::LineOutOfRange => {
-                let message = "The line number is beyond the total number of lines";
-                let width = menu::text_width(window, message, MENU_FONT, BODY_SIZE);
-                dialog_frame(
-                    p,
-                    s,
-                    width,
-                    "Go to line".into(),
-                    message_body(message.into(), s),
-                    vec![
-                        None,
-                        Some(
-                            field::button(p, buttons, "dialog-ok", "OK", true, true).on_click(
-                                cx.listener(|this, _, window, cx| {
-                                    this.show_go_to(None, window, cx)
-                                }),
                             ),
-                        ),
-                    ],
-                )
-            }
-            DialogKind::Prompt(prompt) => {
-                let width = menu::text_width(window, &prompt.message, MENU_FONT, BODY_SIZE).max(
-                    menu::text_width(window, &prompt.title, TITLE_FONT, TITLE_SIZE),
-                );
-                let count = prompt.buttons.len();
-                let mut buttons: Vec<_> = prompt
-                    .buttons
-                    .iter()
-                    .enumerate()
-                    .map(|(ix, label)| {
-                        Some(
-                            field::button(
-                                p,
-                                buttons,
-                                ("dialog-prompt", ix),
-                                label.clone(),
-                                ix == 0,
-                                ix == 0,
-                            )
-                            .on_click(cx.listener(
-                                move |this, _, window, cx| this.answer_prompt(ix, window, cx),
-                            )),
-                        )
-                    })
-                    .collect();
-                if count == 1 {
-                    buttons.insert(0, None);
+                        ],
+                    )
                 }
-                dialog_frame(
-                    p,
-                    s,
-                    width,
-                    prompt.title.clone(),
-                    message_body(prompt.message.clone(), s),
-                    buttons,
-                )
-            }
-        };
+                DialogKind::Prompt(prompt) => {
+                    let width = text_width(window, &prompt.message, MENU_FONT, BODY_SIZE)
+                        .max(text_width(window, &prompt.title, TITLE_FONT, TITLE_SIZE));
+                    let count = prompt.buttons.len();
+                    let mut buttons: Vec<_> = prompt
+                        .buttons
+                        .iter()
+                        .enumerate()
+                        .map(|(ix, label)| {
+                            Some(
+                                field::button(
+                                    p,
+                                    buttons,
+                                    ("dialog-prompt", ix),
+                                    label.clone(),
+                                    ix == 0,
+                                    ix == 0,
+                                )
+                                .on_click(cx.listener(
+                                    move |this, _, window, cx| this.answer_prompt(ix, window, cx),
+                                )),
+                            )
+                        })
+                        .collect();
+                    if count == 1 {
+                        buttons.insert(0, None);
+                    }
+                    dialog_frame(
+                        p,
+                        s,
+                        width,
+                        prompt.title.clone(),
+                        message_body(prompt.message.clone(), s),
+                        buttons,
+                    )
+                }
+            };
         div()
             .absolute()
             .top_0()

@@ -192,11 +192,7 @@ pub(crate) fn icon_button(
         .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
         .child(tooltip::anchor(id))
         .child(glyph)
-        .fade_bg(Brushes {
-            rest: transparent_black().into(),
-            hover: rgba(p.subtle_secondary),
-            pressed: rgba(p.subtle_tertiary),
-        })
+        .fade_bg(Brushes::subtle(p))
         .active(move |style| style.text_color(rgba(p.text_secondary)))
 }
 

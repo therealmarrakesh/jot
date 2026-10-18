@@ -10,6 +10,24 @@ pub(crate) struct Brushes {
     pub pressed: Rgba,
 }
 
+impl Brushes {
+    pub(crate) fn subtle(p: Palette) -> Self {
+        Self {
+            rest: transparent_black().into(),
+            hover: rgba(p.subtle_secondary),
+            pressed: rgba(p.subtle_tertiary),
+        }
+    }
+
+    pub(crate) fn solid(color: Rgba) -> Self {
+        Self {
+            rest: color,
+            hover: color,
+            pressed: color,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Default, PartialEq)]
 struct Pointer {
     hovered: bool,

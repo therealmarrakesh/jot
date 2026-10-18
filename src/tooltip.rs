@@ -361,7 +361,7 @@ pub(crate) fn anchor(id: impl Into<ElementId>) -> impl IntoElement {
                 visible.owner = rect;
                 moved
             });
-            tips.anchors.insert(id.clone(), rect);
+            tips.anchors.insert(id, rect);
             if moved {
                 cx.defer(close);
             }

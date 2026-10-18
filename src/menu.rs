@@ -9,7 +9,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{SPI_GETMENUSHOWDELAY, SystemPa
 
 const CONTEXT: &str = "JotMenu";
 const OPEN_DURATION: Duration = Duration::from_millis(250);
-const CLOSE_DURATION: Duration = Duration::from_millis(83);
+const FADE_DURATION: Duration = Duration::from_millis(83);
 const CLOSED_RATIO: f32 = 0.5;
 const MENU_Z: f32 = 32.;
 const SUBMENU_Z: f32 = 40.;
@@ -48,6 +48,14 @@ const LABEL_SIZE: f32 = 14.;
 const SHORTCUT_SIZE: f32 = 12.;
 const GLYPH_SIZE: f32 = 12.;
 const SUBMENU_OVERLAP: f32 = 4.;
+const BORDER: f32 = 1.;
+const BAR_ITEM_PADDING: f32 = 10.;
+const BAR_GAP: f32 = 8.;
+const BAR_AREA: usize = 0;
+const MENU_AREA: usize = 1;
+const SUBMENU_AREA: usize = 2;
+const CHECK_GLYPH: &str = "\u{E73E}";
+const CHEVRON_GLYPH: &str = "\u{E76C}";
 const BAR_FOCUS_OUTSET: Edges<f32> = Edges {
     top: 0.,
     right: 1.,
@@ -55,7 +63,7 @@ const BAR_FOCUS_OUTSET: Edges<f32> = Edges {
     left: 1.,
 };
 
-pub fn key_bindings() -> Vec<KeyBinding> {
+pub(crate) fn key_bindings() -> Vec<KeyBinding> {
     vec![
         KeyBinding::new("up", SelectUp, Some(CONTEXT)),
         KeyBinding::new("down", SelectDown, Some(CONTEXT)),
@@ -71,15 +79,17 @@ fn open_transition() -> Transition {
     Transition::new(OPEN_DURATION).ease(cubic_bezier(0., 0., 0., 1.))
 }
 
-fn close_transition() -> Transition {
-    Transition::new(CLOSE_DURATION).ease(|t| t)
+fn fade_transition() -> Transition {
+    Transition::new(FADE_DURATION).ease(|t| t)
 }
 
-pub(crate) struct CommandButton {
-    pub label: &'static str,
-    pub glyph: &'static str,
-    pub enabled: bool,
-    pub action: fn() -> Box<dyn Action>,
+pub(crate) type ActionFn = fn() -> Box<dyn Action>;
+
+struct CommandButton {
+    label: &'static str,
+    glyph: &'static str,
+    enabled: bool,
+    action: ActionFn,
 }
 
 pub(crate) enum MenuEvent {
@@ -87,7 +97,7 @@ pub(crate) enum MenuEvent {
     Closed,
 }
 
-pub(crate) fn context_menu(editor: &TextareaState) -> (Vec<CommandButton>, Vec<Entry>) {
+fn context_menu(editor: &TextareaState) -> (Vec<CommandButton>, Vec<Entry>) {
     let selection = !editor.selected_range().is_empty();
     let commands = vec![
         CommandButton {
@@ -127,7 +137,7 @@ pub(crate) fn context_menu(editor: &TextareaState) -> (Vec<CommandButton>, Vec<E
     (commands, entries)
 }
 
-pub(crate) fn clipboard_has_text() -> bool {
+fn clipboard_has_text() -> bool {
     unsafe { IsClipboardFormatAvailable(CF_UNICODETEXT.into()) != 0 }
 }
 
@@ -166,16 +176,16 @@ fn access_key(label: &str) -> Option<char> {
 
 #[derive(Clone)]
 pub(crate) enum Entry {
-    Command(&'static str, fn() -> Box<dyn Action>),
-    Disabled(&'static str, fn() -> Box<dyn Action>),
-    Icon(&'static str, &'static str, bool, fn() -> Box<dyn Action>),
-    Toggle(&'static str, bool, fn() -> Box<dyn Action>),
+    Command(&'static str, ActionFn),
+    Disabled(&'static str, ActionFn),
+    Icon(&'static str, &'static str, bool, ActionFn),
+    Toggle(&'static str, bool, ActionFn),
     Submenu(&'static str, Vec<Entry>),
     Separator,
 }
 
 impl Entry {
-    fn command(label: &'static str, enabled: bool, action: fn() -> Box<dyn Action>) -> Self {
+    fn command(label: &'static str, enabled: bool, action: ActionFn) -> Self {
         if enabled {
             Self::Command(label, action)
         } else {
@@ -256,55 +266,59 @@ impl MenuKind {
         Self::ALL.iter().position(|kind| *kind == self).unwrap_or(0)
     }
 
+    fn cycle(self, delta: isize) -> Self {
+        let count = Self::ALL.len() as isize;
+        Self::ALL[(self.index() as isize + delta).rem_euclid(count) as usize]
+    }
+
     fn entries(self, editor: &TextareaState, cx: &App) -> Vec<Entry> {
-        use Entry::*;
         match self {
             Self::File => vec![
-                Command("New tab", || Box::new(NewTab)),
-                Command("New window", || Box::new(NewWindow)),
-                Command("Open", || Box::new(Open)),
-                Command("Save", || Box::new(Save)),
-                Command("Save as", || Box::new(SaveAs)),
-                Command("Save all", || Box::new(SaveAll)),
-                Separator,
-                Command("Close tab", || Box::new(CloseTab)),
-                Command("Close window", || Box::new(CloseWindow)),
-                Command("Exit", || Box::new(Exit)),
+                Entry::Command("New tab", || Box::new(NewTab)),
+                Entry::Command("New window", || Box::new(NewWindow)),
+                Entry::Command("Open", || Box::new(Open)),
+                Entry::Command("Save", || Box::new(Save)),
+                Entry::Command("Save as", || Box::new(SaveAs)),
+                Entry::Command("Save all", || Box::new(SaveAll)),
+                Entry::Separator,
+                Entry::Command("Close tab", || Box::new(CloseTab)),
+                Entry::Command("Close window", || Box::new(CloseWindow)),
+                Entry::Command("Exit", || Box::new(Exit)),
             ],
             Self::Edit => {
                 let selection = !editor.selected_range().is_empty();
                 let clipboard_text = clipboard_has_text();
                 vec![
                     Entry::command("Undo", editor.can_undo(), || Box::new(input::Undo)),
-                    Separator,
+                    Entry::Separator,
                     Entry::command("Cut", selection, || Box::new(input::Cut)),
                     Entry::command("Copy", selection, || Box::new(input::Copy)),
                     Entry::command("Paste", clipboard_text, || Box::new(input::Paste)),
                     Entry::command("Delete", selection, || Box::new(input::Delete)),
-                    Separator,
-                    Command("Find", || Box::new(Find)),
-                    Command("Find next", || Box::new(FindNext)),
-                    Command("Find previous", || Box::new(FindPrevious)),
-                    Command("Replace", || Box::new(Replace)),
-                    Command("Go to", || Box::new(GoTo)),
-                    Separator,
-                    Command("Select all", || Box::new(input::SelectAll)),
-                    Command("Time/Date", || Box::new(TimeDate)),
+                    Entry::Separator,
+                    Entry::Command("Find", || Box::new(Find)),
+                    Entry::Command("Find next", || Box::new(FindNext)),
+                    Entry::Command("Find previous", || Box::new(FindPrevious)),
+                    Entry::Command("Replace", || Box::new(Replace)),
+                    Entry::Command("Go to", || Box::new(GoTo)),
+                    Entry::Separator,
+                    Entry::Command("Select all", || Box::new(input::SelectAll)),
+                    Entry::Command("Time/Date", || Box::new(TimeDate)),
                 ]
             }
             Self::View => {
                 let view = cx.global::<ViewSettings>();
                 vec![
-                    Submenu(
+                    Entry::Submenu(
                         "Zoom",
                         vec![
-                            Command("Zoom in", || Box::new(ZoomIn)),
-                            Command("Zoom out", || Box::new(ZoomOut)),
-                            Command("Restore default zoom", || Box::new(ResetZoom)),
+                            Entry::Command("Zoom in", || Box::new(ZoomIn)),
+                            Entry::Command("Zoom out", || Box::new(ZoomOut)),
+                            Entry::Command("Restore default zoom", || Box::new(ResetZoom)),
                         ],
                     ),
-                    Toggle("Status bar", view.status_bar, || Box::new(ToggleStatusBar)),
-                    Toggle("Word wrap", view.word_wrap, || Box::new(ToggleWordWrap)),
+                    Entry::Toggle("Status bar", view.status_bar, || Box::new(ToggleStatusBar)),
+                    Entry::Toggle("Word wrap", view.word_wrap, || Box::new(ToggleWordWrap)),
                 ]
             }
             Self::Flyout => Vec::new(),
@@ -316,6 +330,7 @@ struct Panel {
     entries: Vec<Entry>,
     shortcuts: Vec<Option<SharedString>>,
     width: f32,
+    checks: bool,
     focused: Option<usize>,
 }
 
@@ -342,14 +357,9 @@ impl Panel {
             .iter()
             .zip(&shortcuts)
             .map(|(entry, shortcut)| {
-                let label = match entry {
-                    Entry::Command(label, _)
-                    | Entry::Disabled(label, _)
-                    | Entry::Icon(label, ..)
-                    | Entry::Toggle(label, ..)
-                    | Entry::Submenu(label, _) => text_width(window, label, MENU_FONT, LABEL_SIZE),
-                    Entry::Separator => 0.,
-                };
+                let label = entry
+                    .label()
+                    .map_or(0., |label| text_width(window, label, MENU_FONT, LABEL_SIZE));
                 let trailing = match (entry, shortcut) {
                     (Entry::Submenu(..), _) => SHORTCUT_GAP + CHEVRON_WIDTH,
                     (_, Some(shortcut)) => {
@@ -361,22 +371,23 @@ impl Panel {
             })
             .fold(0., f32::max);
         let check = if checks { CHECK_COLUMN } else { 0. };
-        let width = (2. * (1. + ROW_INSET + ROW_PADDING) + check + content).ceil();
+        let width = (2. * (BORDER + ROW_INSET + ROW_PADDING) + check + content).ceil();
 
         Self {
             entries,
             shortcuts,
             width: width.max(min_width),
+            checks,
             focused: None,
         }
     }
 
     fn height(&self) -> f32 {
-        2. + 2. * PADDING_Y + self.entries.iter().map(Entry::height).sum::<f32>()
+        2. * (BORDER + PADDING_Y) + self.entries.iter().map(Entry::height).sum::<f32>()
     }
 
     fn row_top(&self, ix: usize) -> f32 {
-        1. + PADDING_Y + self.entries[..ix].iter().map(Entry::height).sum::<f32>()
+        BORDER + PADDING_Y + self.entries[..ix].iter().map(Entry::height).sum::<f32>()
     }
 
     fn find_key(&self, key: char) -> Option<usize> {
@@ -386,20 +397,27 @@ impl Panel {
     }
 
     fn step(&mut self, delta: isize) {
-        let count = self.entries.len() as isize;
-        let mut ix = match self.focused {
-            Some(ix) => ix as isize,
-            None if delta > 0 => -1,
-            None => count,
-        };
-        for _ in 0..count {
-            ix = (ix + delta).rem_euclid(count);
-            if self.entries[ix as usize].selectable() {
-                self.focused = Some(ix as usize);
-                return;
-            }
+        if let Some(ix) = cycle(self.focused, self.entries.len(), delta, |ix| {
+            self.entries[ix].selectable()
+        }) {
+            self.focused = Some(ix);
         }
     }
+}
+
+fn cycle(
+    current: Option<usize>,
+    count: usize,
+    delta: isize,
+    accept: impl Fn(usize) -> bool,
+) -> Option<usize> {
+    let count = count as isize;
+    let mut ix = current.map_or(if delta > 0 { -1 } else { count }, |ix| ix as isize);
+    (0..count).find_map(|_| {
+        ix = (ix + delta).rem_euclid(count);
+        let at = ix as usize;
+        accept(at).then_some(at)
+    })
 }
 
 fn menu_show_delay() -> Duration {
@@ -442,7 +460,7 @@ impl Motion {
         }
         let appear = if self.fade_in {
             Presence::new(ElementId::from(("jot-menu-appear", self.serial)), true)
-                .transition(close_transition())
+                .transition(fade_transition())
                 .sample(window, cx)
                 .progress
         } else {
@@ -451,7 +469,7 @@ impl Motion {
         let fade = transition_with_status(
             ElementId::from(("jot-menu-fade", self.serial)),
             if self.closing { 0. } else { 1. },
-            close_transition(),
+            fade_transition(),
             window,
             cx,
         );
@@ -460,7 +478,7 @@ impl Motion {
     }
 }
 
-struct Submenu {
+struct OpenSubmenu {
     ix: usize,
     panel: Panel,
     motion: Motion,
@@ -473,9 +491,9 @@ struct OpenMenu {
     commands: Vec<CommandButton>,
     return_focus: Option<FocusHandle>,
     panel: Panel,
-    submenu: Option<Submenu>,
+    submenu: Option<OpenSubmenu>,
     motion: Motion,
-    command: Option<usize>,
+    focused_command: Option<usize>,
     focus_visible: bool,
 }
 
@@ -490,45 +508,40 @@ impl OpenMenu {
             panel,
             submenu: None,
             motion: Motion::new(0, false),
-            command: None,
+            focused_command: None,
             focus_visible: false,
         }
     }
 
-    fn in_submenu(&self) -> bool {
+    fn focused_submenu(&self) -> Option<&OpenSubmenu> {
         self.live_submenu()
-            .is_some_and(|submenu| submenu.panel.focused.is_some())
+            .filter(|submenu| submenu.panel.focused.is_some())
+    }
+
+    fn in_submenu(&self) -> bool {
+        self.focused_submenu().is_some()
     }
 
     fn step_linear(&mut self, delta: isize) {
         let commands = self.commands.len();
-        let count = (commands + self.panel.entries.len()) as isize;
-        let current = match (self.command, self.panel.focused) {
-            (Some(ix), _) => ix as isize,
-            (None, Some(ix)) => (commands + ix) as isize,
-            (None, None) if delta > 0 => -1,
-            (None, None) => count,
-        };
-        let mut ix = current;
-        for _ in 0..count {
-            ix = (ix + delta).rem_euclid(count);
-            let at = ix as usize;
+        let current = self
+            .focused_command
+            .or(self.panel.focused.map(|ix| commands + ix));
+        let count = commands + self.panel.entries.len();
+        if let Some(at) = cycle(current, count, delta, |at| {
             if at < commands {
-                if self.commands[at].enabled {
-                    self.command = Some(at);
-                    self.panel.focused = None;
-                    return;
-                }
-            } else if self.panel.entries[at - commands].selectable() {
-                self.command = None;
-                self.panel.focused = Some(at - commands);
-                return;
+                self.commands[at].enabled
+            } else {
+                self.panel.entries[at - commands].selectable()
             }
+        }) {
+            self.focused_command = (at < commands).then_some(at);
+            self.panel.focused = at.checked_sub(commands);
         }
     }
 
     fn step_command(&mut self, delta: isize) {
-        let Some(mut ix) = self.command else {
+        let Some(mut ix) = self.focused_command else {
             return;
         };
         loop {
@@ -538,7 +551,7 @@ impl OpenMenu {
             }
             ix = next as usize;
             if self.commands[ix].enabled {
-                self.command = Some(ix);
+                self.focused_command = Some(ix);
                 return;
             }
         }
@@ -548,11 +561,11 @@ impl OpenMenu {
         self.motion.closing
     }
 
-    fn live_submenu(&self) -> Option<&Submenu> {
+    fn live_submenu(&self) -> Option<&OpenSubmenu> {
         self.submenu.as_ref().filter(|sub| !sub.motion.closing)
     }
 
-    fn live_submenu_mut(&mut self) -> Option<&mut Submenu> {
+    fn live_submenu_mut(&mut self) -> Option<&mut OpenSubmenu> {
         self.submenu.as_mut().filter(|sub| !sub.motion.closing)
     }
 
@@ -574,11 +587,11 @@ enum SubmenuChange {
     Close,
 }
 
-pub struct MenuBar {
-    pub editor: Entity<TextareaState>,
+pub(crate) struct MenuBar {
+    pub(crate) editor: Entity<TextareaState>,
     focus: FocusHandle,
     open: Option<OpenMenu>,
-    serials: usize,
+    serial: usize,
     submenu_timer: Task<()>,
     hit_areas: Rc<Cell<[Bounds<Pixels>; 3]>>,
     trigger_areas: Rc<Cell<[Bounds<Pixels>; 3]>>,
@@ -587,12 +600,12 @@ pub struct MenuBar {
 }
 
 impl MenuBar {
-    pub fn new(editor: Entity<TextareaState>, cx: &mut Context<Self>) -> Self {
+    pub(crate) fn new(editor: Entity<TextareaState>, cx: &mut Context<Self>) -> Self {
         Self {
             editor,
             focus: cx.focus_handle(),
             open: None,
-            serials: 0,
+            serial: 0,
             submenu_timer: Task::ready(()),
             hit_areas: Rc::new(Cell::new([Bounds::default(); 3])),
             trigger_areas: Rc::new(Cell::new([Bounds::default(); 3])),
@@ -601,34 +614,37 @@ impl MenuBar {
         }
     }
 
-    pub fn access_active(&self) -> bool {
+    pub(crate) fn access_active(&self) -> bool {
         self.access
     }
 
-    pub fn pointer_down(&mut self, cx: &mut Context<Self>) {
-        self.bar_focus = None;
+    pub(crate) fn exit_access(&mut self, cx: &mut Context<Self>) {
         if self.access {
             self.access = false;
             cx.notify();
         }
     }
 
-    pub fn key_down(
+    pub(crate) fn pointer_down(&mut self, cx: &mut Context<Self>) {
+        self.bar_focus = None;
+        self.exit_access(cx);
+    }
+
+    pub(crate) fn key_down(
         &mut self,
         keystroke: &Keystroke,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
         let modifiers = keystroke.modifiers;
-        if keystroke.key == "alt" && modifiers == Modifiers::default() {
+        if keystroke.key == "alt" && !modifiers.modified() {
             self.toggle_access(window, cx);
             return true;
         }
-        let key = (keystroke.key.chars().count() == 1)
-            .then(|| keystroke.key.chars().next())
-            .flatten()
-            .filter(char::is_ascii_alphanumeric)
-            .map(|key| key.to_ascii_uppercase());
+        let key = match keystroke.key.as_bytes() {
+            [byte] if byte.is_ascii_alphanumeric() => Some(char::from(byte.to_ascii_uppercase())),
+            _ => None,
+        };
         if !self.access {
             return match key {
                 Some(key) if modifiers.alt && !modifiers.control && !modifiers.platform => {
@@ -643,8 +659,7 @@ impl MenuBar {
                 true
             }
             "up" | "down" | "left" | "right" | "tab" | "space" | "enter" => {
-                self.access = false;
-                cx.notify();
+                self.exit_access(cx);
                 false
             }
             _ => {
@@ -658,11 +673,10 @@ impl MenuBar {
 
     fn toggle_access(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.access {
-            self.access = false;
-            cx.notify();
+            self.exit_access(cx);
             return;
         }
-        match self.open.as_ref().filter(|open| !open.is_closing()) {
+        match self.live_open() {
             Some(open) if open.kind == MenuKind::Flyout => return,
             Some(_) => {}
             None => {
@@ -675,24 +689,23 @@ impl MenuBar {
     }
 
     fn access_back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        match self.live_open() {
-            Some(open) if open.live_submenu().is_some() => {
-                self.close_submenu(cx);
-                if let Some(open) = self.live_open() {
-                    open.panel.focused = open.submenu.as_ref().map(|submenu| submenu.ix);
+        match self.live_open_mut() {
+            Some(open) => match open.live_submenu().map(|submenu| submenu.ix) {
+                Some(ix) => {
+                    open.panel.focused = Some(ix);
+                    self.close_submenu(cx);
                 }
-            }
-            Some(_) => self.close_to_bar(window, cx),
+                None => self.close_to_bar(window, cx),
+            },
             None => {
                 self.access = false;
                 self.leave_bar(window, cx);
             }
         }
-        cx.notify();
     }
 
     fn invoke_access(&mut self, key: char, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        let Some(open) = self.live_open() else {
+        let Some(open) = self.live_open_mut() else {
             let Some(kind) = MenuKind::ALL
                 .into_iter()
                 .find(|kind| kind.access_key() == Some(key))
@@ -706,13 +719,11 @@ impl MenuBar {
         if open.kind == MenuKind::Flyout {
             return false;
         }
-        if open.in_submenu() {
-            let Some(submenu) = open.live_submenu() else {
+        if let Some(submenu) = open.focused_submenu() {
+            let Some(sub) = submenu.panel.find_key(key) else {
                 return false;
             };
-            let (parent, Some(sub)) = (submenu.ix, submenu.panel.find_key(key)) else {
-                return false;
-            };
+            let parent = submenu.ix;
             self.access = false;
             self.activate((parent, Some(sub)), window, cx);
             return true;
@@ -732,7 +743,6 @@ impl MenuBar {
     }
 
     fn open_by_keyboard(&mut self, kind: MenuKind, window: &mut Window, cx: &mut Context<Self>) {
-        self.bar_focus = None;
         self.open_menu(kind, window, cx);
         if let Some(open) = self.open.as_mut() {
             open.panel.step(1);
@@ -741,12 +751,11 @@ impl MenuBar {
     }
 
     fn close_to_bar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(kind) = self.live_open().map(|open| open.kind) else {
+        let Some(open) = self.live_open_mut() else {
             return;
         };
-        if let Some(open) = self.live_open() {
-            open.motion.closing = true;
-        }
+        open.motion.closing = true;
+        let kind = open.kind;
         self.submenu_timer = Task::ready(());
         self.bar_focus = Some(kind);
         self.focus.focus(window, cx);
@@ -767,9 +776,7 @@ impl MenuBar {
 
     fn move_bar_focus(&mut self, delta: isize, cx: &mut Context<Self>) {
         if let Some(kind) = self.bar_focus {
-            let count = MenuKind::ALL.len() as isize;
-            let next = (kind.index() as isize + delta).rem_euclid(count) as usize;
-            self.bar_focus = Some(MenuKind::ALL[next]);
+            self.bar_focus = Some(kind.cycle(delta));
             cx.notify();
         }
     }
@@ -779,15 +786,20 @@ impl MenuBar {
     }
 
     fn next_serial(&mut self) -> usize {
-        self.serials += 1;
-        self.serials
+        self.serial += 1;
+        self.serial
+    }
+
+    fn live_open(&self) -> Option<&OpenMenu> {
+        self.open.as_ref().filter(|open| !open.is_closing())
+    }
+
+    fn live_open_mut(&mut self) -> Option<&mut OpenMenu> {
+        self.open.as_mut().filter(|open| !open.is_closing())
     }
 
     fn open_kind(&self) -> Option<MenuKind> {
-        self.open
-            .as_ref()
-            .filter(|open| !open.is_closing())
-            .map(|open| open.kind)
+        self.live_open().map(|open| open.kind)
     }
 
     fn open_menu(&mut self, kind: MenuKind, window: &mut Window, cx: &mut Context<Self>) {
@@ -796,25 +808,24 @@ impl MenuBar {
         self.show(OpenMenu::new(kind, panel), window, cx);
     }
 
-    pub fn focus_handle(&self) -> &FocusHandle {
+    pub(crate) fn focus_handle(&self) -> &FocusHandle {
         &self.focus
     }
 
-    pub fn open_context_menu(
+    pub(crate) fn open_context_menu(
         &mut self,
-        commands: Vec<CommandButton>,
-        entries: Vec<Entry>,
         anchor: Point<Pixels>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let (commands, entries) = context_menu(self.editor.read(cx));
         let panel = Panel::new(entries, CONTEXT_WIDTH, &self.action_context(cx), window);
-        let command = commands.iter().position(|command| command.enabled);
+        let focused_command = commands.iter().position(|command| command.enabled);
         self.show(
             OpenMenu {
                 anchor: Some(anchor),
                 commands,
-                command,
+                focused_command,
                 focus_visible: window.last_input_was_keyboard(),
                 ..OpenMenu::new(MenuKind::Flyout, panel)
             },
@@ -823,7 +834,7 @@ impl MenuBar {
         );
     }
 
-    pub fn open_flyout_above(
+    pub(crate) fn open_flyout_above(
         &mut self,
         entries: Vec<Entry>,
         target: Bounds<Pixels>,
@@ -860,11 +871,10 @@ impl MenuBar {
 
     fn close_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.access = false;
-        let mut return_focus = None;
-        if let Some(open) = self.open.as_mut().filter(|open| !open.is_closing()) {
+        let return_focus = self.live_open_mut().and_then(|open| {
             open.motion.closing = true;
-            return_focus = open.return_focus.clone();
-        }
+            open.return_focus.take()
+        });
         self.submenu_timer = Task::ready(());
         return_focus
             .unwrap_or_else(|| self.action_context(cx))
@@ -875,47 +885,42 @@ impl MenuBar {
 
     fn run_command(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(command) = self
-            .open
-            .as_ref()
-            .filter(|open| !open.is_closing())
+            .live_open()
             .and_then(|open| open.commands.get(ix))
             .filter(|command| command.enabled)
         else {
             return;
         };
         let action = (command.action)();
+        self.dispatch(action, window, cx);
+    }
+
+    fn dispatch(&mut self, action: Box<dyn Action>, window: &mut Window, cx: &mut Context<Self>) {
         self.close_menu(window, cx);
         let target = self.action_context(cx);
         window.defer(cx, move |window, cx| {
-            target.dispatch_action(action.as_ref(), window, cx)
+            target.dispatch_action(action.as_ref(), window, cx);
         });
     }
 
-    fn command_row(
-        &self,
-        commands: &[CommandButton],
-        width: f32,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) -> Div {
+    fn command_row(open: &OpenMenu, window: &Window, cx: &mut Context<Self>) -> Div {
         let p = palette(cx);
+        let commands = &open.commands;
         let count = commands.len() as f32;
-        let row = width + 2. * COMMAND_OUTSET;
+        let row = open.panel.width + 2. * COMMAND_OUTSET;
         let cell = ((row - (count - 1.)) / count).floor();
-        let ring = self
-            .open
-            .as_ref()
-            .filter(|open| open.focus_visible)
-            .and_then(|open| open.command);
+        let face = cell - 2. * (COMMAND_GAP + COMMAND_INSET);
+        let ring = open.focused_command.filter(|_| open.focus_visible);
         div()
             .absolute()
-            .top(px(1.))
+            .top(px(BORDER))
             .left(px(-COMMAND_OUTSET))
             .w(px(row))
             .h(px(COMMAND_ROW))
             .flex()
             .children(commands.iter().enumerate().flat_map(|(ix, command)| {
-                let color = if command.enabled {
+                let enabled = command.enabled;
+                let color = if enabled {
                     p.text_primary
                 } else {
                     p.text_disabled
@@ -928,9 +933,7 @@ impl MenuBar {
                         .mt(px(COMMAND_DIVIDER_TOP))
                         .bg(rgb(p.menu_separator))
                 });
-                let enabled = command.enabled;
                 let label_width = text_width(window, command.label, UI_FONT, COMMAND_LABEL_SIZE);
-                let face = cell - 2. * (COMMAND_GAP + COMMAND_INSET);
                 let label_left = (face - COMMAND_LABEL_PANEL) / 2.
                     + keytips::round_half_up((COMMAND_LABEL_PANEL - label_width) / 2.);
                 let button = div()
@@ -976,18 +979,9 @@ impl MenuBar {
                                     .child(command.label),
                             )
                             .fade_bg(if enabled {
-                                Brushes {
-                                    rest: transparent_black().into(),
-                                    hover: rgba(p.subtle_secondary),
-                                    pressed: rgba(p.subtle_tertiary),
-                                }
+                                Brushes::subtle(p)
                             } else {
-                                let clear = transparent_black().into();
-                                Brushes {
-                                    rest: clear,
-                                    hover: clear,
-                                    pressed: clear,
-                                }
+                                Brushes::solid(transparent_black().into())
                             })
                             .when(enabled, |this| {
                                 this.active(move |style| style.text_color(rgba(p.text_secondary)))
@@ -1008,8 +1002,8 @@ impl MenuBar {
             .child(
                 div()
                     .absolute()
-                    .left(px(1. + COMMAND_OUTSET))
-                    .right(px(1. + COMMAND_OUTSET))
+                    .left(px(BORDER + COMMAND_OUTSET))
+                    .right(px(BORDER + COMMAND_OUTSET))
                     .bottom(px(-1.))
                     .h(px(1.))
                     .bg(rgb(p.menu_separator)),
@@ -1022,7 +1016,7 @@ impl MenuBar {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(open) = self.open.as_mut().filter(|open| !open.is_closing()) else {
+        let Some(open) = self.live_open() else {
             return;
         };
         let entry = match path {
@@ -1034,15 +1028,10 @@ impl MenuBar {
         };
         match entry {
             Entry::Submenu(..) => self.open_submenu(path.0, true, window, cx),
-            Entry::Separator | Entry::Disabled(..) => {}
+            entry if !entry.selectable() => {}
             entry => {
-                let action = entry.action();
-                self.close_menu(window, cx);
-                if let Some(action) = action {
-                    let target = self.action_context(cx);
-                    window.defer(cx, move |window, cx| {
-                        target.dispatch_action(action.as_ref(), window, cx)
-                    });
+                if let Some(action) = entry.action() {
+                    self.dispatch(action, window, cx);
                 }
             }
         }
@@ -1058,14 +1047,14 @@ impl MenuBar {
         let action_context = self.action_context(cx);
         let serial = self.next_serial();
         self.submenu_timer = Task::ready(());
-        let Some(open) = self.open.as_mut().filter(|open| !open.is_closing()) else {
+        let Some(open) = self.live_open_mut() else {
             return;
         };
         let Entry::Submenu(_, entries) = &open.panel.entries[ix] else {
             return;
         };
         if open.live_submenu().is_none_or(|submenu| submenu.ix != ix) {
-            open.submenu = Some(Submenu {
+            open.submenu = Some(OpenSubmenu {
                 ix,
                 panel: Panel::new(entries.clone(), MIN_WIDTH, &action_context, window),
                 motion: Motion::new(serial, false),
@@ -1079,18 +1068,12 @@ impl MenuBar {
         cx.notify();
     }
 
-    fn close_submenu(&mut self, cx: &mut Context<Self>) -> bool {
+    fn close_submenu(&mut self, cx: &mut Context<Self>) {
         self.submenu_timer = Task::ready(());
-        let closed = self
-            .open
-            .as_mut()
-            .and_then(OpenMenu::live_submenu_mut)
-            .map(|submenu| submenu.motion.closing = true)
-            .is_some();
-        if closed {
+        if let Some(submenu) = self.open.as_mut().and_then(OpenMenu::live_submenu_mut) {
+            submenu.motion.closing = true;
             cx.notify();
         }
-        closed
     }
 
     fn schedule_submenu(
@@ -1112,9 +1095,7 @@ impl MenuBar {
             cx.background_executor().timer(delay).await;
             this.update_in(cx, |this, window, cx| match target {
                 Some(ix) => this.open_submenu(ix, false, window, cx),
-                None => {
-                    this.close_submenu(cx);
-                }
+                None => this.close_submenu(cx),
             })
             .ok();
         });
@@ -1126,7 +1107,7 @@ impl MenuBar {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(open) = self.open.as_mut().filter(|open| !open.is_closing()) else {
+        let Some(open) = self.live_open() else {
             return;
         };
         let change = match path {
@@ -1149,13 +1130,7 @@ impl MenuBar {
         let Some(kind) = self.open_kind().filter(|kind| *kind != MenuKind::Flyout) else {
             return;
         };
-        let count = MenuKind::ALL.len() as isize;
-        let next = (kind.index() as isize + delta).rem_euclid(count) as usize;
-        self.open_menu(MenuKind::ALL[next], window, cx);
-        if let Some(open) = self.open.as_mut() {
-            open.panel.step(1);
-            open.focus_visible = true;
-        }
+        self.open_by_keyboard(kind.cycle(delta), window, cx);
     }
 
     fn on_up(&mut self, _: &SelectUp, window: &mut Window, cx: &mut Context<Self>) {
@@ -1166,12 +1141,8 @@ impl MenuBar {
         self.step_active(1, window, cx);
     }
 
-    fn live_open(&mut self) -> Option<&mut OpenMenu> {
-        self.open.as_mut().filter(|open| !open.is_closing())
-    }
-
     fn step_active(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(open) = self.live_open() else {
+        let Some(open) = self.live_open_mut() else {
             if delta > 0
                 && let Some(kind) = self.bar_focused(window)
             {
@@ -1199,7 +1170,7 @@ impl MenuBar {
             }
             return;
         };
-        if let Some(ix) = open.command {
+        if let Some(ix) = open.focused_command {
             self.run_command(ix, window, cx);
             return;
         }
@@ -1213,9 +1184,7 @@ impl MenuBar {
 
     fn on_cancel(&mut self, _: &Cancel, window: &mut Window, cx: &mut Context<Self>) {
         match self.live_open() {
-            Some(open) if open.in_submenu() => {
-                self.close_submenu(cx);
-            }
+            Some(open) if open.in_submenu() => self.close_submenu(cx),
             Some(open) if open.kind != MenuKind::Flyout => self.close_to_bar(window, cx),
             Some(_) => self.close_menu(window, cx),
             None => self.leave_bar(window, cx),
@@ -1223,7 +1192,7 @@ impl MenuBar {
     }
 
     fn on_left(&mut self, _: &SelectLeft, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(open) = self.live_open() else {
+        let Some(open) = self.live_open_mut() else {
             self.move_bar_focus(-1, cx);
             return;
         };
@@ -1239,7 +1208,7 @@ impl MenuBar {
     }
 
     fn on_right(&mut self, _: &SelectRight, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(open) = self.live_open() else {
+        let Some(open) = self.live_open_mut() else {
             self.move_bar_focus(1, cx);
             return;
         };
@@ -1276,7 +1245,7 @@ impl MenuBar {
             .flex()
             .items_center()
             .h_full()
-            .px(px(10.))
+            .px(px(BAR_ITEM_PADDING))
             .rounded(px(field::CONTROL_RADIUS))
             .when(active, |this| this.bg(rgba(p.subtle_tertiary)))
             .hover(move |style| style.bg(rgba(p.subtle_secondary)))
@@ -1309,28 +1278,17 @@ impl MenuBar {
                     .with_priority(2),
                 )
             })
-            .child({
-                let trigger_areas = self.trigger_areas.clone();
-                let ix = kind.index();
-                canvas(
-                    move |bounds, _, _| {
-                        let mut areas = trigger_areas.get();
-                        areas[ix] = bounds;
-                        trigger_areas.set(areas);
-                    },
-                    |_, _, _, _| {},
-                )
-                .absolute()
-                .top_0()
-                .left_0()
-                .size_full()
-            })
+            .child(
+                record_bounds(self.trigger_areas.clone(), kind.index())
+                    .top_0()
+                    .left_0(),
+            )
             .when_some(popup, |this, popup| {
                 this.child(
                     div()
                         .absolute()
                         .left_0()
-                        .top(px(32.))
+                        .top(px(MENU_BAR_HEIGHT))
                         .child(deferred(anchored().child(popup)).with_priority(1)),
                 )
             })
@@ -1340,7 +1298,7 @@ impl MenuBar {
         if !self.access {
             return Vec::new();
         }
-        let Some(open) = self.open.as_ref().filter(|open| !open.is_closing()) else {
+        let Some(open) = self.live_open() else {
             let areas = self.trigger_areas.get();
             return MenuKind::ALL
                 .into_iter()
@@ -1360,9 +1318,9 @@ impl MenuBar {
             return Vec::new();
         }
         let areas = self.hit_areas.get();
-        let (panel, area, motion) = match open.live_submenu().filter(|_| open.in_submenu()) {
-            Some(submenu) => (&submenu.panel, areas[2], &submenu.motion),
-            None => (&open.panel, areas[1], &open.motion),
+        let (panel, area, motion) = match open.focused_submenu() {
+            Some(submenu) => (&submenu.panel, areas[SUBMENU_AREA], &submenu.motion),
+            None => (&open.panel, areas[MENU_AREA], &open.motion),
         };
         if motion.unroll < 1. {
             return Vec::new();
@@ -1374,9 +1332,10 @@ impl MenuBar {
             .filter_map(|(ix, entry)| {
                 let key = entry.access_key()?;
                 let face = Bounds::new(
-                    area.origin + point(px(1. + ROW_INSET), px(panel.row_top(ix) + ROW_MARGIN_Y)),
+                    area.origin
+                        + point(px(BORDER + ROW_INSET), px(panel.row_top(ix) + ROW_MARGIN_Y)),
                     size(
-                        px(panel.width - 2. - 2. * ROW_INSET),
+                        px(panel.width - 2. * (BORDER + ROW_INSET)),
                         px(entry.height() - 2. * ROW_MARGIN_Y),
                     ),
                 );
@@ -1394,13 +1353,6 @@ impl MenuBar {
         cx.defer(move |cx| keytips::show(owner, origin, scale, tips, cx));
     }
 
-    pub fn exit_access(&mut self, cx: &mut Context<Self>) {
-        if self.access {
-            self.access = false;
-            cx.notify();
-        }
-    }
-
     fn popup(
         &self,
         open: &OpenMenu,
@@ -1410,26 +1362,25 @@ impl MenuBar {
         let p = palette(cx);
         let panel = &open.panel;
         let width = panel.width;
-        let bar = if open.commands.is_empty() {
-            0.
-        } else {
+        let has_commands = !open.commands.is_empty();
+        let bar = if has_commands {
             COMMAND_ROW + 1. + OVERFLOW_TOP - PADDING_Y
+        } else {
+            0.
         };
         let height = panel.height() + bar;
         let hidden = panel.height() * CLOSED_RATIO * (1. - open.motion.unroll);
-        let (top, offset) = match (bar > 0., open.upward) {
+        let (top, offset) = match (has_commands, open.upward) {
             (true, _) => (0., 0.),
             (false, true) => (hidden, hidden),
             (false, false) => (0., -hidden),
         };
-        let hit_areas = self.hit_areas.clone();
         let submenu = open.submenu.as_ref().map(|submenu| {
             let sub_width = submenu.panel.width;
             let sub_height = submenu.panel.height();
             let hidden = sub_height * SUBMENU_CLOSED_RATIO * (1. - submenu.motion.unroll);
-            let top = panel.row_top(submenu.ix) - 1. - PADDING_Y;
-            let rows = self.panel_rows(&submenu.panel, Some(submenu.ix), 0., false, cx);
-            let hit_areas = self.hit_areas.clone();
+            let top = panel.row_top(submenu.ix) - BORDER - PADDING_Y;
+            let rows = Self::panel_rows(open, &submenu.panel, Some(submenu.ix), 0., false, cx);
             div()
                 .absolute()
                 .left(px(width - SUBMENU_OVERLAP))
@@ -1448,18 +1399,7 @@ impl MenuBar {
                     -hidden,
                     rows,
                 ))
-                .child(
-                    canvas(
-                        move |bounds, _, _| {
-                            let mut areas = hit_areas.get();
-                            areas[2] = bounds;
-                            hit_areas.set(areas);
-                        },
-                        |_, _, _, _| {},
-                    )
-                    .absolute()
-                    .size_full(),
-                )
+                .child(record_bounds(self.hit_areas.clone(), SUBMENU_AREA))
         });
 
         div()
@@ -1488,28 +1428,17 @@ impl MenuBar {
                 offset,
                 div()
                     .size_full()
-                    .when(bar > 0., |this| {
-                        this.child(self.command_row(&open.commands, width, window, cx))
+                    .when(has_commands, |this| {
+                        this.child(Self::command_row(open, window, cx))
                     })
-                    .child(self.panel_rows(panel, None, bar, bar > 0., cx)),
+                    .child(Self::panel_rows(open, panel, None, bar, has_commands, cx)),
             ))
-            .child(
-                canvas(
-                    move |bounds, _, _| {
-                        let mut areas = hit_areas.get();
-                        areas[1] = bounds;
-                        hit_areas.set(areas);
-                    },
-                    |_, _, _, _| {},
-                )
-                .absolute()
-                .size_full(),
-            )
+            .child(record_bounds(self.hit_areas.clone(), MENU_AREA))
             .children(submenu)
     }
 
     fn panel_rows(
-        &self,
+        open: &OpenMenu,
         panel: &Panel,
         parent: Option<usize>,
         offset: f32,
@@ -1517,44 +1446,36 @@ impl MenuBar {
         cx: &mut Context<Self>,
     ) -> Div {
         let p = palette(cx);
-        let checks = panel
-            .entries
-            .iter()
-            .any(|entry| matches!(entry, Entry::Toggle(..) | Entry::Icon(..)));
-        let open = self.open.as_ref();
-        let focus_visible =
-            open.is_some_and(|open| open.focus_visible && (parent.is_some() || !open.in_submenu()));
+        let checks = panel.checks;
+        let focus_visible = open.focus_visible && (parent.is_some() || !open.in_submenu());
         let expanded = open
+            .live_submenu()
             .filter(|_| parent.is_none())
-            .and_then(OpenMenu::live_submenu)
             .map(|submenu| submenu.ix);
 
         div()
             .absolute()
-            .top(px(1. + PADDING_Y + offset))
-            .left(px(1.))
-            .w(px(panel.width - 2.))
+            .top(px(BORDER + PADDING_Y + offset))
+            .left(px(BORDER))
+            .w(px(panel.width - 2. * BORDER))
             .children(panel.entries.iter().enumerate().map(|(ix, entry)| {
                 let path = match parent {
                     Some(parent) => (parent, Some(ix)),
                     None => (ix, None),
                 };
-                if let Entry::Separator = entry {
+                let Some(label) = entry.label() else {
                     return div()
                         .id(("menu-separator", ix))
                         .h(px(ROW_SEPARATOR))
                         .py(px(1.))
                         .child(div().h(px(1.)).bg(rgb(p.menu_separator)));
-                }
+                };
                 let ring = focus_visible && panel.focused == Some(ix);
                 let enabled = entry.selectable();
-                let (label, mark) = match entry {
-                    Entry::Command(label, _)
-                    | Entry::Disabled(label, _)
-                    | Entry::Submenu(label, _) => (*label, None),
-                    Entry::Toggle(label, checked, _) => (*label, checked.then_some("\u{E73E}")),
-                    Entry::Icon(label, glyph, ..) => (*label, Some(*glyph)),
-                    Entry::Separator => unreachable!(),
+                let mark = match entry {
+                    Entry::Toggle(_, checked, _) => checked.then_some(CHECK_GLYPH),
+                    Entry::Icon(_, glyph, ..) => Some(*glyph),
+                    _ => None,
                 };
                 let mark_size = if matches!(entry, Entry::Icon(..)) {
                     ICON_SIZE
@@ -1569,13 +1490,15 @@ impl MenuBar {
                     _ if fade => None,
                     _ => Some(p.text_primary),
                 };
-                let label_color = match () {
-                    _ if !enabled => Some(p.text_disabled),
-                    _ if fade => None,
-                    _ => Some(p.text_primary),
+                let label_color = if !enabled {
+                    Some(p.text_disabled)
+                } else if fade {
+                    None
+                } else {
+                    Some(p.text_primary)
                 };
 
-                let row_id = ix + parent.map_or(0, |p| 1000 * (p + 1));
+                let row_id = ix + parent.map_or(0, |parent| 1000 * (parent + 1));
                 div()
                     .id(("menu-row", row_id))
                     .relative()
@@ -1663,17 +1586,13 @@ impl MenuBar {
                                         .text_size(px(GLYPH_SIZE))
                                         .line_height(px(GLYPH_SIZE))
                                         .text_color(rgba(p.text_secondary))
-                                        .child("\u{E76C}"),
+                                        .child(CHEVRON_GLYPH),
                                 )
                             });
                         if fade {
-                            face.fade_bg(Brushes {
-                                rest: transparent_black().into(),
-                                hover: rgba(p.subtle_secondary),
-                                pressed: rgba(p.subtle_tertiary),
-                            })
-                            .active(move |style| style.text_color(rgba(p.text_secondary)))
-                            .into_any_element()
+                            face.fade_bg(Brushes::subtle(p))
+                                .active(move |style| style.text_color(rgba(p.text_secondary)))
+                                .into_any_element()
                         } else {
                             face.when(expanded == Some(ix), |this| {
                                 this.bg(rgba(p.subtle_secondary))
@@ -1711,7 +1630,7 @@ fn reveal(
         .child(
             div()
                 .size_full()
-                .rounded(px(field::OVERLAY_RADIUS - 1.))
+                .rounded(px(field::OVERLAY_RADIUS - BORDER))
                 .bg(rgb(p.menu_fill)),
         );
     [
@@ -1735,21 +1654,17 @@ fn reveal(
     ]
 }
 
-pub(crate) fn text_width(window: &Window, text: &str, family: &'static str, size: f32) -> f32 {
-    let run = TextRun {
-        len: text.len(),
-        font: font(family),
-        color: hsla(0., 0., 0., 1.),
-        background_color: None,
-        underline: None,
-        strikethrough: None,
-    };
-    window
-        .text_system()
-        .shape_line(SharedString::new(text), px(size), &[run], None)
-        .width
-        .as_f32()
-        .ceil()
+fn record_bounds(areas: Rc<Cell<[Bounds<Pixels>; 3]>>, ix: usize) -> Canvas<()> {
+    canvas(
+        move |bounds, _, _| {
+            let mut all = areas.get();
+            all[ix] = bounds;
+            areas.set(all);
+        },
+        |_, _, _, _| {},
+    )
+    .absolute()
+    .size_full()
 }
 
 fn shortcut_text(
@@ -1805,10 +1720,9 @@ impl Render for MenuBar {
         }
         if self.open.as_ref().is_none_or(|open| open.submenu.is_none()) {
             let mut areas = self.hit_areas.get();
-            areas[2] = Bounds::default();
+            areas[SUBMENU_AREA] = Bounds::default();
             self.hit_areas.set(areas);
         }
-        let hit_areas = self.hit_areas.clone();
         let flyout = self.open.as_ref().and_then(|open| {
             let anchor = open.anchor?;
             Some(
@@ -1828,9 +1742,9 @@ impl Render for MenuBar {
             .relative()
             .flex()
             .h_full()
-            .gap(px(8.))
+            .gap(px(BAR_GAP))
             .font_family(MENU_FONT)
-            .text_size(px(14.))
+            .text_size(px(LABEL_SIZE))
             .text_color(rgba(p.text_primary))
             .on_action(cx.listener(Self::on_up))
             .on_action(cx.listener(Self::on_down))
@@ -1840,17 +1754,6 @@ impl Render for MenuBar {
             .on_action(cx.listener(Self::on_right))
             .children(MenuKind::ALL.map(|kind| self.trigger(kind, window, cx)))
             .children(flyout)
-            .child(
-                canvas(
-                    move |bounds, _, _| {
-                        let mut areas = hit_areas.get();
-                        areas[0] = bounds;
-                        hit_areas.set(areas);
-                    },
-                    |_, _, _, _| {},
-                )
-                .absolute()
-                .size_full(),
-            )
+            .child(record_bounds(self.hit_areas.clone(), BAR_AREA))
     }
 }
