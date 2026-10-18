@@ -2153,7 +2153,6 @@ checksum = "0fac401f6b149bf33794da0942510240afd29b7b18556574e4cf17196b647066"
 dependencies = [
  "gpui-base",
  "gpui-component",
- "gpui-kit-assets",
  "gpui-pre",
  "gpui-pre-macros",
  "gpui-pre-platform",
