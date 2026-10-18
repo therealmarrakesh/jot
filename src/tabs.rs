@@ -157,6 +157,7 @@ pub(crate) struct TabStrip {
     column: f32,
     width: f32,
     overflow: bool,
+    buttons: bool,
     frozen: Option<f32>,
     ghosts: Vec<Ghost>,
     drag: Option<Drag>,
@@ -174,6 +175,7 @@ impl TabStrip {
             column: f32::INFINITY,
             width: TAB_WIDTH,
             overflow: false,
+            buttons: false,
             frozen: None,
             ghosts: Vec::new(),
             drag: None,
@@ -185,19 +187,31 @@ impl TabStrip {
     }
 
     fn measure(&mut self, count: usize) {
+        let alone = count <= 1;
         let count = count.max(1) as f32;
-        let room = self.column - 2. * LIST_PAD;
-        let fit = (room / count).clamp(TAB_MIN_WIDTH, TAB_WIDTH);
+        let room = (self.column - 2. * LIST_PAD).max(0.);
+        let min_width = if alone { 0. } else { TAB_MIN_WIDTH };
+        let fit = (room / count).clamp(min_width, TAB_WIDTH);
         self.width = self.frozen.unwrap_or(fit);
-        self.overflow = self.width * count > room;
+        self.overflow = !alone && self.width * count > room;
+        let between_buttons = room - 2. * SCROLL_AREA;
+        self.buttons = self.overflow && between_buttons >= TAB_MIN_WIDTH;
         if self.overflow && self.frozen.is_none() {
-            self.width = ((room - 2. * SCROLL_AREA) / count).clamp(TAB_MIN_WIDTH, TAB_WIDTH);
+            self.width = if self.buttons {
+                (between_buttons / count).clamp(TAB_MIN_WIDTH, TAB_WIDTH)
+            } else {
+                room.min(TAB_WIDTH)
+            };
         }
+    }
+
+    fn scroll_area(&self) -> f32 {
+        if self.buttons { SCROLL_AREA } else { 0. }
     }
 
     fn viewport(&self, now: Instant) -> f32 {
         if self.overflow {
-            self.column - 2. * SCROLL_AREA
+            self.column - 2. * self.scroll_area()
         } else {
             LIST_PAD + self.trailing.value(now)
         }
@@ -212,12 +226,11 @@ impl TabStrip {
     }
 
     fn origin(&self, now: Instant) -> f32 {
-        let scroll_area = if self.overflow { SCROLL_AREA } else { 0. };
-        HEADER_WIDTH + scroll_area + LIST_PAD - self.scroll.value(now)
+        HEADER_WIDTH + self.scroll_area() + LIST_PAD - self.scroll.value(now)
     }
 
     fn new_tab_gap(&self) -> f32 {
-        if self.overflow {
+        if self.buttons {
             NEW_TAB_GAP_SCROLLING
         } else {
             NEW_TAB_GAP
@@ -225,11 +238,13 @@ impl TabStrip {
     }
 
     fn bounds(&self, now: Instant) -> Bounds<Pixels> {
-        let scroll_areas = if self.overflow { 2. * SCROLL_AREA } else { 0. };
         Bounds::new(
             point(px(HEADER_WIDTH), px(STRIP_TOP)),
             size(
-                px(scroll_areas + self.viewport(now) + self.new_tab_gap() + BUTTON_WIDTH),
+                px(2. * self.scroll_area()
+                    + self.viewport(now)
+                    + self.new_tab_gap()
+                    + BUTTON_WIDTH),
                 px(TAB_HEIGHT),
             ),
         )
@@ -250,7 +265,7 @@ impl TabStrip {
         let target = if left < current {
             left
         } else if right + 2. * LIST_PAD > current + viewport {
-            right + 2. * LIST_PAD - viewport
+            (right + 2. * LIST_PAD - viewport).min(left)
         } else {
             current
         };
@@ -1022,6 +1037,7 @@ impl Jot {
             })
             .collect();
         let overflow = self.strip.overflow;
+        let buttons = self.strip.buttons;
 
         div()
             .relative()
@@ -1030,7 +1046,7 @@ impl Jot {
             .when(self.strip.frozen.is_some(), |this| {
                 this.child(self.thaw_listener(cx))
             })
-            .when(overflow, |this| this.child(self.scroll_button(false, cx)))
+            .when(buttons, |this| this.child(self.scroll_button(false, cx)))
             .child(
                 div()
                     .id("tab-list")
@@ -1066,7 +1082,7 @@ impl Jot {
                     .children(tabs)
                     .when(detach::active(cx), |this| this.child(detach::listeners())),
             )
-            .when(overflow, |this| this.child(self.scroll_button(true, cx)))
+            .when(buttons, |this| this.child(self.scroll_button(true, cx)))
             .child(self.new_tab_button(cx))
     }
 }
