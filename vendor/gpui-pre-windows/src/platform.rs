@@ -831,7 +831,12 @@ impl Platform for WindowsPlatform {
             .and_then(|hwnd| self.window_from_hwnd(hwnd))
             .map(|window| window.dialog_owner.clone());
         crate::dialog::show_dialog(owner, &self.foreground_executor, move |window| {
-            file_save_dialog(directory, suggested_name, Some(window))
+            let options = SavePathOptions {
+                directory,
+                file_name: suggested_name,
+                ..SavePathOptions::default()
+            };
+            file_save_dialog(&options, Some(window)).map(|result| result.map(|(path, _)| path))
         })
     }
 
@@ -1580,12 +1585,54 @@ fn file_open_dialog(
     Ok(Some(paths))
 }
 
+pub struct SaveChoice {
+    pub label: String,
+    pub items: Vec<String>,
+    pub selected: usize,
+}
+
+pub struct SavePathOptions {
+    pub title: Option<String>,
+    pub directory: PathBuf,
+    pub file_name: Option<String>,
+    pub file_types: Vec<(String, String)>,
+    pub default_extension: Option<String>,
+    pub choice: Option<SaveChoice>,
+}
+
+impl Default for SavePathOptions {
+    fn default() -> Self {
+        Self {
+            title: None,
+            directory: PathBuf::new(),
+            file_name: None,
+            file_types: vec![("All files".into(), "*.*".into())],
+            default_extension: None,
+            choice: None,
+        }
+    }
+}
+
+pub fn prompt_for_save_path(
+    owner: isize,
+    executor: &ForegroundExecutor,
+    options: SavePathOptions,
+) -> Receiver<Result<Option<(PathBuf, Option<usize>)>>> {
+    let owner = window_from_hwnd(HWND(owner as _)).map(|window| window.dialog_owner.clone());
+    crate::dialog::show_dialog(owner, executor, move |window| {
+        file_save_dialog(&options, Some(window))
+    })
+}
+
+const SAVE_CHOICE_GROUP: u32 = 1;
+const SAVE_CHOICE_COMBO: u32 = 2;
+
 fn file_save_dialog(
-    directory: PathBuf,
-    suggested_name: Option<String>,
+    options: &SavePathOptions,
     window: Option<HWND>,
-) -> Result<Option<PathBuf>> {
+) -> Result<Option<(PathBuf, Option<usize>)>> {
     let dialog: IFileSaveDialog = unsafe { CoCreateInstance(&FileSaveDialog, None, CLSCTX_ALL)? };
+    let directory = &options.directory;
     if !directory.to_string_lossy().is_empty()
         && let Some(full_path) = directory
             .canonicalize()
@@ -1604,7 +1651,7 @@ fn file_save_dialog(
         };
     }
 
-    if let Some(suggested_name) = suggested_name {
+    if let Some(suggested_name) = &options.file_name {
         unsafe {
             dialog
                 .SetFileName(&HSTRING::from(suggested_name))
@@ -1612,12 +1659,44 @@ fn file_save_dialog(
                 .log_err()
         };
     }
+    if let Some(title) = &options.title {
+        unsafe { dialog.SetTitle(&HSTRING::from(title))? };
+    }
+    if let Some(extension) = &options.default_extension {
+        unsafe { dialog.SetDefaultExtension(&HSTRING::from(extension))? };
+    }
+
+    let file_types: Vec<(HSTRING, HSTRING)> = options
+        .file_types
+        .iter()
+        .map(|(name, spec)| (HSTRING::from(name), HSTRING::from(spec)))
+        .collect();
+    let specs: Vec<Common::COMDLG_FILTERSPEC> = file_types
+        .iter()
+        .map(|(name, spec)| Common::COMDLG_FILTERSPEC {
+            pszName: PCWSTR(name.as_ptr()),
+            pszSpec: PCWSTR(spec.as_ptr()),
+        })
+        .collect();
+    let customize = match &options.choice {
+        Some(choice) => {
+            let customize: IFileDialogCustomize = dialog.cast()?;
+            unsafe {
+                customize.StartVisualGroup(SAVE_CHOICE_GROUP, &HSTRING::from(&choice.label))?;
+                customize.AddComboBox(SAVE_CHOICE_COMBO)?;
+                for (ix, item) in choice.items.iter().enumerate() {
+                    customize.AddControlItem(SAVE_CHOICE_COMBO, ix as u32, &HSTRING::from(item))?;
+                }
+                customize.SetSelectedControlItem(SAVE_CHOICE_COMBO, choice.selected as u32)?;
+                customize.EndVisualGroup()?;
+            }
+            Some(customize)
+        }
+        None => None,
+    };
 
     unsafe {
-        dialog.SetFileTypes(&[Common::COMDLG_FILTERSPEC {
-            pszName: windows::core::w!("All files"),
-            pszSpec: windows::core::w!("*.*"),
-        }])?;
+        dialog.SetFileTypes(&specs)?;
         if let Err(error) = dialog.Show(window) {
             if error.code() == HRESULT::from_win32(ERROR_CANCELLED.0) {
                 return Ok(None);
@@ -1625,6 +1704,12 @@ fn file_save_dialog(
             return Err(error.into());
         }
     }
+    let selected = match customize {
+        Some(customize) => {
+            Some(unsafe { customize.GetSelectedControlItem(SAVE_CHOICE_COMBO)? } as usize)
+        }
+        None => None,
+    };
     let shell_item = unsafe { dialog.GetResult()? };
     let file_path_string = unsafe {
         let pwstr = shell_item.GetDisplayName(SIGDN_FILESYSPATH)?;
@@ -1632,7 +1717,7 @@ fn file_save_dialog(
         CoTaskMemFree(Some(pwstr.0 as _));
         string
     };
-    Ok(Some(PathBuf::from(file_path_string)))
+    Ok(Some((PathBuf::from(file_path_string), selected)))
 }
 
 fn load_icon() -> Result<HICON> {

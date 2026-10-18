@@ -28,6 +28,14 @@ pub enum Encoding {
 }
 
 impl Encoding {
+    pub const SAVE_ORDER: [Self; 5] = [
+        Self::Ansi,
+        Self::Utf16Le,
+        Self::Utf16Be,
+        Self::Utf8,
+        Self::Utf8Bom,
+    ];
+
     pub fn label(self) -> &'static str {
         match self {
             Self::Utf8 => "UTF-8",

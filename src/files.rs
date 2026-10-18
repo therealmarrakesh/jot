@@ -1,7 +1,13 @@
 use super::*;
-use document::{LoadError, default_directory, display_name};
+use document::{Encoding, Format, LoadError, default_directory, display_name};
+use gpui_windows::{SaveChoice, SavePathOptions};
 
 const UNTITLED_FILE_NAME: &str = "Untitled.txt";
+const SAVE_AS_TITLE: &str = "Save as";
+const TEXT_FILE_TYPE: (&str, &str) = ("Text documents (*.txt)", "*.txt");
+const ALL_FILE_TYPE: (&str, &str) = ("All files", "*.*");
+const TEXT_EXTENSION: &str = "txt";
+const ENCODING_LABEL: &str = "Encoding:";
 const LOSSY_ANSI_WARNING: &str = "This file contains characters in Unicode format which will be lost if you save this file as an ANSI encoded text file. To keep the Unicode information, click Cancel below and then select one of the Unicode options from the Encoding drop down list. Continue?";
 
 impl Jot {
@@ -135,7 +141,10 @@ impl Jot {
             return Task::ready(false);
         };
         match self.tabs[ix].path.clone() {
-            Some(path) => self.write_tab(ix, path, window, cx),
+            Some(path) => {
+                let format = self.tabs[ix].format;
+                self.write_tab(ix, path, format, window, cx)
+            }
             None => self.save_tab_as(id, window, cx),
         }
     }
@@ -150,19 +159,47 @@ impl Jot {
             return Task::ready(false);
         };
         let current = self.tabs[ix].path.clone();
+        let format = self.tabs[ix].format;
         let suggested = current
             .as_deref()
             .and_then(Path::file_name)
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| UNTITLED_FILE_NAME.into());
-        let target =
-            cx.prompt_for_new_path(&default_directory(current.as_deref()), Some(&suggested));
+        let target = gpui_windows::prompt_for_save_path(
+            detach::hwnd(window),
+            cx.foreground_executor(),
+            SavePathOptions {
+                title: Some(SAVE_AS_TITLE.into()),
+                directory: default_directory(current.as_deref()),
+                file_name: Some(suggested),
+                file_types: [TEXT_FILE_TYPE, ALL_FILE_TYPE]
+                    .map(|(name, spec)| (name.into(), spec.into()))
+                    .into(),
+                default_extension: Some(TEXT_EXTENSION.into()),
+                choice: Some(SaveChoice {
+                    label: ENCODING_LABEL.into(),
+                    items: Encoding::SAVE_ORDER
+                        .map(|encoding| encoding.label().into())
+                        .into(),
+                    selected: Encoding::SAVE_ORDER
+                        .iter()
+                        .position(|&encoding| encoding == format.encoding)
+                        .unwrap_or_default(),
+                }),
+            },
+        );
         cx.spawn_in(window, async move |this, cx| {
-            let Ok(Ok(Some(path))) = target.await else {
+            let Ok(Ok(Some((path, choice)))) = target.await else {
                 return false;
             };
+            let format = Format {
+                encoding: choice
+                    .and_then(|ix| Encoding::SAVE_ORDER.get(ix).copied())
+                    .unwrap_or(format.encoding),
+                ..format
+            };
             let Ok(write) = this.update_in(cx, |this, window, cx| match this.tab_index(id) {
-                Some(ix) => this.write_tab(ix, path, window, cx),
+                Some(ix) => this.write_tab(ix, path, format, window, cx),
                 None => Task::ready(false),
             }) else {
                 return false;
@@ -175,15 +212,16 @@ impl Jot {
         &mut self,
         ix: usize,
         path: PathBuf,
+        format: Format,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Task<bool> {
         let tab = &self.tabs[ix];
         let id = tab.editor.entity_id();
         let text = tab.editor.read(cx).text().to_string();
-        let encoded = document::encode(&text, tab.format);
+        let encoded = document::encode(&text, format);
         if !encoded.lossy {
-            return Task::ready(self.commit_tab(ix, path, &encoded.bytes, window, cx));
+            return Task::ready(self.commit_tab(ix, path, format, &encoded.bytes, window, cx));
         }
         let answer = self.prompt(
             "Jot",
@@ -198,10 +236,15 @@ impl Jot {
         );
         cx.spawn_in(window, async move |this, cx| {
             if answer.await != Ok(0) {
-                return false;
+                let Ok(save_as) =
+                    this.update_in(cx, |this, window, cx| this.save_tab_as(id, window, cx))
+                else {
+                    return false;
+                };
+                return save_as.await;
             }
             this.update_in(cx, |this, window, cx| match this.tab_index(id) {
-                Some(ix) => this.commit_tab(ix, path, &encoded.bytes, window, cx),
+                Some(ix) => this.commit_tab(ix, path, format, &encoded.bytes, window, cx),
                 None => false,
             })
             .unwrap_or(false)
@@ -212,6 +255,7 @@ impl Jot {
         &mut self,
         ix: usize,
         path: PathBuf,
+        format: Format,
         bytes: &[u8],
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -220,6 +264,7 @@ impl Jot {
             Ok(()) => {
                 let tab = &mut self.tabs[ix];
                 tab.path = Some(path);
+                tab.format = format;
                 tab.dirty = false;
                 self.refresh_title(window);
                 cx.notify();
