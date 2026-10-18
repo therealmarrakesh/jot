@@ -33,6 +33,8 @@ const NEW_TAB_GAP: f32 = 5.;
 const NEW_TAB_GAP_SCROLLING: f32 = 3.;
 const SLIDE_DURATION: Duration = Duration::from_millis(200);
 const REORDER_THRESHOLD: f32 = 16.;
+pub(crate) const CARET_LEFT: &str = "\u{EDD9}";
+pub(crate) const CARET_RIGHT: &str = "\u{EDDA}";
 
 #[derive(Clone, Copy)]
 enum Ink {
@@ -214,16 +216,20 @@ impl TabStrip {
         HEADER_WIDTH + scroll_area + LIST_PAD - self.scroll.value(now)
     }
 
-    fn bounds(&self, now: Instant) -> Bounds<Pixels> {
-        let (scroll_areas, gap) = if self.overflow {
-            (2. * SCROLL_AREA, NEW_TAB_GAP_SCROLLING)
+    fn new_tab_gap(&self) -> f32 {
+        if self.overflow {
+            NEW_TAB_GAP_SCROLLING
         } else {
-            (0., NEW_TAB_GAP)
-        };
+            NEW_TAB_GAP
+        }
+    }
+
+    fn bounds(&self, now: Instant) -> Bounds<Pixels> {
+        let scroll_areas = if self.overflow { 2. * SCROLL_AREA } else { 0. };
         Bounds::new(
             point(px(HEADER_WIDTH), px(STRIP_TOP)),
             size(
-                px(scroll_areas + self.viewport(now) + gap + BUTTON_WIDTH),
+                px(scroll_areas + self.viewport(now) + self.new_tab_gap() + BUTTON_WIDTH),
                 px(TAB_HEIGHT),
             ),
         )
@@ -250,6 +256,26 @@ impl TabStrip {
         };
         self.scroll_to(target, duration);
     }
+}
+
+pub(crate) fn window_listeners(register: impl FnOnce(&mut Window) + 'static) -> impl IntoElement {
+    canvas(|_, _, _| {}, move |_, _, window, _| register(window))
+        .absolute()
+        .size_full()
+}
+
+pub(crate) fn repeat(
+    cx: &mut Context<Jot>,
+    delay: Duration,
+    interval: Duration,
+    mut tick: impl FnMut(&mut Jot, &mut Context<Jot>) -> bool + 'static,
+) -> Task<()> {
+    cx.spawn(async move |this, cx| {
+        cx.background_executor().timer(delay).await;
+        while this.update(cx, |jot, cx| tick(jot, cx)).unwrap_or(false) {
+            cx.background_executor().timer(interval).await;
+        }
+    })
 }
 
 fn slide_duration(cx: &App) -> Duration {
@@ -327,6 +353,26 @@ fn tab_face(p: Palette, active: bool, trailing: f32, name: impl Into<SharedStrin
         )
 }
 
+fn unsaved_dot(p: Palette, inset: f32) -> Div {
+    div()
+        .absolute()
+        .top(px(UNSAVED_DOT_TOP - inset))
+        .right(px(UNSAVED_DOT_RIGHT - inset))
+        .size(px(UNSAVED_DOT))
+        .rounded_full()
+        .bg(rgba(p.text_tertiary))
+}
+
+fn tab_separator(p: Palette) -> Div {
+    div()
+        .absolute()
+        .right_0()
+        .top(px(8.))
+        .w(px(1.))
+        .h(px(16.))
+        .bg(rgba(p.divider))
+}
+
 impl Jot {
     pub(crate) fn add_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let tab = Self::create_tab(None, window, cx);
@@ -349,7 +395,6 @@ impl Jot {
         }
         let now = Instant::now();
         let duration = slide_duration(cx);
-        let name = self.tab_name(ix);
         let width = self.strip.width;
         let tab = self.tabs.remove(ix);
         let id = tab.editor.entity_id();
@@ -365,24 +410,20 @@ impl Jot {
         slot.width.slide(0., duration, now);
         if slot.moving(now) {
             self.strip.ghosts.push(Ghost {
-                name: name.into(),
+                name: document::display_name(tab.path.as_deref()).into(),
                 slot,
             });
         }
+        self.settle_after_removal(ix, window, cx);
+    }
+
+    fn settle_after_removal(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         self.hovered_tab = None;
         if ix < self.active || self.active == self.tabs.len() {
             self.active -= 1;
         }
         self.layout_tabs(cx);
         self.activate_tab(self.active, window, cx);
-    }
-
-    pub(crate) fn owner(&self, window: &Window, cx: &Context<Self>) -> detach::Owner {
-        detach::Owner {
-            handle: window.window_handle(),
-            jot: cx.weak_entity(),
-            hwnd: self.hwnd,
-        }
     }
 
     fn layout_tabs(&mut self, cx: &App) {
@@ -408,12 +449,16 @@ impl Jot {
     }
 
     pub(crate) fn reveal_tab(&mut self, ix: usize, cx: &App) {
+        self.reveal_tab_over(ix, slide_duration(cx));
+    }
+
+    fn reveal_tab_over(&mut self, ix: usize, duration: Duration) {
         let Some(tab) = self.tabs.get(ix) else {
             return;
         };
         let left = tab.slot.x.to;
         let right = left + tab.slot.width.to;
-        self.strip.reveal(left, right, slide_duration(cx));
+        self.strip.reveal(left, right, duration);
     }
 
     fn scroll_tabs(&mut self, delta: f32, cx: &mut Context<Self>) {
@@ -432,31 +477,25 @@ impl Jot {
     fn thaw_listener(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let bounds = self.strip.bounds(Instant::now());
         let jot = cx.weak_entity();
-        canvas(
-            |_, _, _| {},
-            move |_, _, window, _| {
-                let moved = jot.clone();
-                window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
-                    if phase == DispatchPhase::Bubble && !bounds.contains(&event.position) {
-                        moved.update(cx, |jot, cx| jot.thaw_tabs(cx)).ok();
-                    }
-                });
-                let left = jot.clone();
-                window.on_mouse_event(move |_: &MouseExitEvent, phase, _, cx| {
-                    if phase == DispatchPhase::Bubble {
-                        left.update(cx, |jot, cx| jot.thaw_tabs(cx)).ok();
-                    }
-                });
-            },
-        )
-        .absolute()
-        .size_full()
+        window_listeners(move |window| {
+            let moved = jot.clone();
+            window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
+                if phase == DispatchPhase::Bubble && !bounds.contains(&event.position) {
+                    moved.update(cx, |jot, cx| jot.thaw_tabs(cx)).ok();
+                }
+            });
+            window.on_mouse_event(move |_: &MouseExitEvent, phase, _, cx| {
+                if phase == DispatchPhase::Bubble {
+                    jot.update(cx, |jot, cx| jot.thaw_tabs(cx)).ok();
+                }
+            });
+        })
     }
 
     pub(crate) fn drag_tab(
         &mut self,
         id: EntityId,
-        position: Point<f32>,
+        x: f32,
         grab: f32,
         start: f32,
         cx: &mut Context<Self>,
@@ -477,7 +516,7 @@ impl Jot {
             });
         self.strip.lifted = Some(id);
         let width = self.strip.width;
-        let x = position.x - origin;
+        let x = x - origin;
         let last = self.tabs.len() - 1;
         let left = (x - drag.grab).clamp(0., last as f32 * width);
         self.tabs[from].slot.x = Motion::at(left);
@@ -512,23 +551,19 @@ impl Jot {
         let tab = self.tabs.remove(ix);
         self.strip.drag = None;
         self.strip.lifted = None;
-        self.hovered_tab = None;
         if self.tabs.is_empty() {
+            self.hovered_tab = None;
             window.remove_window();
-            return Some(tab.into_data());
+        } else {
+            self.settle_after_removal(ix, window, cx);
         }
-        if ix < self.active || self.active == self.tabs.len() {
-            self.active -= 1;
-        }
-        self.layout_tabs(cx);
-        self.activate_tab(self.active, window, cx);
         Some(tab.into_data())
     }
 
     pub(crate) fn insert_dragged_tab(
         &mut self,
         data: TabData,
-        position: Point<f32>,
+        x: f32,
         grab: f32,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -538,7 +573,7 @@ impl Jot {
         let count = self.tabs.len();
         self.strip.measure(count + 1);
         let width = self.strip.width;
-        let x = position.x - self.strip.origin(Instant::now());
+        let x = x - self.strip.origin(Instant::now());
         let left = (x - grab).clamp(0., count as f32 * width);
         let ix = slot_index(left, width, count);
         tab.slot = Slot::at(left, width);
@@ -588,22 +623,13 @@ impl Jot {
         cx.notify();
     }
 
-    pub(crate) fn tab_count(&self) -> usize {
-        self.tabs.len()
-    }
-
     pub(crate) fn sample_tabs(&mut self, window: &mut Window) {
         let now = Instant::now();
         let column = window.viewport_size().width.as_f32() - HEADER_WIDTH - STRIP_RESERVED;
         if column != self.strip.column {
             self.strip.column = column;
             self.layout_tabs_over(Duration::ZERO);
-            let active = self.active;
-            if let Some(tab) = self.tabs.get(active) {
-                let left = tab.slot.x.to;
-                let right = left + tab.slot.width.to;
-                self.strip.reveal(left, right, Duration::ZERO);
-            }
+            self.reveal_tab_over(self.active, Duration::ZERO);
         }
         self.strip.ghosts.retain(|ghost| ghost.slot.moving(now));
         if let Some(id) = self.strip.lifted
@@ -649,7 +675,7 @@ impl Jot {
         let key = id.as_u64() as usize;
 
         div()
-            .id(("tab", id.as_u64() as usize))
+            .id(("tab", key))
             .relative()
             .size_full()
             .overflow_hidden()
@@ -714,87 +740,73 @@ impl Jot {
                 this.hover(move |style| style.bg(rgba(p.layer_hover)))
             }))
             .child(tooltip::anchor(("tab", key)))
-            .when(show_dot, |this| {
-                this.child(
-                    div()
-                        .absolute()
-                        .top(px(UNSAVED_DOT_TOP - inset))
-                        .right(px(UNSAVED_DOT_RIGHT - inset))
-                        .size(px(UNSAVED_DOT))
-                        .rounded_full()
-                        .bg(rgba(p.text_tertiary)),
-                )
-            })
-            .when(separator, |this| {
-                this.child(
-                    div()
-                        .absolute()
-                        .right_0()
-                        .top(px(8.))
-                        .w(px(1.))
-                        .h(px(16.))
-                        .bg(rgba(p.divider)),
-                )
-            })
+            .when(show_dot, |this| this.child(unsaved_dot(p, inset)))
+            .when(separator, |this| this.child(tab_separator(p)))
             .when(show_close, |this| {
-                this.child(
-                    div()
-                        .id(("close-tab", id.as_u64() as usize))
-                        .absolute()
-                        .top(px(CLOSE_BUTTON_TOP - inset))
-                        .right(px(CLOSE_BUTTON_RIGHT - inset))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .w(px(BUTTON_WIDTH))
-                        .h(px(BUTTON_HEIGHT))
-                        .rounded(px(field::CONTROL_RADIUS))
-                        .font_family(ICON_FONT)
-                        .text_size(px(12.))
-                        .text_color(rgba(p.text_primary))
-                        .hover(move |style| style.bg(rgba(p.subtle_secondary)))
-                        .active(move |style| {
-                            style
-                                .bg(rgba(p.subtle_tertiary))
-                                .text_color(rgba(p.text_secondary))
-                        })
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .on_hover(move |hovered, _, cx| {
-                            tooltip::hover(
-                                ("close-tab", key),
-                                1,
-                                "Close tab (Ctrl+W)",
-                                *hovered,
-                                cx,
-                            )
-                        })
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            if let Some(ix) = this.tab_index(id) {
-                                this.close_tab(ix, window, cx);
-                            }
-                        }))
-                        .child(tooltip::anchor(("close-tab", key)))
-                        .child("\u{E711}"),
-                )
+                this.child(Self::close_button(p, id, key, inset, cx))
             })
+    }
+
+    fn close_button(
+        p: Palette,
+        id: EntityId,
+        key: usize,
+        inset: f32,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        div()
+            .id(("close-tab", key))
+            .absolute()
+            .top(px(CLOSE_BUTTON_TOP - inset))
+            .right(px(CLOSE_BUTTON_RIGHT - inset))
+            .flex()
+            .items_center()
+            .justify_center()
+            .w(px(BUTTON_WIDTH))
+            .h(px(BUTTON_HEIGHT))
+            .rounded(px(field::CONTROL_RADIUS))
+            .font_family(ICON_FONT)
+            .text_size(px(12.))
+            .text_color(rgba(p.text_primary))
+            .hover(move |style| style.bg(rgba(p.subtle_secondary)))
+            .active(move |style| {
+                style
+                    .bg(rgba(p.subtle_tertiary))
+                    .text_color(rgba(p.text_secondary))
+            })
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_hover(move |hovered, _, cx| {
+                tooltip::hover(("close-tab", key), 1, "Close tab (Ctrl+W)", *hovered, cx)
+            })
+            .on_click(cx.listener(move |this, _, window, cx| {
+                if let Some(ix) = this.tab_index(id) {
+                    this.close_tab(ix, window, cx);
+                }
+            }))
+            .child(tooltip::anchor(("close-tab", key)))
+            .child("\u{E711}")
+    }
+
+    fn release_plus(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+        self.strip.plus_pressed = false;
+        cx.notify();
+    }
+
+    fn stop_repeat(&mut self, _: &MouseUpEvent, _: &mut Window, _: &mut Context<Self>) {
+        self.strip.repeat = Task::ready(());
     }
 
     fn new_tab_button(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let p = palette(cx);
-        let ink = if self.strip.plus_pressed {
+        let alpha_scale = if self.strip.plus_pressed {
             (p.text_secondary & 0xff) as f32 / (p.text_primary & 0xff) as f32
         } else {
             1.
         };
-        let gap = if self.strip.overflow {
-            NEW_TAB_GAP_SCROLLING
-        } else {
-            NEW_TAB_GAP
-        };
         div()
             .id("new-tab")
             .flex_none()
-            .ml(px(gap))
+            .ml(px(self.strip.new_tab_gap()))
             .mt(px(BUTTON_TOP))
             .w(px(BUTTON_WIDTH))
             .h(px(BUTTON_HEIGHT))
@@ -811,37 +823,24 @@ impl Jot {
                     cx.notify();
                 }),
             )
-            .on_mouse_up(
-                MouseButton::Left,
-                cx.listener(|this, _: &MouseUpEvent, _, cx| {
-                    this.strip.plus_pressed = false;
-                    cx.notify();
-                }),
-            )
-            .on_mouse_up_out(
-                MouseButton::Left,
-                cx.listener(|this, _: &MouseUpEvent, _, cx| {
-                    this.strip.plus_pressed = false;
-                    cx.notify();
-                }),
-            )
+            .on_mouse_up(MouseButton::Left, cx.listener(Self::release_plus))
+            .on_mouse_up_out(MouseButton::Left, cx.listener(Self::release_plus))
             .on_click(cx.listener(|this, _, window, cx| this.add_tab(window, cx)))
             .child(tooltip::anchor("new-tab"))
             .child(
                 canvas(
                     |_, _, _| {},
                     move |bounds, _, window, _| {
-                        for (x, y, w, h, segment) in PLUS_SEGMENTS {
+                        for (x, y, w, h, ink) in PLUS_SEGMENTS {
+                            let color = ink.color(&p);
+                            let alpha = ((color & 0xff) as f32 * alpha_scale).round() as u32;
+                            let color = rgba((color & !0xff) | alpha);
                             window.paint_quad(fill(
                                 Bounds::new(
                                     bounds.origin + point(px(x), px(y)),
                                     size(px(w), px(h)),
                                 ),
-                                {
-                                    let color = segment.color(&p);
-                                    let alpha = ((color & 0xff) as f32 * ink).round() as u32;
-                                    rgba((color & !0xff) | alpha)
-                                },
+                                color,
                             ));
                         }
                     },
@@ -869,12 +868,6 @@ impl Jot {
         } else {
             (SCROLL_OUTER_PAD, SCROLL_INNER_PAD)
         };
-        let stop = cx.listener(|this, _: &MouseUpEvent, _, _| {
-            this.strip.repeat = Task::ready(());
-        });
-        let stop_out = cx.listener(|this, _: &MouseUpEvent, _, _| {
-            this.strip.repeat = Task::ready(());
-        });
         div().flex_none().h_full().pl(px(left)).pr(px(right)).child(
             div()
                 .id(key)
@@ -902,24 +895,21 @@ impl Jot {
                     MouseButton::Left,
                     cx.listener(move |this, _, _, cx| {
                         this.scroll_tabs(step, cx);
-                        this.strip.repeat = cx.spawn(async move |this, cx| {
-                            cx.background_executor().timer(SCROLL_REPEAT_DELAY).await;
-                            loop {
-                                if this
-                                    .update(cx, |jot, cx| jot.scroll_tabs(step, cx))
-                                    .is_err()
-                                {
-                                    break;
-                                }
-                                cx.background_executor().timer(SCROLL_REPEAT_INTERVAL).await;
-                            }
-                        });
+                        this.strip.repeat = repeat(
+                            cx,
+                            SCROLL_REPEAT_DELAY,
+                            SCROLL_REPEAT_INTERVAL,
+                            move |jot, cx| {
+                                jot.scroll_tabs(step, cx);
+                                true
+                            },
+                        );
                     }),
                 )
                 .child(tooltip::anchor(key))
-                .on_mouse_up(MouseButton::Left, stop)
-                .on_mouse_up_out(MouseButton::Left, stop_out)
-                .child(div().child(if forward { "\u{EDDA}" } else { "\u{EDD9}" })),
+                .on_mouse_up(MouseButton::Left, cx.listener(Self::stop_repeat))
+                .on_mouse_up_out(MouseButton::Left, cx.listener(Self::stop_repeat))
+                .child(div().child(if forward { CARET_RIGHT } else { CARET_LEFT })),
         )
     }
 
@@ -933,19 +923,14 @@ impl Jot {
             let slot = &self.tabs[ix].slot;
             (shift + slot.x.value(now), shift + slot.right(now))
         });
-        let ghosts: Vec<_> = self
-            .strip
-            .ghosts
-            .iter()
-            .map(|ghost| {
-                frame(
-                    shift + ghost.slot.x.value(now),
-                    ghost.slot.width.value(now),
-                    cover,
-                    tab_face(p, false, TAB_LABEL_TRAILING_BARE, ghost.name.clone()),
-                )
-            })
-            .collect();
+        let ghosts = self.strip.ghosts.iter().map(|ghost| {
+            frame(
+                shift + ghost.slot.x.value(now),
+                ghost.slot.width.value(now),
+                cover,
+                tab_face(p, false, TAB_LABEL_TRAILING_BARE, ghost.name.clone()),
+            )
+        });
         let tabs: Vec<_> = (0..self.tabs.len())
             .filter(|&ix| Some(ix) != lifted)
             .chain(lifted)

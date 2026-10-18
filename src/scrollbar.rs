@@ -1,8 +1,9 @@
 use super::*;
-use gpui_kit::base::{Transition, transition_with_status};
+use gpui_kit::base::{Transition, transition};
+use tabs::{CARET_LEFT, CARET_RIGHT, repeat, window_listeners};
 use windows_sys::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW};
 
-const SIZE: f32 = 12.;
+const BAR_BREADTH: f32 = 12.;
 const MARGIN: f32 = 1.;
 const THUMB_COLLAPSED: f32 = 8.;
 const THUMB_OFFSET: f32 = 2.;
@@ -23,12 +24,6 @@ const HIDE_DELAY: Duration = Duration::from_secs(2);
 const REPEAT_DELAY: Duration = Duration::from_millis(250);
 const REPEAT_INTERVAL: Duration = Duration::from_millis(50);
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum Axis {
-    Vertical,
-    Horizontal,
-}
-
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Part {
     Decrease,
@@ -38,18 +33,10 @@ enum Part {
     Increase,
 }
 
+#[derive(Default)]
 struct Bar {
     hovered: bool,
     hovered_part: Option<Part>,
-}
-
-impl Bar {
-    fn new() -> Self {
-        Self {
-            hovered: false,
-            hovered_part: None,
-        }
-    }
 }
 
 #[derive(Clone, Copy)]
@@ -73,7 +60,7 @@ pub(crate) struct ScrollChrome {
 impl ScrollChrome {
     pub(crate) fn new() -> Self {
         Self {
-            bars: [Bar::new(), Bar::new()],
+            bars: Default::default(),
             area: Rc::new(Cell::new(Bounds::default())),
             shown: false,
             press: None,
@@ -83,7 +70,11 @@ impl ScrollChrome {
         }
     }
 
-    fn bar(&mut self, axis: Axis) -> &mut Bar {
+    fn bar(&self, axis: Axis) -> &Bar {
+        &self.bars[axis as usize]
+    }
+
+    fn bar_mut(&mut self, axis: Axis) -> &mut Bar {
         &mut self.bars[axis as usize]
     }
 }
@@ -123,17 +114,10 @@ impl Metrics {
 
 fn metrics(editor: &TextareaState, axis: Axis) -> Metrics {
     let (viewport, content, offset) = editor.scroll_extent();
-    match axis {
-        Axis::Vertical => Metrics {
-            viewport: viewport.height.as_f32(),
-            content: content.height.as_f32(),
-            offset: -offset.y.as_f32(),
-        },
-        Axis::Horizontal => Metrics {
-            viewport: viewport.width.as_f32(),
-            content: content.width.as_f32(),
-            offset: -offset.x.as_f32(),
-        },
+    Metrics {
+        viewport: viewport.along(axis).as_f32(),
+        content: content.along(axis).as_f32(),
+        offset: -offset.along(axis).as_f32(),
     }
 }
 
@@ -160,6 +144,19 @@ fn track(length: f32, metrics: &Metrics) -> Track {
     }
 }
 
+fn thumb(axis: Axis, track: &Track, expansion: f32) -> (Bounds<Pixels>, f32) {
+    let breadth = THUMB_COLLAPSED + (BAR_BREADTH - THUMB_COLLAPSED) * expansion;
+    let shift = (BAR_BREADTH - breadth) / 2. + THUMB_OFFSET * (1. - expansion);
+    let fill_breadth = (breadth - 2. * THUMB_STROKE_INSET).max(0.);
+    let fill_length = (track.thumb_length - 2. * THUMB_STROKE_INSET).max(0.);
+    let across = px(shift + THUMB_STROKE_INSET);
+    let bounds = Bounds::new(
+        point(across, across).apply_along(axis, |_| px(track.thumb_start + THUMB_STROKE_INSET)),
+        size(px(fill_breadth), px(fill_breadth)).apply_along(axis, |_| px(fill_length)),
+    );
+    (bounds, THUMB_RADIUS.min(fill_breadth / 2.))
+}
+
 impl Jot {
     pub(crate) fn scroll_activity(&mut self, cx: &mut Context<Self>) {
         let chrome = &mut self.scroll;
@@ -181,25 +178,20 @@ impl Jot {
     }
 
     fn hover_bar(&mut self, axis: Axis, hovered: bool, cx: &mut Context<Self>) {
-        let bar = self.scroll.bar(axis);
+        let bar = self.scroll.bar_mut(axis);
         bar.hovered = hovered;
         if !hovered {
             bar.hovered_part = None;
-        }
-        if !hovered {
             self.scroll_activity(cx);
         }
         cx.notify();
     }
 
     fn scroll_by(&mut self, axis: Axis, delta: f32, cx: &mut Context<Self>) {
-        let editor = self.active_editor().clone();
-        editor.update(cx, |editor, cx| {
-            let offset = editor.scroll_offset();
-            let offset = match axis {
-                Axis::Vertical => point(offset.x, offset.y - px(delta)),
-                Axis::Horizontal => point(offset.x - px(delta), offset.y),
-            };
+        self.active_editor().update(cx, |editor, cx| {
+            let offset = editor
+                .scroll_offset()
+                .apply_along(axis, |offset| offset - px(delta));
             editor.set_scroll_offset(offset, cx);
         });
     }
@@ -226,23 +218,12 @@ impl Jot {
         });
         if part != Part::Thumb {
             self.step(axis, part, cx);
-            self.scroll.repeating = cx.spawn(async move |this, cx| {
-                cx.background_executor().timer(REPEAT_DELAY).await;
-                loop {
-                    let held = this
-                        .update(cx, |jot, cx| {
-                            let held = jot.scroll.press.is_some_and(|press| press.part == part);
-                            if held {
-                                jot.step(axis, part, cx);
-                            }
-                            held
-                        })
-                        .unwrap_or(false);
-                    if !held {
-                        break;
-                    }
-                    cx.background_executor().timer(REPEAT_INTERVAL).await;
+            self.scroll.repeating = repeat(cx, REPEAT_DELAY, REPEAT_INTERVAL, move |jot, cx| {
+                let held = jot.scroll.press.is_some_and(|press| press.part == part);
+                if held {
+                    jot.step(axis, part, cx);
                 }
+                held
             });
         }
         self.scroll_activity(cx);
@@ -255,10 +236,7 @@ impl Jot {
         let metrics = metrics(self.active_editor().read(cx), press.axis);
         let track = track(length, &metrics);
         let travel = (track.length - track.thumb_length).max(1.);
-        let pointer = match press.axis {
-            Axis::Vertical => position.y.as_f32(),
-            Axis::Horizontal => position.x.as_f32(),
-        };
+        let pointer = position.along(press.axis).as_f32();
         let target = press.offset + (pointer - press.pointer) * metrics.range() / travel;
         let delta = target - metrics.offset;
         self.scroll_by(press.axis, delta, cx);
@@ -288,7 +266,7 @@ impl Jot {
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let p = palette(cx);
-        let bar = &self.scroll.bars[axis as usize];
+        let bar = self.scroll.bar(axis);
         let pressed = self
             .scroll
             .press
@@ -302,31 +280,25 @@ impl Jot {
         let glyph = match (axis, part) {
             (Axis::Vertical, Part::Decrease) => "\u{EDDB}",
             (Axis::Vertical, _) => "\u{EDDC}",
-            (Axis::Horizontal, Part::Decrease) => "\u{EDD9}",
-            (Axis::Horizontal, _) => "\u{EDDA}",
+            (Axis::Horizontal, Part::Decrease) => CARET_LEFT,
+            (Axis::Horizontal, _) => CARET_RIGHT,
         };
-        let size = if pressed {
+        let glyph_size = if pressed {
             ARROW_GLYPH * ARROW_PRESSED_SCALE
         } else {
             ARROW_GLYPH
         };
-        let start = if part == Part::Decrease {
-            0.
-        } else {
-            length - ARROW
-        };
-        let (left, top, w, h) = match axis {
-            Axis::Vertical => (0., start, SIZE, ARROW),
-            Axis::Horizontal => (start, 0., ARROW, SIZE),
-        };
-        let padding = |edge: bool| if edge { ARROW_PADDING } else { 0. };
         let decrease = part == Part::Decrease;
+        let start = if decrease { 0. } else { length - ARROW };
+        let origin = point(0., 0.).apply_along(axis, |_| start);
+        let extent = size(BAR_BREADTH, BAR_BREADTH).apply_along(axis, |_| ARROW);
+        let padding = |edge: bool| if edge { ARROW_PADDING } else { 0. };
         div()
             .absolute()
-            .left(px(left))
-            .top(px(top))
-            .w(px(w))
-            .h(px(h))
+            .left(px(origin.x))
+            .top(px(origin.y))
+            .w(px(extent.width))
+            .h(px(extent.height))
             .when(axis == Axis::Vertical, |this| {
                 this.pt(px(padding(decrease))).pb(px(padding(!decrease)))
             })
@@ -338,28 +310,21 @@ impl Jot {
             .justify_center()
             .opacity(opacity)
             .font_family(ICON_FONT)
-            .text_size(px(size))
-            .line_height(px(size))
+            .text_size(px(glyph_size))
+            .line_height(px(glyph_size))
             .text_color(rgba(color))
             .child(glyph)
     }
 
-    fn scrollbar(
+    fn bar_motion(
         &self,
         axis: Axis,
-        bounds: Bounds<Pixels>,
         always: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Option<impl IntoElement + use<>> {
-        let p = palette(cx);
-        let metrics = metrics(self.active_editor().read(cx), axis);
-        if !metrics.scrollable() {
-            return None;
-        }
-        let bar = &self.scroll.bars[axis as usize];
+    ) -> Option<(f32, f32, f32)> {
         let shown = always || self.scroll.shown;
-        let visibility = transition_with_status(
+        let visibility = transition(
             ElementId::from(("scrollbar-visibility", axis as usize)),
             if shown { 1. } else { 0. },
             Transition::new(if shown {
@@ -371,25 +336,24 @@ impl Jot {
             window,
             cx,
         );
-        if visibility.value <= 0. && !shown {
+        if visibility <= 0. && !shown {
             return None;
         }
-        let expanded = always || (bar.hovered && shown);
-        let (target, delay) = if expanded {
+        let (target, delay) = if always {
+            (1., Duration::ZERO)
+        } else if self.scroll.bar(axis).hovered && shown {
             (1., EXPAND_BEGIN)
         } else {
             (0., CONTRACT_BEGIN)
         };
-        let delay = if always { Duration::ZERO } else { delay };
-        let expansion = transition_with_status(
+        let expansion = transition(
             ElementId::from(("scrollbar-expansion", axis as usize)),
             target,
             Transition::new(EXPAND).delay(delay).easing(DECELERATE),
             window,
             cx,
-        )
-        .value;
-        let chrome = transition_with_status(
+        );
+        let chrome = transition(
             ElementId::from(("scrollbar-chrome", axis as usize)),
             target,
             Transition::new(OPACITY_CHANGE)
@@ -397,44 +361,36 @@ impl Jot {
                 .easing(Easing::Linear),
             window,
             cx,
-        )
-        .value;
-        let visibility = visibility.value;
+        );
+        Some((visibility, expansion, chrome))
+    }
+
+    fn scrollbar(
+        &self,
+        axis: Axis,
+        metrics: Metrics,
+        bounds: Bounds<Pixels>,
+        always: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<impl IntoElement + use<>> {
+        let p = palette(cx);
+        if !metrics.scrollable() {
+            return None;
+        }
+        let (visibility, expansion, chrome) = self.bar_motion(axis, always, window, cx)?;
         let origin = self.scroll.area.get().origin + bounds.origin;
-        let length = match axis {
-            Axis::Vertical => bounds.size.height.as_f32(),
-            Axis::Horizontal => bounds.size.width.as_f32(),
-        };
+        let length = bounds.size.along(axis).as_f32();
         let track = track(length, &metrics);
-        let breadth = THUMB_COLLAPSED + (SIZE - THUMB_COLLAPSED) * expansion;
-        let shift = (SIZE - breadth) / 2. + THUMB_OFFSET * (1. - expansion);
-        let fill_breadth = (breadth - 2. * THUMB_STROKE_INSET).max(0.);
-        let fill_length = (track.thumb_length - 2. * THUMB_STROKE_INSET).max(0.);
-        let radius = THUMB_RADIUS.min(fill_breadth / 2.);
-        let (thumb_left, thumb_top, thumb_w, thumb_h) = match axis {
-            Axis::Vertical => (
-                shift + THUMB_STROKE_INSET,
-                track.thumb_start + THUMB_STROKE_INSET,
-                fill_breadth,
-                fill_length,
-            ),
-            Axis::Horizontal => (
-                track.thumb_start + THUMB_STROKE_INSET,
-                shift + THUMB_STROKE_INSET,
-                fill_length,
-                fill_breadth,
-            ),
-        };
+        let (thumb, radius) = thumb(axis, &track, expansion);
         let noise = acrylic_noise();
         let tiles = (length / NOISE_SIZE).ceil() as usize;
         let id = match axis {
             Axis::Vertical => "scrollbar-vertical",
             Axis::Horizontal => "scrollbar-horizontal",
         };
-        let along = move |position: Point<Pixels>| match axis {
-            Axis::Vertical => (position.y - origin.y).as_f32(),
-            Axis::Horizontal => (position.x - origin.x).as_f32(),
-        };
+        let along =
+            move |position: Point<Pixels>| (position.along(axis) - origin.along(axis)).as_f32();
         let thumb_range = track.thumb_start..track.thumb_start + track.thumb_length;
         let part_at = move |at: f32| {
             if at < ARROW {
@@ -463,7 +419,7 @@ impl Jot {
                 }))
                 .on_mouse_move(cx.listener(move |this, event: &MouseMoveEvent, _, cx| {
                     let part = Some(part_at(along(event.position)));
-                    let bar = this.scroll.bar(axis);
+                    let bar = this.scroll.bar_mut(axis);
                     if bar.hovered_part != part {
                         bar.hovered_part = part;
                         cx.notify();
@@ -501,10 +457,10 @@ impl Jot {
                 .child(
                     div()
                         .absolute()
-                        .left(px(thumb_left))
-                        .top(px(thumb_top))
-                        .w(px(thumb_w))
-                        .h(px(thumb_h))
+                        .left(thumb.origin.x)
+                        .top(thumb.origin.y)
+                        .w(thumb.size.width)
+                        .h(thumb.size.height)
                         .rounded(px(radius))
                         .bg(rgba(p.scrollbar_thumb)),
                 ),
@@ -516,20 +472,26 @@ impl Jot {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
-        let size = self.scroll.area.get().size;
+        let area = self.scroll.area.get().size;
         let always = !auto_hide();
         let editor = self.active_editor().read(cx);
-        let vertical = metrics(editor, Axis::Vertical).scrollable();
-        let horizontal = metrics(editor, Axis::Horizontal).scrollable();
-        let (width, height) = (size.width.as_f32(), size.height.as_f32());
-        let reserve = |other: bool| if other { SIZE + 2. * MARGIN } else { 0. };
+        let vertical = metrics(editor, Axis::Vertical);
+        let horizontal = metrics(editor, Axis::Horizontal);
+        let (width, height) = (area.width.as_f32(), area.height.as_f32());
+        let reserve = |other: bool| if other { BAR_BREADTH + 2. * MARGIN } else { 0. };
         let vertical_bounds = Bounds::new(
-            point(px(width - MARGIN - SIZE), px(MARGIN)),
-            gpui_kit::size(px(SIZE), px(height - 2. * MARGIN - reserve(horizontal))),
+            point(px(width - MARGIN - BAR_BREADTH), px(MARGIN)),
+            size(
+                px(BAR_BREADTH),
+                px(height - 2. * MARGIN - reserve(horizontal.scrollable())),
+            ),
         );
         let horizontal_bounds = Bounds::new(
-            point(px(MARGIN), px(height - MARGIN - SIZE)),
-            gpui_kit::size(px(width - 2. * MARGIN - reserve(vertical)), px(SIZE)),
+            point(px(MARGIN), px(height - MARGIN - BAR_BREADTH)),
+            size(
+                px(width - 2. * MARGIN - reserve(vertical.scrollable())),
+                px(BAR_BREADTH),
+            ),
         );
         let pressed = self.scroll.press.map(|press| press.axis);
         let drag_length = match pressed {
@@ -543,36 +505,38 @@ impl Jot {
             .top_0()
             .left_0()
             .size_full()
-            .children(self.scrollbar(Axis::Vertical, vertical_bounds, always, window, cx))
-            .children(self.scrollbar(Axis::Horizontal, horizontal_bounds, always, window, cx))
+            .children(self.scrollbar(
+                Axis::Vertical,
+                vertical,
+                vertical_bounds,
+                always,
+                window,
+                cx,
+            ))
+            .children(self.scrollbar(
+                Axis::Horizontal,
+                horizontal,
+                horizontal_bounds,
+                always,
+                window,
+                cx,
+            ))
             .when(pressed.is_some(), |this| {
-                this.child(
-                    canvas(
-                        |_, _, _| {},
-                        move |_, _, window, _| {
-                            let moved = jot.clone();
-                            window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
-                                if phase == DispatchPhase::Bubble {
-                                    moved
-                                        .update(cx, |jot, cx| {
-                                            jot.drag_bar(event.position, drag_length, cx)
-                                        })
-                                        .ok();
-                                }
-                            });
-                            let released = jot.clone();
-                            window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
-                                if phase == DispatchPhase::Bubble
-                                    && event.button == MouseButton::Left
-                                {
-                                    released.update(cx, |jot, cx| jot.release_bar(cx)).ok();
-                                }
-                            });
-                        },
-                    )
-                    .absolute()
-                    .size_full(),
-                )
+                this.child(window_listeners(move |window| {
+                    let moved = jot.clone();
+                    window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
+                        if phase == DispatchPhase::Bubble {
+                            moved
+                                .update(cx, |jot, cx| jot.drag_bar(event.position, drag_length, cx))
+                                .ok();
+                        }
+                    });
+                    window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
+                        if phase == DispatchPhase::Bubble && event.button == MouseButton::Left {
+                            jot.update(cx, |jot, cx| jot.release_bar(cx)).ok();
+                        }
+                    });
+                }))
             })
     }
 }
