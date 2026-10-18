@@ -249,7 +249,6 @@ gpui_kit::actions!(
         ToggleMatchCase,
         ToggleWrapAround,
         ReplaceNext,
-        ReplaceAll,
         ShowContextMenu,
         ToggleTheme,
     ]
@@ -1013,7 +1012,6 @@ impl Render for Jot {
             .on_action(cx.listener(Self::toggle_match_case))
             .on_action(cx.listener(Self::toggle_wrap_around))
             .on_action(cx.listener(Self::replace_next))
-            .on_action(cx.listener(Self::replace_all))
             .child(
                 div()
                     .key_context(CONTEXT)

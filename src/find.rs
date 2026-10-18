@@ -397,12 +397,7 @@ impl Jot {
         self.find_step(true, window, cx);
     }
 
-    pub(crate) fn replace_all(
-        &mut self,
-        _: &ReplaceAll,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub(crate) fn replace_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(query) = self.find.prepare(cx) else {
             return;
         };
@@ -794,11 +789,7 @@ impl Jot {
             ))
             .child(action(
                 field::button(p, buttons, "find-replace-all", "Replace all", false, false)
-                    .on_click(
-                        cx.listener(|this, _, window, cx| {
-                            this.replace_all(&ReplaceAll, window, cx)
-                        }),
-                    ),
+                    .on_click(cx.listener(|this, _, window, cx| this.replace_all(window, cx))),
             ))
     }
 }
