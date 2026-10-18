@@ -11,6 +11,8 @@ const UTF8_BOM: &[u8] = b"\xef\xbb\xbf";
 const UTF16_LE_BOM: &[u8] = b"\xff\xfe";
 const UTF16_BE_BOM: &[u8] = b"\xfe\xff";
 const TEMP_ATTEMPTS: usize = 100;
+const NOTICES: &str = include_str!("../assets/THIRD-PARTY-NOTICES.txt");
+const NOTICES_FILE: &str = "THIRD-PARTY-NOTICES.txt";
 
 pub(crate) const UNTITLED: &str = "Untitled";
 
@@ -178,6 +180,14 @@ fn create_temp(path: &Path) -> io::Result<(PathBuf, fs::File)> {
         }
     }
     Err(io::Error::from(io::ErrorKind::AlreadyExists))
+}
+
+pub(crate) fn write_notices() -> io::Result<PathBuf> {
+    let dir = std::env::temp_dir().join(crate::APP_NAME);
+    fs::create_dir_all(&dir)?;
+    let path = dir.join(NOTICES_FILE);
+    fs::write(&path, NOTICES)?;
+    Ok(path)
 }
 
 fn ansi_decode(bytes: &[u8]) -> Option<String> {

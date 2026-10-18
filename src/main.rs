@@ -47,6 +47,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 };
 
 const APP_NAME: &str = "Jot";
+const NOTICES_FLAG: &str = "--notices";
 const CONTEXT: &str = "Jot";
 
 const WINDOW_WIDTH: f32 = 2213.;
@@ -1025,7 +1026,13 @@ fn main() {
 
             let (window, jot) = open_jot_window(None, None, cx);
             tooltip::prepare(cx);
-            let paths: Vec<PathBuf> = std::env::args_os().skip(1).map(PathBuf::from).collect();
+            let (flags, mut paths): (Vec<_>, Vec<_>) = std::env::args_os()
+                .skip(1)
+                .map(PathBuf::from)
+                .partition(|arg| arg.as_os_str() == NOTICES_FLAG);
+            if !flags.is_empty() {
+                paths.extend(document::write_notices().ok());
+            }
             if !paths.is_empty() {
                 window
                     .update(cx, |_, window, cx| {
