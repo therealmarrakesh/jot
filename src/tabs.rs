@@ -773,7 +773,8 @@ impl Jot {
                             x - this.strip.origin(now) - this.tabs[ix].slot.x.value(now),
                             event.position.y.as_f32() - STRIP_TOP,
                         );
-                        detach::press(this.owner(window, cx), id, ix, grab, x, cx);
+                        let alone = this.tabs.len() == 1;
+                        detach::press(this.owner(window, cx), id, ix, grab, x, alone, cx);
                         cx.notify();
                     }
                 }),

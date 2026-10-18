@@ -80,8 +80,12 @@ pub(crate) fn press(
     index: usize,
     grab: Point<f32>,
     start: f32,
+    alone: bool,
     cx: &mut App,
 ) {
+    if alone && unsafe { IsZoomed(owner.hwnd as HWND) } == 0 {
+        cx.defer(lift);
+    }
     cx.set_global(TabDrag {
         source: owner.clone(),
         owner,
@@ -183,6 +187,17 @@ fn moved(cx: &mut App) {
     } else {
         detach(&mut drag, alone, point, cx);
     }
+    cx.set_global(drag);
+}
+
+fn lift(cx: &mut App) {
+    let Some(mut drag) = cx.try_global::<TabDrag>().cloned() else {
+        return;
+    };
+    let point = drag.press;
+    drag.started = true;
+    drag.source_placement = placement(drag.owner.hwnd);
+    start_move_loop(&mut drag, point, cx);
     cx.set_global(drag);
 }
 
@@ -289,12 +304,16 @@ fn detach(drag: &mut TabDrag, alone: bool, point: POINT, cx: &mut App) {
 }
 
 fn run_move_loop(drag: &mut TabDrag, point: POINT, cx: &mut App) {
-    let hwnd = drag.owner.hwnd;
     place(
-        hwnd,
+        drag.owner.hwnd,
         point,
         gpui_kit::point(STRIP_LEFT + drag.grab.x, STRIP_TOP + drag.grab.y),
     );
+    start_move_loop(drag, point, cx);
+}
+
+fn start_move_loop(drag: &mut TabDrag, point: POINT, cx: &mut App) {
+    let hwnd = drag.owner.hwnd;
     let position = (((point.y as u16 as u32) << 16) | point.x as u16 as u32) as LPARAM;
     unsafe {
         ReleaseCapture();
