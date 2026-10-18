@@ -428,8 +428,8 @@ impl Jot {
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-                        let at = along(event.position);
-                        this.press_bar(axis, part_at(at), at, cx);
+                        let part = part_at(along(event.position));
+                        this.press_bar(axis, part, event.position.along(axis).as_f32(), cx);
                         cx.stop_propagation();
                     }),
                 )
