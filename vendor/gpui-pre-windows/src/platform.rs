@@ -1660,10 +1660,20 @@ fn file_save_dialog(
         };
     }
     if let Some(title) = &options.title {
-        unsafe { dialog.SetTitle(&HSTRING::from(title))? };
+        unsafe {
+            dialog
+                .SetTitle(&HSTRING::from(title))
+                .context("failed to set dialog title")
+                .log_err()
+        };
     }
     if let Some(extension) = &options.default_extension {
-        unsafe { dialog.SetDefaultExtension(&HSTRING::from(extension))? };
+        unsafe {
+            dialog
+                .SetDefaultExtension(&HSTRING::from(extension))
+                .context("failed to set default extension")
+                .log_err()
+        };
     }
 
     let file_types: Vec<(HSTRING, HSTRING)> = options
@@ -1678,8 +1688,10 @@ fn file_save_dialog(
             pszSpec: PCWSTR(spec.as_ptr()),
         })
         .collect();
-    let customize = match &options.choice {
-        Some(choice) => {
+    let customize = options
+        .choice
+        .as_ref()
+        .map(|choice| -> Result<IFileDialogCustomize> {
             let customize: IFileDialogCustomize = dialog.cast()?;
             unsafe {
                 customize.StartVisualGroup(SAVE_CHOICE_GROUP, &HSTRING::from(&choice.label))?;
@@ -1690,10 +1702,9 @@ fn file_save_dialog(
                 customize.SetSelectedControlItem(SAVE_CHOICE_COMBO, choice.selected as u32)?;
                 customize.EndVisualGroup()?;
             }
-            Some(customize)
-        }
-        None => None,
-    };
+            Ok(customize)
+        })
+        .transpose()?;
 
     unsafe {
         dialog.SetFileTypes(&specs)?;
@@ -1704,12 +1715,10 @@ fn file_save_dialog(
             return Err(error.into());
         }
     }
-    let selected = match customize {
-        Some(customize) => {
-            Some(unsafe { customize.GetSelectedControlItem(SAVE_CHOICE_COMBO)? } as usize)
-        }
-        None => None,
-    };
+    let selected = customize
+        .map(|customize| unsafe { customize.GetSelectedControlItem(SAVE_CHOICE_COMBO) })
+        .transpose()?
+        .map(|ix| ix as usize);
     let shell_item = unsafe { dialog.GetResult()? };
     let file_path_string = unsafe {
         let pwstr = shell_item.GetDisplayName(SIGDN_FILESYSPATH)?;

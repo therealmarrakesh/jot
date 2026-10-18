@@ -70,7 +70,7 @@ pub(crate) struct Palette {
 
 impl Global for Palette {}
 
-pub(crate) const LIGHT: Palette = Palette {
+const LIGHT: Palette = Palette {
     dark: false,
     layer: 0xffffffb3,
     stroke: 0x0000000f,
@@ -144,7 +144,7 @@ pub(crate) const LIGHT: Palette = Palette {
     accent_bottom_edge: 0x66 as f32 / 255.,
 };
 
-pub(crate) const DARK: Palette = Palette {
+const DARK: Palette = Palette {
     dark: true,
     layer: 0x3a3a3a73,
     stroke: 0x00000019,
@@ -251,10 +251,8 @@ pub(crate) fn theme_shadow(dark: bool, z: f32, scale: f32) -> Vec<BoxShadow> {
 }
 
 pub(crate) fn apply(appearance: WindowAppearance, cx: &mut App) {
-    let dark = matches!(
-        appearance,
-        WindowAppearance::Dark | WindowAppearance::VibrantDark
-    );
+    let mode = ThemeMode::from(appearance);
+    let dark = mode.is_dark();
     if cx
         .try_global::<Palette>()
         .is_some_and(|palette| palette.dark == dark)
@@ -262,20 +260,14 @@ pub(crate) fn apply(appearance: WindowAppearance, cx: &mut App) {
         return;
     }
     cx.set_global(if dark { DARK } else { LIGHT });
-    Theme::change(
-        if dark {
-            ThemeMode::Dark
-        } else {
-            ThemeMode::Light
-        },
-        None,
-        cx,
-    );
+    Theme::change(mode, None, cx);
+    let background = transparent_black();
+    let caret = hsla(0., 0., 0., f32::EPSILON);
     let theme = Theme::global_mut(cx);
-    theme.background = transparent_black();
-    theme.tokens.background = transparent_black().into();
-    theme.caret = hsla(0., 0., 0., f32::EPSILON);
-    theme.tokens.caret = hsla(0., 0., 0., f32::EPSILON).into();
+    theme.background = background;
+    theme.tokens.background = background.into();
+    theme.caret = caret;
+    theme.tokens.caret = caret.into();
     cx.refresh_windows();
 }
 

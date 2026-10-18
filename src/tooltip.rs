@@ -1,6 +1,5 @@
 use super::*;
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::time::Instant;
 use windows_sys::Win32::Foundation::{POINT, RECT};
 use windows_sys::Win32::Graphics::Gdi::{
@@ -69,13 +68,13 @@ impl Fade {
 }
 
 fn theme_fade(storyboard: i32) -> Fade {
-    unsafe {
-        let theme = OpenThemeData(std::ptr::null_mut(), windows_sys::w!("Animations"));
-        let timing = OpenThemeData(std::ptr::null_mut(), windows_sys::w!("timingfunction"));
-        let mut fade = None;
-        let mut count = 0u32;
-        let mut written = 0u32;
-        if GetThemeAnimationProperty(
+    let theme = unsafe { OpenThemeData(std::ptr::null_mut(), windows_sys::w!("Animations")) };
+    let timing = unsafe { OpenThemeData(std::ptr::null_mut(), windows_sys::w!("timingfunction")) };
+    let mut fade = None;
+    let mut count = 0u32;
+    let mut written = 0u32;
+    if unsafe {
+        GetThemeAnimationProperty(
             theme,
             storyboard,
             FADE_TARGET,
@@ -83,11 +82,13 @@ fn theme_fade(storyboard: i32) -> Fade {
             (&raw mut count).cast(),
             size_of::<u32>() as u32,
             &mut written,
-        ) == 0
-        {
-            for index in 0..count {
-                let mut transform = TA_TRANSFORM_OPACITY::default();
-                if GetThemeAnimationTransform(
+        )
+    } == 0
+    {
+        for index in 0..count {
+            let mut transform = TA_TRANSFORM_OPACITY::default();
+            if unsafe {
+                GetThemeAnimationTransform(
                     theme,
                     storyboard,
                     FADE_TARGET,
@@ -95,37 +96,41 @@ fn theme_fade(storyboard: i32) -> Fade {
                     (&raw mut transform).cast(),
                     size_of::<TA_TRANSFORM_OPACITY>() as u32,
                     &mut written,
-                ) != 0
-                    || transform.header.eTransformType != TATT_OPACITY
-                {
-                    continue;
-                }
-                let mut bezier = TA_CUBIC_BEZIER::default();
-                let curve = if GetThemeTimingFunction(
+                )
+            } != 0
+                || transform.header.eTransformType != TATT_OPACITY
+            {
+                continue;
+            }
+            let mut bezier = TA_CUBIC_BEZIER::default();
+            let curve = if unsafe {
+                GetThemeTimingFunction(
                     timing,
                     transform.header.dwTimingFunctionId as i32,
                     (&raw mut bezier).cast(),
                     size_of::<TA_CUBIC_BEZIER>() as u32,
                     &mut written,
-                ) == 0
-                    && bezier.header.eTimingFunctionType == TTFT_CUBIC_BEZIER
-                {
-                    [bezier.rX0, bezier.rY0, bezier.rX1, bezier.rY1]
-                } else {
-                    Fade::LINEAR.curve
-                };
-                fade = Some(Fade {
-                    delay: Duration::from_millis(transform.header.dwStartTime.into()),
-                    duration: Duration::from_millis(transform.header.dwDurationTime.into()),
-                    curve,
-                });
-                break;
-            }
+                )
+            } == 0
+                && bezier.header.eTimingFunctionType == TTFT_CUBIC_BEZIER
+            {
+                [bezier.rX0, bezier.rY0, bezier.rX1, bezier.rY1]
+            } else {
+                Fade::LINEAR.curve
+            };
+            fade = Some(Fade {
+                delay: Duration::from_millis(transform.header.dwStartTime.into()),
+                duration: Duration::from_millis(transform.header.dwDurationTime.into()),
+                curve,
+            });
+            break;
         }
+    }
+    unsafe {
         CloseThemeData(theme);
         CloseThemeData(timing);
-        fade.unwrap_or(Fade::LINEAR)
     }
+    fade.unwrap_or(Fade::LINEAR)
 }
 
 #[derive(Clone, Copy)]
@@ -134,10 +139,9 @@ enum Phase {
     Out(Instant, f32),
 }
 
-pub(crate) struct TooltipView {
+struct TooltipView {
     text: SharedString,
     size: gpui_kit::Size<Pixels>,
-    noise: Arc<Image>,
     phase: Phase,
     fade_in: Fade,
     fade_out: Fade,
@@ -152,10 +156,11 @@ impl TooltipView {
     }
 
     fn settled(&self, now: Instant) -> bool {
-        match self.phase {
-            Phase::In(since) => now.saturating_duration_since(since) >= self.fade_in.total(),
-            Phase::Out(since, _) => now.saturating_duration_since(since) >= self.fade_out.total(),
-        }
+        let (since, fade) = match self.phase {
+            Phase::In(since) => (since, self.fade_in),
+            Phase::Out(since, _) => (since, self.fade_out),
+        };
+        now.saturating_duration_since(since) >= fade.total()
     }
 }
 
@@ -168,10 +173,11 @@ impl Render for TooltipView {
         }
         let columns = (self.size.width.as_f32() / NOISE_SIZE).ceil() as usize;
         let rows = (self.size.height.as_f32() / NOISE_SIZE).ceil() as usize;
+        let image = acrylic_noise();
         let noise: Vec<_> = (0..rows)
             .flat_map(|row| (0..columns).map(move |column| (row, column)))
             .map(|(row, column)| {
-                img(self.noise.clone())
+                img(image.clone())
                     .absolute()
                     .left(px(column as f32 * NOISE_SIZE))
                     .top(px(row as f32 * NOISE_SIZE))
@@ -203,8 +209,7 @@ impl Render for TooltipView {
                             div()
                                 .relative()
                                 .size_full()
-                                .pl(px(PADDING_X))
-                                .pr(px(PADDING_X))
+                                .px(px(PADDING_X))
                                 .pt(px(PADDING_TOP))
                                 .pb(px(PADDING_BOTTOM))
                                 .font_family(SMALL_FONT)
@@ -330,17 +335,12 @@ pub(crate) fn anchor(id: impl Into<ElementId>) -> impl IntoElement {
                 right: origin.x + physical(bounds.origin.x + bounds.size.width),
                 bottom: origin.y + physical(bounds.origin.y + bounds.size.height),
             };
-            let moved = tips.visible.as_mut().is_some_and(|visible| {
-                if visible.id != id {
-                    return false;
-                }
-                let moved = visible.owner.left != rect.left
-                    || visible.owner.top != rect.top
-                    || visible.owner.right != rect.right
-                    || visible.owner.bottom != rect.bottom;
+            let edges = |r: RECT| (r.left, r.top, r.right, r.bottom);
+            let mut moved = false;
+            if let Some(visible) = tips.visible.as_mut().filter(|visible| visible.id == id) {
+                moved = edges(visible.owner) != edges(rect);
                 visible.owner = rect;
-                moved
-            });
+            }
             tips.anchors.insert(id, rect);
             if moved {
                 cx.defer(close);
@@ -373,22 +373,14 @@ pub(crate) fn key_down(cx: &mut App) {
 }
 
 pub(crate) fn modifiers_changed(modifiers: &Modifiers, cx: &mut App) {
-    let only_control = modifiers.control
-        && !modifiers.alt
-        && !modifiers.shift
-        && !modifiers.platform
-        && !modifiers.function;
-    let released = *modifiers == Modifiers::default();
+    let only_control = *modifiers == Modifiers::control();
+    let released = !modifiers.modified();
     let tips = cx.default_global::<Tooltips>();
-    if only_control {
-        tips.control_only = true;
-    } else if released && tips.control_only {
-        tips.control_only = false;
+    let was = std::mem::replace(&mut tips.control_only, only_control);
+    if released && was {
         tips.current = None;
         tips.opening = None;
         close(cx);
-    } else {
-        tips.control_only = false;
     }
 }
 
@@ -482,9 +474,9 @@ fn close(cx: &mut App) {
     cx.default_global::<Tooltips>().hiding = Some(task);
 }
 
-fn popup(cx: &mut App) -> Option<(Entity<TooltipView>, AnyWindowHandle, isize)> {
+fn popup(cx: &mut App) -> Option<overlay::Overlay<TooltipView>> {
     if let Some(popup) = &cx.default_global::<Tooltips>().popup {
-        return Some((popup.view.clone(), popup.handle, popup.hwnd));
+        return Some(popup.clone());
     }
     let (fade_in, fade_out) = (
         theme_fade(FADE_IN_STORYBOARD),
@@ -494,7 +486,6 @@ fn popup(cx: &mut App) -> Option<(Entity<TooltipView>, AnyWindowHandle, isize)> 
         |_| TooltipView {
             text: "".into(),
             size: size(px(0.), px(0.)),
-            noise: acrylic_noise(),
             phase: Phase::Out(Instant::now(), 0.),
             fade_in,
             fade_out,
@@ -502,13 +493,13 @@ fn popup(cx: &mut App) -> Option<(Entity<TooltipView>, AnyWindowHandle, isize)> 
         cx,
     )?;
     cx.default_global::<Tooltips>().popup = Some(popup.clone());
-    Some((popup.view, popup.handle, popup.hwnd))
+    Some(popup)
 }
 
 fn measure(text: &SharedString, window: &mut Window) -> (f32, f32) {
     let runs = [TextRun {
         len: text.len(),
-        font: gpui_kit::font(SMALL_FONT),
+        font: font(SMALL_FONT),
         color: gpui_kit::black(),
         background_color: None,
         underline: None,
@@ -539,7 +530,7 @@ fn measure(text: &SharedString, window: &mut Window) -> (f32, f32) {
         .fold(0., f32::max);
     (
         (widest.ceil() + chrome).min(MAX_WIDTH),
-        SINGLE_HEIGHT + (count.max(1) - 1) as f32 * LINE_HEIGHT,
+        SINGLE_HEIGHT + count.saturating_sub(1) as f32 * LINE_HEIGHT,
     )
 }
 
@@ -572,7 +563,7 @@ fn watch_safe_zone(cx: &mut App) {
 }
 
 fn show(id: ElementId, text: SharedString, entered: POINT, cx: &mut App) {
-    let Some((view, handle, hwnd)) = popup(cx) else {
+    let Some(popup) = popup(cx) else {
         return;
     };
     let monitor = unsafe { MonitorFromPoint(entered, MONITOR_DEFAULTTONEAREST) };
@@ -585,11 +576,11 @@ fn show(id: ElementId, text: SharedString, entered: POINT, cx: &mut App) {
     unsafe { GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y) };
     let scale = dpi_x as f32 / USER_DEFAULT_SCREEN_DPI as f32;
     let work = info.rcWork;
-    overlay::place(hwnd, entered.x, entered.y, 1, 1);
-    overlay::clear_backdrop(hwnd);
-    let Ok((width, height)) = handle.update(cx, |_, window, cx| {
+    overlay::place(popup.hwnd, entered.x, entered.y, 1, 1);
+    overlay::clear_backdrop(popup.hwnd);
+    let Ok((width, height)) = popup.handle.update(cx, |_, window, cx| {
         let measured = measure(&text, window);
-        view.update(cx, |view, cx| {
+        popup.view.update(cx, |view, cx| {
             view.text = text.clone();
             view.size = size(px(measured.0), px(measured.1));
             view.phase = Phase::In(Instant::now());
@@ -613,13 +604,13 @@ fn show(id: ElementId, text: SharedString, entered: POINT, cx: &mut App) {
         physical(SHADOW_BOTTOM),
     );
     overlay::place(
-        hwnd,
+        popup.hwnd,
         left - side,
         top - above,
         w + 2 * side,
         h + above + below,
     );
-    overlay::show(hwnd);
+    overlay::show(popup.hwnd);
     let tips = cx.default_global::<Tooltips>();
     tips.hiding = None;
     let owner = tips.anchors.get(&id).copied().unwrap_or(RECT {

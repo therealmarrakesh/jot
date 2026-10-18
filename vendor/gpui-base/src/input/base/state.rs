@@ -42,27 +42,36 @@ use crate::input::{
 };
 use crate::{AutoScroll, StepAction};
 
+const DEFAULT_WHEEL_SCROLL: u32 = 3;
+const WHEEL_STEP_FRACTION: f32 = 0.15;
+const MIN_WHEEL_STEP: f32 = 48.;
+
 #[cfg(target_os = "windows")]
-fn wheel_scroll_lines() -> u32 {
+fn wheel_scroll_amount(horizontal: bool) -> u32 {
     use windows::Win32::UI::WindowsAndMessaging::{
-        SPI_GETWHEELSCROLLLINES, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SystemParametersInfoW,
+        SPI_GETWHEELSCROLLCHARS, SPI_GETWHEELSCROLLLINES, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
+        SystemParametersInfoW,
     };
-    let mut lines = 3u32;
-    // SAFETY: SPI_GETWHEELSCROLLLINES writes one UINT through `pvParam`; it outlives the call.
+    let action = if horizontal {
+        SPI_GETWHEELSCROLLCHARS
+    } else {
+        SPI_GETWHEELSCROLLLINES
+    };
+    let mut amount = DEFAULT_WHEEL_SCROLL;
     let _ = unsafe {
         SystemParametersInfoW(
-            SPI_GETWHEELSCROLLLINES,
+            action,
             0,
-            Some((&mut lines as *mut u32).cast()),
+            Some((&mut amount as *mut u32).cast()),
             SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
         )
     };
-    lines
+    amount
 }
 
 #[cfg(not(target_os = "windows"))]
-fn wheel_scroll_lines() -> u32 {
-    3
+fn wheel_scroll_amount(_horizontal: bool) -> u32 {
+    DEFAULT_WHEEL_SCROLL
 }
 
 /// Vertical clearance to retain when revealing a text position.
@@ -706,19 +715,16 @@ impl<M: InputModeKind> InputBaseState<M> {
         self.is_multi_line() && !self.hide_scrollbar
     }
 
-    /// Hide the built-in scrollbar so the host can draw its own.
     pub fn hide_scrollbar(mut self) -> Self {
         self.hide_scrollbar = true;
         self
     }
 
-    /// Scroll one wheel notch by max(48px, 15% of the viewport), as WinUI's ScrollViewer does.
     pub fn viewport_wheel_step(mut self) -> Self {
         self.viewport_wheel_step = true;
         self
     }
 
-    /// The viewport size, the scrollable content size and the current scroll offset.
     pub fn scroll_extent(&self) -> (gpui::Size<Pixels>, gpui::Size<Pixels>, Point<Pixels>) {
         (
             self.input_bounds.size,
@@ -2666,15 +2672,18 @@ impl<M: InputModeKind> InputBaseState<M> {
             .unwrap_or(window.line_height());
         let delta = match event.delta {
             ScrollDelta::Lines(lines) if self.viewport_wheel_step => {
-                let lines_per_notch = wheel_scroll_lines().max(1) as f32;
+                let chars_per_notch = wheel_scroll_amount(true).max(1) as f32;
+                let lines_per_notch = wheel_scroll_amount(false).max(1) as f32;
                 let size = self.input_bounds.size;
                 let step = |notches: f32, extent: Pixels| {
                     let extent = extent.as_f32();
-                    let notch = (extent * 0.15).round().max(48.);
-                    px((notches * notch).round().clamp(-extent.floor(), extent.floor()))
+                    let notch = (extent * WHEEL_STEP_FRACTION).round().max(MIN_WHEEL_STEP);
+                    px((notches * notch)
+                        .round()
+                        .clamp(-extent.floor(), extent.floor()))
                 };
                 point(
-                    step(lines.x / lines_per_notch, size.width),
+                    step(lines.x / chars_per_notch, size.width),
                     step(lines.y / lines_per_notch, size.height),
                 )
             }

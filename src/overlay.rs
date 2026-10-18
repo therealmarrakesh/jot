@@ -126,11 +126,11 @@ pub(crate) fn open<V: Render>(
     set(DWMWA_TRANSITIONS_FORCEDISABLED, 1);
     unsafe {
         SetWindowLongW(window, GWL_STYLE, WS_POPUP as i32);
-        let extended = GetWindowLongW(window, GWL_EXSTYLE) as u32;
+        let extended = GetWindowLongW(window, GWL_EXSTYLE);
         SetWindowLongW(
             window,
             GWL_EXSTYLE,
-            (extended | WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE) as i32,
+            extended | (WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE) as i32,
         );
         SetLayeredWindowAttributes(window, 0, 255, LWA_ALPHA);
         SetWindowPos(

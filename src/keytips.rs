@@ -20,7 +20,7 @@ pub(crate) struct KeyTip {
     bounds: Bounds<Pixels>,
 }
 
-pub(crate) struct KeyTipView {
+struct KeyTipView {
     tips: Vec<KeyTip>,
 }
 
@@ -90,7 +90,7 @@ pub(crate) fn show(
     owner: AnyWindowHandle,
     origin: POINT,
     scale: f32,
-    tips: Vec<KeyTip>,
+    mut tips: Vec<KeyTip>,
     cx: &mut App,
 ) {
     let state = cx.default_global::<KeyTips>();
@@ -104,13 +104,9 @@ pub(crate) fn show(
         }
         return;
     };
-    let tips: Vec<KeyTip> = tips
-        .into_iter()
-        .map(|tip| KeyTip {
-            key: tip.key,
-            bounds: Bounds::new(tip.bounds.origin - union.origin, tip.bounds.size),
-        })
-        .collect();
+    for tip in &mut tips {
+        tip.bounds.origin -= union.origin;
+    }
     let physical = |value: Pixels| (value.as_f32() * scale).round() as i32;
     let rect = [
         origin.x + physical(union.origin.x),
