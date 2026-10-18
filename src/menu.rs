@@ -901,7 +901,6 @@ impl MenuBar {
         let count = commands.len() as f32;
         let row = open.panel.width + 2. * COMMAND_OUTSET;
         let cell = ((row - (count - 1.)) / count).floor();
-        let face = cell - 2. * (COMMAND_GAP + COMMAND_INSET);
         let ring = open.focused_command.filter(|_| open.focus_visible);
         div()
             .absolute()
@@ -911,12 +910,6 @@ impl MenuBar {
             .h(px(COMMAND_ROW))
             .flex()
             .children(commands.iter().enumerate().flat_map(|(ix, command)| {
-                let enabled = command.enabled;
-                let color = if enabled {
-                    p.text_primary
-                } else {
-                    p.text_disabled
-                };
                 let divider = (ix > 0).then(|| {
                     div()
                         .flex_none()
@@ -925,67 +918,8 @@ impl MenuBar {
                         .mt(px(COMMAND_DIVIDER_TOP))
                         .bg(rgb(p.menu_separator))
                 });
-                let label_width = text_width(window, command.label, SMALL_FONT, COMMAND_LABEL_SIZE);
-                let label_left = (face - COMMAND_LABEL_PANEL) / 2.
-                    + round_half_up((COMMAND_LABEL_PANEL - label_width) / 2.);
-                let button = div()
-                    .id(("menu-command", ix))
-                    .flex_none()
-                    .w(px(cell))
-                    .h_full()
-                    .pt(px(COMMAND_ROW - COMMAND_BUTTON + COMMAND_INSET))
-                    .px(px(COMMAND_GAP + COMMAND_INSET))
-                    .pb(px(COMMAND_INSET))
-                    .on_click(
-                        cx.listener(move |this, _, window, cx| this.run_command(ix, window, cx)),
-                    )
-                    .child(
-                        div()
-                            .id(("menu-command-face", ix))
-                            .size_full()
-                            .flex()
-                            .flex_col()
-                            .items_center()
-                            .pt(px(COMMAND_ICON_TOP))
-                            .rounded(px(field::CONTROL_RADIUS))
-                            .text_color(rgba(color))
-                            .child(
-                                div()
-                                    .h(px(COMMAND_LINE))
-                                    .line_height(px(COMMAND_LINE))
-                                    .font_family(ICON_FONT)
-                                    .text_size(px(ICON_SIZE))
-                                    .child(command.glyph),
-                            )
-                            .child(
-                                div()
-                                    .self_start()
-                                    .ml(px(label_left))
-                                    .w(px(label_width))
-                                    .text_center()
-                                    .mt(px(COMMAND_LABEL_GAP))
-                                    .h(px(COMMAND_LINE))
-                                    .line_height(px(COMMAND_LINE))
-                                    .font_family(SMALL_FONT)
-                                    .text_size(px(COMMAND_LABEL_SIZE))
-                                    .child(command.label),
-                            )
-                            .fade_bg(if enabled {
-                                Brushes::subtle(p)
-                            } else {
-                                Brushes::solid(transparent_black().into())
-                            })
-                            .when(enabled, |this| {
-                                this.active(move |style| style.text_color(rgba(p.text_secondary)))
-                            })
-                            .when(ring == Some(ix), |this| {
-                                this.child(field::focus_ring(
-                                    p,
-                                    Edges::default(),
-                                    px(field::CONTROL_RADIUS),
-                                ))
-                            }),
-                    );
+                let button =
+                    Self::command_button(p, ix, command, cell, ring == Some(ix), window, cx);
                 divider
                     .into_iter()
                     .map(IntoElement::into_any_element)
@@ -999,6 +933,83 @@ impl MenuBar {
                     .bottom(px(-1.))
                     .h(px(1.))
                     .bg(rgb(p.menu_separator)),
+            )
+    }
+
+    fn command_button(
+        p: Palette,
+        ix: usize,
+        command: &CommandButton,
+        cell: f32,
+        focused: bool,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let face = cell - 2. * (COMMAND_GAP + COMMAND_INSET);
+        let enabled = command.enabled;
+        let color = if enabled {
+            p.text_primary
+        } else {
+            p.text_disabled
+        };
+        let label_width = text_width(window, command.label, SMALL_FONT, COMMAND_LABEL_SIZE);
+        let label_left = (face - COMMAND_LABEL_PANEL) / 2.
+            + round_half_up((COMMAND_LABEL_PANEL - label_width) / 2.);
+        div()
+            .id(("menu-command", ix))
+            .flex_none()
+            .w(px(cell))
+            .h_full()
+            .pt(px(COMMAND_ROW - COMMAND_BUTTON + COMMAND_INSET))
+            .px(px(COMMAND_GAP + COMMAND_INSET))
+            .pb(px(COMMAND_INSET))
+            .on_click(cx.listener(move |this, _, window, cx| this.run_command(ix, window, cx)))
+            .child(
+                div()
+                    .id(("menu-command-face", ix))
+                    .size_full()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .pt(px(COMMAND_ICON_TOP))
+                    .rounded(px(field::CONTROL_RADIUS))
+                    .text_color(rgba(color))
+                    .child(
+                        div()
+                            .h(px(COMMAND_LINE))
+                            .line_height(px(COMMAND_LINE))
+                            .font_family(ICON_FONT)
+                            .text_size(px(ICON_SIZE))
+                            .child(command.glyph),
+                    )
+                    .child(
+                        div()
+                            .self_start()
+                            .ml(px(label_left))
+                            .w(px(label_width))
+                            .text_center()
+                            .mt(px(COMMAND_LABEL_GAP))
+                            .h(px(COMMAND_LINE))
+                            .line_height(px(COMMAND_LINE))
+                            .font_family(SMALL_FONT)
+                            .text_size(px(COMMAND_LABEL_SIZE))
+                            .child(command.label),
+                    )
+                    .fade_bg(if enabled {
+                        Brushes::subtle(p)
+                    } else {
+                        Brushes::solid(transparent_black().into())
+                    })
+                    .when(enabled, |this| {
+                        this.active(move |style| style.text_color(rgba(p.text_secondary)))
+                    })
+                    .when(focused, |this| {
+                        this.child(field::focus_ring(
+                            p,
+                            Edges::default(),
+                            px(field::CONTROL_RADIUS),
+                        ))
+                    }),
             )
     }
 
@@ -1366,32 +1377,10 @@ impl MenuBar {
             (false, true) => (hidden, hidden),
             (false, false) => (0., -hidden),
         };
-        let submenu = open.submenu.as_ref().map(|submenu| {
-            let sub_width = submenu.panel.width;
-            let sub_height = submenu.panel.height();
-            let hidden = sub_height * SUBMENU_CLOSED_RATIO * (1. - submenu.motion.unroll);
-            let top = panel.row_top(submenu.ix) - BORDER - PADDING_Y;
-            let rows = Self::panel_rows(open, &submenu.panel, Some(submenu.ix), 0., false, cx);
-            div()
-                .absolute()
-                .left(px(width - SUBMENU_OVERLAP))
-                .top(px(top))
-                .w(px(sub_width))
-                .h(px(sub_height))
-                .opacity(submenu.motion.opacity)
-                .occlude()
-                .cursor_default()
-                .children(reveal(
-                    p,
-                    SUBMENU_Z,
-                    sub_height,
-                    0.,
-                    sub_height - hidden,
-                    -hidden,
-                    rows,
-                ))
-                .child(record_bounds(self.hit_areas.clone(), SUBMENU_AREA))
-        });
+        let submenu = open
+            .submenu
+            .as_ref()
+            .map(|submenu| self.submenu_popup(open, submenu, cx));
 
         div()
             .relative()
@@ -1428,6 +1417,34 @@ impl MenuBar {
             .children(submenu)
     }
 
+    fn submenu_popup(&self, open: &OpenMenu, submenu: &OpenSubmenu, cx: &mut Context<Self>) -> Div {
+        let p = palette(cx);
+        let sub_width = submenu.panel.width;
+        let sub_height = submenu.panel.height();
+        let hidden = sub_height * SUBMENU_CLOSED_RATIO * (1. - submenu.motion.unroll);
+        let top = open.panel.row_top(submenu.ix) - BORDER - PADDING_Y;
+        let rows = Self::panel_rows(open, &submenu.panel, Some(submenu.ix), 0., false, cx);
+        div()
+            .absolute()
+            .left(px(open.panel.width - SUBMENU_OVERLAP))
+            .top(px(top))
+            .w(px(sub_width))
+            .h(px(sub_height))
+            .opacity(submenu.motion.opacity)
+            .occlude()
+            .cursor_default()
+            .children(reveal(
+                p,
+                SUBMENU_Z,
+                sub_height,
+                0.,
+                sub_height - hidden,
+                -hidden,
+                rows,
+            ))
+            .child(record_bounds(self.hit_areas.clone(), SUBMENU_AREA))
+    }
+
     fn panel_rows(
         open: &OpenMenu,
         panel: &Panel,
@@ -1437,7 +1454,6 @@ impl MenuBar {
         cx: &mut Context<Self>,
     ) -> Div {
         let p = palette(cx);
-        let checks = panel.checks;
         let focus_visible = open.focus_visible && (parent.is_some() || !open.in_submenu());
         let expanded = open
             .live_submenu()
@@ -1455,41 +1471,19 @@ impl MenuBar {
                     None => (ix, None),
                 };
                 let Some(label) = entry.label() else {
-                    return div()
-                        .id(("menu-separator", ix))
-                        .h(px(ROW_SEPARATOR))
-                        .py(px(1.))
-                        .child(div().h(px(1.)).bg(rgb(p.menu_separator)));
+                    return separator_row(p, ix);
                 };
                 let ring = focus_visible && panel.focused == Some(ix);
-                let enabled = entry.selectable();
-                let mark = match entry {
-                    Entry::Toggle(_, checked, _) => checked.then_some(CHECK_GLYPH),
-                    Entry::Icon(_, glyph, ..) => Some(*glyph),
-                    _ => None,
-                };
-                let mark_size = if matches!(entry, Entry::Icon(..)) {
-                    ICON_SIZE
-                } else {
-                    GLYPH_SIZE
-                };
-                let shortcut = panel.shortcuts[ix].clone();
-                let fade = fade && enabled;
-                let mark_color = match entry {
-                    _ if !enabled => Some(p.text_disabled),
-                    Entry::Toggle(..) => Some(p.text_secondary),
-                    _ if fade => None,
-                    _ => Some(p.text_primary),
-                };
-                let label_color = if !enabled {
-                    Some(p.text_disabled)
-                } else if fade {
-                    None
-                } else {
-                    Some(p.text_primary)
-                };
-
                 let row_id = ix + parent.map_or(0, |parent| 1000 * (parent + 1));
+                let face = row_face(
+                    p,
+                    panel,
+                    ix,
+                    label,
+                    row_id,
+                    fade && entry.selectable(),
+                    expanded == Some(ix),
+                );
                 div()
                     .id(("menu-row", row_id))
                     .relative()
@@ -1511,91 +1505,127 @@ impl MenuBar {
                     .on_click(
                         cx.listener(move |this, _, window, cx| this.activate(path, window, cx)),
                     )
-                    .child({
-                        let face = div()
-                            .id(("menu-row-face", row_id))
-                            .flex()
-                            .items_center()
-                            .size_full()
-                            .px(px(ROW_PADDING))
-                            .rounded(px(field::CONTROL_RADIUS))
-                            .group("menu-row")
-                            .text_color(rgba(p.text_primary))
-                            .when(checks, |this| {
-                                this.child(
-                                    div()
-                                        .flex_none()
-                                        .w(px(CHECK_COLUMN))
-                                        .font_family(ICON_FONT)
-                                        .text_size(px(mark_size))
-                                        .line_height(px(mark_size))
-                                        .when_some(mark_color, |this, color| {
-                                            this.text_color(rgba(color))
-                                        })
-                                        .when(
-                                            enabled && matches!(entry, Entry::Toggle(..)),
-                                            |this| {
-                                                this.group_hover("menu-row", move |style| {
-                                                    style.text_color(rgba(p.text_primary))
-                                                })
-                                            },
-                                        )
-                                        .children(mark),
-                                )
-                            })
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .font_family(TEXT_FONT)
-                                    .text_size(px(LABEL_SIZE))
-                                    .whitespace_nowrap()
-                                    .when_some(label_color, |this, color| {
-                                        this.text_color(rgba(color))
-                                    })
-                                    .child(label),
-                            )
-                            .when_some(shortcut, |this, shortcut| {
-                                this.child(
-                                    div()
-                                        .flex_none()
-                                        .font_family(SMALL_FONT)
-                                        .text_size(px(SHORTCUT_SIZE))
-                                        .whitespace_nowrap()
-                                        .text_color(rgba(if enabled {
-                                            p.text_secondary
-                                        } else {
-                                            p.text_disabled
-                                        }))
-                                        .child(shortcut),
-                                )
-                            })
-                            .when(matches!(entry, Entry::Submenu(..)), |this| {
-                                this.child(
-                                    div()
-                                        .flex_none()
-                                        .font_family(ICON_FONT)
-                                        .text_size(px(GLYPH_SIZE))
-                                        .line_height(px(GLYPH_SIZE))
-                                        .text_color(rgba(p.text_secondary))
-                                        .child(CHEVRON_GLYPH),
-                                )
-                            });
-                        if fade {
-                            face.fade_bg(Brushes::subtle(p))
-                                .active(move |style| style.text_color(rgba(p.text_secondary)))
-                                .into_any_element()
-                        } else {
-                            face.when(expanded == Some(ix), |this| {
-                                this.bg(rgba(p.subtle_secondary))
-                            })
-                            .when(enabled, |this| {
-                                this.hover(move |style| style.bg(rgba(p.subtle_secondary)))
-                                    .active(move |style| style.bg(rgba(p.subtle_tertiary)))
-                            })
-                            .into_any_element()
-                        }
-                    })
+                    .child(face)
             }))
+    }
+}
+
+fn separator_row(p: Palette, ix: usize) -> Stateful<Div> {
+    div()
+        .id(("menu-separator", ix))
+        .h(px(ROW_SEPARATOR))
+        .py(px(1.))
+        .child(div().h(px(1.)).bg(rgb(p.menu_separator)))
+}
+
+fn row_face(
+    p: Palette,
+    panel: &Panel,
+    ix: usize,
+    label: &'static str,
+    row_id: usize,
+    fade: bool,
+    expanded: bool,
+) -> AnyElement {
+    let entry = &panel.entries[ix];
+    let checks = panel.checks;
+    let shortcut = panel.shortcuts[ix].clone();
+    let enabled = entry.selectable();
+    let mark = match entry {
+        Entry::Toggle(_, checked, _) => checked.then_some(CHECK_GLYPH),
+        Entry::Icon(_, glyph, ..) => Some(*glyph),
+        _ => None,
+    };
+    let mark_size = if matches!(entry, Entry::Icon(..)) {
+        ICON_SIZE
+    } else {
+        GLYPH_SIZE
+    };
+    let mark_color = match entry {
+        _ if !enabled => Some(p.text_disabled),
+        Entry::Toggle(..) => Some(p.text_secondary),
+        _ if fade => None,
+        _ => Some(p.text_primary),
+    };
+    let label_color = if !enabled {
+        Some(p.text_disabled)
+    } else if fade {
+        None
+    } else {
+        Some(p.text_primary)
+    };
+    let face = div()
+        .id(("menu-row-face", row_id))
+        .flex()
+        .items_center()
+        .size_full()
+        .px(px(ROW_PADDING))
+        .rounded(px(field::CONTROL_RADIUS))
+        .group("menu-row")
+        .text_color(rgba(p.text_primary))
+        .when(checks, |this| {
+            this.child(
+                div()
+                    .flex_none()
+                    .w(px(CHECK_COLUMN))
+                    .font_family(ICON_FONT)
+                    .text_size(px(mark_size))
+                    .line_height(px(mark_size))
+                    .when_some(mark_color, |this, color| this.text_color(rgba(color)))
+                    .when(enabled && matches!(entry, Entry::Toggle(..)), |this| {
+                        this.group_hover("menu-row", move |style| {
+                            style.text_color(rgba(p.text_primary))
+                        })
+                    })
+                    .children(mark),
+            )
+        })
+        .child(
+            div()
+                .flex_1()
+                .font_family(TEXT_FONT)
+                .text_size(px(LABEL_SIZE))
+                .whitespace_nowrap()
+                .when_some(label_color, |this, color| this.text_color(rgba(color)))
+                .child(label),
+        )
+        .when_some(shortcut, |this, shortcut| {
+            this.child(
+                div()
+                    .flex_none()
+                    .font_family(SMALL_FONT)
+                    .text_size(px(SHORTCUT_SIZE))
+                    .whitespace_nowrap()
+                    .text_color(rgba(if enabled {
+                        p.text_secondary
+                    } else {
+                        p.text_disabled
+                    }))
+                    .child(shortcut),
+            )
+        })
+        .when(matches!(entry, Entry::Submenu(..)), |this| {
+            this.child(
+                div()
+                    .flex_none()
+                    .font_family(ICON_FONT)
+                    .text_size(px(GLYPH_SIZE))
+                    .line_height(px(GLYPH_SIZE))
+                    .text_color(rgba(p.text_secondary))
+                    .child(CHEVRON_GLYPH),
+            )
+        });
+    if fade {
+        face.fade_bg(Brushes::subtle(p))
+            .active(move |style| style.text_color(rgba(p.text_secondary)))
+            .into_any_element()
+    } else {
+        face.when(expanded, |this| this.bg(rgba(p.subtle_secondary)))
+            .when(enabled, |this| {
+                this.hover(move |style| style.bg(rgba(p.subtle_secondary)))
+                    .active(move |style| style.bg(rgba(p.subtle_tertiary)))
+            })
+            .into_any_element()
     }
 }
 
@@ -1746,5 +1776,111 @@ impl Render for MenuBar {
             .children(MenuKind::ALL.map(|kind| self.trigger(kind, window, cx)))
             .children(flyout)
             .child(record_bounds(self.hit_areas.clone(), BAR_AREA))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CommandButton, Entry, MenuKind, OpenMenu, Panel, cycle};
+    use crate::NewTab;
+
+    fn command(label: &'static str) -> Entry {
+        Entry::Command(label, || Box::new(NewTab))
+    }
+
+    fn panel(entries: Vec<Entry>) -> Panel {
+        Panel {
+            shortcuts: vec![None; entries.len()],
+            entries,
+            width: 0.,
+            checks: false,
+            focused: None,
+        }
+    }
+
+    fn button(enabled: bool) -> CommandButton {
+        CommandButton {
+            label: "",
+            glyph: "",
+            enabled,
+            action: || Box::new(NewTab),
+        }
+    }
+
+    #[test]
+    fn cycle_starts_at_either_end_and_wraps() {
+        let all = |_| true;
+        assert_eq!(cycle(None, 4, 1, all), Some(0));
+        assert_eq!(cycle(None, 4, -1, all), Some(3));
+        assert_eq!(cycle(Some(3), 4, 1, all), Some(0));
+        assert_eq!(cycle(Some(0), 4, -1, all), Some(3));
+    }
+
+    #[test]
+    fn cycle_skips_rejected_and_gives_up() {
+        assert_eq!(cycle(Some(0), 5, 1, |ix| ix == 3), Some(3));
+        assert_eq!(cycle(Some(3), 5, 1, |ix| ix == 3), Some(3));
+        assert_eq!(cycle(None, 5, 1, |_| false), None);
+        assert_eq!(cycle(None, 0, 1, |_| true), None);
+    }
+
+    #[test]
+    fn only_enabled_rows_are_selectable() {
+        assert!(command("a").selectable());
+        assert!(!Entry::Disabled("a", || Box::new(NewTab)).selectable());
+        assert!(Entry::Icon("a", "", true, || Box::new(NewTab)).selectable());
+        assert!(!Entry::Icon("a", "", false, || Box::new(NewTab)).selectable());
+        assert!(Entry::Toggle("a", false, || Box::new(NewTab)).selectable());
+        assert!(Entry::Submenu("a", Vec::new()).selectable());
+        assert!(!Entry::Separator.selectable());
+    }
+
+    #[test]
+    fn panel_step_skips_separators_and_disabled_rows() {
+        let mut panel = panel(vec![
+            command("a"),
+            Entry::Separator,
+            Entry::Disabled("b", || Box::new(NewTab)),
+            command("c"),
+        ]);
+        panel.step(1);
+        assert_eq!(panel.focused, Some(0));
+        panel.step(1);
+        assert_eq!(panel.focused, Some(3));
+        panel.step(1);
+        assert_eq!(panel.focused, Some(0));
+        panel.step(-1);
+        assert_eq!(panel.focused, Some(3));
+    }
+
+    #[test]
+    fn linear_steps_cross_commands_and_rows() {
+        let mut open = OpenMenu {
+            commands: vec![button(false), button(true), button(true)],
+            ..OpenMenu::new(
+                MenuKind::Flyout,
+                panel(vec![
+                    Entry::Icon("Undo", "", false, || Box::new(NewTab)),
+                    command("x"),
+                ]),
+            )
+        };
+        open.step_linear(1);
+        assert_eq!((open.focused_command, open.panel.focused), (Some(1), None));
+        open.step_linear(1);
+        assert_eq!((open.focused_command, open.panel.focused), (Some(2), None));
+        open.step_linear(1);
+        assert_eq!((open.focused_command, open.panel.focused), (None, Some(1)));
+        open.step_linear(1);
+        assert_eq!((open.focused_command, open.panel.focused), (Some(1), None));
+        open.step_linear(-1);
+        assert_eq!((open.focused_command, open.panel.focused), (None, Some(1)));
+    }
+
+    #[test]
+    fn menu_bar_cycles_with_wrap() {
+        assert!(MenuKind::File.cycle(1) == MenuKind::Edit);
+        assert!(MenuKind::View.cycle(1) == MenuKind::File);
+        assert!(MenuKind::File.cycle(-1) == MenuKind::View);
     }
 }
