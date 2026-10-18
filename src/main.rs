@@ -866,45 +866,26 @@ impl Jot {
             div()
                 .flex()
                 .items_center()
+                .gap(px(24.))
                 .h(px(31.))
+                .px(px(22.))
                 .bg(rgba(p.layer))
                 .font_family(SMALL_FONT)
                 .text_size(px(12.))
                 .text_color(rgba(p.text_secondary))
-                .child(div().flex_none().w(px(96.)).pl(px(22.)).child(format!(
-                    "Ln {}, Col {}",
-                    point.row + 1,
-                    column + 1
-                )))
+                .child(format!("Ln {}, Col {}", point.row + 1, column + 1))
                 .child(status_divider(p))
-                .child(div().pl(px(8.)).child(character_count(selected, total)))
+                .child(character_count(selected, total))
                 .child(div().flex_1())
-                .child(status_cell(
-                    p,
-                    68.,
-                    format!("{}%", (self.zoom() * 100.).round()),
-                ))
-                .child(status_cell(
-                    p,
-                    144.,
-                    self.tabs[self.active].format.encoding.label(),
-                )),
+                .child(format!("{}%", (self.zoom() * 100.).round()))
+                .child(status_divider(p))
+                .child(self.tabs[self.active].format.encoding.label()),
         )
     }
 }
 
 fn status_divider(p: Palette) -> Div {
     div().flex_none().w(px(1.)).h(px(16.)).bg(rgba(p.stroke))
-}
-
-fn status_cell(p: Palette, width: f32, label: impl Into<SharedString>) -> Div {
-    div()
-        .flex()
-        .flex_none()
-        .items_center()
-        .w(px(width))
-        .child(status_divider(p))
-        .child(div().pl(px(12.)).child(label.into()))
 }
 
 impl Render for Jot {
