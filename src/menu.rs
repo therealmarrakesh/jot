@@ -286,6 +286,7 @@ impl MenuKind {
             Self::Edit => {
                 let selection = !editor.selected_range().is_empty();
                 let clipboard_text = clipboard_has_text();
+                let text = editor.text().len() > 0;
                 vec![
                     Entry::command("Undo", editor.can_undo(), || Box::new(input::Undo)),
                     Entry::Separator,
@@ -294,10 +295,10 @@ impl MenuKind {
                     Entry::command("Paste", clipboard_text, || Box::new(input::Paste)),
                     Entry::command("Delete", selection, || Box::new(input::Delete)),
                     Entry::Separator,
-                    Entry::Command("Find", || Box::new(Find)),
-                    Entry::Command("Find next", || Box::new(FindNext)),
-                    Entry::Command("Find previous", || Box::new(FindPrevious)),
-                    Entry::Command("Replace", || Box::new(Replace)),
+                    Entry::command("Find", text, || Box::new(Find)),
+                    Entry::command("Find next", text, || Box::new(FindNext)),
+                    Entry::command("Find previous", text, || Box::new(FindPrevious)),
+                    Entry::command("Replace", text, || Box::new(Replace)),
                     Entry::Command("Go to", || Box::new(GoTo)),
                     Entry::Separator,
                     Entry::Command("Select all", || Box::new(input::SelectAll)),

@@ -604,6 +604,10 @@ impl Jot {
         &self.tabs[self.active].editor
     }
 
+    fn has_text(&self, cx: &App) -> bool {
+        self.active_editor().read(cx).text().len() > 0
+    }
+
     fn zoom(&self) -> f32 {
         self.tabs[self.active].zoom
     }

@@ -334,15 +334,21 @@ impl FindBar {
 
 impl Jot {
     pub(crate) fn find(&mut self, _: &Find, window: &mut Window, cx: &mut Context<Self>) {
-        self.open_find(false, window, cx);
+        if self.has_text(cx) {
+            self.open_find(false, window, cx);
+        }
     }
 
     pub(crate) fn replace(&mut self, _: &Replace, window: &mut Window, cx: &mut Context<Self>) {
-        self.open_find(true, window, cx);
+        if self.has_text(cx) {
+            self.open_find(true, window, cx);
+        }
     }
 
     pub(crate) fn find_next(&mut self, _: &FindNext, window: &mut Window, cx: &mut Context<Self>) {
-        self.find_step(true, window, cx);
+        if self.has_text(cx) {
+            self.find_step(true, window, cx);
+        }
     }
 
     pub(crate) fn find_previous(
@@ -351,7 +357,9 @@ impl Jot {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.find_step(false, window, cx);
+        if self.has_text(cx) {
+            self.find_step(false, window, cx);
+        }
     }
 
     pub(crate) fn toggle_match_case(
