@@ -160,7 +160,7 @@ impl WindowsWindowInner {
             WM_SHOWWINDOW => self.handle_window_visibility_changed(handle, wparam),
             WM_GPUI_CURSOR_STYLE_CHANGED => self.handle_cursor_changed(lparam),
             WM_GPUI_FORCE_UPDATE_WINDOW => self.draw_window(handle, true),
-            WM_GPUI_APPEARANCE_CHANGED => self.handle_appearance_changed(handle),
+            WM_GPUI_APPEARANCE_CHANGED => self.handle_appearance_changed(handle, false),
             WM_GPUI_GPU_DEVICE_LOST => self.handle_device_lost(lparam),
             DM_POINTERHITTEST => self.handle_dm_pointer_hit_test(wparam),
             WM_GETOBJECT => self.handle_wm_getobject(wparam, lparam),
@@ -1244,24 +1244,27 @@ impl WindowsWindowInner {
         {
             log::info!("System settings changed: {}", parameter_string);
             if parameter_string.as_str() == "ImmersiveColorSet" {
-                self.handle_appearance_changed(handle)?;
+                self.handle_appearance_changed(handle, true)?;
             }
         }
         Some(0)
     }
 
-    fn handle_appearance_changed(&self, handle: HWND) -> Option<isize> {
+    fn handle_appearance_changed(&self, handle: HWND, colors_changed: bool) -> Option<isize> {
         let new_appearance = app_appearance()
             .context("unable to get window appearance")
             .log_err()?;
 
-        if new_appearance != self.state.appearance.get() {
+        let flipped = new_appearance != self.state.appearance.get();
+        if flipped || colors_changed {
             self.state.appearance.set(new_appearance);
             let mut callback = self.state.callbacks.appearance_changed.take()?;
 
             callback();
             self.state.callbacks.appearance_changed.set(Some(callback));
-            configure_dwm_dark_mode(handle, new_appearance);
+            if flipped {
+                configure_dwm_dark_mode(handle, new_appearance);
+            }
         }
         Some(0)
     }
