@@ -1,7 +1,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-#[cfg(feature = "bench")]
-mod bench;
 mod brush;
 mod detach;
 mod dialog;
@@ -507,8 +505,6 @@ struct Jot {
     caret_key: CaretKey,
     _caret_blink: Task<()>,
     _subscriptions: Vec<Subscription>,
-    #[cfg(feature = "bench")]
-    painted: bench::FrameProbe,
 }
 
 impl Jot {
@@ -596,8 +592,6 @@ impl Jot {
             caret_key: (0, 0..0, 0),
             _caret_blink: Task::ready(()),
             _subscriptions,
-            #[cfg(feature = "bench")]
-            painted: bench::FrameProbe::default(),
         };
         jot.activate_tab(0, window, cx);
         detach::register(jot.owner(window, cx), cx);
@@ -606,8 +600,6 @@ impl Jot {
             this.update(cx, |jot, cx| jot.request_close_window(window, cx))
                 .unwrap_or(true)
         });
-        #[cfg(feature = "bench")]
-        bench::schedule(jot.painted.clone(), window, cx);
         jot
     }
 
@@ -1030,8 +1022,6 @@ impl Render for Jot {
             )
             .children(dialogs)
             .child(min_size);
-        #[cfg(feature = "bench")]
-        let root = root.child(bench::probe(&self.painted));
         tooltip::host(root)
     }
 }
@@ -1057,10 +1047,7 @@ fn main() {
 
         cx.set_global(ViewSettings {
             status_bar: true,
-            #[cfg(not(feature = "bench"))]
             word_wrap: true,
-            #[cfg(feature = "bench")]
-            word_wrap: bench::word_wrap(),
         });
         cx.bind_keys(key_bindings());
         cx.bind_keys(menu::key_bindings());

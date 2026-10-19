@@ -33,9 +33,6 @@ windows-sys = { version = "0.60", features = [
 [build-dependencies]
 embed-resource = "3"
 
-[features]
-bench = []
-
 [patch.crates-io]
 gpui-base = { path = "vendor/gpui-base" }
 gpui-pre-windows = { path = "vendor/gpui-pre-windows" }
