@@ -508,13 +508,13 @@ impl Jot {
             cx.observe_window_activation(window, |this, window, cx| {
                 if !window.is_window_active() {
                     this.menu_bar
-                        .update(cx, |menu_bar, cx| menu_bar.exit_access(cx));
+                        .update(cx, |menu_bar, cx| menu_bar.cancel(window, cx));
                     cx.notify();
                 }
             }),
-            cx.observe_window_bounds(window, |this, _, cx| {
+            cx.observe_window_bounds(window, |this, window, cx| {
                 this.menu_bar
-                    .update(cx, |menu_bar, cx| menu_bar.exit_access(cx));
+                    .update(cx, |menu_bar, cx| menu_bar.cancel(window, cx));
             }),
             cx.observe_global_in::<ViewSettings>(window, |this, window, cx| {
                 let word_wrap = cx.global::<ViewSettings>().word_wrap;

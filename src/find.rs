@@ -551,10 +551,10 @@ impl Jot {
     fn open_find_options(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let target = self.find.options_bounds.get();
         let entries = vec![
-            Entry::Toggle("Match case", self.find.match_case, || {
+            Entry::toggle("Match case", self.find.match_case, || {
                 Box::new(ToggleMatchCase)
             }),
-            Entry::Toggle("Wrap around", self.find.wrap_around, || {
+            Entry::toggle("Wrap around", self.find.wrap_around, || {
                 Box::new(ToggleWrapAround)
             }),
         ];

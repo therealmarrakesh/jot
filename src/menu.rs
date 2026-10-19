@@ -83,11 +83,26 @@ fn fade_transition() -> Transition {
 
 pub(crate) type ActionFn = fn() -> Box<dyn Action>;
 
-struct CommandButton {
+#[derive(Clone, Copy)]
+pub(crate) struct Command {
     label: &'static str,
-    glyph: &'static str,
     enabled: bool,
     action: ActionFn,
+}
+
+impl Command {
+    fn new(label: &'static str, enabled: bool, action: ActionFn) -> Self {
+        Self {
+            label,
+            enabled,
+            action,
+        }
+    }
+}
+
+struct CommandButton {
+    command: Command,
+    glyph: &'static str,
 }
 
 pub(crate) enum MenuEvent {
@@ -97,41 +112,25 @@ pub(crate) enum MenuEvent {
 
 fn context_menu(editor: &TextareaState) -> (Vec<CommandButton>, Vec<Entry>) {
     let selection = !editor.selected_range().is_empty();
+    let button = |label, glyph, enabled, action| CommandButton {
+        command: Command::new(label, enabled, action),
+        glyph,
+    };
     let commands = vec![
-        CommandButton {
-            label: "Cut",
-            glyph: "\u{E8C6}",
-            enabled: selection,
-            action: || Box::new(input::Cut),
-        },
-        CommandButton {
-            label: "Copy",
-            glyph: "\u{E8C8}",
-            enabled: selection,
-            action: || Box::new(input::Copy),
-        },
-        CommandButton {
-            label: "Paste",
-            glyph: "\u{E77F}",
-            enabled: clipboard_has_text(),
-            action: || Box::new(input::Paste),
-        },
-        CommandButton {
-            label: "Select all",
-            glyph: "\u{E8B3}",
-            enabled: true,
-            action: || Box::new(input::SelectAll),
-        },
-        CommandButton {
-            label: "Delete",
-            glyph: "\u{E74D}",
-            enabled: selection,
-            action: || Box::new(input::Delete),
-        },
+        button("Cut", "\u{E8C6}", selection, || Box::new(input::Cut)),
+        button("Copy", "\u{E8C8}", selection, || Box::new(input::Copy)),
+        button("Paste", "\u{E77F}", clipboard_has_text(), || {
+            Box::new(input::Paste)
+        }),
+        button("Select all", "\u{E8B3}", true, || {
+            Box::new(input::SelectAll)
+        }),
+        button("Delete", "\u{E74D}", selection, || Box::new(input::Delete)),
     ];
-    let entries = vec![Entry::Icon("Undo", "\u{E7A7}", editor.can_undo(), || {
-        Box::new(input::Undo)
-    })];
+    let entries = vec![Entry::Command {
+        command: Command::new("Undo", editor.can_undo(), || Box::new(input::Undo)),
+        icon: Some("\u{E7A7}"),
+    }];
     (commands, entries)
 }
 
@@ -139,98 +138,82 @@ fn clipboard_has_text() -> bool {
     unsafe { IsClipboardFormatAvailable(CF_UNICODETEXT.into()) != 0 }
 }
 
-fn access_key(label: &str) -> Option<char> {
-    Some(match label {
-        "New tab" => 'N',
-        "New window" => 'W',
-        "Open" => 'O',
-        "Save" => 'S',
-        "Save as" => 'A',
-        "Save all" => 'L',
-        "Close tab" => 'C',
-        "Close window" => 'E',
-        "Exit" => 'X',
-        "Undo" => 'U',
-        "Cut" => 'T',
-        "Copy" => 'C',
-        "Paste" => 'P',
-        "Delete" => 'L',
-        "Find" => 'F',
-        "Find next" => 'N',
-        "Find previous" => 'V',
-        "Replace" => 'R',
-        "Go to" => 'G',
-        "Select all" => 'A',
-        "Time/Date" => 'D',
-        "Zoom" => 'Z',
-        "Status bar" => 'S',
-        "Word wrap" => 'W',
-        "Zoom in" => 'I',
-        "Zoom out" => 'O',
-        "Restore default zoom" => 'R',
-        _ => return None,
-    })
+fn display_label(label: &str) -> SharedString {
+    label.replacen('&', "", 1).into()
 }
 
 #[derive(Clone)]
 pub(crate) enum Entry {
-    Command(&'static str, ActionFn),
-    Disabled(&'static str, ActionFn),
-    Icon(&'static str, &'static str, bool, ActionFn),
-    Toggle(&'static str, bool, ActionFn),
+    Command {
+        command: Command,
+        icon: Option<&'static str>,
+    },
+    Toggle {
+        label: &'static str,
+        checked: bool,
+        action: ActionFn,
+    },
     Submenu(&'static str, Vec<Entry>),
     Separator,
 }
 
 impl Entry {
-    fn command(label: &'static str, enabled: bool, action: ActionFn) -> Self {
-        if enabled {
-            Self::Command(label, action)
-        } else {
-            Self::Disabled(label, action)
+    fn command(label: &'static str, action: ActionFn) -> Self {
+        Self::command_if(label, true, action)
+    }
+
+    fn command_if(label: &'static str, enabled: bool, action: ActionFn) -> Self {
+        Self::Command {
+            command: Command::new(label, enabled, action),
+            icon: None,
+        }
+    }
+
+    pub(crate) fn toggle(label: &'static str, checked: bool, action: ActionFn) -> Self {
+        Self::Toggle {
+            label,
+            checked,
+            action,
         }
     }
 
     fn height(&self) -> f32 {
         match self {
-            Self::Command(..) | Self::Disabled(..) => ROW_COMMAND,
-            Self::Icon(..) => ROW_ICON,
-            Self::Toggle(..) | Self::Submenu(..) => ROW_COMPACT,
+            Self::Command { icon: Some(_), .. } => ROW_ICON,
+            Self::Command { icon: None, .. } => ROW_COMMAND,
+            Self::Toggle { .. } | Self::Submenu(..) => ROW_COMPACT,
             Self::Separator => ROW_SEPARATOR,
         }
     }
 
     fn selectable(&self) -> bool {
         match self {
-            Self::Separator | Self::Disabled(..) => false,
-            Self::Icon(_, _, enabled, _) => *enabled,
-            _ => true,
+            Self::Command { command, .. } => command.enabled,
+            Self::Toggle { .. } | Self::Submenu(..) => true,
+            Self::Separator => false,
         }
     }
 
     fn label(&self) -> Option<&'static str> {
         match self {
-            Self::Command(label, _)
-            | Self::Disabled(label, _)
-            | Self::Icon(label, ..)
-            | Self::Toggle(label, ..)
-            | Self::Submenu(label, _) => Some(label),
+            Self::Command { command, .. } => Some(command.label),
+            Self::Toggle { label, .. } | Self::Submenu(label, _) => Some(label),
             Self::Separator => None,
         }
     }
 
     fn access_key(&self) -> Option<char> {
-        self.label()
-            .filter(|_| self.selectable())
-            .and_then(access_key)
+        let (_, key) = self
+            .label()
+            .filter(|_| self.selectable())?
+            .split_once('&')?;
+        key.chars().next().map(|key| key.to_ascii_uppercase())
     }
 
     fn action(&self) -> Option<Box<dyn Action>> {
         match self {
-            Self::Command(_, action)
-            | Self::Disabled(_, action)
-            | Self::Toggle(_, _, action)
-            | Self::Icon(_, _, _, action) => Some(action()),
+            Self::Command { command, .. } => Some((command.action)()),
+            Self::Toggle { action, .. } => Some(action()),
             _ => None,
         }
     }
@@ -241,7 +224,6 @@ enum MenuKind {
     File,
     Edit,
     View,
-    Flyout,
 }
 
 impl MenuKind {
@@ -252,7 +234,6 @@ impl MenuKind {
             Self::File => "File",
             Self::Edit => "Edit",
             Self::View => "View",
-            Self::Flyout => "",
         }
     }
 
@@ -261,72 +242,72 @@ impl MenuKind {
     }
 
     fn index(self) -> usize {
-        Self::ALL.iter().position(|kind| *kind == self).unwrap_or(0)
+        self as usize
     }
 
     fn cycle(self, delta: isize) -> Self {
-        let count = Self::ALL.len() as isize;
-        Self::ALL[(self.index() as isize + delta).rem_euclid(count) as usize]
+        cycle(Some(self.index()), Self::ALL.len(), delta, true, |_| true)
+            .map_or(self, |ix| Self::ALL[ix])
     }
 
     fn entries(self, editor: &TextareaState, cx: &App) -> Vec<Entry> {
         match self {
             Self::File => vec![
-                Entry::Command("New tab", || Box::new(NewTab)),
-                Entry::Command("New window", || Box::new(NewWindow)),
-                Entry::Command("Open", || Box::new(Open)),
-                Entry::Command("Save", || Box::new(Save)),
-                Entry::Command("Save as", || Box::new(SaveAs)),
-                Entry::Command("Save all", || Box::new(SaveAll)),
+                Entry::command("&New tab", || Box::new(NewTab)),
+                Entry::command("New &window", || Box::new(NewWindow)),
+                Entry::command("&Open", || Box::new(Open)),
+                Entry::command("&Save", || Box::new(Save)),
+                Entry::command("Save &as", || Box::new(SaveAs)),
+                Entry::command("Save a&ll", || Box::new(SaveAll)),
                 Entry::Separator,
-                Entry::Command("Close tab", || Box::new(CloseTab)),
-                Entry::Command("Close window", || Box::new(CloseWindow)),
-                Entry::Command("Exit", || Box::new(Exit)),
+                Entry::command("&Close tab", || Box::new(CloseTab)),
+                Entry::command("Clos&e window", || Box::new(CloseWindow)),
+                Entry::command("E&xit", || Box::new(Exit)),
             ],
             Self::Edit => {
                 let selection = !editor.selected_range().is_empty();
                 let clipboard_text = clipboard_has_text();
                 let text = editor.text().len() > 0;
                 vec![
-                    Entry::command("Undo", editor.can_undo(), || Box::new(input::Undo)),
+                    Entry::command_if("&Undo", editor.can_undo(), || Box::new(input::Undo)),
                     Entry::Separator,
-                    Entry::command("Cut", selection, || Box::new(input::Cut)),
-                    Entry::command("Copy", selection, || Box::new(input::Copy)),
-                    Entry::command("Paste", clipboard_text, || Box::new(input::Paste)),
-                    Entry::command("Delete", selection, || Box::new(input::Delete)),
+                    Entry::command_if("Cu&t", selection, || Box::new(input::Cut)),
+                    Entry::command_if("&Copy", selection, || Box::new(input::Copy)),
+                    Entry::command_if("&Paste", clipboard_text, || Box::new(input::Paste)),
+                    Entry::command_if("De&lete", selection, || Box::new(input::Delete)),
                     Entry::Separator,
-                    Entry::command("Find", text, || Box::new(Find)),
-                    Entry::command("Find next", text, || Box::new(FindNext)),
-                    Entry::command("Find previous", text, || Box::new(FindPrevious)),
-                    Entry::command("Replace", text, || Box::new(Replace)),
-                    Entry::Command("Go to", || Box::new(GoTo)),
+                    Entry::command_if("&Find", text, || Box::new(Find)),
+                    Entry::command_if("Find &next", text, || Box::new(FindNext)),
+                    Entry::command_if("Find pre&vious", text, || Box::new(FindPrevious)),
+                    Entry::command_if("&Replace", text, || Box::new(Replace)),
+                    Entry::command("&Go to", || Box::new(GoTo)),
                     Entry::Separator,
-                    Entry::Command("Select all", || Box::new(input::SelectAll)),
-                    Entry::Command("Time/Date", || Box::new(TimeDate)),
+                    Entry::command("Select &all", || Box::new(input::SelectAll)),
+                    Entry::command("Time/&Date", || Box::new(TimeDate)),
                 ]
             }
             Self::View => {
                 let view = cx.global::<ViewSettings>();
                 vec![
                     Entry::Submenu(
-                        "Zoom",
+                        "&Zoom",
                         vec![
-                            Entry::Command("Zoom in", || Box::new(ZoomIn)),
-                            Entry::Command("Zoom out", || Box::new(ZoomOut)),
-                            Entry::Command("Restore default zoom", || Box::new(ResetZoom)),
+                            Entry::command("Zoom &in", || Box::new(ZoomIn)),
+                            Entry::command("Zoom &out", || Box::new(ZoomOut)),
+                            Entry::command("&Restore default zoom", || Box::new(ResetZoom)),
                         ],
                     ),
-                    Entry::Toggle("Status bar", view.status_bar, || Box::new(ToggleStatusBar)),
-                    Entry::Toggle("Word wrap", view.word_wrap, || Box::new(ToggleWordWrap)),
+                    Entry::toggle("&Status bar", view.status_bar, || Box::new(ToggleStatusBar)),
+                    Entry::toggle("&Word wrap", view.word_wrap, || Box::new(ToggleWordWrap)),
                 ]
             }
-            Self::Flyout => Vec::new(),
         }
     }
 }
 
 struct Panel {
     entries: Vec<Entry>,
+    labels: Vec<SharedString>,
     shortcuts: Vec<Option<SharedString>>,
     width: f32,
     checks: bool,
@@ -337,28 +318,35 @@ impl Panel {
     fn new(
         entries: Vec<Entry>,
         min_width: f32,
+        shortcuts: bool,
         action_context: &FocusHandle,
         window: &Window,
     ) -> Self {
+        let labels: Vec<_> = entries
+            .iter()
+            .map(|entry| entry.label().map(display_label).unwrap_or_default())
+            .collect();
         let shortcuts: Vec<_> = entries
             .iter()
             .map(|entry| {
                 entry
                     .action()
-                    .filter(|_| !matches!(entry, Entry::Icon(..)))
+                    .filter(|_| shortcuts)
                     .and_then(|action| shortcut_text(action.as_ref(), action_context, window))
             })
             .collect();
-        let checks = entries
-            .iter()
-            .any(|entry| matches!(entry, Entry::Toggle(..) | Entry::Icon(..)));
+        let checks = entries.iter().any(|entry| {
+            matches!(
+                entry,
+                Entry::Toggle { .. } | Entry::Command { icon: Some(_), .. }
+            )
+        });
         let content = entries
             .iter()
+            .zip(&labels)
             .zip(&shortcuts)
-            .map(|(entry, shortcut)| {
-                let label = entry
-                    .label()
-                    .map_or(0., |label| text_width(window, label, TEXT_FONT, LABEL_SIZE));
+            .map(|((entry, label), shortcut)| {
+                let label = text_width(window, label, TEXT_FONT, LABEL_SIZE);
                 let trailing = match (entry, shortcut) {
                     (Entry::Submenu(..), _) => SHORTCUT_GAP + CHEVRON_WIDTH,
                     (_, Some(shortcut)) => {
@@ -374,6 +362,7 @@ impl Panel {
 
         Self {
             entries,
+            labels,
             shortcuts,
             width: width.max(min_width),
             checks,
@@ -396,7 +385,7 @@ impl Panel {
     }
 
     fn step(&mut self, delta: isize) {
-        if let Some(ix) = cycle(self.focused, self.entries.len(), delta, |ix| {
+        if let Some(ix) = cycle(self.focused, self.entries.len(), delta, true, |ix| {
             self.entries[ix].selectable()
         }) {
             self.focused = Some(ix);
@@ -408,12 +397,18 @@ fn cycle(
     current: Option<usize>,
     count: usize,
     delta: isize,
+    wrap: bool,
     accept: impl Fn(usize) -> bool,
 ) -> Option<usize> {
     let count = count as isize;
     let mut ix = current.map_or(if delta > 0 { -1 } else { count }, |ix| ix as isize);
     (0..count).find_map(|_| {
-        ix = (ix + delta).rem_euclid(count);
+        ix += delta;
+        if wrap {
+            ix = ix.rem_euclid(count);
+        } else if !(0..count).contains(&ix) {
+            return None;
+        }
         let at = ix as usize;
         accept(at).then_some(at)
     })
@@ -478,7 +473,7 @@ struct OpenSubmenu {
 }
 
 struct OpenMenu {
-    kind: MenuKind,
+    kind: Option<MenuKind>,
     anchor: Option<Point<Pixels>>,
     upward: bool,
     commands: Vec<CommandButton>,
@@ -491,7 +486,7 @@ struct OpenMenu {
 }
 
 impl OpenMenu {
-    fn new(kind: MenuKind, panel: Panel) -> Self {
+    fn new(kind: Option<MenuKind>, panel: Panel) -> Self {
         Self {
             kind,
             anchor: None,
@@ -521,9 +516,9 @@ impl OpenMenu {
             .focused_command
             .or(self.panel.focused.map(|ix| commands + ix));
         let count = commands + self.panel.entries.len();
-        if let Some(at) = cycle(current, count, delta, |at| {
+        if let Some(at) = cycle(current, count, delta, true, |at| {
             if at < commands {
-                self.commands[at].enabled
+                self.commands[at].command.enabled
             } else {
                 self.panel.entries[at - commands].selectable()
             }
@@ -534,19 +529,13 @@ impl OpenMenu {
     }
 
     fn step_command(&mut self, delta: isize) {
-        let Some(mut ix) = self.focused_command else {
+        let Some(ix) = self.focused_command else {
             return;
         };
-        loop {
-            let next = ix as isize + delta;
-            if next < 0 || next >= self.commands.len() as isize {
-                return;
-            }
-            ix = next as usize;
-            if self.commands[ix].enabled {
-                self.focused_command = Some(ix);
-                return;
-            }
+        if let Some(ix) = cycle(Some(ix), self.commands.len(), delta, false, |ix| {
+            self.commands[ix].command.enabled
+        }) {
+            self.focused_command = Some(ix);
         }
     }
 
@@ -622,6 +611,16 @@ impl MenuBar {
         }
     }
 
+    pub(crate) fn cancel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.live_open().is_some() {
+            self.close_menu(window, cx);
+        } else if self.bar_focus.is_some() {
+            self.leave_bar(window, cx);
+        }
+        self.bar_focus = None;
+        self.exit_access(cx);
+    }
+
     pub(crate) fn width(&self) -> f32 {
         self.hit_areas.get()[BAR_AREA].size.width.as_f32()
     }
@@ -678,7 +677,7 @@ impl MenuBar {
             return;
         }
         match self.live_open() {
-            Some(open) if open.kind == MenuKind::Flyout => return,
+            Some(open) if open.kind.is_none() => return,
             Some(_) => {}
             None => {
                 self.bar_focus = Some(MenuKind::File);
@@ -717,7 +716,7 @@ impl MenuBar {
             self.access = true;
             return true;
         };
-        if open.kind == MenuKind::Flyout {
+        if open.kind.is_none() {
             return false;
         }
         if let Some(submenu) = open.focused_submenu() {
@@ -755,8 +754,10 @@ impl MenuBar {
         let Some(open) = self.live_open_mut() else {
             return;
         };
+        let Some(kind) = open.kind else {
+            return self.close_menu(window, cx);
+        };
         open.motion.closing = true;
-        let kind = open.kind;
         self.submenu_timer = Task::ready(());
         self.bar_focus = Some(kind);
         self.focus.focus(window, cx);
@@ -774,7 +775,7 @@ impl MenuBar {
 
     fn bar_focused(&self, window: &Window) -> Option<MenuKind> {
         self.bar_focus
-            .filter(|_| self.open_kind().is_none() && self.focus.is_focused(window))
+            .filter(|_| self.live_open().is_none() && self.focus.is_focused(window))
     }
 
     fn move_bar_focus(&mut self, delta: isize, cx: &mut Context<Self>) {
@@ -808,7 +809,7 @@ impl MenuBar {
     }
 
     fn open_kind(&self) -> Option<MenuKind> {
-        self.live_open().map(|open| open.kind)
+        self.live_open().and_then(|open| open.kind)
     }
 
     fn open_menu(&mut self, kind: MenuKind, window: &mut Window, cx: &mut Context<Self>) {
@@ -816,8 +817,8 @@ impl MenuBar {
             return;
         };
         let entries = kind.entries(editor.read(cx), cx);
-        let panel = Panel::new(entries, MIN_WIDTH, &editor.focus_handle(cx), window);
-        self.show(OpenMenu::new(kind, panel), window, cx);
+        let panel = Panel::new(entries, MIN_WIDTH, true, &editor.focus_handle(cx), window);
+        self.show(OpenMenu::new(Some(kind), panel), window, cx);
     }
 
     pub(crate) fn focus_handle(&self) -> &FocusHandle {
@@ -832,15 +833,21 @@ impl MenuBar {
         cx: &mut Context<Self>,
     ) {
         let (commands, entries) = context_menu(editor.read(cx));
-        let panel = Panel::new(entries, CONTEXT_WIDTH, &editor.focus_handle(cx), window);
-        let focused_command = commands.iter().position(|command| command.enabled);
+        let panel = Panel::new(
+            entries,
+            CONTEXT_WIDTH,
+            false,
+            &editor.focus_handle(cx),
+            window,
+        );
+        let focused_command = commands.iter().position(|button| button.command.enabled);
         self.show(
             OpenMenu {
                 anchor: Some(anchor),
                 commands,
                 focused_command,
                 focus_visible: window.last_input_was_keyboard(),
-                ..OpenMenu::new(MenuKind::Flyout, panel)
+                ..OpenMenu::new(None, panel)
             },
             window,
             cx,
@@ -856,7 +863,13 @@ impl MenuBar {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let panel = Panel::new(entries, FLYOUT_MIN_WIDTH, &editor.focus_handle(cx), window);
+        let panel = Panel::new(
+            entries,
+            FLYOUT_MIN_WIDTH,
+            true,
+            &editor.focus_handle(cx),
+            window,
+        );
         let anchor = point(
             target.center().x - px((panel.width / 2.).floor()),
             target.top() - px(FLYOUT_GAP + panel.height()),
@@ -866,7 +879,7 @@ impl MenuBar {
                 anchor: Some(anchor),
                 upward: true,
                 return_focus: Some(return_focus),
-                ..OpenMenu::new(MenuKind::Flyout, panel)
+                ..OpenMenu::new(None, panel)
             },
             window,
             cx,
@@ -901,6 +914,7 @@ impl MenuBar {
         let Some(command) = self
             .live_open()
             .and_then(|open| open.commands.get(ix))
+            .map(|button| button.command)
             .filter(|command| command.enabled)
         else {
             return;
@@ -963,13 +977,14 @@ impl MenuBar {
     fn command_button(
         p: Palette,
         ix: usize,
-        command: &CommandButton,
+        button: &CommandButton,
         cell: f32,
         focused: bool,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         let face = cell - 2. * (COMMAND_GAP + COMMAND_INSET);
+        let CommandButton { command, glyph } = button;
         let enabled = command.enabled;
         let color = if enabled {
             p.text_primary
@@ -1004,7 +1019,7 @@ impl MenuBar {
                             .line_height(px(COMMAND_LINE))
                             .font_family(ICON_FONT)
                             .text_size(px(ICON_SIZE))
-                            .child(command.glyph),
+                            .child(*glyph),
                     )
                     .child(
                         div()
@@ -1085,7 +1100,7 @@ impl MenuBar {
         if open.live_submenu().is_none_or(|submenu| submenu.ix != ix) {
             open.submenu = Some(OpenSubmenu {
                 ix,
-                panel: Panel::new(entries.clone(), MIN_WIDTH, &action_context, window),
+                panel: Panel::new(entries.clone(), MIN_WIDTH, true, &action_context, window),
                 motion: Motion::new(serial, false),
             });
         }
@@ -1156,7 +1171,7 @@ impl MenuBar {
     }
 
     fn switch(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(kind) = self.open_kind().filter(|kind| *kind != MenuKind::Flyout) else {
+        let Some(kind) = self.open_kind() else {
             return;
         };
         self.open_by_keyboard(kind.cycle(delta), window, cx);
@@ -1214,7 +1229,7 @@ impl MenuBar {
     fn on_cancel(&mut self, _: &Cancel, window: &mut Window, cx: &mut Context<Self>) {
         match self.live_open() {
             Some(open) if open.in_submenu() => self.close_submenu(cx),
-            Some(open) if open.kind != MenuKind::Flyout => self.close_to_bar(window, cx),
+            Some(open) if open.kind.is_some() => self.close_to_bar(window, cx),
             Some(_) => self.close_menu(window, cx),
             None => self.leave_bar(window, cx),
         }
@@ -1263,7 +1278,7 @@ impl MenuBar {
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let p = palette(cx);
-        let open = self.open.as_ref().filter(|open| open.kind == kind);
+        let open = self.open.as_ref().filter(|open| open.kind == Some(kind));
         let active = open.is_some_and(|open| !open.is_closing());
         let popup = open.map(|open| self.popup(open, window, cx));
         let ring = self.bar_focused(window) == Some(kind);
@@ -1339,7 +1354,7 @@ impl MenuBar {
                 })
                 .collect();
         };
-        if open.kind == MenuKind::Flyout {
+        if open.kind.is_none() {
             return Vec::new();
         }
         let areas = self.hit_areas.get();
@@ -1452,6 +1467,7 @@ impl MenuBar {
         let top = open.panel.row_top(submenu.ix) - BORDER - PADDING_Y;
         let rows = Self::panel_rows(open, &submenu.panel, Some(submenu.ix), 0., false, cx);
         let panel = div()
+            .id("submenu")
             .absolute()
             .left(px(open.panel.width - SUBMENU_OVERLAP))
             .top(px(top))
@@ -1497,22 +1513,19 @@ impl MenuBar {
                     Some(parent) => (parent, Some(ix)),
                     None => (ix, None),
                 };
-                let Some(label) = entry.label() else {
+                if matches!(entry, Entry::Separator) {
                     return separator_row(p, ix);
-                };
+                }
                 let ring = focus_visible && panel.focused == Some(ix);
-                let row_id = ix + parent.map_or(0, |parent| 1000 * (parent + 1));
                 let face = row_face(
                     p,
                     panel,
                     ix,
-                    label,
-                    row_id,
                     fade && entry.selectable(),
                     expanded == Some(ix),
                 );
                 div()
-                    .id(("menu-row", row_id))
+                    .id(("menu-row", ix))
                     .relative()
                     .h(px(entry.height()))
                     .px(px(ROW_INSET))
@@ -1545,32 +1558,25 @@ fn separator_row(p: Palette, ix: usize) -> Stateful<Div> {
         .child(div().h(px(1.)).bg(rgb(p.menu_separator)))
 }
 
-fn row_face(
-    p: Palette,
-    panel: &Panel,
-    ix: usize,
-    label: &'static str,
-    row_id: usize,
-    fade: bool,
-    expanded: bool,
-) -> AnyElement {
+fn row_face(p: Palette, panel: &Panel, ix: usize, fade: bool, expanded: bool) -> AnyElement {
     let entry = &panel.entries[ix];
+    let label = panel.labels[ix].clone();
     let checks = panel.checks;
     let shortcut = panel.shortcuts[ix].clone();
     let enabled = entry.selectable();
     let mark = match entry {
-        Entry::Toggle(_, checked, _) => checked.then_some(CHECK_GLYPH),
-        Entry::Icon(_, glyph, ..) => Some(*glyph),
+        Entry::Toggle { checked, .. } => checked.then_some(CHECK_GLYPH),
+        Entry::Command { icon, .. } => *icon,
         _ => None,
     };
-    let mark_size = if matches!(entry, Entry::Icon(..)) {
+    let mark_size = if matches!(entry, Entry::Command { icon: Some(_), .. }) {
         ICON_SIZE
     } else {
         GLYPH_SIZE
     };
     let mark_color = match entry {
         _ if !enabled => Some(p.text_disabled),
-        Entry::Toggle(..) => Some(p.text_secondary),
+        Entry::Toggle { .. } => Some(p.text_secondary),
         _ if fade => None,
         _ => Some(p.text_primary),
     };
@@ -1582,7 +1588,7 @@ fn row_face(
         Some(p.text_primary)
     };
     let face = div()
-        .id(("menu-row-face", row_id))
+        .id(("menu-row-face", ix))
         .flex()
         .items_center()
         .size_full()
@@ -1599,7 +1605,7 @@ fn row_face(
                     .text_size(px(mark_size))
                     .line_height(px(mark_size))
                     .when_some(mark_color, |this, color| this.text_color(rgba(color)))
-                    .when(enabled && matches!(entry, Entry::Toggle(..)), |this| {
+                    .when(enabled && matches!(entry, Entry::Toggle { .. }), |this| {
                         this.group_hover("menu-row", move |style| {
                             style.text_color(rgba(p.text_primary))
                         })
