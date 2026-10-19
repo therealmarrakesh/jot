@@ -471,7 +471,7 @@ impl Jot {
             None => Self::create_tab(None, window, cx),
         };
         let jot = cx.weak_entity();
-        let menu_bar = cx.new(|cx| MenuBar::new(jot, cx));
+        let menu_bar = cx.new(|cx| MenuBar::new(jot, window, cx));
         let menu_events = cx.subscribe(&menu_bar, |this, _, _: &menu::MenuEvent, cx| {
             this.sync_selection_focus(cx)
         });
@@ -502,17 +502,11 @@ impl Jot {
                 theme::apply(window.appearance(), cx);
                 cx.notify();
             }),
-            cx.observe_window_activation(window, |this, window, cx| {
+            cx.observe_window_activation(window, |_, window, cx| {
                 if !window.is_window_active() {
-                    this.menu_bar
-                        .update(cx, |menu_bar, cx| menu_bar.cancel(window, cx));
                     tooltip::window_deactivated(window.window_handle(), cx);
                     cx.notify();
                 }
-            }),
-            cx.observe_window_bounds(window, |this, window, cx| {
-                this.menu_bar
-                    .update(cx, |menu_bar, cx| menu_bar.cancel(window, cx));
             }),
             cx.observe_global_in::<ViewSettings>(window, |this, window, cx| {
                 let word_wrap = cx.global::<ViewSettings>().word_wrap;
@@ -974,13 +968,15 @@ fn main() {
         cx.bind_keys(find::key_bindings());
 
         cx.on_action(|_: &Exit, cx| {
-            for window in cx.windows() {
-                window
-                    .update(cx, |_, window, cx| {
-                        window.dispatch_action(Box::new(CloseWindow), cx);
-                    })
-                    .ok();
-            }
+            cx.defer(|cx| {
+                for window in cx.windows() {
+                    window
+                        .update(cx, |_, window, cx| {
+                            window.dispatch_action(Box::new(CloseWindow), cx);
+                        })
+                        .ok();
+                }
+            });
         });
         cx.on_action(|_: &NewWindow, cx| {
             open_jot_window(None, None, cx);

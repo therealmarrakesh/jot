@@ -579,10 +579,19 @@ pub(crate) struct MenuBar {
     trigger_areas: Rc<Cell<[Bounds<Pixels>; 3]>>,
     bar_focus: Option<MenuKind>,
     access: bool,
+    _window_changes: [Subscription; 2],
 }
 
 impl MenuBar {
-    pub(crate) fn new(jot: WeakEntity<Jot>, cx: &mut Context<Self>) -> Self {
+    pub(crate) fn new(jot: WeakEntity<Jot>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let _window_changes = [
+            cx.observe_window_activation(window, |this, window, cx| {
+                if !window.is_window_active() {
+                    this.cancel(window, cx);
+                }
+            }),
+            cx.observe_window_bounds(window, |this, window, cx| this.cancel(window, cx)),
+        ];
         Self {
             jot,
             focus: cx.focus_handle(),
@@ -593,6 +602,7 @@ impl MenuBar {
             trigger_areas: Rc::new(Cell::new([Bounds::default(); 3])),
             bar_focus: None,
             access: false,
+            _window_changes,
         }
     }
 
@@ -611,7 +621,7 @@ impl MenuBar {
         }
     }
 
-    pub(crate) fn cancel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn cancel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.live_open().is_some() {
             self.close_menu(window, cx);
         } else if self.bar_focus.is_some() {

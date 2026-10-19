@@ -16,4 +16,5 @@ The crates in this folder are copies of crates.io releases, licensed under the A
 - `src/platform.rs`, `src/gpui_windows.rs`: a save dialog with a title, file types, a default extension and a choice drop-down (`prompt_for_save_path`).
 - `src/window.rs`, `src/events.rs`, `src/gpui_windows.rs`: a minimum window size that can be changed after the window is created (`set_window_min_size`).
 - `src/window.rs`, `src/events.rs`: while Windows runs its move/size loop, the mouse position is reported as outside the window, so nothing shows hover during a resize or move.
+- `src/events.rs`: the display-changed callback runs from a spawned task, like the activation callback, so a window moved across monitors from inside an app update (a synchronous WM_MOVE) no longer borrows the app twice.
 - `src/window.rs`, `src/events.rs`: when the pointer leaves a window, a mouse move carrying the pointer's real position is delivered, so hover clears instead of staying on the last element under the pointer.
