@@ -579,6 +579,7 @@ pub(crate) struct MenuBar {
     trigger_areas: Rc<Cell<[Bounds<Pixels>; 3]>>,
     bar_focus: Option<MenuKind>,
     access: bool,
+    bounds: Bounds<Pixels>,
     _window_changes: [Subscription; 2],
 }
 
@@ -590,7 +591,13 @@ impl MenuBar {
                     this.cancel(window, cx);
                 }
             }),
-            cx.observe_window_bounds(window, |this, window, cx| this.cancel(window, cx)),
+            cx.observe_window_bounds(window, |this, window, cx| {
+                let bounds = window.bounds();
+                if bounds != this.bounds {
+                    this.bounds = bounds;
+                    this.cancel(window, cx);
+                }
+            }),
         ];
         Self {
             jot,
@@ -602,6 +609,7 @@ impl MenuBar {
             trigger_areas: Rc::new(Cell::new([Bounds::default(); 3])),
             bar_focus: None,
             access: false,
+            bounds: window.bounds(),
             _window_changes,
         }
     }
