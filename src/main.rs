@@ -53,6 +53,7 @@ const WINDOW_MAX_SCREEN_SHARE: f32 = 0.9;
 const SMALL_FONT: &str = "Segoe UI Variable Small";
 const TEXT_FONT: &str = "Segoe UI Variable Text";
 const ICON_FONT: &str = "Segoe Fluent Icons";
+const CLOSE_GLYPH: &str = "\u{E711}";
 
 const DECELERATE: Easing = Easing::CubicBezier {
     x1: 0.,
@@ -456,7 +457,6 @@ struct Tab {
 struct Jot {
     tabs: Vec<Tab>,
     active: usize,
-    hovered_tab: Option<EntityId>,
     strip: tabs::TabStrip,
     hwnd: isize,
     menu_bar: Entity<MenuBar>,
@@ -528,7 +528,6 @@ impl Jot {
         let mut jot = Self {
             tabs: vec![tab],
             active: 0,
-            hovered_tab: None,
             strip: tabs::TabStrip::new(),
             hwnd: window_hwnd(window),
             menu_bar,
@@ -606,6 +605,7 @@ impl Jot {
         self.active_editor().focus_handle(cx).focus(window, cx);
         self.sync_selection_focus(cx);
         self.refresh_title(window);
+        cx.notify();
     }
 
     pub(crate) fn sync_selection_focus(&mut self, cx: &mut Context<Self>) {
@@ -737,6 +737,7 @@ impl Jot {
                             px(THEME_GLYPH_SIZE),
                             size(px(THEME_BUTTON_WIDTH), px(MENU_BAR_HEIGHT)),
                             px(field::CONTROL_RADIUS),
+                            true,
                         )
                         .flex_none()
                         .on_click(|_, window, cx| {

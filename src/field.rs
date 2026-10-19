@@ -116,11 +116,12 @@ pub(crate) fn button(
 
 pub(crate) fn icon_button(
     p: Palette,
-    id: &'static str,
+    id: impl Into<ElementId>,
     glyph: &'static str,
     glyph_size: Pixels,
     size: gpui::Size<Pixels>,
     radius: Pixels,
+    enabled: bool,
 ) -> brush::BrushTransition {
     div()
         .id(id)
@@ -135,11 +136,21 @@ pub(crate) fn icon_button(
         .font_family(ICON_FONT)
         .text_size(glyph_size)
         .line_height(glyph_size)
-        .text_color(rgba(p.text_primary))
+        .text_color(rgba(if enabled {
+            p.text_primary
+        } else {
+            p.text_disabled
+        }))
         .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
         .child(glyph)
-        .brush_transition(Brushes::subtle(p))
-        .active(move |style| style.text_color(rgba(p.text_secondary)))
+        .brush_transition(if enabled {
+            Brushes::subtle(p)
+        } else {
+            Brushes::solid(transparent_black().into())
+        })
+        .when(enabled, |this| {
+            this.active(move |style| style.text_color(rgba(p.text_secondary)))
+        })
 }
 
 pub(crate) fn focus_ring(p: Palette, outset: Edges<f32>, radius: Pixels) -> Div {

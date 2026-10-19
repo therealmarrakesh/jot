@@ -42,7 +42,6 @@ const CHEVRON_DOWN_GLYPH: &str = "\u{E70D}";
 const ARROW_DOWN_GLYPH: &str = "\u{E74B}";
 const ARROW_UP_GLYPH: &str = "\u{E74A}";
 const OPTIONS_GLYPH: &str = "\u{E9E9}";
-const CLOSE_GLYPH: &str = "\u{E711}";
 
 pub(crate) fn key_bindings() -> Vec<KeyBinding> {
     vec![
@@ -836,6 +835,7 @@ fn icon_button(
         u(size),
         gpui::size(u(ICON_BUTTON_SIZE), u(ICON_BUTTON_SIZE)),
         u(CONTROL_RADIUS),
+        true,
     )
 }
 

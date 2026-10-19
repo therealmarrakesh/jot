@@ -1,7 +1,7 @@
 use super::*;
 use std::time::Instant;
 
-pub(crate) const TAB_WIDTH: f32 = 240.;
+const TAB_WIDTH: f32 = 240.;
 const TAB_MIN_WIDTH: f32 = 80.;
 pub(crate) const TAB_HEIGHT: f32 = 32.;
 const TAB_LABEL_INSET: f32 = 8.;
@@ -17,9 +17,10 @@ const LIST_PAD: f32 = 4.;
 pub(crate) const STRIP_LEFT: f32 = HEADER_WIDTH + LIST_PAD;
 pub(crate) const STRIP_TOP: f32 = 10.;
 pub(crate) const CAPTION_WIDTH: f32 = 3. * CAPTION_BUTTON_WIDTH;
-const STRIP_RESERVED: f32 = CAPTION_WIDTH + 43. + NEW_TAB_GAP_SCROLLING + BUTTON_WIDTH;
+const DRAG_RESERVE: f32 = 43.;
+const STRIP_RESERVED: f32 = CAPTION_WIDTH + DRAG_RESERVE + NEW_TAB_GAP_SCROLLING + BUTTON_WIDTH;
 pub(crate) const TITLE_BAR_MIN_WIDTH: f32 = HEADER_WIDTH + 2. * LIST_PAD + STRIP_RESERVED;
-const SCROLL_AREA: f32 = 43.;
+const SCROLL_AREA: f32 = SCROLL_OUTER_PAD + BUTTON_WIDTH + SCROLL_INNER_PAD;
 const SCROLL_OUTER_PAD: f32 = 8.;
 const SCROLL_INNER_PAD: f32 = 3.;
 const SCROLL_STEP: f32 = 50.;
@@ -34,39 +35,10 @@ const NEW_TAB_GAP: f32 = 5.;
 const NEW_TAB_GAP_SCROLLING: f32 = 3.;
 const SLIDE_DURATION: Duration = Duration::from_millis(200);
 const REORDER_THRESHOLD: f32 = 16.;
-pub(crate) const CARET_LEFT: &str = "\u{EDD9}";
-pub(crate) const CARET_RIGHT: &str = "\u{EDDA}";
-
-#[derive(Clone, Copy)]
-enum Ink {
-    Lead,
-    Line,
-    Center,
-    Trail,
-}
-
-impl Ink {
-    fn color(self, p: &Palette) -> u32 {
-        match self {
-            Self::Lead => p.plus_cap_lead,
-            Self::Line => p.plus_line,
-            Self::Center => p.plus_center,
-            Self::Trail => p.plus_cap_trail,
-        }
-    }
-}
-
-const PLUS_SEGMENTS: [(f32, f32, f32, f32, Ink); 9] = [
-    (10., 11., 1., 1., Ink::Lead),
-    (11., 11., 4., 1., Ink::Line),
-    (15., 11., 1., 1., Ink::Center),
-    (16., 11., 4., 1., Ink::Line),
-    (20., 11., 1., 1., Ink::Trail),
-    (15., 6., 1., 1., Ink::Lead),
-    (15., 7., 1., 4., Ink::Line),
-    (15., 12., 1., 4., Ink::Line),
-    (15., 16., 1., 1., Ink::Trail),
-];
+const CARET_LEFT: &str = "\u{EDD9}";
+const CARET_RIGHT: &str = "\u{EDDA}";
+const ADD_GLYPH: &str = "\u{E710}";
+const BUTTON_GLYPH_SIZE: f32 = 12.;
 
 #[derive(Clone, Copy)]
 struct Motion {
@@ -163,9 +135,9 @@ pub(crate) struct TabStrip {
     ghosts: Vec<Ghost>,
     drag: Option<Drag>,
     lifted: Option<EntityId>,
+    hovered: Option<EntityId>,
+    area: Rc<Cell<Bounds<Pixels>>>,
     repeat: Task<()>,
-    middle: Option<EntityId>,
-    plus_pressed: bool,
 }
 
 impl TabStrip {
@@ -181,9 +153,9 @@ impl TabStrip {
             ghosts: Vec::new(),
             drag: None,
             lifted: None,
+            hovered: None,
+            area: Rc::new(Cell::new(Bounds::default())),
             repeat: Task::ready(()),
-            middle: None,
-            plus_pressed: false,
         }
     }
 
@@ -238,17 +210,22 @@ impl TabStrip {
         }
     }
 
-    fn bounds(&self, now: Instant) -> Bounds<Pixels> {
-        Bounds::new(
-            point(px(HEADER_WIDTH), px(STRIP_TOP)),
-            size(
-                px(2. * self.scroll_area()
-                    + self.viewport(now)
-                    + self.new_tab_gap()
-                    + BUTTON_WIDTH),
-                px(TAB_HEIGHT),
-            ),
-        )
+    fn depart(&mut self, id: EntityId) {
+        if self.drag.is_some_and(|drag| drag.id == id) {
+            self.drag = None;
+        }
+        if self.lifted == Some(id) {
+            self.lifted = None;
+        }
+        if self.hovered == Some(id) {
+            self.hovered = None;
+        }
+    }
+
+    fn place(&self, x: f32, grab: f32, last: usize, now: Instant) -> (f32, f32, usize) {
+        let x = x - self.origin(now);
+        let left = (x - grab).clamp(0., last as f32 * self.width);
+        (x, left, slot_index(left, self.width, last))
     }
 
     fn scroll_to(&mut self, target: f32, duration: Duration) {
@@ -280,7 +257,7 @@ pub(crate) fn window_listeners(register: impl FnOnce(&mut Window) + 'static) -> 
         .size_full()
 }
 
-pub(crate) fn repeat(
+fn repeat(
     cx: &mut Context<Jot>,
     delay: Duration,
     interval: Duration,
@@ -379,6 +356,24 @@ fn unsaved_dot(p: Palette, inset: f32) -> Div {
         .bg(rgba(p.text_tertiary))
 }
 
+fn strip_button(
+    p: Palette,
+    id: impl Into<ElementId>,
+    glyph: &'static str,
+    glyph_size: f32,
+    enabled: bool,
+) -> brush::BrushTransition {
+    field::icon_button(
+        p,
+        id,
+        glyph,
+        px(glyph_size),
+        size(px(BUTTON_WIDTH), px(BUTTON_HEIGHT)),
+        px(field::CONTROL_RADIUS),
+        enabled,
+    )
+}
+
 fn tab_separator(p: Palette) -> Div {
     div()
         .absolute()
@@ -435,7 +430,7 @@ impl Jot {
         });
         Tab {
             data,
-            slot: tabs::Slot::at(0., tabs::TAB_WIDTH),
+            slot: Slot::at(0., TAB_WIDTH),
             _changes,
         }
     }
@@ -478,12 +473,7 @@ impl Jot {
     }
 
     fn forget_tab(&mut self, id: EntityId, cx: &mut Context<Self>) {
-        if self.strip.drag.is_some_and(|drag| drag.id == id) {
-            self.strip.drag = None;
-        }
-        if self.hovered_tab == Some(id) {
-            self.hovered_tab = None;
-        }
+        self.strip.depart(id);
         tab_drag::forget(id, cx);
     }
 
@@ -495,25 +485,22 @@ impl Jot {
         let now = Instant::now();
         let duration = slide_duration(cx);
         let width = self.strip.width;
+        let name = self.tab_name(ix).into();
         let tab = self.tabs.remove(ix);
         self.forget_tab(tab.data.editor.entity_id(), cx);
-        if ix < self.tabs.len() && self.strip.bounds(now).contains(&window.mouse_position()) {
+        if ix < self.tabs.len() && self.strip.area.get().contains(&window.mouse_position()) {
             self.strip.frozen = Some(width);
         }
         let mut slot = tab.slot;
         slot.x.slide(ix as f32 * width, duration, now);
         slot.width.slide(0., duration, now);
         if slot.moving(now) {
-            self.strip.ghosts.push(Ghost {
-                name: document::display_name(tab.data.path.as_deref()).into(),
-                slot,
-            });
+            self.strip.ghosts.push(Ghost { name, slot });
         }
         self.settle_after_removal(ix, window, cx);
     }
 
     fn settle_after_removal(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
-        self.hovered_tab = None;
         if ix < self.active || self.active == self.tabs.len() {
             self.active -= 1;
         }
@@ -556,10 +543,11 @@ impl Jot {
         self.strip.reveal(left, right, duration);
     }
 
-    fn scroll_tabs(&mut self, delta: f32, cx: &mut Context<Self>) {
-        let target = self.strip.scroll.to + delta;
-        self.strip.scroll_to(target, slide_duration(cx));
+    fn scroll_tabs(&mut self, delta: f32, cx: &mut Context<Self>) -> bool {
+        let before = self.strip.scroll.to;
+        self.strip.scroll_to(before + delta, slide_duration(cx));
         cx.notify();
+        self.strip.scroll.to != before
     }
 
     fn thaw_tabs(&mut self, cx: &mut Context<Self>) {
@@ -570,12 +558,12 @@ impl Jot {
     }
 
     fn thaw_listener(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let bounds = self.strip.bounds(Instant::now());
+        let area = self.strip.area.clone();
         let jot = cx.weak_entity();
         window_listeners(move |window| {
             let moved = jot.clone();
             window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
-                if phase == DispatchPhase::Bubble && !bounds.contains(&event.position) {
+                if phase == DispatchPhase::Bubble && !area.get().contains(&event.position) {
                     moved.update(cx, |jot, cx| jot.thaw_tabs(cx)).ok();
                 }
             });
@@ -611,12 +599,10 @@ impl Jot {
             });
         self.strip.lifted = Some(id);
         let width = self.strip.width;
-        let x = x - origin;
         let last = self.tabs.len() - 1;
-        let left = (x - drag.grab).clamp(0., last as f32 * width);
+        let (x, left, to) = self.strip.place(x, drag.grab, last, now);
         self.tabs[from].slot.x = Motion::at(left);
         self.strip.reveal(left, left + width, Duration::ZERO);
-        let to = slot_index(left, width, last);
         if to != from && (x - drag.last_move).abs() > REORDER_THRESHOLD {
             let active = self.active_editor().entity_id();
             let tab = self.tabs.remove(from);
@@ -644,10 +630,8 @@ impl Jot {
     ) -> Option<TabData> {
         let ix = self.tab_index(id)?;
         let tab = self.tabs.remove(ix);
-        self.strip.drag = None;
-        self.strip.lifted = None;
+        self.strip.depart(id);
         if self.tabs.is_empty() {
-            self.hovered_tab = None;
             window.remove_window();
         } else {
             self.settle_after_removal(ix, window, cx);
@@ -668,9 +652,7 @@ impl Jot {
         let count = self.tabs.len();
         self.strip.measure(count + 1);
         let width = self.strip.width;
-        let x = x - self.strip.origin(Instant::now());
-        let left = (x - grab).clamp(0., count as f32 * width);
-        let ix = slot_index(left, width, count);
+        let (x, left, ix) = self.strip.place(x, grab, count, Instant::now());
         tab.slot = Slot::at(left, width);
         self.tabs.insert(ix, tab);
         self.strip.drag = Some(Drag {
@@ -749,11 +731,14 @@ impl Jot {
         let tab = &self.tabs[ix];
         let id = tab.data.editor.entity_id();
         let active = ix == self.active;
-        let hovered = self.hovered_tab.and_then(|hovered| self.tab_index(hovered));
+        let hovered = self
+            .strip
+            .hovered
+            .and_then(|hovered| self.tab_index(hovered));
         let separator =
             !active && ix + 1 != self.active && hovered != Some(ix) && hovered != Some(ix + 1);
         let dirty = tab.data.dirty;
-        let show_close = self.hovered_tab == Some(id) || (active && !dirty);
+        let show_close = self.strip.hovered == Some(id) || (active && !dirty);
         let show_dot = dirty && !show_close;
         let trailing = if show_close || show_dot {
             TAB_LABEL_TRAILING
@@ -768,10 +753,9 @@ impl Jot {
             .as_ref()
             .map_or(name.clone(), |path| path.display().to_string())
             .into();
-        let key = id.as_u64() as usize;
 
         let tab = div()
-            .id(("tab", key))
+            .id(("tab", id))
             .relative()
             .size_full()
             .overflow_hidden()
@@ -802,90 +786,53 @@ impl Jot {
                     }
                 }),
             )
-            .on_mouse_down(
-                MouseButton::Middle,
-                cx.listener(move |this, _: &MouseDownEvent, _, cx| {
-                    this.strip.middle = Some(id);
-                    cx.stop_propagation();
-                }),
-            )
-            .on_mouse_up(
-                MouseButton::Middle,
-                cx.listener(move |this, _: &MouseUpEvent, window, cx| {
-                    if this.strip.middle.take() == Some(id)
-                        && let Some(ix) = this.tab_index(id)
-                    {
-                        this.close_tab(ix, window, cx);
-                    }
-                }),
-            )
-            .on_mouse_up_out(
-                MouseButton::Middle,
-                cx.listener(move |this, _: &MouseUpEvent, _, _| {
-                    if this.strip.middle == Some(id) {
-                        this.strip.middle = None;
-                    }
-                }),
-            )
             .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
                 if *hovered {
-                    this.hovered_tab = Some(id);
-                } else if this.hovered_tab == Some(id) {
-                    this.hovered_tab = None;
+                    this.strip.hovered = Some(id);
+                } else if this.strip.hovered == Some(id) {
+                    this.strip.hovered = None;
                 }
                 cx.notify();
             }))
-            .child(tab_face(p, active, trailing, name).when(!active, |this| {
-                this.hover(move |style| style.bg(rgba(p.layer_hover)))
-            }))
+            .child(
+                tab_face(p, active, trailing, name)
+                    .id(("tab-face", id))
+                    .when(!active, |this| {
+                        this.hover(move |style| style.bg(rgba(p.layer_hover)))
+                    })
+                    .on_aux_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                        if event.is_middle_click()
+                            && let Some(ix) = this.tab_index(id)
+                        {
+                            this.close_tab(ix, window, cx);
+                        }
+                    })),
+            )
             .when(show_dot, |this| this.child(unsaved_dot(p, inset)))
             .when(separator, |this| this.child(tab_separator(p)))
             .when(show_close, |this| {
-                this.child(Self::close_button(p, id, key, inset, cx))
+                this.child(Self::close_button(p, id, inset, cx))
             });
-        tooltip::owner(("tab", key), tip, tab)
+        tooltip::owner(("tab", id), tip, tab)
     }
 
     fn close_button(
         p: Palette,
         id: EntityId,
-        key: usize,
         inset: f32,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
-        let button = div()
-            .id(("close-tab", key))
+        let button = strip_button(p, ("close-tab", id), CLOSE_GLYPH, BUTTON_GLYPH_SIZE, true)
             .absolute()
             .top(px(CLOSE_BUTTON_TOP - inset))
             .right(px(CLOSE_BUTTON_RIGHT - inset))
-            .flex()
-            .items_center()
-            .justify_center()
-            .w(px(BUTTON_WIDTH))
-            .h(px(BUTTON_HEIGHT))
-            .rounded(px(field::CONTROL_RADIUS))
-            .font_family(ICON_FONT)
-            .text_size(px(12.))
-            .text_color(rgba(p.text_primary))
-            .hover(move |style| style.bg(rgba(p.subtle_secondary)))
-            .active(move |style| {
-                style
-                    .bg(rgba(p.subtle_tertiary))
-                    .text_color(rgba(p.text_secondary))
-            })
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_click(cx.listener(move |this, _, window, cx| {
                 if let Some(ix) = this.tab_index(id) {
                     this.close_tab(ix, window, cx);
                 }
-            }))
-            .child("\u{E711}");
-        tooltip::owner(("close-tab", key), "Close tab (Ctrl+W)", button)
-    }
-
-    fn release_plus(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
-        self.strip.plus_pressed = false;
-        cx.notify();
+            }));
+        tooltip::owner(("close-tab", id), "Close tab (Ctrl+W)", button)
     }
 
     fn stop_repeat(&mut self, _: &MouseUpEvent, _: &mut Window, _: &mut Context<Self>) {
@@ -894,51 +841,10 @@ impl Jot {
 
     fn new_tab_button(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let p = palette(cx);
-        let alpha_scale = if self.strip.plus_pressed {
-            (p.text_secondary & 0xff) as f32 / (p.text_primary & 0xff) as f32
-        } else {
-            1.
-        };
-        let button = div()
-            .id("new-tab")
-            .flex_none()
+        let button = strip_button(p, "new-tab", ADD_GLYPH, BUTTON_GLYPH_SIZE, true)
             .ml(px(self.strip.new_tab_gap()))
             .mt(px(BUTTON_TOP))
-            .w(px(BUTTON_WIDTH))
-            .h(px(BUTTON_HEIGHT))
-            .rounded(px(field::CONTROL_RADIUS))
-            .hover(move |style| style.bg(rgba(p.subtle_secondary)))
-            .active(move |style| style.bg(rgba(p.subtle_tertiary)))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _: &MouseDownEvent, _, cx| {
-                    this.strip.plus_pressed = true;
-                    cx.notify();
-                }),
-            )
-            .on_mouse_up(MouseButton::Left, cx.listener(Self::release_plus))
-            .on_mouse_up_out(MouseButton::Left, cx.listener(Self::release_plus))
-            .on_click(cx.listener(|this, _, window, cx| this.add_tab(window, cx)))
-            .child(
-                canvas(
-                    |_, _, _| {},
-                    move |bounds, _, window, _| {
-                        for (x, y, w, h, ink) in PLUS_SEGMENTS {
-                            let color = ink.color(&p);
-                            let alpha = ((color & 0xff) as f32 * alpha_scale).round() as u32;
-                            let color = rgba((color & !0xff) | alpha);
-                            window.paint_quad(fill(
-                                Bounds::new(
-                                    bounds.origin + point(px(x), px(y)),
-                                    size(px(w), px(h)),
-                                ),
-                                color,
-                            ));
-                        }
-                    },
-                )
-                .size_full(),
-            );
+            .on_click(cx.listener(|this, _, window, cx| this.add_tab(window, cx)));
         tooltip::owner("new-tab", "New tab (Ctrl+N)", button)
     }
 
@@ -951,55 +857,43 @@ impl Jot {
             target > 0.1
         };
         let step = if forward { SCROLL_STEP } else { -SCROLL_STEP };
-        let (key, tip) = if forward {
-            ("scroll-tabs-forward", "Scroll tab list forward")
+        let (key, tip, glyph) = if forward {
+            (
+                "scroll-tabs-forward",
+                "Scroll tab list forward",
+                CARET_RIGHT,
+            )
         } else {
-            ("scroll-tabs-backward", "Scroll tab list backward")
+            (
+                "scroll-tabs-backward",
+                "Scroll tab list backward",
+                CARET_LEFT,
+            )
         };
         let (left, right) = if forward {
             (SCROLL_INNER_PAD, SCROLL_OUTER_PAD)
         } else {
             (SCROLL_OUTER_PAD, SCROLL_INNER_PAD)
         };
-        let button = div()
-            .id(key)
-            .flex()
-            .items_center()
-            .justify_center()
+        let button = strip_button(p, key, glyph, SCROLL_GLYPH_SIZE, enabled)
             .mt(px(BUTTON_TOP))
-            .w(px(BUTTON_WIDTH))
-            .h(px(BUTTON_HEIGHT))
-            .rounded(px(field::CONTROL_RADIUS))
-            .font_family(ICON_FONT)
-            .text_size(px(SCROLL_GLYPH_SIZE))
-            .line_height(px(SCROLL_GLYPH_SIZE))
-            .text_color(rgba(if enabled {
-                p.text_secondary
-            } else {
-                p.text_disabled
-            }))
             .when(enabled, |this| {
-                this.hover(move |style| style.bg(rgba(p.subtle_secondary)))
-                    .active(move |style| style.bg(rgba(p.subtle_tertiary)))
+                this.text_color(rgba(p.text_secondary)).on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _, _, cx| {
+                        if this.scroll_tabs(step, cx) {
+                            this.strip.repeat = repeat(
+                                cx,
+                                SCROLL_REPEAT_DELAY,
+                                SCROLL_REPEAT_INTERVAL,
+                                move |jot, cx| jot.scroll_tabs(step, cx),
+                            );
+                        }
+                    }),
+                )
             })
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _, _, cx| {
-                    this.scroll_tabs(step, cx);
-                    this.strip.repeat = repeat(
-                        cx,
-                        SCROLL_REPEAT_DELAY,
-                        SCROLL_REPEAT_INTERVAL,
-                        move |jot, cx| {
-                            jot.scroll_tabs(step, cx);
-                            true
-                        },
-                    );
-                }),
-            )
             .on_mouse_up(MouseButton::Left, cx.listener(Self::stop_repeat))
-            .on_mouse_up_out(MouseButton::Left, cx.listener(Self::stop_repeat))
-            .child(div().child(if forward { CARET_RIGHT } else { CARET_LEFT }));
+            .on_mouse_up_out(MouseButton::Left, cx.listener(Self::stop_repeat));
         div()
             .flex_none()
             .h_full()
@@ -1042,7 +936,8 @@ impl Jot {
         let overflow = self.strip.overflow;
         let buttons = self.strip.buttons;
 
-        div()
+        let area = self.strip.area.clone();
+        let strip = div()
             .relative()
             .flex()
             .h(px(TAB_HEIGHT))
@@ -1088,6 +983,7 @@ impl Jot {
                     }),
             )
             .when(buttons, |this| this.child(self.scroll_button(true, cx)))
-            .child(self.new_tab_button(cx))
+            .child(self.new_tab_button(cx));
+        measure::measured(strip, move |bounds, _, _| area.set(bounds))
     }
 }
