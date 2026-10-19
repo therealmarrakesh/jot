@@ -135,23 +135,33 @@ impl Matcher {
         floor: usize,
         buffer: &mut Vec<u8>,
     ) -> Option<Range<usize>> {
-        let floor = text.floor_char_boundary(floor.min(text.len()));
-        let mut end = text.floor_char_boundary(before.min(text.len()));
+        let len = text.len();
+        let floor = floor.min(len);
+        let mut before = before.min(len);
         loop {
-            let begin = end.saturating_sub(self.block + self.overlap).max(floor);
-            let start = Self::fill(text, begin..end, buffer);
-            let limit = (end - start).min(buffer.len());
-            if let Some(found) = self.pattern.find_iter(&buffer[..limit]).last() {
-                let mut range = found.range();
-                while let Some(later) = self.pattern.find_at(&buffer[..limit], range.start + 1) {
-                    range = later.range();
-                }
+            let begin = before.saturating_sub(self.block).max(floor);
+            let start = Self::fill(text, begin..(before + self.overlap).min(len), buffer);
+            let limit = before - start;
+            let mut found = self
+                .pattern
+                .find_iter(buffer)
+                .take_while(|hit| hit.start() < limit)
+                .last()
+                .map(|hit| hit.range());
+            while let Some(later) = found
+                .as_ref()
+                .and_then(|range| self.pattern.find_at(buffer, range.start + 1))
+                .filter(|later| later.start() < limit)
+            {
+                found = Some(later.range());
+            }
+            if let Some(range) = found {
                 return Some(start + range.start..start + range.end);
             }
             if begin <= floor {
                 return None;
             }
-            end = text.floor_char_boundary(begin + self.overlap);
+            before = begin;
         }
     }
 
@@ -207,8 +217,7 @@ impl Matcher {
             if !wrap {
                 return None;
             }
-            let floor = selection.start.saturating_sub(self.overlap);
-            self.previous(text, text.len(), floor, buffer)
+            self.previous(text, text.len(), selection.start, buffer)
                 .map(|range| (range, true))
         }
     }
@@ -477,9 +486,8 @@ impl Jot {
         self.find.closing = true;
         self.find.notice = None;
         self.find.notice_timer = Task::ready(());
-        let editor = self.active_editor();
-        editor.update(cx, |editor, cx| editor.set_selection_focus(None, cx));
-        editor.focus_handle(cx).focus(window, cx);
+        self.sync_find_selection(cx);
+        self.active_editor().focus_handle(cx).focus(window, cx);
     }
 
     pub(crate) fn sync_find_selection(&mut self, cx: &mut Context<Self>) {
@@ -530,6 +538,9 @@ impl Jot {
     }
 
     fn show_notice(&mut self, notice: impl Into<SharedString>, cx: &mut Context<Self>) {
+        if !self.find.is_open() {
+            return;
+        }
         self.find.notice = Some(notice.into());
         self.find.notice_timer = cx.spawn(async move |this, cx| {
             cx.background_executor().timer(NOTICE_DURATION).await;
