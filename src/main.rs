@@ -499,7 +499,6 @@ struct Jot {
     menu_bar: Entity<MenuBar>,
     dialogs: dialog::Dialogs,
     find: find::FindBar,
-    accent: Rgba,
     field_caret: Option<(EntityId, usize, Range<usize>)>,
     caret_visible: bool,
     caret_key: CaretKey,
@@ -546,9 +545,8 @@ impl Jot {
         let _subscriptions = vec![
             menu_events,
             access_keys,
-            cx.observe_window_appearance(window, |this, window, cx| {
+            cx.observe_window_appearance(window, |_, window, cx| {
                 palette::apply(window.appearance(), cx);
-                this.accent = accent_color(cx);
                 cx.notify();
             }),
             cx.observe_window_activation(window, |this, window, cx| {
@@ -586,7 +584,6 @@ impl Jot {
             menu_bar,
             dialogs,
             find,
-            accent: accent_color(cx),
             field_caret: None,
             caret_visible: true,
             caret_key: (0, 0..0, 0),

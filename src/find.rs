@@ -456,7 +456,6 @@ impl Jot {
     }
 
     fn open_find(&mut self, replace: bool, window: &mut Window, cx: &mut Context<Self>) {
-        self.accent = accent_color(cx);
         let selected = self.active_editor().read(cx).selected_text().to_string();
         if !selected.is_empty() && !selected.contains('\n') {
             self.find
@@ -629,7 +628,7 @@ impl Jot {
         }
         let buttons = field::ButtonStyle {
             surface: p.card_surface,
-            accent: self.accent,
+            accent: accent_color(cx),
             scale: s,
         };
         let query_row = self.find_query_row(p, s, window, cx);
@@ -772,13 +771,21 @@ impl Jot {
                     )),
             )
             .child(action(
-                field::button(p, buttons, "find-replace", "Replace", false, false).on_click(
+                field::button(p, buttons, "find-replace", "Replace", false, None, window).on_click(
                     cx.listener(|this, _, window, cx| this.replace_next(&ReplaceNext, window, cx)),
                 ),
             ))
             .child(action(
-                field::button(p, buttons, "find-replace-all", "Replace all", false, false)
-                    .on_click(cx.listener(|this, _, window, cx| this.replace_all(window, cx))),
+                field::button(
+                    p,
+                    buttons,
+                    "find-replace-all",
+                    "Replace all",
+                    false,
+                    None,
+                    window,
+                )
+                .on_click(cx.listener(|this, _, window, cx| this.replace_all(window, cx))),
             ))
     }
 }

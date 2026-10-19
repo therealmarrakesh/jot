@@ -1,6 +1,7 @@
 use super::*;
 use field::{BODY_LINE, BODY_SIZE, FieldStyle};
 use futures::channel::oneshot;
+use gpui_kit::base::FocusTrapElement as _;
 use gpui_kit::base::actions::{Cancel, Confirm};
 use gpui_kit::base::input::Position;
 use gpui_kit::base::{MotionStatus, Presence, Transition, transition_with_status};
@@ -23,7 +24,11 @@ const HEADER_GAP: f32 = 8.;
 const BUTTON_GAP: f32 = 8.;
 const GO_TO_WIDTH: f32 = 312.;
 const GO_TO_TITLE: &str = "Go to line";
+const GO_TO_BUTTONS: &[&str] = &["Go to", "Cancel"];
+const OUT_OF_RANGE_MESSAGE: &str = "The line number is beyond the total number of lines";
+const OUT_OF_RANGE_BUTTONS: &[&str] = &["OK"];
 const BORDER: f32 = 1.;
+const BODY_BASELINE_SNAP: f32 = -1.;
 
 pub(crate) fn key_bindings() -> Vec<KeyBinding> {
     vec![
@@ -45,8 +50,19 @@ enum DialogKind {
     Prompt(Prompt),
 }
 
+impl DialogKind {
+    fn buttons(&self) -> &'static [&'static str] {
+        match self {
+            Self::GoTo => GO_TO_BUTTONS,
+            Self::LineOutOfRange => OUT_OF_RANGE_BUTTONS,
+            Self::Prompt(prompt) => prompt.buttons,
+        }
+    }
+}
+
 struct OpenDialog {
     kind: DialogKind,
+    buttons: Vec<FocusHandle>,
     serial: usize,
     closing: bool,
     scale: f32,
@@ -98,6 +114,7 @@ impl Dialogs {
             InputState::new(window, cx).validate(|text, _| text.chars().all(|c| c.is_ascii_digit()))
         });
         let _line_observer = Jot::watch_field(&line, cx);
+        line.read(cx).focus_handle(cx).tab_index(0).tab_stop(true);
         Self {
             open: Vec::new(),
             serial: 0,
@@ -107,32 +124,34 @@ impl Dialogs {
         }
     }
 
-    fn active(&self) -> Option<&DialogKind> {
-        self.open
-            .iter()
-            .rev()
-            .find(|dialog| !dialog.closing)
-            .map(|dialog| &dialog.kind)
+    fn active(&self) -> Option<&OpenDialog> {
+        self.open.iter().rev().find(|dialog| !dialog.closing)
     }
 
-    fn active_mut(&mut self) -> Option<&mut DialogKind> {
-        self.open
-            .iter_mut()
-            .rev()
-            .find(|dialog| !dialog.closing)
-            .map(|dialog| &mut dialog.kind)
+    fn active_mut(&mut self) -> Option<&mut OpenDialog> {
+        self.open.iter_mut().rev().find(|dialog| !dialog.closing)
     }
 
-    fn show(&mut self, kind: DialogKind) {
+    fn show(&mut self, kind: DialogKind, cx: &mut App) {
         self.hide();
         self.serial += 1;
+        let buttons = (0..kind.buttons().len())
+            .map(|ix| cx.focus_handle().tab_index(ix as isize + 1).tab_stop(true))
+            .collect();
         self.open.push(OpenDialog {
             kind,
+            buttons,
             serial: self.serial,
             closing: false,
             scale: OPEN_SCALE,
             opacity: 0.,
         });
+    }
+
+    fn focus_default(&self, window: &mut Window, cx: &mut App) {
+        if let Some(button) = self.active().and_then(|dialog| dialog.buttons.first()) {
+            button.focus(window, cx);
+        }
     }
 
     fn hide(&mut self) {
@@ -156,8 +175,7 @@ impl Jot {
     }
 
     fn show_go_to(&mut self, line: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
-        self.accent = accent_color(cx);
-        self.dialogs.show(DialogKind::GoTo);
+        self.dialogs.show(DialogKind::GoTo, cx);
         self.dialogs.line.update(cx, |input, cx| {
             if let Some(line) = line {
                 input.set_value(line.to_string(), window, cx);
@@ -169,23 +187,33 @@ impl Jot {
     }
 
     fn confirm_dialog(&mut self, _: &Confirm, window: &mut Window, cx: &mut Context<Self>) {
-        match self.dialogs.active() {
-            Some(DialogKind::GoTo) => self.submit_go_to(window, cx),
-            Some(DialogKind::LineOutOfRange) => self.show_go_to(None, window, cx),
-            Some(DialogKind::Prompt(_)) => self.answer_prompt(0, window, cx),
-            None => {}
-        }
+        let Some(dialog) = self.dialogs.active() else {
+            return;
+        };
+        let focused = dialog
+            .buttons
+            .iter()
+            .position(|button| button.is_focused(window));
+        self.press_dialog_button(focused.unwrap_or(0), window, cx);
     }
 
     fn cancel_dialog(&mut self, _: &Cancel, window: &mut Window, cx: &mut Context<Self>) {
-        match self.dialogs.active() {
-            Some(DialogKind::GoTo) => self.close_dialogs(window, cx),
-            Some(DialogKind::LineOutOfRange) => self.show_go_to(None, window, cx),
-            Some(DialogKind::Prompt(prompt)) => {
-                let last = prompt.buttons.len().saturating_sub(1);
-                self.answer_prompt(last, window, cx)
-            }
-            None => {}
+        let Some(dialog) = self.dialogs.active() else {
+            return;
+        };
+        let last = dialog.buttons.len().saturating_sub(1);
+        self.press_dialog_button(last, window, cx);
+    }
+
+    fn press_dialog_button(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(dialog) = self.dialogs.active() else {
+            return;
+        };
+        match dialog.kind {
+            DialogKind::GoTo if ix == 0 => self.submit_go_to(window, cx),
+            DialogKind::GoTo => self.close_dialogs(window, cx),
+            DialogKind::LineOutOfRange => self.show_go_to(None, window, cx),
+            DialogKind::Prompt(_) => self.answer_prompt(ix, window, cx),
         }
     }
 
@@ -198,20 +226,23 @@ impl Jot {
         cx: &mut Context<Self>,
     ) -> oneshot::Receiver<usize> {
         let (answer, receiver) = oneshot::channel();
-        self.accent = accent_color(cx);
-        self.dialogs.show(DialogKind::Prompt(Prompt {
-            title: title.into(),
-            message: message.into(),
-            buttons,
-            answer: Some(answer),
-        }));
-        self.dialogs.focus.focus(window, cx);
+        self.dialogs.show(
+            DialogKind::Prompt(Prompt {
+                title: title.into(),
+                message: message.into(),
+                buttons,
+                answer: Some(answer),
+            }),
+            cx,
+        );
+        self.dialogs.focus_default(window, cx);
         cx.notify();
         receiver
     }
 
     fn answer_prompt(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(DialogKind::Prompt(prompt)) = self.dialogs.active_mut()
+        if let Some(dialog) = self.dialogs.active_mut()
+            && let DialogKind::Prompt(prompt) = &mut dialog.kind
             && let Some(answer) = prompt.answer.take()
         {
             answer.send(index).ok();
@@ -237,8 +268,8 @@ impl Jot {
                 });
             }
             _ => {
-                self.dialogs.show(DialogKind::LineOutOfRange);
-                self.dialogs.focus.focus(window, cx);
+                self.dialogs.show(DialogKind::LineOutOfRange, cx);
+                self.dialogs.focus_default(window, cx);
                 cx.notify();
             }
         }
@@ -252,20 +283,18 @@ impl Jot {
         self.dialogs
             .open
             .retain_mut(|dialog| !dialog.sample(window, cx));
-        if self.dialogs.open.is_empty() {
-            return None;
-        }
+        let serial = self.dialogs.open.last()?.serial;
+        let accent = accent_color(cx);
         let layers: Vec<_> = self
             .dialogs
             .open
             .iter()
-            .map(|dialog| self.dialog_layer(dialog, window, cx))
+            .map(|dialog| self.dialog_layer(dialog, accent, window, cx))
             .collect();
         Some(
             div()
                 .id("dialogs")
                 .key_context(CONTEXT)
-                .track_focus(&self.dialogs.focus)
                 .absolute()
                 .top_0()
                 .left_0()
@@ -275,23 +304,76 @@ impl Jot {
                 .on_action(cx.listener(|this, _: &input::Escape, window, cx| {
                     this.cancel_dialog(&Cancel, window, cx)
                 }))
-                .children(layers),
+                .children(layers)
+                .focus_trap(("jot-dialog-trap", serial), &self.dialogs.focus),
         )
     }
 
-    fn dialog_layer(&self, dialog: &OpenDialog, window: &Window, cx: &mut Context<Self>) -> Div {
+    fn dialog_layer(
+        &self,
+        dialog: &OpenDialog,
+        accent: Rgba,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
         let p = palette(cx);
+        let s = dialog.scale;
         let style = field::ButtonStyle {
             surface: p.command_surface,
-            accent: self.accent,
-            scale: dialog.scale,
+            accent,
+            scale: s,
         };
-        let frame = match &dialog.kind {
-            DialogKind::GoTo => self.go_to_frame(p, style, window, cx),
-            DialogKind::LineOutOfRange => out_of_range_frame(p, style, window, cx),
-            DialogKind::Prompt(prompt) => prompt_frame(p, style, prompt, window, cx),
+        let focused = dialog
+            .buttons
+            .iter()
+            .position(|button| button.is_focused(window));
+        let buttons =
+            dialog
+                .kind
+                .buttons()
+                .iter()
+                .zip(&dialog.buttons)
+                .enumerate()
+                .map(|(ix, (&label, handle))| {
+                    let accented = ix == 0 && focused.is_none_or(|focused| focused == ix);
+                    field::button(
+                        p,
+                        style,
+                        ("button", ix),
+                        label,
+                        accented,
+                        Some(handle),
+                        window,
+                    )
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.press_dialog_button(ix, window, cx)
+                    }))
+                })
+                .collect();
+        let (width, title, body) = match &dialog.kind {
+            DialogKind::GoTo => (
+                GO_TO_WIDTH,
+                GO_TO_TITLE.into(),
+                self.go_to_body(p, s, window, cx),
+            ),
+            DialogKind::LineOutOfRange => (
+                text_width(window, OUT_OF_RANGE_MESSAGE, TEXT_FONT, BODY_SIZE),
+                GO_TO_TITLE.into(),
+                message_body(OUT_OF_RANGE_MESSAGE.into(), s),
+            ),
+            DialogKind::Prompt(prompt) => (
+                text_width(window, &prompt.message, TEXT_FONT, BODY_SIZE).max(text_width(
+                    window,
+                    &prompt.title,
+                    TITLE_FONT,
+                    TITLE_SIZE,
+                )),
+                prompt.title.clone(),
+                message_body(prompt.message.clone(), s),
+            ),
         };
         div()
+            .id(("jot-dialog", dialog.serial))
             .absolute()
             .top_0()
             .left_0()
@@ -302,18 +384,11 @@ impl Jot {
             .bg(rgba(p.smoke))
             .opacity(dialog.opacity)
             .when(!dialog.closing, |this| this.occlude())
-            .child(frame)
+            .child(dialog_frame(p, s, width, title, body, buttons))
     }
 
-    fn go_to_frame(
-        &self,
-        p: Palette,
-        style: field::ButtonStyle,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) -> Div {
-        let s = style.scale;
-        let body = div()
+    fn go_to_body(&self, p: Palette, s: f32, window: &Window, cx: &mut Context<Self>) -> Div {
+        div()
             .child(
                 message_body("Line number".into(), s)
                     .h(px(BODY_LINE * s))
@@ -329,83 +404,14 @@ impl Jot {
                 s,
                 window,
                 cx,
-            ));
-        dialog_frame(
-            p,
-            s,
-            GO_TO_WIDTH,
-            GO_TO_TITLE.into(),
-            body,
-            vec![
-                field::button(p, style, "dialog-go-to", "Go to", true, false)
-                    .on_click(cx.listener(|this, _, window, cx| this.submit_go_to(window, cx))),
-                field::button(p, style, "dialog-cancel", "Cancel", false, false)
-                    .on_click(cx.listener(|this, _, window, cx| this.close_dialogs(window, cx))),
-            ],
-        )
+            ))
     }
-}
-
-fn out_of_range_frame(
-    p: Palette,
-    style: field::ButtonStyle,
-    window: &Window,
-    cx: &mut Context<Jot>,
-) -> Div {
-    let s = style.scale;
-    let message = "The line number is beyond the total number of lines";
-    let width = text_width(window, message, TEXT_FONT, BODY_SIZE);
-    dialog_frame(
-        p,
-        s,
-        width,
-        GO_TO_TITLE.into(),
-        message_body(message.into(), s),
-        vec![
-            field::button(p, style, "dialog-ok", "OK", true, true)
-                .on_click(cx.listener(|this, _, window, cx| this.show_go_to(None, window, cx))),
-        ],
-    )
-}
-
-fn prompt_frame(
-    p: Palette,
-    style: field::ButtonStyle,
-    prompt: &Prompt,
-    window: &Window,
-    cx: &mut Context<Jot>,
-) -> Div {
-    let s = style.scale;
-    let width = text_width(window, &prompt.message, TEXT_FONT, BODY_SIZE).max(text_width(
-        window,
-        &prompt.title,
-        TITLE_FONT,
-        TITLE_SIZE,
-    ));
-    let buttons = prompt
-        .buttons
-        .iter()
-        .enumerate()
-        .map(|(ix, &label)| {
-            field::button(p, style, ("dialog-prompt", ix), label, ix == 0, ix == 0).on_click(
-                cx.listener(move |this, _, window, cx| this.answer_prompt(ix, window, cx)),
-            )
-        })
-        .collect();
-    dialog_frame(
-        p,
-        s,
-        width,
-        prompt.title.clone(),
-        message_body(prompt.message.clone(), s),
-        buttons,
-    )
 }
 
 fn message_body(message: SharedString, s: f32) -> Div {
     div()
         .relative()
-        .top(px(-1.))
+        .top(px(BODY_BASELINE_SNAP))
         .line_height(px(BODY_LINE * s))
         .child(message)
 }
@@ -423,6 +429,7 @@ fn dialog_frame(
     let spacer = (buttons.len() == 1).then(|| div().flex_1().min_w_0());
     div()
         .w(u(width))
+        .max_w_full()
         .border_1()
         .border_color(rgba(p.surface_stroke))
         .rounded(u(field::OVERLAY_RADIUS))
@@ -462,12 +469,12 @@ fn dialog_content(p: Palette, s: f32, title: SharedString, body: Div) -> Div {
         .border_color(rgb(p.dialog_divider))
         .child(
             div()
-                .h(u(TITLE_LINE))
                 .mb(u(TITLE_GAP))
                 .font_family(TITLE_FONT)
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_size(u(TITLE_SIZE))
                 .line_height(u(TITLE_LINE))
+                .line_clamp(2)
                 .child(title),
         )
         .child(body)

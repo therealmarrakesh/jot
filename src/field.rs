@@ -44,8 +44,9 @@ pub(crate) fn button(
     style: ButtonStyle,
     id: impl Into<ElementId>,
     label: impl Into<SharedString>,
-    accent_style: bool,
-    focused: bool,
+    accented: bool,
+    focus: Option<&FocusHandle>,
+    window: &Window,
 ) -> Stateful<Div> {
     let ButtonStyle {
         surface,
@@ -53,7 +54,9 @@ pub(crate) fn button(
         scale: s,
     } = style;
     let u = |v: f32| px(v * s);
-    let (fill, hover, pressed, edge, bottom, text) = if accent_style {
+    let ring =
+        focus.is_some_and(|focus| focus.is_focused(window) && window.last_input_was_keyboard());
+    let (fill, hover, pressed, edge, bottom, text) = if accented {
         let backdrop = f32::from(p.dialog_command.to_be_bytes()[3]) / 255.;
         (
             accent,
@@ -73,13 +76,14 @@ pub(crate) fn button(
             rgba(p.text_primary),
         )
     };
-    let (pressed_edge, pressed_bottom, pressed_text) = if accent_style {
+    let (pressed_edge, pressed_bottom, pressed_text) = if accented {
         (pressed, pressed, rgba(p.on_accent_secondary))
     } else {
         (edge, edge, rgba(p.text_secondary))
     };
     div()
         .id(id)
+        .when_some(focus, |this, focus| this.track_focus(focus))
         .relative()
         .h(u(CONTROL_HEIGHT))
         .rounded(u(CONTROL_RADIUS))
@@ -110,7 +114,7 @@ pub(crate) fn button(
                 })
                 .active(move |style| style.border_color(pressed_edge).text_color(pressed_text)),
         )
-        .when(focused, |this| {
+        .when(ring, |this| {
             this.child(focus_ring(p, Edges::all(3.), u(CONTROL_RADIUS + 3.)))
         })
 }
@@ -295,7 +299,7 @@ impl Jot {
             .child(bottom_edge(
                 focused,
                 if focused {
-                    self.accent
+                    accent_color(cx)
                 } else {
                     rgb(surface.field_bottom)
                 },
