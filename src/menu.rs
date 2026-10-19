@@ -1000,7 +1000,7 @@ impl MenuBar {
                             .text_size(px(COMMAND_LABEL_SIZE))
                             .child(command.label),
                     )
-                    .fade_bg(if enabled {
+                    .brush_transition(if enabled {
                         Brushes::subtle(p)
                     } else {
                         Brushes::solid(transparent_black().into())
@@ -1622,7 +1622,7 @@ fn row_face(
             )
         });
     if fade {
-        face.fade_bg(Brushes::subtle(p))
+        face.brush_transition(Brushes::subtle(p))
             .active(move |style| style.text_color(rgba(p.text_secondary)))
             .into_any_element()
     } else {

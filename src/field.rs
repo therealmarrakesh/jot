@@ -103,7 +103,7 @@ pub(crate) fn button(
                 .border_color(edge)
                 .text_color(text)
                 .child(label.into())
-                .fade_bg(Brushes {
+                .brush_transition(Brushes {
                     rest: fill,
                     hover,
                     pressed,
@@ -122,7 +122,7 @@ pub(crate) fn icon_button(
     glyph_size: Pixels,
     size: gpui::Size<Pixels>,
     radius: Pixels,
-) -> brush::Faded {
+) -> brush::BrushTransition {
     div()
         .id(id)
         .flex_none()
@@ -139,7 +139,7 @@ pub(crate) fn icon_button(
         .text_color(rgba(p.text_primary))
         .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
         .child(glyph)
-        .fade_bg(Brushes::subtle(p))
+        .brush_transition(Brushes::subtle(p))
         .active(move |style| style.text_color(rgba(p.text_secondary)))
 }
 

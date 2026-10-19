@@ -823,7 +823,7 @@ fn icon_button(
     glyph: &'static str,
     size: f32,
     s: f32,
-) -> brush::Faded {
+) -> brush::BrushTransition {
     let u = |v: f32| px(v * s);
     field::icon_button(
         p,

@@ -16,7 +16,7 @@ mod scrollbar;
 mod tabs;
 mod tooltip;
 
-use brush::{Brushes, FadeBackground as _};
+use brush::{BrushTransitionExt as _, Brushes};
 use gpui_kit::Edges;
 use gpui_kit::base::Easing;
 use gpui_kit::base::animation::cubic_bezier;
