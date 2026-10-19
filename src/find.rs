@@ -277,6 +277,10 @@ impl FindBar {
         self.matcher.as_ref().map(|_| query)
     }
 
+    pub(crate) fn selection_focus(&self) -> Option<FocusHandle> {
+        self.is_open().then(|| self.focus.clone())
+    }
+
     fn is_open(&self) -> bool {
         self.visible && !self.closing
     }
@@ -475,7 +479,7 @@ impl Jot {
             input.select_all(window, cx);
             input.focus(window, cx);
         });
-        self.sync_find_selection(cx);
+        self.sync_selection_focus(cx);
         cx.notify();
     }
 
@@ -486,17 +490,8 @@ impl Jot {
         self.find.closing = true;
         self.find.notice = None;
         self.find.notice_timer = Task::ready(());
-        self.sync_find_selection(cx);
+        self.sync_selection_focus(cx);
         self.active_editor().focus_handle(cx).focus(window, cx);
-    }
-
-    pub(crate) fn sync_find_selection(&mut self, cx: &mut Context<Self>) {
-        let focus = self.find.is_open().then(|| self.find.focus.clone());
-        for (ix, tab) in self.tabs.iter().enumerate() {
-            let focus = (ix == self.active).then(|| focus.clone()).flatten();
-            tab.editor
-                .update(cx, |editor, cx| editor.set_selection_focus(focus, cx));
-        }
     }
 
     fn find_step(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
@@ -564,8 +559,9 @@ impl Jot {
             }),
         ];
         let return_focus = self.find.query.focus_handle(cx);
+        let editor = self.active_editor().clone();
         self.menu_bar.update(cx, |menu_bar, cx| {
-            menu_bar.open_flyout_above(entries, target, return_focus, window, cx)
+            menu_bar.open_flyout_above(&editor, entries, target, return_focus, window, cx)
         });
     }
 

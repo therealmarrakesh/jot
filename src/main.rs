@@ -451,25 +451,9 @@ struct TabData {
 }
 
 struct Tab {
-    editor: Entity<TextareaState>,
-    zoom: f32,
-    path: Option<PathBuf>,
-    format: document::Format,
-    dirty: bool,
+    data: TabData,
     slot: tabs::Slot,
     _changes: Subscription,
-}
-
-impl Tab {
-    fn into_data(self) -> TabData {
-        TabData {
-            editor: self.editor,
-            zoom: self.zoom,
-            path: self.path,
-            format: self.format,
-            dirty: self.dirty,
-        }
-    }
 }
 
 struct Jot {
@@ -491,15 +475,10 @@ impl Jot {
             Some(data) => Self::adopt_tab(data, window, cx),
             None => Self::create_tab(None, window, cx),
         };
-        let editor = tab.editor.clone();
-        let menu_bar = cx.new(|cx| MenuBar::new(editor, cx));
-        let menu_events = cx.subscribe(&menu_bar, |this, menu_bar, event, cx| match event {
-            menu::MenuEvent::Opened => {
-                let focus = menu_bar.read(cx).focus_handle().clone();
-                this.active_editor()
-                    .update(cx, |editor, cx| editor.set_selection_focus(Some(focus), cx));
-            }
-            menu::MenuEvent::Closed => this.sync_find_selection(cx),
+        let jot = cx.weak_entity();
+        let menu_bar = cx.new(|cx| MenuBar::new(jot, cx));
+        let menu_events = cx.subscribe(&menu_bar, |this, _, _: &menu::MenuEvent, cx| {
+            this.sync_selection_focus(cx)
         });
         let dialogs = dialog::Dialogs::new(window, cx);
         let find = find::FindBar::new(window, cx);
@@ -542,7 +521,8 @@ impl Jot {
             cx.observe_global_in::<ViewSettings>(window, |this, window, cx| {
                 let word_wrap = cx.global::<ViewSettings>().word_wrap;
                 for tab in &this.tabs {
-                    tab.editor
+                    tab.data
+                        .editor
                         .update(cx, |editor, cx| editor.set_soft_wrap(word_wrap, window, cx));
                 }
                 cx.notify();
@@ -571,7 +551,7 @@ impl Jot {
     }
 
     fn active_editor(&self) -> &Entity<TextareaState> {
-        &self.tabs[self.active].editor
+        &self.tabs[self.active].data.editor
     }
 
     fn has_text(&self, cx: &App) -> bool {
@@ -579,7 +559,7 @@ impl Jot {
     }
 
     fn zoom(&self) -> f32 {
-        self.tabs[self.active].zoom
+        self.tabs[self.active].data.zoom
     }
 
     fn line_height(&self) -> f32 {
@@ -628,12 +608,24 @@ impl Jot {
     fn activate_tab(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         self.active = ix;
         self.reveal_tab(ix, cx);
-        let editor = self.active_editor().clone();
-        editor.focus_handle(cx).focus(window, cx);
-        self.menu_bar
-            .update(cx, |menu_bar, _| menu_bar.editor = editor.clone());
-        self.sync_find_selection(cx);
+        self.active_editor().focus_handle(cx).focus(window, cx);
+        self.sync_selection_focus(cx);
         self.refresh_title(window);
+    }
+
+    pub(crate) fn sync_selection_focus(&mut self, cx: &mut Context<Self>) {
+        let menu_bar = self.menu_bar.read(cx);
+        let focus = if menu_bar.is_open() {
+            Some(menu_bar.focus_handle().clone())
+        } else {
+            self.find.selection_focus()
+        };
+        for (ix, tab) in self.tabs.iter().enumerate() {
+            let focus = (ix == self.active).then(|| focus.clone()).flatten();
+            tab.data
+                .editor
+                .update(cx, |editor, cx| editor.set_selection_focus(focus, cx));
+        }
     }
 
     fn new_tab(&mut self, _: &NewTab, window: &mut Window, cx: &mut Context<Self>) {
@@ -679,7 +671,7 @@ impl Jot {
     }
 
     fn set_zoom(&mut self, zoom: f32, cx: &mut Context<Self>) {
-        self.tabs[self.active].zoom =
+        self.tabs[self.active].data.zoom =
             ((zoom / ZOOM_STEP).round() * ZOOM_STEP).clamp(ZOOM_MIN, ZOOM_MAX);
         cx.notify();
     }
@@ -785,8 +777,9 @@ impl Jot {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let editor = self.active_editor().clone();
         self.menu_bar.update(cx, |menu_bar, cx| {
-            menu_bar.open_context_menu(position, window, cx);
+            menu_bar.open_context_menu(&editor, position, window, cx);
         });
     }
 
@@ -869,9 +862,9 @@ impl Jot {
                 .child(status_spacer(p))
                 .child(format!("{}%", (self.zoom() * 100.).round()))
                 .child(status_divider(p))
-                .child(self.tabs[self.active].format.line_ending.label())
+                .child(self.tabs[self.active].data.format.line_ending.label())
                 .child(status_divider(p))
-                .child(self.tabs[self.active].format.encoding.label()),
+                .child(self.tabs[self.active].data.format.encoding.label()),
         )
     }
 }

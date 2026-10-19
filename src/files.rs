@@ -39,7 +39,7 @@ impl Jot {
 
     fn is_blank(&self, ix: usize, cx: &App) -> bool {
         let tab = &self.tabs[ix];
-        tab.path.is_none() && tab.editor.read(cx).text().len() == 0
+        tab.data.path.is_none() && tab.data.editor.read(cx).text().len() == 0
     }
 
     pub(crate) fn open(&mut self, _: &Open, window: &mut Window, cx: &mut Context<Self>) {
@@ -79,7 +79,7 @@ impl Jot {
         if let Some(ix) = self
             .tabs
             .iter()
-            .position(|tab| tab.path.as_deref() == Some(path.as_path()))
+            .position(|tab| tab.data.path.as_deref() == Some(path.as_path()))
         {
             self.activate_tab(ix, window, cx);
             return;
@@ -125,8 +125,8 @@ impl Jot {
     fn dirty_tabs(&self) -> Vec<EntityId> {
         self.tabs
             .iter()
-            .filter(|tab| tab.dirty)
-            .map(|tab| tab.editor.entity_id())
+            .filter(|tab| tab.data.dirty)
+            .map(|tab| tab.data.editor.entity_id())
             .collect()
     }
 
@@ -139,9 +139,9 @@ impl Jot {
         let Some(ix) = self.tab_index(id) else {
             return Task::ready(false);
         };
-        match self.tabs[ix].path.clone() {
+        match self.tabs[ix].data.path.clone() {
             Some(path) => {
-                let format = self.tabs[ix].format;
+                let format = self.tabs[ix].data.format;
                 self.write_tab(ix, path, format, window, cx)
             }
             None => self.save_tab_as(id, window, cx),
@@ -157,8 +157,8 @@ impl Jot {
         let Some(ix) = self.tab_index(id) else {
             return Task::ready(false);
         };
-        let current = self.tabs[ix].path.clone();
-        let format = self.tabs[ix].format;
+        let current = self.tabs[ix].data.path.clone();
+        let format = self.tabs[ix].data.format;
         let suggested = file_name(current.as_deref()).unwrap_or_else(|| UNTITLED_FILE_NAME.into());
         let target = gpui_windows::prompt_for_save_path(
             self.hwnd,
@@ -212,8 +212,8 @@ impl Jot {
         cx: &mut Context<Self>,
     ) -> Task<bool> {
         let tab = &self.tabs[ix];
-        let id = tab.editor.entity_id();
-        let text = tab.editor.read(cx).text().to_string();
+        let id = tab.data.editor.entity_id();
+        let text = tab.data.editor.read(cx).text().to_string();
         let encoded = match document::encode(text, format) {
             Ok(encoded) => encoded,
             Err(error) => {
@@ -262,9 +262,9 @@ impl Jot {
         match document::write(&path, bytes) {
             Ok(()) => {
                 let tab = &mut self.tabs[ix];
-                tab.path = Some(path);
-                tab.format = format;
-                tab.dirty = false;
+                tab.data.path = Some(path);
+                tab.data.format = format;
+                tab.data.dirty = false;
                 self.refresh_title(window);
                 cx.notify();
                 true
@@ -277,11 +277,11 @@ impl Jot {
     }
 
     pub(crate) fn close_tab(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.tabs[ix].dirty {
+        if !self.tabs[ix].data.dirty {
             self.remove_tab(ix, window, cx);
             return;
         }
-        let id = self.tabs[ix].editor.entity_id();
+        let id = self.tabs[ix].data.editor.entity_id();
         self.activate_tab(ix, window, cx);
         let confirm = self.confirm_discard(id, window, cx);
         cx.spawn_in(window, async move |this, cx| {
@@ -306,7 +306,7 @@ impl Jot {
         let Some(ix) = self.tab_index(id) else {
             return Task::ready(true);
         };
-        let name = self.tabs[ix].path.as_deref().map_or_else(
+        let name = self.tabs[ix].data.path.as_deref().map_or_else(
             || UNTITLED_FILE_NAME.into(),
             |path| display_name(Some(path)),
         );

@@ -581,7 +581,7 @@ enum SubmenuChange {
 }
 
 pub(crate) struct MenuBar {
-    pub(crate) editor: Entity<TextareaState>,
+    jot: WeakEntity<Jot>,
     focus: FocusHandle,
     open: Option<OpenMenu>,
     serial: usize,
@@ -593,9 +593,9 @@ pub(crate) struct MenuBar {
 }
 
 impl MenuBar {
-    pub(crate) fn new(editor: Entity<TextareaState>, cx: &mut Context<Self>) -> Self {
+    pub(crate) fn new(jot: WeakEntity<Jot>, cx: &mut Context<Self>) -> Self {
         Self {
-            editor,
+            jot,
             focus: cx.focus_handle(),
             open: None,
             serial: 0,
@@ -605,6 +605,10 @@ impl MenuBar {
             bar_focus: None,
             access: false,
         }
+    }
+
+    pub(crate) fn is_open(&self) -> bool {
+        self.live_open().is_some()
     }
 
     pub(crate) fn access_active(&self) -> bool {
@@ -762,7 +766,9 @@ impl MenuBar {
 
     fn leave_bar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.bar_focus = None;
-        self.action_context(cx).focus(window, cx);
+        if let Some(target) = self.action_context(cx) {
+            target.focus(window, cx);
+        }
         cx.notify();
     }
 
@@ -778,8 +784,14 @@ impl MenuBar {
         }
     }
 
-    fn action_context(&self, cx: &App) -> FocusHandle {
-        self.editor.focus_handle(cx)
+    fn editor(&self, cx: &App) -> Option<Entity<TextareaState>> {
+        self.jot
+            .upgrade()
+            .map(|jot| jot.read(cx).active_editor().clone())
+    }
+
+    fn action_context(&self, cx: &App) -> Option<FocusHandle> {
+        self.editor(cx).map(|editor| editor.focus_handle(cx))
     }
 
     fn next_serial(&mut self) -> usize {
@@ -800,8 +812,11 @@ impl MenuBar {
     }
 
     fn open_menu(&mut self, kind: MenuKind, window: &mut Window, cx: &mut Context<Self>) {
-        let entries = kind.entries(self.editor.read(cx), cx);
-        let panel = Panel::new(entries, MIN_WIDTH, &self.action_context(cx), window);
+        let Some(editor) = self.editor(cx) else {
+            return;
+        };
+        let entries = kind.entries(editor.read(cx), cx);
+        let panel = Panel::new(entries, MIN_WIDTH, &editor.focus_handle(cx), window);
         self.show(OpenMenu::new(kind, panel), window, cx);
     }
 
@@ -811,12 +826,13 @@ impl MenuBar {
 
     pub(crate) fn open_context_menu(
         &mut self,
+        editor: &Entity<TextareaState>,
         anchor: Point<Pixels>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let (commands, entries) = context_menu(self.editor.read(cx));
-        let panel = Panel::new(entries, CONTEXT_WIDTH, &self.action_context(cx), window);
+        let (commands, entries) = context_menu(editor.read(cx));
+        let panel = Panel::new(entries, CONTEXT_WIDTH, &editor.focus_handle(cx), window);
         let focused_command = commands.iter().position(|command| command.enabled);
         self.show(
             OpenMenu {
@@ -833,13 +849,14 @@ impl MenuBar {
 
     pub(crate) fn open_flyout_above(
         &mut self,
+        editor: &Entity<TextareaState>,
         entries: Vec<Entry>,
         target: Bounds<Pixels>,
         return_focus: FocusHandle,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let panel = Panel::new(entries, FLYOUT_MIN_WIDTH, &self.action_context(cx), window);
+        let panel = Panel::new(entries, FLYOUT_MIN_WIDTH, &editor.focus_handle(cx), window);
         let anchor = point(
             target.center().x - px((panel.width / 2.).floor()),
             target.top() - px(FLYOUT_GAP + panel.height()),
@@ -873,9 +890,9 @@ impl MenuBar {
             open.return_focus.take()
         });
         self.submenu_timer = Task::ready(());
-        return_focus
-            .unwrap_or_else(|| self.action_context(cx))
-            .focus(window, cx);
+        if let Some(target) = return_focus.or_else(|| self.action_context(cx)) {
+            target.focus(window, cx);
+        }
         cx.emit(MenuEvent::Closed);
         cx.notify();
     }
@@ -894,7 +911,9 @@ impl MenuBar {
 
     fn dispatch(&mut self, action: Box<dyn Action>, window: &mut Window, cx: &mut Context<Self>) {
         self.close_menu(window, cx);
-        let target = self.action_context(cx);
+        let Some(target) = self.action_context(cx) else {
+            return;
+        };
         window.defer(cx, move |window, cx| {
             target.dispatch_action(action.as_ref(), window, cx);
         });
@@ -1052,7 +1071,9 @@ impl MenuBar {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let action_context = self.action_context(cx);
+        let Some(action_context) = self.action_context(cx) else {
+            return;
+        };
         let serial = self.next_serial();
         self.submenu_timer = Task::ready(());
         let Some(open) = self.live_open_mut() else {

@@ -421,38 +421,34 @@ impl Jot {
     }
 
     pub(crate) fn adopt_tab(data: TabData, window: &mut Window, cx: &mut Context<Self>) -> Tab {
-        let editor = data.editor;
-        editor.update(cx, |editor, cx| editor.attach_window(window, cx));
-        let _changes = cx.subscribe(&editor, |this, editor, event: &InputEvent, cx| {
+        data.editor
+            .update(cx, |editor, cx| editor.attach_window(window, cx));
+        let _changes = cx.subscribe(&data.editor, |this, editor, event: &InputEvent, cx| {
             if let InputEvent::Change = event
-                && let Some(tab) = this.tabs.iter_mut().find(|tab| tab.editor == editor)
+                && let Some(tab) = this.tabs.iter_mut().find(|tab| tab.data.editor == editor)
             {
-                let dirty = tab.path.is_some() || editor.read(cx).text().len() > 0;
-                if tab.dirty != dirty {
-                    tab.dirty = dirty;
+                let dirty = tab.data.path.is_some() || editor.read(cx).text().len() > 0;
+                if tab.data.dirty != dirty {
+                    tab.data.dirty = dirty;
                     cx.notify();
                 }
             }
         });
         Tab {
-            editor,
-            zoom: data.zoom,
-            path: data.path,
-            format: data.format,
-            dirty: data.dirty,
+            data,
             slot: tabs::Slot::at(0., tabs::TAB_WIDTH),
             _changes,
         }
     }
 
     pub(crate) fn tab_name(&self, ix: usize) -> String {
-        document::display_name(self.tabs[ix].path.as_deref())
+        document::display_name(self.tabs[ix].data.path.as_deref())
     }
 
     pub(crate) fn tab_index(&self, id: EntityId) -> Option<usize> {
         self.tabs
             .iter()
-            .position(|tab| tab.editor.entity_id() == id)
+            .position(|tab| tab.data.editor.entity_id() == id)
     }
 
     pub(crate) fn add_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -478,7 +474,7 @@ impl Jot {
     ) {
         tab.slot = self.tabs[ix].slot;
         let replaced = std::mem::replace(&mut self.tabs[ix], tab);
-        self.forget_tab(replaced.editor.entity_id(), cx);
+        self.forget_tab(replaced.data.editor.entity_id(), cx);
         self.activate_tab(ix, window, cx);
     }
 
@@ -501,7 +497,7 @@ impl Jot {
         let duration = slide_duration(cx);
         let width = self.strip.width;
         let tab = self.tabs.remove(ix);
-        self.forget_tab(tab.editor.entity_id(), cx);
+        self.forget_tab(tab.data.editor.entity_id(), cx);
         if ix < self.tabs.len() && self.strip.bounds(now).contains(&window.mouse_position()) {
             self.strip.frozen = Some(width);
         }
@@ -510,7 +506,7 @@ impl Jot {
         slot.width.slide(0., duration, now);
         if slot.moving(now) {
             self.strip.ghosts.push(Ghost {
-                name: document::display_name(tab.path.as_deref()).into(),
+                name: document::display_name(tab.data.path.as_deref()).into(),
                 slot,
             });
         }
@@ -537,7 +533,7 @@ impl Jot {
         let dragged = self.strip.drag.map(|drag| drag.id);
         let mut x = 0.;
         for tab in &mut self.tabs {
-            if Some(tab.editor.entity_id()) != dragged {
+            if Some(tab.data.editor.entity_id()) != dragged {
                 tab.slot.x.slide(x, duration, now);
             }
             tab.slot.width.slide(width, duration, now);
@@ -657,7 +653,7 @@ impl Jot {
         } else {
             self.settle_after_removal(ix, window, cx);
         }
-        Some(tab.into_data())
+        Some(tab.data)
     }
 
     pub(crate) fn insert_dragged_tab(
@@ -669,7 +665,7 @@ impl Jot {
         cx: &mut Context<Self>,
     ) {
         let mut tab = Self::adopt_tab(data, window, cx);
-        let id = tab.editor.entity_id();
+        let id = tab.data.editor.entity_id();
         let count = self.tabs.len();
         self.strip.measure(count + 1);
         let width = self.strip.width;
@@ -752,12 +748,12 @@ impl Jot {
     fn tab(&self, ix: usize, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let p = palette(cx);
         let tab = &self.tabs[ix];
-        let id = tab.editor.entity_id();
+        let id = tab.data.editor.entity_id();
         let active = ix == self.active;
         let hovered = self.hovered_tab.and_then(|hovered| self.tab_index(hovered));
         let separator =
             !active && ix + 1 != self.active && hovered != Some(ix) && hovered != Some(ix + 1);
-        let dirty = tab.dirty;
+        let dirty = tab.data.dirty;
         let show_close = self.hovered_tab == Some(id) || (active && !dirty);
         let show_dot = dirty && !show_close;
         let trailing = if show_close || show_dot {
@@ -768,6 +764,7 @@ impl Jot {
         let inset = if active { 1. } else { 0. };
         let name = self.tab_name(ix);
         let tip: SharedString = tab
+            .data
             .path
             .as_ref()
             .map_or(name.clone(), |path| path.display().to_string())
