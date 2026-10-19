@@ -10,9 +10,9 @@ mod keytips;
 mod measure;
 mod menu;
 mod overlay;
-mod palette;
 mod tab_drag;
 mod tabs;
+mod theme;
 mod tooltip;
 
 use brush::{BrushTransitionExt as _, Brushes};
@@ -26,14 +26,12 @@ use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use menu::MenuBar;
-use palette::{
-    NOISE_OPACITY, NOISE_SIZE, Palette, Surface, accent_color, acrylic_noise, palette, theme_shadow,
-};
 use std::cell::Cell;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Duration;
+use theme::{Palette, Surface, palette, theme_shadow};
 use windows_sys::Win32::Foundation::{HWND, POINT, SYSTEMTIME};
 use windows_sys::Win32::Globalization::{
     DATE_SHORTDATE, GetDateFormatEx, GetTimeFormatEx, TIME_NOSECONDS,
@@ -502,7 +500,7 @@ impl Jot {
             menu_events,
             access_keys,
             cx.observe_window_appearance(window, |_, window, cx| {
-                palette::apply(window.appearance(), cx);
+                theme::apply(window.appearance(), cx);
                 cx.notify();
             }),
             cx.observe_window_activation(window, |this, window, cx| {
@@ -965,7 +963,7 @@ fn main() {
         })
         .detach();
 
-        palette::apply(cx.window_appearance(), cx);
+        theme::apply(cx.window_appearance(), cx);
         cx.set_text_rendering_mode(TextRenderingMode::Grayscale);
 
         cx.set_global(ViewSettings {

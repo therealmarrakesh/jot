@@ -258,7 +258,7 @@ pub(crate) fn text_field(
         .child(bottom_edge(
             focused,
             if focused {
-                accent_color(cx)
+                rgb(p.accent)
             } else {
                 rgb(surface.field_bottom)
             },

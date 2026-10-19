@@ -171,20 +171,6 @@ impl Render for TooltipView {
         if !self.settled(now) {
             window.request_animation_frame();
         }
-        let columns = (self.size.width.as_f32() / NOISE_SIZE).ceil() as usize;
-        let rows = (self.size.height.as_f32() / NOISE_SIZE).ceil() as usize;
-        let image = acrylic_noise();
-        let noise: Vec<_> = (0..rows)
-            .flat_map(|row| (0..columns).map(move |column| (row, column)))
-            .map(|(row, column)| {
-                img(image.clone())
-                    .absolute()
-                    .left(px(column as f32 * NOISE_SIZE))
-                    .top(px(row as f32 * NOISE_SIZE))
-                    .size(px(NOISE_SIZE))
-                    .opacity(NOISE_OPACITY)
-            })
-            .collect();
         div().size_full().opacity(self.opacity(now)).child(
             div()
                 .absolute()
@@ -204,7 +190,6 @@ impl Render for TooltipView {
                         .overflow_hidden()
                         .bg(rgb(p.acrylic_fallback))
                         .child(div().absolute().size_full().bg(rgba(p.acrylic_luminosity)))
-                        .children(noise)
                         .child(
                             div()
                                 .relative()

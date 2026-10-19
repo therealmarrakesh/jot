@@ -279,7 +279,7 @@ impl Jot {
             .open
             .retain_mut(|dialog| !dialog.sample(window, cx));
         let serial = self.dialogs.open.last()?.serial;
-        let accent = accent_color(cx);
+        let accent = rgb(palette(cx).accent);
         let layers: Vec<_> = self
             .dialogs
             .open

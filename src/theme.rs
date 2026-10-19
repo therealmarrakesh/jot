@@ -1,12 +1,5 @@
 use super::*;
-use std::sync::{Arc, OnceLock};
 use windows_sys::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_BINARY, RegGetValueW};
-
-const DEFAULT_ACCENT: u32 = 0x005fb8;
-const DEFAULT_ACCENT_DARK: u32 = 0x60cdff;
-const NOISE: &[u8] = include_bytes!("../assets/acrylic-noise.png");
-pub(crate) const NOISE_SIZE: f32 = 256.;
-pub(crate) const NOISE_OPACITY: f32 = 0.02;
 
 #[derive(Clone, Copy)]
 pub(crate) struct Surface {
@@ -60,7 +53,7 @@ pub(crate) struct Palette {
     pub acrylic_luminosity: u32,
     pub flyout_stroke: u32,
     pub on_accent: u32,
-    pub accent_shade: usize,
+    pub accent: u32,
     pub accent_bottom_edge: f32,
 }
 
@@ -132,7 +125,7 @@ const LIGHT: Palette = Palette {
     acrylic_luminosity: 0xfcfcfcd9,
     flyout_stroke: 0x0000000f,
     on_accent: 0xffffff,
-    accent_shade: 4,
+    accent: 0x005fb8,
     accent_bottom_edge: 0x66 as f32 / 255.,
 };
 
@@ -202,7 +195,7 @@ const DARK: Palette = Palette {
     acrylic_luminosity: 0x2c2c2cf5,
     flyout_stroke: 0x00000033,
     on_accent: 0x000000,
-    accent_shade: 1,
+    accent: 0x60cdff,
     accent_bottom_edge: 0x23 as f32 / 255.,
 };
 
@@ -240,30 +233,21 @@ pub(crate) fn theme_shadow(dark: bool, z: f32, scale: f32) -> Vec<BoxShadow> {
 
 pub(crate) fn apply(appearance: WindowAppearance, cx: &mut App) {
     let mode = ThemeMode::from(appearance);
-    let dark = mode.is_dark();
-    if cx
-        .try_global::<Palette>()
-        .is_some_and(|palette| palette.dark == dark)
-    {
-        return;
+    let mut palette = if mode.is_dark() { DARK } else { LIGHT };
+    if let Some(accent) = system_accent(palette.dark) {
+        palette.accent = accent;
     }
-    cx.set_global(if dark { DARK } else { LIGHT });
+    let placeholder = Hsla::from(rgba(palette.text_secondary));
+    cx.set_global(palette);
     Theme::change(mode, None, cx);
-    let background = transparent_black();
-    let caret = hsla(0., 0., 0., f32::EPSILON);
-    let placeholder = Hsla::from(rgba(palette(cx).text_secondary));
-    let theme = Theme::global_mut(cx);
-    theme.background = background;
-    theme.tokens.background = background.into();
-    theme.caret = caret;
-    theme.tokens.caret = caret.into();
-    theme.muted_foreground = placeholder;
-    theme.tokens.muted_foreground = placeholder.into();
-    cx.refresh_windows();
+    Theme::update(cx, |theme| {
+        theme.background = transparent_black();
+        theme.caret = hsla(0., 0., 0., f32::EPSILON);
+        theme.muted_foreground = placeholder;
+    });
 }
 
-pub(crate) fn accent_color(cx: &App) -> Rgba {
-    let p = palette(cx);
+fn system_accent(dark: bool) -> Option<u32> {
     let mut shades = [0u8; 32];
     let mut len = shades.len() as u32;
     let status = unsafe {
@@ -277,25 +261,7 @@ pub(crate) fn accent_color(cx: &App) -> Rgba {
             &mut len,
         )
     };
-    let shade = p.accent_shade * 4;
-    if status != 0 || (len as usize) < shade + 3 {
-        return rgb(if p.dark {
-            DEFAULT_ACCENT_DARK
-        } else {
-            DEFAULT_ACCENT
-        });
-    }
-    rgb(u32::from_be_bytes([
-        0,
-        shades[shade],
-        shades[shade + 1],
-        shades[shade + 2],
-    ]))
-}
-
-pub(crate) fn acrylic_noise() -> Arc<Image> {
-    static IMAGE: OnceLock<Arc<Image>> = OnceLock::new();
-    IMAGE
-        .get_or_init(|| Arc::new(Image::from_bytes(ImageFormat::Png, NOISE.to_vec())))
-        .clone()
+    let at = if dark { 4 } else { 16 };
+    (status == 0 && len as usize >= at + 3)
+        .then(|| u32::from_be_bytes([0, shades[at], shades[at + 1], shades[at + 2]]))
 }

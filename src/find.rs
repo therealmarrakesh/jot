@@ -628,7 +628,7 @@ impl Jot {
         }
         let buttons = field::ButtonStyle {
             surface: p.card_surface,
-            accent: accent_color(cx),
+            accent: rgb(p.accent),
             scale: s,
         };
         let query_row = self.find_query_row(p, s, window, cx);
