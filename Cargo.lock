@@ -3286,7 +3286,7 @@ dependencies = [
 
 [[package]]
 name = "jot"
-version = "1.0.3"
+version = "1.0.4"
 dependencies = [
  "embed-resource",
  "futures",
