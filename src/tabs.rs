@@ -766,7 +766,7 @@ impl Jot {
             .into();
         let key = id.as_u64() as usize;
 
-        div()
+        let tab = div()
             .id(("tab", key))
             .relative()
             .size_full()
@@ -826,18 +826,17 @@ impl Jot {
                 } else if this.hovered_tab == Some(id) {
                     this.hovered_tab = None;
                 }
-                tooltip::hover(("tab", key), 0, tip.clone(), *hovered, cx);
                 cx.notify();
             }))
             .child(tab_face(p, active, trailing, name).when(!active, |this| {
                 this.hover(move |style| style.bg(rgba(p.layer_hover)))
             }))
-            .child(tooltip::anchor(("tab", key)))
             .when(show_dot, |this| this.child(unsaved_dot(p, inset)))
             .when(separator, |this| this.child(tab_separator(p)))
             .when(show_close, |this| {
                 this.child(Self::close_button(p, id, key, inset, cx))
-            })
+            });
+        tooltip::owner(("tab", key), tip, tab)
     }
 
     fn close_button(
@@ -847,7 +846,7 @@ impl Jot {
         inset: f32,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
-        div()
+        let button = div()
             .id(("close-tab", key))
             .absolute()
             .top(px(CLOSE_BUTTON_TOP - inset))
@@ -868,16 +867,13 @@ impl Jot {
                     .text_color(rgba(p.text_secondary))
             })
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .on_hover(move |hovered, _, cx| {
-                tooltip::hover(("close-tab", key), 1, "Close tab (Ctrl+W)", *hovered, cx)
-            })
             .on_click(cx.listener(move |this, _, window, cx| {
                 if let Some(ix) = this.tab_index(id) {
                     this.close_tab(ix, window, cx);
                 }
             }))
-            .child(tooltip::anchor(("close-tab", key)))
-            .child("\u{E711}")
+            .child("\u{E711}");
+        tooltip::owner(("close-tab", key), "Close tab (Ctrl+W)", button)
     }
 
     fn release_plus(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
@@ -896,7 +892,7 @@ impl Jot {
         } else {
             1.
         };
-        div()
+        let button = div()
             .id("new-tab")
             .flex_none()
             .ml(px(self.strip.new_tab_gap()))
@@ -906,9 +902,6 @@ impl Jot {
             .rounded(px(field::CONTROL_RADIUS))
             .hover(move |style| style.bg(rgba(p.subtle_secondary)))
             .active(move |style| style.bg(rgba(p.subtle_tertiary)))
-            .on_hover(|hovered, _, cx| {
-                tooltip::hover("new-tab", 0, "New tab (Ctrl+N)", *hovered, cx)
-            })
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _: &MouseDownEvent, _, cx| {
@@ -919,7 +912,6 @@ impl Jot {
             .on_mouse_up(MouseButton::Left, cx.listener(Self::release_plus))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::release_plus))
             .on_click(cx.listener(|this, _, window, cx| this.add_tab(window, cx)))
-            .child(tooltip::anchor("new-tab"))
             .child(
                 canvas(
                     |_, _, _| {},
@@ -939,7 +931,8 @@ impl Jot {
                     },
                 )
                 .size_full(),
-            )
+            );
+        tooltip::owner("new-tab", "New tab (Ctrl+N)", button)
     }
 
     fn scroll_button(&self, forward: bool, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -961,49 +954,51 @@ impl Jot {
         } else {
             (SCROLL_OUTER_PAD, SCROLL_INNER_PAD)
         };
-        div().flex_none().h_full().pl(px(left)).pr(px(right)).child(
-            div()
-                .id(key)
-                .on_hover(move |hovered, _, cx| tooltip::hover(key, 0, tip, *hovered, cx))
-                .flex()
-                .items_center()
-                .justify_center()
-                .mt(px(BUTTON_TOP))
-                .w(px(BUTTON_WIDTH))
-                .h(px(BUTTON_HEIGHT))
-                .rounded(px(field::CONTROL_RADIUS))
-                .font_family(ICON_FONT)
-                .text_size(px(SCROLL_GLYPH_SIZE))
-                .line_height(px(SCROLL_GLYPH_SIZE))
-                .text_color(rgba(if enabled {
-                    p.text_secondary
-                } else {
-                    p.text_disabled
-                }))
-                .when(enabled, |this| {
-                    this.hover(move |style| style.bg(rgba(p.subtle_secondary)))
-                        .active(move |style| style.bg(rgba(p.subtle_tertiary)))
-                })
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |this, _, _, cx| {
-                        this.scroll_tabs(step, cx);
-                        this.strip.repeat = repeat(
-                            cx,
-                            SCROLL_REPEAT_DELAY,
-                            SCROLL_REPEAT_INTERVAL,
-                            move |jot, cx| {
-                                jot.scroll_tabs(step, cx);
-                                true
-                            },
-                        );
-                    }),
-                )
-                .child(tooltip::anchor(key))
-                .on_mouse_up(MouseButton::Left, cx.listener(Self::stop_repeat))
-                .on_mouse_up_out(MouseButton::Left, cx.listener(Self::stop_repeat))
-                .child(div().child(if forward { CARET_RIGHT } else { CARET_LEFT })),
-        )
+        let button = div()
+            .id(key)
+            .flex()
+            .items_center()
+            .justify_center()
+            .mt(px(BUTTON_TOP))
+            .w(px(BUTTON_WIDTH))
+            .h(px(BUTTON_HEIGHT))
+            .rounded(px(field::CONTROL_RADIUS))
+            .font_family(ICON_FONT)
+            .text_size(px(SCROLL_GLYPH_SIZE))
+            .line_height(px(SCROLL_GLYPH_SIZE))
+            .text_color(rgba(if enabled {
+                p.text_secondary
+            } else {
+                p.text_disabled
+            }))
+            .when(enabled, |this| {
+                this.hover(move |style| style.bg(rgba(p.subtle_secondary)))
+                    .active(move |style| style.bg(rgba(p.subtle_tertiary)))
+            })
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, _, cx| {
+                    this.scroll_tabs(step, cx);
+                    this.strip.repeat = repeat(
+                        cx,
+                        SCROLL_REPEAT_DELAY,
+                        SCROLL_REPEAT_INTERVAL,
+                        move |jot, cx| {
+                            jot.scroll_tabs(step, cx);
+                            true
+                        },
+                    );
+                }),
+            )
+            .on_mouse_up(MouseButton::Left, cx.listener(Self::stop_repeat))
+            .on_mouse_up_out(MouseButton::Left, cx.listener(Self::stop_repeat))
+            .child(div().child(if forward { CARET_RIGHT } else { CARET_LEFT }));
+        div()
+            .flex_none()
+            .h_full()
+            .pl(px(left))
+            .pr(px(right))
+            .child(tooltip::owner(key, tip, button))
     }
 
     pub(crate) fn tab_strip(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {

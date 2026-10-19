@@ -226,15 +226,130 @@ impl Render for TooltipView {
     }
 }
 
-struct Owner {
+#[derive(Clone, PartialEq, Eq, Debug)]
+struct Key<W> {
+    window: W,
     id: ElementId,
-    depth: u8,
+}
+
+#[derive(Clone)]
+struct Snap<W> {
+    key: Key<W>,
     text: SharedString,
+    owner: RECT,
     entered: POINT,
 }
 
-struct Visible {
+#[derive(Clone, Default)]
+enum State<W> {
+    #[default]
+    Idle,
+    Waiting {
+        snap: Snap<W>,
+        epoch: u64,
+    },
+    Showing {
+        snap: Snap<W>,
+    },
+    Suppressed {
+        key: Key<W>,
+    },
+}
+
+impl<W> State<W> {
+    fn key(&self) -> Option<&Key<W>> {
+        match self {
+            Self::Idle => None,
+            Self::Waiting { snap, .. } | Self::Showing { snap } => Some(&snap.key),
+            Self::Suppressed { key } => Some(key),
+        }
+    }
+}
+
+enum Report<W> {
+    Owner(Snap<W>),
+    NoneIn(W),
+    Gone(Key<W>),
+    Press(W),
+    Dismiss,
+    LeftSafeZone,
+    Timer(u64),
+}
+
+fn transition<W: PartialEq>(state: State<W>, report: Report<W>, epoch: &mut u64) -> State<W> {
+    let mut wait = |snap| {
+        *epoch += 1;
+        State::Waiting {
+            snap,
+            epoch: *epoch,
+        }
+    };
+    match (state, report) {
+        (state, Report::Owner(snap)) if state.key() == Some(&snap.key) => state,
+        (_, Report::Owner(snap)) => wait(snap),
+        (state @ (State::Waiting { .. } | State::Suppressed { .. }), Report::NoneIn(window))
+            if state.key().is_some_and(|key| key.window == window) =>
+        {
+            State::Idle
+        }
+        (state, Report::Gone(key)) if state.key() == Some(&key) => State::Idle,
+        (State::Waiting { snap, .. } | State::Showing { snap }, Report::Press(window))
+            if snap.key.window == window =>
+        {
+            State::Suppressed { key: snap.key }
+        }
+        (State::Waiting { snap, .. } | State::Showing { snap }, Report::Dismiss) => {
+            State::Suppressed { key: snap.key }
+        }
+        (State::Showing { .. }, Report::LeftSafeZone) => State::Idle,
+        (State::Waiting { snap, epoch }, Report::Timer(fired)) if epoch == fired => {
+            State::Showing { snap }
+        }
+        (state, _) => state,
+    }
+}
+
+fn topmost<T>(entries: &[T], hovered: impl Fn(&T) -> bool) -> Option<&T> {
+    entries.iter().rev().find(|entry| hovered(entry))
+}
+
+fn observe<W>(
+    window: W,
+    hovered: bool,
+    pressed: bool,
+    owner: impl FnOnce() -> Option<Snap<W>>,
+) -> Option<Report<W>> {
+    if !hovered {
+        return Some(Report::NoneIn(window));
+    }
+    if pressed {
+        return None;
+    }
+    Some(owner().map_or(Report::NoneIn(window), Report::Owner))
+}
+
+fn screen_rect(bounds: Bounds<Pixels>, scale: f32, origin: POINT) -> RECT {
+    let physical = |v: Pixels| (v.as_f32() * scale).round() as i32;
+    RECT {
+        left: origin.x + physical(bounds.origin.x),
+        top: origin.y + physical(bounds.origin.y),
+        right: origin.x + physical(bounds.origin.x + bounds.size.width),
+        bottom: origin.y + physical(bounds.origin.y + bounds.size.height),
+    }
+}
+
+fn same_rect(a: RECT, b: RECT) -> bool {
+    (a.left, a.top, a.right, a.bottom) == (b.left, b.top, b.right, b.bottom)
+}
+
+struct Entry {
     id: ElementId,
+    text: SharedString,
+    hitbox: Hitbox,
+}
+
+struct Shown {
+    key: Key<AnyWindowHandle>,
     owner: RECT,
     tip: RECT,
     checked: POINT,
@@ -243,112 +358,244 @@ struct Visible {
 #[derive(Default)]
 struct Tooltips {
     popup: Option<overlay::Overlay<TooltipView>>,
-    hovered: Vec<Owner>,
-    current: Option<ElementId>,
-    visible: Option<Visible>,
-    anchors: HashMap<ElementId, RECT>,
+    owners: HashMap<AnyWindowHandle, Vec<Entry>>,
+    state: State<AnyWindowHandle>,
+    epoch: u64,
+    pressed: bool,
+    shown: Option<Shown>,
     closed_at: Option<Instant>,
     control_only: bool,
-    opening: Option<Task<()>>,
+    opening: Option<(u64, Task<()>)>,
     hiding: Option<Task<()>>,
     watching: Option<Task<()>>,
 }
 
 impl Global for Tooltips {}
 
-pub(crate) fn hover(
+pub(crate) fn owner(
     id: impl Into<ElementId>,
-    depth: u8,
     text: impl Into<SharedString>,
-    hovered: bool,
-    cx: &mut App,
-) {
-    let id = id.into();
-    let tips = cx.default_global::<Tooltips>();
-    tips.hovered.retain(|owner| owner.id != id);
-    if hovered {
-        tips.hovered.push(Owner {
-            id,
-            depth,
-            text: text.into(),
-            entered: cursor(),
-        });
-    }
-    let candidate = tips
-        .hovered
-        .iter()
-        .rev()
-        .max_by_key(|owner| owner.depth)
-        .map(|owner| (owner.id.clone(), owner.text.clone(), owner.entered));
-    if candidate.as_ref().map(|(id, _, _)| id) == tips.current.as_ref() {
-        return;
-    }
-    tips.current = candidate.as_ref().map(|(id, _, _)| id.clone());
-    tips.opening = None;
-    let Some((id, text, entered)) = candidate else {
-        return;
-    };
-    if tips
-        .visible
-        .as_ref()
-        .is_some_and(|visible| visible.id == id)
-    {
-        return;
-    }
-    close(cx);
-    let tips = cx.default_global::<Tooltips>();
-    let reshow = tips
-        .closed_at
-        .is_some_and(|closed| closed.elapsed() < RESHOW_WINDOW);
-    let delay = show_delay(reshow);
-    let task = cx.spawn(async move |cx| {
-        cx.background_executor().timer(delay).await;
-        cx.update(|cx| {
-            if cx.default_global::<Tooltips>().current.as_ref() == Some(&id) {
-                show(id, text, entered, cx);
-            }
-        });
-    });
-    cx.default_global::<Tooltips>().opening = Some(task);
+    child: impl IntoElement,
+) -> measure::Measured {
+    let (id, text) = (id.into(), text.into());
+    measure::measured(child, move |bounds, window, cx| {
+        let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
+        let owners = cx
+            .default_global::<Tooltips>()
+            .owners
+            .entry(window.window_handle())
+            .or_default();
+        owners.retain(|entry| entry.id != id);
+        owners.push(Entry { id, text, hitbox });
+    })
 }
 
-pub(crate) fn anchor(id: impl Into<ElementId>) -> impl IntoElement {
-    let id = id.into();
-    canvas(
-        |_, _, _| {},
-        move |bounds, _, window, cx| {
-            let tips = cx.default_global::<Tooltips>();
-            let tracked = tips.hovered.iter().any(|owner| owner.id == id)
-                || tips
-                    .visible
-                    .as_ref()
-                    .is_some_and(|visible| visible.id == id);
-            if !tracked {
-                return;
+pub(crate) struct Host {
+    child: AnyElement,
+}
+
+pub(crate) fn host(child: impl IntoElement) -> Host {
+    Host {
+        child: child.into_any_element(),
+    }
+}
+
+impl Element for Host {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, ()) {
+        (self.child.request_layout(window, cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        _: Bounds<Pixels>,
+        _: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        cx.default_global::<Tooltips>()
+            .owners
+            .insert(window.window_handle(), Vec::new());
+        self.child.prepaint(window, cx);
+    }
+
+    fn paint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        _: Bounds<Pixels>,
+        _: &mut (),
+        _: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        window.on_mouse_event(|event: &MouseMoveEvent, phase, window, cx| {
+            if phase == DispatchPhase::Capture {
+                cx.default_global::<Tooltips>().pressed = event.pressed_button.is_some();
+                evaluate(window, cx);
             }
-            let scale = window.scale_factor();
-            let origin = client_origin(window_hwnd(window));
-            let physical = |v: Pixels| (v.as_f32() * scale).round() as i32;
-            let rect = RECT {
-                left: origin.x + physical(bounds.origin.x),
-                top: origin.y + physical(bounds.origin.y),
-                right: origin.x + physical(bounds.origin.x + bounds.size.width),
-                bottom: origin.y + physical(bounds.origin.y + bounds.size.height),
-            };
-            let edges = |r: RECT| (r.left, r.top, r.right, r.bottom);
-            let mut moved = false;
-            if let Some(visible) = tips.visible.as_mut().filter(|visible| visible.id == id) {
-                moved = edges(visible.owner) != edges(rect);
-                visible.owner = rect;
+        });
+        window.on_mouse_event(|_: &MouseDownEvent, phase, window, cx| {
+            if phase == DispatchPhase::Capture {
+                cx.default_global::<Tooltips>().pressed = true;
+                report(Report::Press(window.window_handle()), cx);
             }
-            tips.anchors.insert(id, rect);
-            if moved {
-                cx.defer(close);
+        });
+        window.on_mouse_event(|_: &MouseUpEvent, phase, _, cx| {
+            if phase == DispatchPhase::Capture {
+                cx.default_global::<Tooltips>().pressed = false;
             }
-        },
-    )
-    .absolute()
-    .size_full()
+        });
+        window.defer(cx, evaluate);
+        self.child.paint(window, cx);
+    }
+}
+
+impl IntoElement for Host {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
+
+fn evaluate(window: &mut Window, cx: &mut App) {
+    let handle = window.window_handle();
+    let position = window.mouse_position();
+    let scale = window.scale_factor();
+    let origin = client_origin(window_hwnd(window));
+    let tips = cx.default_global::<Tooltips>();
+    let entries = tips.owners.get(&handle).map_or(&[][..], Vec::as_slice);
+    let gone = tips
+        .state
+        .key()
+        .filter(|key| key.window == handle)
+        .filter(|key| {
+            entries
+                .iter()
+                .find(|entry| entry.id == key.id)
+                .is_none_or(|entry| {
+                    tips.shown.as_ref().is_some_and(|shown| {
+                        shown.key == **key
+                            && !same_rect(
+                                shown.owner,
+                                screen_rect(entry.hitbox.bounds, scale, origin),
+                            )
+                    })
+                })
+        })
+        .cloned();
+    let observed = observe(handle, window.is_window_hovered(), tips.pressed, || {
+        topmost(entries, |entry| {
+            entry.hitbox.is_hovered_at(position, window)
+        })
+        .map(|entry| Snap {
+            key: Key {
+                window: handle,
+                id: entry.id.clone(),
+            },
+            text: entry.text.clone(),
+            owner: screen_rect(entry.hitbox.bounds, scale, origin),
+            entered: cursor(),
+        })
+    });
+    if let Some(key) = gone {
+        report(Report::Gone(key), cx);
+    }
+    if let Some(observed) = observed {
+        report(observed, cx);
+    }
+}
+
+fn report(report: Report<AnyWindowHandle>, cx: &mut App) {
+    let tips = cx.default_global::<Tooltips>();
+    let state = std::mem::take(&mut tips.state);
+    tips.state = transition(state, report, &mut tips.epoch);
+    cx.defer(render);
+}
+
+fn render(cx: &mut App) {
+    let tips = cx.default_global::<Tooltips>();
+    let showing = match &tips.state {
+        State::Showing { snap } => Some(snap.clone()),
+        _ => None,
+    };
+    if tips
+        .shown
+        .as_ref()
+        .is_some_and(|shown| showing.as_ref().is_none_or(|snap| snap.key != shown.key))
+    {
+        hide(cx);
+    }
+    if let Some(snap) = showing
+        && cx.default_global::<Tooltips>().shown.is_none()
+    {
+        show(snap, cx);
+    }
+    let tips = cx.default_global::<Tooltips>();
+    let waiting = match &tips.state {
+        State::Waiting { snap, epoch } => Some((snap.key.clone(), *epoch)),
+        _ => None,
+    };
+    match waiting {
+        Some((_, epoch))
+            if tips
+                .opening
+                .as_ref()
+                .is_some_and(|(opening, _)| *opening == epoch) => {}
+        Some((key, epoch)) => {
+            let reshow = tips
+                .closed_at
+                .is_some_and(|closed| closed.elapsed() < RESHOW_WINDOW);
+            let delay = show_delay(reshow);
+            let task = cx.spawn(async move |cx| {
+                cx.background_executor().timer(delay).await;
+                cx.update(|cx| {
+                    let window = key.window;
+                    if window
+                        .update(cx, |_, window, cx| evaluate(window, cx))
+                        .is_err()
+                    {
+                        report(Report::Gone(key), cx);
+                    }
+                    report(Report::Timer(epoch), cx);
+                });
+            });
+            cx.default_global::<Tooltips>().opening = Some((epoch, task));
+        }
+        None => tips.opening = None,
+    }
+}
+
+pub(crate) fn window_closed(window: WindowId, cx: &mut App) {
+    let tips = cx.default_global::<Tooltips>();
+    tips.owners.retain(|handle, _| handle.window_id() != window);
+    if let Some(key) = tips
+        .state
+        .key()
+        .filter(|key| key.window.window_id() == window)
+        .cloned()
+    {
+        report(Report::Gone(key), cx);
+    }
 }
 
 pub(crate) fn pointer_moved(cx: &mut App) {
@@ -356,11 +603,12 @@ pub(crate) fn pointer_moved(cx: &mut App) {
     let Some(tips) = cx.try_global::<Tooltips>() else {
         return;
     };
-    let Some(visible) = &tips.visible else {
-        return;
-    };
-    if !in_safe_zone(point, visible.owner, visible.tip) {
-        close(cx);
+    if tips
+        .shown
+        .as_ref()
+        .is_some_and(|shown| !in_safe_zone(point, shown.owner, shown.tip))
+    {
+        report(Report::LeftSafeZone, cx);
     }
 }
 
@@ -378,9 +626,7 @@ pub(crate) fn modifiers_changed(modifiers: &Modifiers, cx: &mut App) {
     let tips = cx.default_global::<Tooltips>();
     let was = std::mem::replace(&mut tips.control_only, only_control);
     if released && was {
-        tips.current = None;
-        tips.opening = None;
-        close(cx);
+        report(Report::Dismiss, cx);
     }
 }
 
@@ -444,9 +690,9 @@ fn in_safe_zone(point: POINT, owner: RECT, tip: RECT) -> bool {
     (0..hull.len()).all(|i| cross(hull[i], hull[(i + 1) % hull.len()], p) >= 0.)
 }
 
-fn close(cx: &mut App) {
+fn hide(cx: &mut App) {
     let tips = cx.default_global::<Tooltips>();
-    if tips.visible.take().is_none() {
+    if tips.shown.take().is_none() {
         return;
     }
     tips.closed_at = Some(Instant::now());
@@ -465,7 +711,7 @@ fn close(cx: &mut App) {
         cx.background_executor().timer(fade).await;
         cx.update(|cx| {
             let tips = cx.default_global::<Tooltips>();
-            if tips.visible.is_none() {
+            if tips.shown.is_none() {
                 overlay::hide(hwnd);
             }
             tips.hiding = None;
@@ -541,17 +787,17 @@ fn watch_safe_zone(cx: &mut App) {
             let open = cx.update(|cx| {
                 let point = cursor();
                 let tips = cx.default_global::<Tooltips>();
-                let Some(visible) = tips.visible.as_mut() else {
+                let Some(shown) = tips.shown.as_mut() else {
                     return false;
                 };
-                if point.x == visible.checked.x && point.y == visible.checked.y {
+                if point.x == shown.checked.x && point.y == shown.checked.y {
                     return true;
                 }
-                visible.checked = point;
-                if in_safe_zone(point, visible.owner, visible.tip) {
+                shown.checked = point;
+                if in_safe_zone(point, shown.owner, shown.tip) {
                     return true;
                 }
-                close(cx);
+                report(Report::LeftSafeZone, cx);
                 false
             });
             if !open {
@@ -562,10 +808,11 @@ fn watch_safe_zone(cx: &mut App) {
     cx.default_global::<Tooltips>().watching = Some(task);
 }
 
-fn show(id: ElementId, text: SharedString, entered: POINT, cx: &mut App) {
+fn show(snap: Snap<AnyWindowHandle>, cx: &mut App) {
     let Some(popup) = popup(cx) else {
         return;
     };
+    let entered = snap.entered;
     let monitor = unsafe { MonitorFromPoint(entered, MONITOR_DEFAULTTONEAREST) };
     let mut info = MONITORINFO {
         cbSize: size_of::<MONITORINFO>() as u32,
@@ -578,6 +825,7 @@ fn show(id: ElementId, text: SharedString, entered: POINT, cx: &mut App) {
     let work = info.rcWork;
     overlay::place(popup.hwnd, entered.x, entered.y, 1, 1);
     overlay::clear_backdrop(popup.hwnd);
+    let text = snap.text.clone();
     let Ok((width, height)) = popup.handle.update(cx, |_, window, cx| {
         let measured = measure(&text, window);
         popup.view.update(cx, |view, cx| {
@@ -613,15 +861,9 @@ fn show(id: ElementId, text: SharedString, entered: POINT, cx: &mut App) {
     overlay::show(popup.hwnd);
     let tips = cx.default_global::<Tooltips>();
     tips.hiding = None;
-    let owner = tips.anchors.get(&id).copied().unwrap_or(RECT {
-        left: entered.x,
-        top: entered.y,
-        right: entered.x,
-        bottom: entered.y,
-    });
-    tips.visible = Some(Visible {
-        id,
-        owner,
+    tips.shown = Some(Shown {
+        key: snap.key,
+        owner: snap.owner,
         tip: RECT {
             left,
             top,
@@ -631,4 +873,233 @@ fn show(id: ElementId, text: SharedString, entered: POINT, cx: &mut App) {
         checked: cursor(),
     });
     watch_safe_zone(cx);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Key, Report, Snap, State, observe, screen_rect, topmost, transition};
+    use gpui_kit::{ElementId, SharedString, bounds, point, px, size};
+    use windows_sys::Win32::Foundation::{POINT, RECT};
+
+    fn key(window: u8, id: &'static str) -> Key<u8> {
+        Key {
+            window,
+            id: ElementId::Name(id.into()),
+        }
+    }
+
+    fn snap(window: u8, id: &'static str) -> Snap<u8> {
+        Snap {
+            key: key(window, id),
+            text: SharedString::from(id),
+            owner: RECT::default(),
+            entered: POINT::default(),
+        }
+    }
+
+    fn step(state: State<u8>, report: Report<u8>, epoch: &mut u64) -> State<u8> {
+        transition(state, report, epoch)
+    }
+
+    fn label(state: &State<u8>) -> String {
+        match state {
+            State::Idle => "idle".into(),
+            State::Waiting { snap, epoch } => format!("waiting {:?} #{epoch}", snap.key.id),
+            State::Showing { snap } => format!("showing {:?}", snap.key.id),
+            State::Suppressed { key } => format!("suppressed {:?}", key.id),
+        }
+    }
+
+    fn showing_a(epoch: &mut u64) -> State<u8> {
+        let waiting = step(State::Idle, Report::Owner(snap(1, "a")), epoch);
+        step(waiting, Report::Timer(*epoch), epoch)
+    }
+
+    #[test]
+    fn only_a_matching_timer_shows() {
+        let mut epoch = 0;
+        let waiting = step(State::Idle, Report::Owner(snap(1, "a")), &mut epoch);
+        assert_eq!(label(&waiting), "waiting Name(\"a\") #1");
+        let stale = step(waiting.clone(), Report::Timer(0), &mut epoch);
+        assert_eq!(label(&stale), label(&waiting));
+        let shown = step(waiting, Report::Timer(1), &mut epoch);
+        assert_eq!(label(&shown), "showing Name(\"a\")");
+        let mut epoch = 0;
+        for report in [
+            Report::NoneIn(1),
+            Report::Press(1),
+            Report::Dismiss,
+            Report::LeftSafeZone,
+            Report::Timer(0),
+        ] {
+            assert_eq!(label(&step(State::Idle, report, &mut epoch)), "idle");
+        }
+    }
+
+    #[test]
+    fn resting_on_the_owner_keeps_one_wait() {
+        let mut epoch = 0;
+        let waiting = step(State::Idle, Report::Owner(snap(1, "a")), &mut epoch);
+        let again = step(waiting, Report::Owner(snap(1, "a")), &mut epoch);
+        assert_eq!(label(&again), "waiting Name(\"a\") #1");
+    }
+
+    #[test]
+    fn leaving_the_owner_keeps_a_shown_tip_for_the_safe_zone() {
+        let mut epoch = 0;
+        let shown = showing_a(&mut epoch);
+        let outside = step(shown, Report::NoneIn(1), &mut epoch);
+        assert_eq!(label(&outside), "showing Name(\"a\")");
+        assert_eq!(
+            label(&step(outside, Report::LeftSafeZone, &mut epoch)),
+            "idle"
+        );
+    }
+
+    #[test]
+    fn safe_zone_exit_only_ends_a_shown_tip() {
+        let mut epoch = 0;
+        let waiting = step(State::Idle, Report::Owner(snap(1, "a")), &mut epoch);
+        let still = step(waiting, Report::LeftSafeZone, &mut epoch);
+        assert_eq!(label(&still), "waiting Name(\"a\") #1");
+    }
+
+    #[test]
+    fn another_owner_restarts_the_wait() {
+        let mut epoch = 0;
+        let shown = showing_a(&mut epoch);
+        let next = step(shown, Report::Owner(snap(1, "b")), &mut epoch);
+        assert_eq!(label(&next), "waiting Name(\"b\") #2");
+    }
+
+    #[test]
+    fn other_windows_never_cancel() {
+        let mut epoch = 0;
+        let waiting = step(State::Idle, Report::Owner(snap(1, "a")), &mut epoch);
+        let kept = step(waiting, Report::NoneIn(2), &mut epoch);
+        assert_eq!(label(&kept), "waiting Name(\"a\") #1");
+        let kept = step(kept, Report::Press(2), &mut epoch);
+        assert_eq!(label(&kept), "waiting Name(\"a\") #1");
+        let ended = step(kept, Report::NoneIn(1), &mut epoch);
+        assert_eq!(label(&ended), "idle");
+    }
+
+    #[test]
+    fn a_vanished_owner_always_ends() {
+        let mut epoch = 0;
+        let waiting = step(State::Idle, Report::Owner(snap(1, "a")), &mut epoch);
+        assert_eq!(
+            label(&step(waiting, Report::Gone(key(1, "a")), &mut epoch)),
+            "idle"
+        );
+        let shown = showing_a(&mut epoch);
+        let other = step(shown.clone(), Report::Gone(key(1, "b")), &mut epoch);
+        assert_eq!(label(&other), "showing Name(\"a\")");
+        assert_eq!(
+            label(&step(shown, Report::Gone(key(1, "a")), &mut epoch)),
+            "idle"
+        );
+    }
+
+    #[test]
+    fn a_press_suppresses_until_the_pointer_leaves() {
+        let mut epoch = 0;
+        let shown = showing_a(&mut epoch);
+        let pressed = step(shown, Report::Press(1), &mut epoch);
+        assert_eq!(label(&pressed), "suppressed Name(\"a\")");
+        let still = step(pressed.clone(), Report::Owner(snap(1, "a")), &mut epoch);
+        assert_eq!(label(&still), "suppressed Name(\"a\")");
+        let still = step(still, Report::Timer(epoch), &mut epoch);
+        assert_eq!(label(&still), "suppressed Name(\"a\")");
+        assert_eq!(label(&step(still, Report::NoneIn(1), &mut epoch)), "idle");
+        let moved = step(pressed, Report::Owner(snap(1, "b")), &mut epoch);
+        assert_eq!(label(&moved), format!("waiting Name(\"b\") #{epoch}"));
+    }
+
+    #[test]
+    fn dismiss_suppresses_waiting_and_shown_tips() {
+        let mut epoch = 0;
+        let waiting = step(State::Idle, Report::Owner(snap(1, "a")), &mut epoch);
+        assert_eq!(
+            label(&step(waiting, Report::Dismiss, &mut epoch)),
+            "suppressed Name(\"a\")"
+        );
+        let shown = showing_a(&mut epoch);
+        assert_eq!(
+            label(&step(shown, Report::Dismiss, &mut epoch)),
+            "suppressed Name(\"a\")"
+        );
+    }
+
+    #[test]
+    fn every_wait_takes_a_fresh_epoch() {
+        let mut epoch = 0;
+        let a = step(State::Idle, Report::Owner(snap(1, "a")), &mut epoch);
+        let b = step(a, Report::Owner(snap(1, "b")), &mut epoch);
+        let a = step(b, Report::Owner(snap(1, "a")), &mut epoch);
+        assert_eq!(label(&a), "waiting Name(\"a\") #3");
+        assert_eq!(
+            label(&step(a.clone(), Report::Timer(1), &mut epoch)),
+            label(&a)
+        );
+    }
+
+    fn observed(hovered: bool, pressed: bool, owner: Option<Snap<u8>>) -> String {
+        match observe(1, hovered, pressed, || owner) {
+            None => "nothing".into(),
+            Some(Report::Owner(snap)) => format!("owner {:?}", snap.key.id),
+            Some(Report::NoneIn(window)) => format!("none in {window}"),
+            Some(_) => "other".into(),
+        }
+    }
+
+    #[test]
+    fn a_held_button_says_nothing_about_hover() {
+        assert_eq!(observed(true, true, Some(snap(1, "a"))), "nothing");
+        assert_eq!(observed(true, true, None), "nothing");
+        assert_eq!(
+            observed(true, false, Some(snap(1, "a"))),
+            "owner Name(\"a\")"
+        );
+        assert_eq!(observed(true, false, None), "none in 1");
+        assert_eq!(observed(false, true, Some(snap(1, "a"))), "none in 1");
+        assert_eq!(observed(false, false, Some(snap(1, "a"))), "none in 1");
+    }
+
+    #[test]
+    fn clicking_the_owner_keeps_it_suppressed_through_the_release() {
+        let mut epoch = 0;
+        let shown = showing_a(&mut epoch);
+        let pressed = step(shown, Report::Press(1), &mut epoch);
+        let held = match observe(1, true, true, || Some(snap(1, "a"))) {
+            Some(report) => step(pressed, report, &mut epoch),
+            None => pressed,
+        };
+        let released = match observe(1, true, false, || Some(snap(1, "a"))) {
+            Some(report) => step(held, report, &mut epoch),
+            None => held,
+        };
+        assert_eq!(label(&released), "suppressed Name(\"a\")");
+    }
+
+    #[test]
+    fn the_last_hovered_entry_is_topmost() {
+        let entries = ["tab", "close", "other"];
+        let hovered = |entry: &&str| *entry != "other";
+        assert_eq!(topmost(&entries, hovered), Some(&"close"));
+        assert_eq!(topmost(&entries, |_| false), None);
+    }
+
+    #[test]
+    fn screen_rects_scale_and_offset() {
+        let rect = screen_rect(
+            bounds(point(px(10.), px(20.)), size(px(30.), px(40.))),
+            1.5,
+            POINT { x: 100, y: 200 },
+        );
+        assert_eq!(
+            (rect.left, rect.top, rect.right, rect.bottom),
+            (115, 230, 160, 290)
+        );
+    }
 }

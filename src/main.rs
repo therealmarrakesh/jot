@@ -10,6 +10,7 @@ mod field;
 mod files;
 mod find;
 mod keytips;
+mod measure;
 mod menu;
 mod overlay;
 mod palette;
@@ -805,11 +806,12 @@ impl Jot {
                     .bg(rgba(p.layer))
                     .child(self.menu_bar.clone())
                     .child(div().flex_1())
-                    .child(
+                    .child(tooltip::owner(
+                        "theme",
+                        "Switch theme",
                         field::icon_button(
                             p,
                             "theme",
-                            "Switch theme",
                             if p.dark { SUN_GLYPH } else { MOON_GLYPH },
                             px(THEME_GLYPH_SIZE),
                             size(px(THEME_BUTTON_WIDTH), px(MENU_BAR_HEIGHT)),
@@ -819,7 +821,7 @@ impl Jot {
                         .on_click(|_, window, cx| {
                             window.dispatch_action(Box::new(ToggleTheme), cx);
                         }),
-                    ),
+                    )),
             )
             .child(separator(p))
     }
@@ -1030,7 +1032,7 @@ impl Render for Jot {
             .child(min_size);
         #[cfg(feature = "bench")]
         let root = root.child(bench::probe(&self.painted));
-        root
+        tooltip::host(root)
     }
 }
 
@@ -1038,7 +1040,8 @@ fn main() {
     gpui_kit::application().run(|cx| {
         gpui_kit::init(cx);
 
-        cx.on_window_closed(|cx, _| {
+        cx.on_window_closed(|cx, window| {
+            tooltip::window_closed(window, cx);
             if cx
                 .windows()
                 .into_iter()

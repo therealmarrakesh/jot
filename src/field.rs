@@ -118,7 +118,6 @@ pub(crate) fn button(
 pub(crate) fn icon_button(
     p: Palette,
     id: &'static str,
-    tip: &'static str,
     glyph: &'static str,
     glyph_size: Pixels,
     size: gpui::Size<Pixels>,
@@ -126,7 +125,6 @@ pub(crate) fn icon_button(
 ) -> brush::Faded {
     div()
         .id(id)
-        .on_hover(move |hovered, _, cx| tooltip::hover(id, 0, tip, *hovered, cx))
         .flex_none()
         .flex()
         .items_center()
@@ -140,7 +138,6 @@ pub(crate) fn icon_button(
         .line_height(glyph_size)
         .text_color(rgba(p.text_primary))
         .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
-        .child(tooltip::anchor(id))
         .child(glyph)
         .fade_bg(Brushes::subtle(p))
         .active(move |style| style.text_color(rgba(p.text_secondary)))

@@ -1247,7 +1247,7 @@ impl MenuBar {
         let popup = open.map(|open| self.popup(open, window, cx));
         let ring = self.bar_focused(window) == Some(kind);
 
-        div()
+        let trigger = div()
             .id(kind.title())
             .relative()
             .flex()
@@ -1286,11 +1286,6 @@ impl MenuBar {
                     .with_priority(2),
                 )
             })
-            .child(
-                record_bounds(self.trigger_areas.clone(), kind.index())
-                    .top_0()
-                    .left_0(),
-            )
             .when_some(popup, |this, popup| {
                 this.child(
                     div()
@@ -1299,7 +1294,8 @@ impl MenuBar {
                         .top(px(MENU_BAR_HEIGHT))
                         .child(deferred(anchored().child(popup)).with_priority(1)),
                 )
-            })
+            });
+        record_bounds(self.trigger_areas.clone(), kind.index(), trigger)
     }
 
     fn key_tips(&self, window: &Window) -> Vec<keytips::KeyTip> {
@@ -1387,7 +1383,7 @@ impl MenuBar {
             .as_ref()
             .map(|submenu| self.submenu_popup(open, submenu, cx));
 
-        div()
+        let panel = div()
             .relative()
             .w(px(width))
             .h(px(height))
@@ -1418,18 +1414,23 @@ impl MenuBar {
                     })
                     .child(Self::panel_rows(open, panel, None, bar, has_commands, cx)),
             ))
-            .child(record_bounds(self.hit_areas.clone(), MENU_AREA))
-            .children(submenu)
+            .children(submenu);
+        record_bounds(self.hit_areas.clone(), MENU_AREA, panel)
     }
 
-    fn submenu_popup(&self, open: &OpenMenu, submenu: &OpenSubmenu, cx: &mut Context<Self>) -> Div {
+    fn submenu_popup(
+        &self,
+        open: &OpenMenu,
+        submenu: &OpenSubmenu,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
         let p = palette(cx);
         let sub_width = submenu.panel.width;
         let sub_height = submenu.panel.height();
         let hidden = sub_height * SUBMENU_CLOSED_RATIO * (1. - submenu.motion.unroll);
         let top = open.panel.row_top(submenu.ix) - BORDER - PADDING_Y;
         let rows = Self::panel_rows(open, &submenu.panel, Some(submenu.ix), 0., false, cx);
-        div()
+        let panel = div()
             .absolute()
             .left(px(open.panel.width - SUBMENU_OVERLAP))
             .top(px(top))
@@ -1446,8 +1447,8 @@ impl MenuBar {
                 sub_height - hidden,
                 -hidden,
                 rows,
-            ))
-            .child(record_bounds(self.hit_areas.clone(), SUBMENU_AREA))
+            ));
+        record_bounds(self.hit_areas.clone(), SUBMENU_AREA, panel)
     }
 
     fn panel_rows(
@@ -1680,17 +1681,16 @@ fn reveal(
     ]
 }
 
-fn record_bounds(areas: Rc<Cell<[Bounds<Pixels>; 3]>>, ix: usize) -> Canvas<()> {
-    canvas(
-        move |bounds, _, _| {
-            let mut all = areas.get();
-            all[ix] = bounds;
-            areas.set(all);
-        },
-        |_, _, _, _| {},
-    )
-    .absolute()
-    .size_full()
+fn record_bounds(
+    areas: Rc<Cell<[Bounds<Pixels>; 3]>>,
+    ix: usize,
+    child: impl IntoElement,
+) -> measure::Measured {
+    measure::measured(child, move |bounds, _, _| {
+        let mut all = areas.get();
+        all[ix] = bounds;
+        areas.set(all);
+    })
 }
 
 fn shortcut_text(
@@ -1761,7 +1761,7 @@ impl Render for MenuBar {
             )
         });
 
-        div()
+        let bar = div()
             .id("menu-bar")
             .track_focus(&self.focus)
             .key_context(CONTEXT)
@@ -1779,8 +1779,8 @@ impl Render for MenuBar {
             .on_action(cx.listener(Self::on_left))
             .on_action(cx.listener(Self::on_right))
             .children(MenuKind::ALL.map(|kind| self.trigger(kind, window, cx)))
-            .children(flyout)
-            .child(record_bounds(self.hit_areas.clone(), BAR_AREA))
+            .children(flyout);
+        record_bounds(self.hit_areas.clone(), BAR_AREA, bar)
     }
 }
 
