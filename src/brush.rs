@@ -68,6 +68,19 @@ pub(crate) struct BrushTransition {
     brushes: Brushes,
 }
 
+pub(crate) trait PressedExt: StatefulInteractiveElement + Sized {
+    fn pressed(self, f: impl Fn(StyleRefinement) -> StyleRefinement + 'static) -> Self {
+        self.capture_any_mouse_down(|event, window, _| {
+            if event.button != MouseButton::Left {
+                window.prevent_default();
+            }
+        })
+        .active(f)
+    }
+}
+
+impl<T: StatefulInteractiveElement> PressedExt for T {}
+
 pub(crate) trait BrushTransitionExt {
     fn brush_transition(self, brushes: Brushes) -> BrushTransition;
 }

@@ -15,7 +15,7 @@ mod tabs;
 mod theme;
 mod tooltip;
 
-use brush::{BrushTransitionExt as _, Brushes};
+use brush::{BrushTransitionExt as _, Brushes, PressedExt as _};
 use gpui_kit::Edges;
 use gpui_kit::base::Easing;
 use gpui_kit::component::input::{
@@ -194,7 +194,7 @@ impl Caption {
             .text_color(rgba(fg))
             .window_control_area(self.area())
             .hover(move |style| style.bg(rgba(hover_bg)).text_color(rgba(hover_fg)))
-            .active(move |style| style.bg(rgba(pressed_bg)).text_color(rgba(pressed_fg)))
+            .pressed(move |style| style.bg(rgba(pressed_bg)).text_color(rgba(pressed_fg)))
             .child(
                 div()
                     .relative()

@@ -83,7 +83,7 @@ pub(crate) fn button(
         .h(u(CONTROL_HEIGHT))
         .rounded(u(CONTROL_RADIUS))
         .bg(bottom)
-        .active(move |style| style.bg(pressed_bottom))
+        .pressed(move |style| style.bg(pressed_bottom))
         .pb(px(1.))
         .cursor_default()
         .font_family(TEXT_FONT)
@@ -107,7 +107,7 @@ pub(crate) fn button(
                     hover,
                     pressed,
                 })
-                .active(move |style| style.border_color(pressed_edge).text_color(pressed_text)),
+                .pressed(move |style| style.border_color(pressed_edge).text_color(pressed_text)),
         )
         .when(ring, |this| {
             this.child(focus_ring(p, Edges::all(3.), u(CONTROL_RADIUS + 3.)))
@@ -149,7 +149,7 @@ pub(crate) fn icon_button(
             Brushes::solid(transparent_black().into())
         })
         .when(enabled, |this| {
-            this.active(move |style| style.text_color(rgba(p.text_secondary)))
+            this.pressed(move |style| style.text_color(rgba(p.text_secondary)))
         })
 }
 
@@ -300,7 +300,7 @@ fn bottom_edge(focused: bool, color: Rgba, s: f32) -> Div {
 fn clear_button(p: Palette, input: Entity<InputState>, right: f32, s: f32) -> Stateful<Div> {
     field_glyph(p, ("field-clear", input.entity_id()), CLEAR_GLYPH, right, s)
         .hover(move |style| style.bg(rgba(p.subtle_secondary)))
-        .active(move |style| {
+        .pressed(move |style| {
             style
                 .bg(rgba(p.subtle_tertiary))
                 .text_color(rgba(p.text_tertiary))

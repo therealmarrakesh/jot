@@ -1058,7 +1058,7 @@ impl MenuBar {
                         Brushes::solid(transparent_black().into())
                     })
                     .when(enabled, |this| {
-                        this.active(move |style| style.text_color(rgba(p.text_secondary)))
+                        this.pressed(move |style| style.text_color(rgba(p.text_secondary)))
                     })
                     .when(focused, |this| {
                         this.child(field::focus_ring(
@@ -1311,7 +1311,7 @@ impl MenuBar {
             .rounded(px(field::CONTROL_RADIUS))
             .when(active, |this| this.bg(rgba(p.subtle_tertiary)))
             .hover(move |style| style.bg(rgba(p.subtle_secondary)))
-            .active(move |style| style.bg(rgba(p.subtle_tertiary)))
+            .pressed(move |style| style.bg(rgba(p.subtle_tertiary)))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _, window, cx| {
@@ -1668,13 +1668,13 @@ fn row_face(p: Palette, panel: &Panel, ix: usize, fade: bool, expanded: bool) ->
         });
     if fade {
         face.brush_transition(Brushes::subtle(p))
-            .active(move |style| style.text_color(rgba(p.text_secondary)))
+            .pressed(move |style| style.text_color(rgba(p.text_secondary)))
             .into_any_element()
     } else {
         face.when(expanded, |this| this.bg(rgba(p.subtle_secondary)))
             .when(enabled, |this| {
                 this.hover(move |style| style.bg(rgba(p.subtle_secondary)))
-                    .active(move |style| style.bg(rgba(p.subtle_tertiary)))
+                    .pressed(move |style| style.bg(rgba(p.subtle_tertiary)))
             })
             .into_any_element()
     }
