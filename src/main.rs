@@ -996,7 +996,6 @@ fn main() {
         });
 
         let (window, jot) = open_jot_window(None, None, cx);
-        tooltip::prepare(cx);
         let (flags, mut paths): (Vec<_>, Vec<_>) = std::env::args_os()
             .skip(1)
             .map(PathBuf::from)

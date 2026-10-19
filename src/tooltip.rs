@@ -458,10 +458,6 @@ fn modifiers_changed(modifiers: &Modifiers, cx: &mut App) {
     }
 }
 
-pub(crate) fn prepare(cx: &mut App) {
-    popup(cx);
-}
-
 fn show_delay(reshow: bool) -> Duration {
     let hover = system_u32(SPI_GETMOUSEHOVERTIME).unwrap_or(DEFAULT_HOVER_TIME) as f32;
     let factor = if reshow {
