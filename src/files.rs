@@ -39,7 +39,7 @@ impl Jot {
 
     fn is_blank(&self, ix: usize, cx: &App) -> bool {
         let tab = &self.tabs[ix];
-        tab.path.is_none() && !tab.dirty && tab.editor.read(cx).text().len() == 0
+        tab.path.is_none() && tab.editor.read(cx).text().len() == 0
     }
 
     pub(crate) fn open(&mut self, _: &Open, window: &mut Window, cx: &mut Context<Self>) {
@@ -75,6 +75,7 @@ impl Jot {
     }
 
     pub(crate) fn open_path(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let path = std::path::absolute(&path).unwrap_or(path);
         if let Some(ix) = self
             .tabs
             .iter()
@@ -85,11 +86,9 @@ impl Jot {
         }
         match document::load(&path) {
             Ok(loaded) => {
-                let mut tab = Self::create_tab(Some((path, loaded)), window, cx);
+                let tab = Self::create_tab(Some((path, loaded)), window, cx);
                 if self.is_blank(self.active, cx) {
-                    tab.slot = self.tabs[self.active].slot;
-                    self.tabs[self.active] = tab;
-                    self.activate_tab(self.active, window, cx);
+                    self.replace_tab(self.active, tab, window, cx);
                 } else {
                     self.push_tab(tab, window, cx);
                 }
@@ -232,20 +231,22 @@ impl Jot {
             window,
             cx,
         );
-        cx.spawn_in(window, async move |this, cx| {
-            if answer.await != Ok(0) {
+        cx.spawn_in(window, async move |this, cx| match answer.await {
+            Ok(0) => this
+                .update_in(cx, |this, window, cx| match this.tab_index(id) {
+                    Some(ix) => this.commit_tab(ix, path, format, &encoded.bytes, window, cx),
+                    None => false,
+                })
+                .unwrap_or(false),
+            Ok(1) => {
                 let Ok(save_as) =
                     this.update_in(cx, |this, window, cx| this.save_tab_as(id, window, cx))
                 else {
                     return false;
                 };
-                return save_as.await;
+                save_as.await
             }
-            this.update_in(cx, |this, window, cx| match this.tab_index(id) {
-                Some(ix) => this.commit_tab(ix, path, format, &encoded.bytes, window, cx),
-                None => false,
-            })
-            .unwrap_or(false)
+            _ => false,
         })
     }
 
@@ -335,16 +336,13 @@ impl Jot {
         cx: &mut Context<Self>,
     ) -> bool {
         let dirty = self.dirty_tabs();
-        if dirty.is_empty() || self.close_confirmed {
+        if dirty.is_empty() {
             return true;
         }
         cx.spawn_in(window, async move |this, cx| {
             if visit_tabs(&this, dirty, Self::confirm_discard, cx).await {
-                this.update_in(cx, |this, window, _| {
-                    this.close_confirmed = true;
-                    window.remove_window();
-                })
-                .ok();
+                this.update_in(cx, |_, window, _| window.remove_window())
+                    .ok();
             }
         })
         .detach();

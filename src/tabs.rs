@@ -469,6 +469,29 @@ impl Jot {
         self.activate_tab(self.tabs.len() - 1, window, cx);
     }
 
+    pub(crate) fn replace_tab(
+        &mut self,
+        ix: usize,
+        mut tab: Tab,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        tab.slot = self.tabs[ix].slot;
+        let replaced = std::mem::replace(&mut self.tabs[ix], tab);
+        self.forget_tab(replaced.editor.entity_id(), cx);
+        self.activate_tab(ix, window, cx);
+    }
+
+    fn forget_tab(&mut self, id: EntityId, cx: &mut Context<Self>) {
+        if self.strip.drag.is_some_and(|drag| drag.id == id) {
+            self.strip.drag = None;
+        }
+        if self.hovered_tab == Some(id) {
+            self.hovered_tab = None;
+        }
+        tab_drag::forget(id, cx);
+    }
+
     pub(crate) fn remove_tab(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         if self.tabs.len() == 1 {
             window.remove_window();
@@ -478,11 +501,7 @@ impl Jot {
         let duration = slide_duration(cx);
         let width = self.strip.width;
         let tab = self.tabs.remove(ix);
-        let id = tab.editor.entity_id();
-        if self.strip.drag.is_some_and(|drag| drag.id == id) {
-            self.strip.drag = None;
-        }
-        tab_drag::forget(id, cx);
+        self.forget_tab(tab.editor.entity_id(), cx);
         if ix < self.tabs.len() && self.strip.bounds(now).contains(&window.mouse_position()) {
             self.strip.frozen = Some(width);
         }
