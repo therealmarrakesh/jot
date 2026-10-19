@@ -1,16 +1,27 @@
 use std::ffi::OsString;
 use std::fs;
 use std::io::{self, Write};
+use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 use std::ptr::{null, null_mut};
+use windows_sys::Win32::Foundation::ERROR_UNABLE_TO_MOVE_REPLACEMENT_2;
 use windows_sys::Win32::Globalization::{
     CP_UTF8, GetACP, MultiByteToWideChar, WC_NO_BEST_FIT_CHARS, WideCharToMultiByte,
 };
+use windows_sys::Win32::Storage::FileSystem::{
+    REPLACEFILE_IGNORE_ACL_ERRORS, REPLACEFILE_IGNORE_MERGE_ERRORS, ReplaceFileW,
+};
+use windows_sys::Win32::System::Com::CoTaskMemFree;
+use windows_sys::Win32::UI::Shell::{FOLDERID_Documents, KF_FLAG_DEFAULT, SHGetKnownFolderPath};
 
 const UTF8_BOM: &[u8] = b"\xef\xbb\xbf";
 const UTF16_LE_BOM: &[u8] = b"\xff\xfe";
 const UTF16_BE_BOM: &[u8] = b"\xfe\xff";
 const TEMP_ATTEMPTS: usize = 100;
+const TEMP_SUFFIX: &str = ".jot-save";
+const BACKUP_SUFFIX: &str = ".jot-backup";
+const READ_ONLY: &str = "This file is read-only.";
+const TOO_LARGE_FOR_ANSI: &str = "This text is too large to save as ANSI.";
 const NOTICES: &str = include_str!("../assets/THIRD-PARTY-NOTICES.txt");
 const NOTICES_FILE: &str = "THIRD-PARTY-NOTICES.txt";
 
@@ -177,19 +188,93 @@ pub(crate) fn encode(text: String, format: Format) -> io::Result<Encoded> {
 }
 
 pub(crate) fn write(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let (temp, mut file) = create_temp(path)?;
-    let written = file.write_all(bytes);
+    let target = resolve(path)?;
+    let existing = match fs::metadata(&target) {
+        Ok(metadata) if metadata.permissions().readonly() => {
+            return Err(io::Error::new(io::ErrorKind::PermissionDenied, READ_ONLY));
+        }
+        Ok(_) => true,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+        Err(error) => return Err(error),
+    };
+    let (temp, mut file) = create_temp(&target)?;
+    let written = file.write_all(bytes).and_then(|()| file.sync_all());
     drop(file);
-    written
-        .and_then(|()| fs::rename(&temp, path))
-        .inspect_err(|_| {
+    if let Err(error) = written {
+        fs::remove_file(&temp).ok();
+        return Err(error);
+    }
+    if existing {
+        replace(path, &target, &temp)
+    } else {
+        fs::rename(&temp, &target).inspect_err(|_| {
             fs::remove_file(&temp).ok();
         })
+    }
+}
+
+fn resolve(path: &Path) -> io::Result<PathBuf> {
+    match fs::canonicalize(path) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            let parent = path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .unwrap_or(Path::new("."));
+            Ok(fs::canonicalize(parent)?.join(path.file_name().unwrap_or_default()))
+        }
+        resolved => resolved,
+    }
+}
+
+fn replace(path: &Path, target: &Path, temp: &Path) -> io::Result<()> {
+    let backup = free_sibling(target, BACKUP_SUFFIX)?;
+    let (replaced, replacement, backed_up) = (wide(target), wide(temp), wide(&backup));
+    let done = unsafe {
+        ReplaceFileW(
+            replaced.as_ptr(),
+            replacement.as_ptr(),
+            backed_up.as_ptr(),
+            REPLACEFILE_IGNORE_MERGE_ERRORS | REPLACEFILE_IGNORE_ACL_ERRORS,
+            null(),
+            null(),
+        )
+    } != 0;
+    if done {
+        fs::remove_file(&backup).ok();
+        return Ok(());
+    }
+    let error = io::Error::last_os_error();
+    if error.raw_os_error() == Some(ERROR_UNABLE_TO_MOVE_REPLACEMENT_2 as i32)
+        && fs::rename(&backup, target).is_err()
+    {
+        let shown = |sibling: &Path| path.with_file_name(sibling.file_name().unwrap_or_default());
+        return Err(io::Error::new(
+            error.kind(),
+            format!(
+                "{error}\nThe original file was kept as {}\nThe new text was saved as {}",
+                shown(&backup).display(),
+                shown(temp).display()
+            ),
+        ));
+    }
+    fs::remove_file(temp).ok();
+    Err(error)
+}
+
+fn wide(path: &Path) -> Vec<u16> {
+    path.as_os_str().encode_wide().chain(Some(0)).collect()
+}
+
+fn free_sibling(path: &Path, suffix: &str) -> io::Result<PathBuf> {
+    (0..TEMP_ATTEMPTS)
+        .map(|attempt| sibling(path, attempt, suffix))
+        .find(|candidate| fs::symlink_metadata(candidate).is_err())
+        .ok_or_else(|| io::Error::from(io::ErrorKind::AlreadyExists))
 }
 
 fn create_temp(path: &Path) -> io::Result<(PathBuf, fs::File)> {
     for attempt in 0..TEMP_ATTEMPTS {
-        let temp = temp_path(path, attempt);
+        let temp = sibling(path, attempt, TEMP_SUFFIX);
         match fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -235,10 +320,10 @@ fn ansi_encode(text: &str) -> io::Result<Encoded> {
     }
     let wide: Vec<u16> = text.encode_utf16().collect();
     let Ok(input) = i32::try_from(wide.len()) else {
-        return Ok(Encoded {
-            bytes: text.as_bytes().to_vec(),
-            lossy: true,
-        });
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            TOO_LARGE_FOR_ANSI,
+        ));
     };
     if input == 0 {
         return Ok(Encoded {
@@ -297,18 +382,38 @@ pub(crate) fn display_name(path: Option<&Path>) -> String {
 pub(crate) fn default_directory(path: Option<&Path>) -> PathBuf {
     path.and_then(Path::parent)
         .map(Path::to_path_buf)
-        .or_else(|| {
-            std::env::var_os("USERPROFILE").map(|home| PathBuf::from(home).join("Documents"))
-        })
+        .or_else(documents)
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
-fn temp_path(path: &Path, attempt: usize) -> PathBuf {
+fn documents() -> Option<PathBuf> {
+    let mut path = null_mut();
+    let result = unsafe {
+        SHGetKnownFolderPath(
+            &FOLDERID_Documents,
+            KF_FLAG_DEFAULT as u32,
+            null_mut(),
+            &mut path,
+        )
+    };
+    let documents = (result >= 0 && !path.is_null()).then(|| {
+        let length = (0..)
+            .take_while(|&ix| unsafe { *path.add(ix) } != 0)
+            .count();
+        PathBuf::from(OsString::from_wide(unsafe {
+            std::slice::from_raw_parts(path, length)
+        }))
+    });
+    unsafe { CoTaskMemFree(path.cast()) };
+    documents
+}
+
+fn sibling(path: &Path, attempt: usize, suffix: &str) -> PathBuf {
     let mut name = OsString::from(".");
     name.push(path.file_name().unwrap_or_default());
     if attempt > 0 {
         name.push(format!(".{attempt}"));
     }
-    name.push(".jot-save");
+    name.push(suffix);
     path.with_file_name(name)
 }
