@@ -112,6 +112,21 @@ pub(crate) struct WindowsWindowInner {
 }
 
 impl WindowsWindowState {
+    pub(crate) fn pointer_position(&self, hwnd: HWND) -> Point<Pixels> {
+        if self.in_size_move_loop.get() {
+            return point(px(-1.), px(-1.));
+        }
+        let cursor = unsafe {
+            let mut cursor = POINT::default();
+            GetCursorPos(&mut cursor)
+                .context("unable to get cursor position")
+                .log_err();
+            ScreenToClient(hwnd, &mut cursor).ok().log_err();
+            cursor
+        };
+        logical_point(cursor.x as f32, cursor.y as f32, self.scale_factor.get())
+    }
+
     fn new(
         hwnd: HWND,
         directx_devices: &DirectXDevices,
@@ -692,19 +707,7 @@ impl PlatformWindow for WindowsWindow {
     }
 
     fn mouse_position(&self) -> Point<Pixels> {
-        if self.0.state.in_size_move_loop.get() {
-            return point(px(-1.), px(-1.));
-        }
-        let scale_factor = self.scale_factor();
-        let point = unsafe {
-            let mut point: POINT = std::mem::zeroed();
-            GetCursorPos(&mut point)
-                .context("unable to get cursor position")
-                .log_err();
-            ScreenToClient(self.0.hwnd, &mut point).ok().log_err();
-            point
-        };
-        logical_point(point.x as f32, point.y as f32, scale_factor)
+        self.0.state.pointer_position(self.0.hwnd)
     }
 
     fn modifiers(&self) -> Modifiers {

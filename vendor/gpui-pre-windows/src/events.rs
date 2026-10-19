@@ -111,7 +111,7 @@ impl WindowsWindowInner {
             WM_CLOSE => self.handle_close_msg(),
             WM_DESTROY => self.handle_destroy_msg(handle),
             WM_MOUSEMOVE => self.handle_mouse_move_msg(handle, lparam, wparam),
-            WM_MOUSELEAVE | WM_NCMOUSELEAVE => self.handle_mouse_leave_msg(),
+            WM_MOUSELEAVE | WM_NCMOUSELEAVE => self.handle_mouse_leave_msg(handle),
             WM_NCMOUSEMOVE => self.handle_nc_mouse_move_msg(handle, lparam),
             // Treat double click as a second single click, since we track the double clicks ourselves.
             // If you don't interact with any elements, this will fall through to the windows default
@@ -387,7 +387,7 @@ impl WindowsWindowInner {
         if handled { Some(0) } else { Some(1) }
     }
 
-    fn handle_mouse_leave_msg(&self) -> Option<isize> {
+    fn handle_mouse_leave_msg(&self, handle: HWND) -> Option<isize> {
         self.state.hovered.set(false);
         // The next window's `WM_SETCURSOR` picks its own cursor, so we just clear
         // the flag for tight `is_cursor_visible()` semantics.
@@ -398,6 +398,14 @@ impl WindowsWindowInner {
                 .callbacks
                 .hovered_status_change
                 .set(Some(callback));
+        }
+        if let Some(mut func) = self.state.callbacks.input.take() {
+            func(PlatformInput::MouseMove(MouseMoveEvent {
+                position: self.state.pointer_position(handle),
+                pressed_button: current_pressed_button(),
+                modifiers: current_modifiers(),
+            }));
+            self.state.callbacks.input.set(Some(func));
         }
 
         Some(0)
@@ -1765,6 +1773,24 @@ pub(crate) fn current_modifiers() -> Modifiers {
         platform: is_virtual_key_pressed(VK_LWIN) || is_virtual_key_pressed(VK_RWIN),
         function: false,
     }
+}
+
+pub(crate) fn current_pressed_button() -> Option<MouseButton> {
+    [
+        (VK_LBUTTON, MouseButton::Left),
+        (VK_RBUTTON, MouseButton::Right),
+        (VK_MBUTTON, MouseButton::Middle),
+        (
+            VK_XBUTTON1,
+            MouseButton::Navigate(NavigationDirection::Back),
+        ),
+        (
+            VK_XBUTTON2,
+            MouseButton::Navigate(NavigationDirection::Forward),
+        ),
+    ]
+    .into_iter()
+    .find_map(|(key, button)| is_virtual_key_pressed(key).then_some(button))
 }
 
 #[inline]
