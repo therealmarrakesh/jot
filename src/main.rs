@@ -958,7 +958,7 @@ fn main() {
             if cx
                 .windows()
                 .into_iter()
-                .all(|window| overlay::is_overlay(window, cx))
+                .all(|window| window.downcast::<gpui_kit::base::Root>().is_none())
             {
                 cx.quit();
             }

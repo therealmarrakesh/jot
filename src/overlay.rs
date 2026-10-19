@@ -73,16 +73,6 @@ impl<V> Clone for Overlay<V> {
     }
 }
 
-#[derive(Default)]
-struct Overlays(Vec<AnyWindowHandle>);
-
-impl Global for Overlays {}
-
-pub(crate) fn is_overlay(handle: AnyWindowHandle, cx: &App) -> bool {
-    cx.try_global::<Overlays>()
-        .is_some_and(|overlays| overlays.0.contains(&handle))
-}
-
 pub(crate) fn open<V: Render>(
     build: impl FnOnce(&mut Context<V>) -> V,
     cx: &mut App,
@@ -96,9 +86,6 @@ pub(crate) fn open<V: Render>(
         focus: false,
         show: false,
         kind: WindowKind::PopUp,
-        is_movable: false,
-        is_resizable: false,
-        is_minimizable: false,
         inactive_frame_interval: None,
         window_background: WindowBackgroundAppearance::Transparent,
         ..Default::default()
@@ -143,9 +130,12 @@ pub(crate) fn open<V: Render>(
             SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
         );
     }
-    let handle: AnyWindowHandle = handle.into();
-    cx.default_global::<Overlays>().0.push(handle);
-    Some(Overlay { view, handle, hwnd })
+    clear_backdrop(hwnd);
+    Some(Overlay {
+        view,
+        handle: handle.into(),
+        hwnd,
+    })
 }
 
 pub(crate) fn screen_rect(bounds: Bounds<Pixels>, scale: f32, origin: POINT) -> RECT {
@@ -177,7 +167,6 @@ pub(crate) fn place(hwnd: isize, rect: RECT) {
 }
 
 pub(crate) fn show(hwnd: isize) {
-    clear_backdrop(hwnd);
     unsafe { ShowWindow(hwnd as HWND, SW_SHOWNOACTIVATE) };
 }
 
