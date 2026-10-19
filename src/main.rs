@@ -1,7 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod brush;
-mod detach;
 mod dialog;
 mod document;
 mod field;
@@ -13,6 +12,7 @@ mod menu;
 mod overlay;
 mod palette;
 mod scrollbar;
+mod tab_drag;
 mod tabs;
 mod tooltip;
 
@@ -594,7 +594,6 @@ impl Jot {
             _subscriptions,
         };
         jot.activate_tab(0, window, cx);
-        detach::register(jot.owner(window, cx), cx);
         let this = cx.weak_entity();
         window.on_window_should_close(cx, move |window, cx| {
             this.update(cx, |jot, cx| jot.request_close_window(window, cx))
@@ -980,9 +979,9 @@ impl Render for Jot {
             .on_modifiers_changed(|event, _, cx| tooltip::modifiers_changed(&event.modifiers, cx))
             .capture_key_down(|event: &KeyDownEvent, _, cx| {
                 tooltip::key_down(cx);
-                if event.keystroke.key == "escape" && detach::dragging(cx) {
+                if event.keystroke.key == "escape" && tab_drag::dragging(cx) {
                     cx.stop_propagation();
-                    cx.defer(detach::cancel);
+                    cx.defer(tab_drag::cancel);
                 }
             })
             .capture_any_mouse_down(cx.listener(|this, _, _, cx| {

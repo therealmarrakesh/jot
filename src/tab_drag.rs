@@ -1,4 +1,6 @@
 use super::*;
+use gpui_kit::base::Root;
+use std::time::Instant;
 use tabs::{CAPTION_WIDTH, STRIP_LEFT, STRIP_TOP, TAB_HEIGHT, window_listeners};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, POINT, RECT};
 use windows_sys::Win32::Graphics::Dwm::{
@@ -21,57 +23,69 @@ use windows_sys::core::BOOL;
 const DRAG_THRESHOLD: f32 = 10.;
 const DETACH_MAGNETISM: f32 = 15.;
 const MOVE_POLL: Duration = Duration::from_millis(10);
-const MOVE_LOOP_WAIT_POLLS: u32 = 50;
+const MOVE_LOOP_START_TIMEOUT: Duration = Duration::from_millis(500);
 
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 pub(crate) struct Owner {
-    pub handle: AnyWindowHandle,
-    pub jot: WeakEntity<Jot>,
-    pub hwnd: isize,
+    window: WindowHandle<Root>,
+    hwnd: isize,
 }
 
-#[derive(Default)]
-struct JotWindows(Vec<Owner>);
-
-impl Global for JotWindows {}
-
-#[derive(Clone, Copy, Default)]
-struct Moving {
-    entered: bool,
-    attaching: bool,
-    waited: u32,
+#[derive(Clone, Copy)]
+enum Phase {
+    Pressed,
+    Dragging,
+    Entering { since: Instant },
+    Moving { attaching: bool },
 }
 
 #[derive(Clone)]
 struct TabDrag {
     owner: Owner,
+    source: Owner,
     tab: EntityId,
     grab: Point<f32>,
     start: f32,
     press: POINT,
-    started: bool,
-    moving: Option<Moving>,
-    source: Owner,
+    phase: Phase,
     source_index: usize,
     source_placement: Option<WINDOWPLACEMENT>,
 }
 
 impl Global for TabDrag {}
 
-impl Jot {
-    pub(crate) fn owner(&self, window: &Window, cx: &Context<Self>) -> Owner {
-        Owner {
-            handle: window.window_handle(),
-            jot: cx.weak_entity(),
-            hwnd: self.hwnd,
-        }
-    }
+pub(crate) fn owner(window: &Window) -> Option<Owner> {
+    Some(Owner {
+        window: window.window_handle().downcast::<Root>()?,
+        hwnd: window_hwnd(window),
+    })
 }
 
-pub(crate) fn register(owner: Owner, cx: &mut App) {
-    let windows = &mut cx.default_global::<JotWindows>().0;
-    windows.retain(|window| window.jot.upgrade().is_some());
-    windows.push(owner);
+fn jot(window: WindowHandle<Root>, cx: &App) -> Option<Entity<Jot>> {
+    window.read(cx).ok()?.view().clone().downcast::<Jot>().ok()
+}
+
+fn with_jot<R>(
+    owner: Owner,
+    cx: &mut App,
+    f: impl FnOnce(&mut Jot, &mut Window, &mut Context<Jot>) -> R,
+) -> Option<R> {
+    owner
+        .window
+        .update(cx, |root, window, cx| {
+            let jot = root.view().clone().downcast::<Jot>().ok()?;
+            Some(jot.update(cx, |jot, cx| f(jot, window, cx)))
+        })
+        .ok()
+        .flatten()
+}
+
+fn jot_windows(cx: &App) -> impl Iterator<Item = Owner> + '_ {
+    cx.windows().into_iter().filter_map(move |handle| {
+        let window = handle.downcast::<Root>()?;
+        let hwnd = jot(window, cx)?.read(cx).hwnd;
+        Some(Owner { window, hwnd })
+    })
 }
 
 pub(crate) fn press(
@@ -79,7 +93,7 @@ pub(crate) fn press(
     tab: EntityId,
     index: usize,
     grab: Point<f32>,
-    start: f32,
+    position: Point<Pixels>,
     alone: bool,
     cx: &mut App,
 ) {
@@ -87,14 +101,13 @@ pub(crate) fn press(
         cx.defer(lift);
     }
     cx.set_global(TabDrag {
-        source: owner.clone(),
         owner,
+        source: owner,
         tab,
         grab,
-        start,
-        press: cursor(),
-        started: false,
-        moving: None,
+        start: position.x.as_f32(),
+        press: screen(owner.hwnd, position),
+        phase: Phase::Pressed,
         source_index: index,
         source_placement: None,
     });
@@ -106,7 +119,7 @@ pub(crate) fn active(cx: &App) -> bool {
 
 pub(crate) fn dragging(cx: &App) -> bool {
     cx.try_global::<TabDrag>()
-        .is_some_and(|drag| drag.started && drag.moving.is_none())
+        .is_some_and(|drag| matches!(drag.phase, Phase::Dragging))
 }
 
 pub(crate) fn forget(tab: EntityId, cx: &mut App) {
@@ -146,40 +159,27 @@ fn end(cx: &mut App) -> Option<TabDrag> {
     drag
 }
 
-fn with_jot<R>(
-    owner: &Owner,
-    cx: &mut App,
-    f: impl FnOnce(&mut Jot, &mut Window, &mut Context<Jot>) -> R,
-) -> Option<R> {
-    let jot = owner.jot.upgrade()?;
-    owner
-        .handle
-        .update(cx, |_, window, cx| {
-            jot.update(cx, |jot, cx| f(jot, window, cx))
-        })
-        .ok()
-}
-
 fn moved(cx: &mut App) {
     let Some(mut drag) = cx.try_global::<TabDrag>().cloned() else {
         return;
     };
-    if drag.moving.is_some() {
-        return;
-    }
     let point = cursor();
-    if !drag.started {
-        let distance = ((point.x - drag.press.x) as f32).hypot((point.y - drag.press.y) as f32);
-        if distance / scale(drag.owner.hwnd) <= DRAG_THRESHOLD {
-            return;
+    match drag.phase {
+        Phase::Pressed => {
+            let distance = ((point.x - drag.press.x) as f32).hypot((point.y - drag.press.y) as f32);
+            if distance / scale(drag.owner.hwnd) <= DRAG_THRESHOLD {
+                return;
+            }
+            drag.phase = Phase::Dragging;
         }
-        drag.started = true;
+        Phase::Dragging => {}
+        Phase::Entering { .. } | Phase::Moving { .. } => return,
     }
-    let alone = with_jot(&drag.owner, cx, |jot, _, _| jot.tabs.len() == 1).unwrap_or(true);
+    let alone = with_jot(drag.owner, cx, |jot, _, _| jot.tabs.len() == 1).unwrap_or(true);
     if !alone && in_strip(drag.owner.hwnd, point) {
         let x = local(drag.owner.hwnd, point).x;
         let (tab, grab, start) = (drag.tab, drag.grab.x, drag.start);
-        with_jot(&drag.owner, cx, |jot, _, cx| {
+        with_jot(drag.owner, cx, |jot, _, cx| {
             jot.drag_tab(tab, x, grab, start, cx)
         });
     } else if !alone && let Some(target) = strip_window(point, 0, cx) {
@@ -195,7 +195,6 @@ fn lift(cx: &mut App) {
         return;
     };
     let point = drag.press;
-    drag.started = true;
     drag.source_placement = placement(drag.owner.hwnd);
     start_move_loop(&mut drag, point, cx);
     cx.set_global(drag);
@@ -204,15 +203,15 @@ fn lift(cx: &mut App) {
 fn released(cx: &mut App) {
     if cx
         .try_global::<TabDrag>()
-        .is_none_or(|drag| drag.moving.is_some())
+        .is_none_or(|drag| matches!(drag.phase, Phase::Entering { .. } | Phase::Moving { .. }))
     {
         return;
     }
     let Some(drag) = end(cx) else {
         return;
     };
-    if drag.started {
-        with_jot(&drag.owner, cx, |jot, _, cx| jot.release_tab(cx));
+    if let Phase::Dragging = drag.phase {
+        with_jot(drag.owner, cx, |jot, _, cx| jot.release_tab(cx));
         if drag.owner.hwnd != drag.source.hwnd {
             foreground(drag.owner.hwnd);
         }
@@ -224,29 +223,29 @@ pub(crate) fn cancel(cx: &mut App) {
         return;
     };
     unsafe { ReleaseCapture() };
-    if !drag.started {
+    if let Phase::Pressed = drag.phase {
         return;
     }
     let tab = drag.tab;
     let index = drag.source_index;
     if drag.owner.hwnd == drag.source.hwnd {
-        if drag.moving.is_some() {
-            restore_placement(drag.source.hwnd, drag.source_placement);
-        } else {
-            with_jot(&drag.source, cx, |jot, window, cx| {
+        if let Phase::Dragging = drag.phase {
+            with_jot(drag.source, cx, |jot, window, cx| {
                 jot.return_tab(tab, index, window, cx)
             });
+        } else {
+            restore_placement(drag.source.hwnd, drag.source_placement);
         }
         return;
     }
-    let Some(data) = with_jot(&drag.owner, cx, |jot, window, cx| {
+    let Some(data) = with_jot(drag.owner, cx, |jot, window, cx| {
         jot.take_tab(tab, window, cx)
     })
     .flatten() else {
         return;
     };
-    if drag.source.jot.upgrade().is_some() {
-        with_jot(&drag.source, cx, |jot, window, cx| {
+    if drag.source.window.read(cx).is_ok() {
+        with_jot(drag.source, cx, |jot, window, cx| {
             jot.restore_tab(data, index, window, cx)
         });
         foreground(drag.source.hwnd);
@@ -258,7 +257,7 @@ pub(crate) fn cancel(cx: &mut App) {
 
 fn attach(drag: &mut TabDrag, target: Owner, point: POINT, cx: &mut App) {
     let tab = drag.tab;
-    let Some(data) = with_jot(&drag.owner, cx, |jot, window, cx| {
+    let Some(data) = with_jot(drag.owner, cx, |jot, window, cx| {
         jot.take_tab(tab, window, cx)
     })
     .flatten() else {
@@ -266,18 +265,18 @@ fn attach(drag: &mut TabDrag, target: Owner, point: POINT, cx: &mut App) {
     };
     let x = local(target.hwnd, point).x;
     let grab = drag.grab.x;
-    with_jot(&target, cx, |jot, window, cx| {
+    with_jot(target, cx, |jot, window, cx| {
         jot.insert_dragged_tab(data, x, grab, window, cx)
     });
     unsafe { SetCapture(target.hwnd as HWND) };
     drag.owner = target;
-    drag.moving = None;
+    drag.phase = Phase::Dragging;
 }
 
 fn detach(drag: &mut TabDrag, alone: bool, point: POINT, cx: &mut App) {
     let tab = drag.tab;
     if !alone {
-        let Some((data, size)) = with_jot(&drag.owner, cx, |jot, window, cx| {
+        let Some((data, size)) = with_jot(drag.owner, cx, |jot, window, cx| {
             let size = window.window_bounds().get_bounds().size;
             jot.take_tab(tab, window, cx).map(|data| (data, size))
         })
@@ -285,10 +284,12 @@ fn detach(drag: &mut TabDrag, alone: bool, point: POINT, cx: &mut App) {
             return;
         };
         let (handle, jot) = open_jot_window(Some(data), Some(size), cx);
+        let Some(window) = handle.downcast::<Root>() else {
+            return;
+        };
         drag.owner = Owner {
-            handle,
+            window,
             hwnd: jot.read(cx).hwnd,
-            jot: jot.downgrade(),
         };
     } else {
         let hwnd = drag.owner.hwnd;
@@ -298,7 +299,7 @@ fn detach(drag: &mut TabDrag, alone: bool, point: POINT, cx: &mut App) {
         if unsafe { IsZoomed(hwnd as HWND) } != 0 {
             unsafe { ShowWindow(hwnd as HWND, SW_RESTORE) };
         }
-        with_jot(&drag.owner, cx, |jot, _, cx| jot.release_tab(cx));
+        with_jot(drag.owner, cx, |jot, _, cx| jot.release_tab(cx));
     }
     run_move_loop(drag, point, cx);
 }
@@ -324,7 +325,9 @@ fn start_move_loop(drag: &mut TabDrag, point: POINT, cx: &mut App) {
             position,
         );
     }
-    drag.moving = Some(Moving::default());
+    drag.phase = Phase::Entering {
+        since: Instant::now(),
+    };
     cx.spawn(async move |cx| {
         loop {
             cx.background_executor().timer(MOVE_POLL).await;
@@ -340,42 +343,45 @@ fn poll(cx: &mut App) -> bool {
     let Some(mut drag) = cx.try_global::<TabDrag>().cloned() else {
         return false;
     };
-    let Some(mut moving) = drag.moving else {
-        return false;
+    let attaching = match drag.phase {
+        Phase::Entering { .. } => false,
+        Phase::Moving { attaching } => attaching,
+        Phase::Pressed | Phase::Dragging => return false,
     };
     let hwnd = drag.owner.hwnd;
     let point = cursor();
     if in_move_loop(hwnd) {
-        moving.entered = true;
-        if !moving.attaching && strip_window(point, hwnd, cx).is_some() {
+        let attaching = attaching || strip_window(point, hwnd, cx).is_some();
+        if attaching && !matches!(drag.phase, Phase::Moving { attaching: true }) {
             unsafe { PostMessageW(hwnd as HWND, WM_CANCELMODE, 0, 0) };
-            moving.attaching = true;
         }
-    } else if !moving.entered && moving.waited < MOVE_LOOP_WAIT_POLLS {
-        moving.waited += 1;
-    } else {
-        let pressed = button_down();
-        if let Some(target) = strip_window(point, hwnd, cx) {
-            attach(&mut drag, target, point, cx);
-            cx.set_global(drag);
-            if !pressed {
-                released(cx);
-            }
-        } else if pressed && moving.attaching {
-            run_move_loop(&mut drag, point, cx);
-            cx.set_global(drag);
-        } else if pressed {
-            cx.set_global(drag);
-            cancel(cx);
-        } else {
-            end(cx);
-            foreground(hwnd);
-        }
-        return false;
+        drag.phase = Phase::Moving { attaching };
+        cx.set_global(drag);
+        return true;
     }
-    drag.moving = Some(moving);
-    cx.set_global(drag);
-    true
+    if let Phase::Entering { since } = drag.phase
+        && since.elapsed() < MOVE_LOOP_START_TIMEOUT
+    {
+        return true;
+    }
+    let pressed = button_down();
+    if let Some(target) = strip_window(point, hwnd, cx) {
+        attach(&mut drag, target, point, cx);
+        cx.set_global(drag);
+        if !pressed {
+            released(cx);
+        }
+    } else if pressed && attaching {
+        run_move_loop(&mut drag, point, cx);
+        cx.set_global(drag);
+    } else if pressed {
+        cx.set_global(drag);
+        cancel(cx);
+    } else {
+        end(cx);
+        foreground(hwnd);
+    }
+    false
 }
 
 fn strip_window(point: POINT, exclude: isize, cx: &App) -> Option<Owner> {
@@ -383,11 +389,7 @@ fn strip_window(point: POINT, exclude: isize, cx: &App) -> Option<Owner> {
     if hwnd == 0 || !in_strip(hwnd, point) {
         return None;
     }
-    cx.try_global::<JotWindows>()?
-        .0
-        .iter()
-        .find(|owner| owner.hwnd == hwnd && owner.jot.upgrade().is_some())
-        .cloned()
+    jot_windows(cx).find(|owner| owner.hwnd == hwnd)
 }
 
 fn button_down() -> bool {
@@ -413,6 +415,15 @@ fn local(hwnd: isize, point: POINT) -> Point<f32> {
         (point.x - origin.x) as f32 / scale,
         (point.y - origin.y) as f32 / scale,
     )
+}
+
+fn screen(hwnd: isize, position: Point<Pixels>) -> POINT {
+    let origin = client_origin(hwnd);
+    let scale = scale(hwnd);
+    POINT {
+        x: origin.x + (position.x.as_f32() * scale).round() as i32,
+        y: origin.y + (position.y.as_f32() * scale).round() as i32,
+    }
 }
 
 fn in_strip(hwnd: isize, point: POINT) -> bool {

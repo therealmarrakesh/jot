@@ -493,7 +493,7 @@ impl Jot {
         if self.strip.drag.is_some_and(|drag| drag.id == id) {
             self.strip.drag = None;
         }
-        detach::forget(id, cx);
+        tab_drag::forget(id, cx);
         if ix < self.tabs.len() && self.strip.bounds(now).contains(&window.mouse_position()) {
             self.strip.frozen = Some(width);
         }
@@ -781,16 +781,19 @@ impl Jot {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                    if let Some(ix) = this.tab_index(id) {
+                    if let Some(ix) = this.tab_index(id)
+                        && let Some(owner) = tab_drag::owner(window)
+                    {
                         this.activate_tab(ix, window, cx);
-                        let x = event.position.x.as_f32();
                         let now = Instant::now();
                         let grab = point(
-                            x - this.strip.origin(now) - this.tabs[ix].slot.x.value(now),
+                            event.position.x.as_f32()
+                                - this.strip.origin(now)
+                                - this.tabs[ix].slot.x.value(now),
                             event.position.y.as_f32() - STRIP_TOP,
                         );
                         let alone = this.tabs.len() == 1;
-                        detach::press(this.owner(window, cx), id, ix, grab, x, alone, cx);
+                        tab_drag::press(owner, id, ix, grab, event.position, alone, cx);
                         cx.notify();
                     }
                 }),
@@ -1076,7 +1079,9 @@ impl Jot {
                     })
                     .children(ghosts)
                     .children(tabs)
-                    .when(detach::active(cx), |this| this.child(detach::listeners())),
+                    .when(tab_drag::active(cx), |this| {
+                        this.child(tab_drag::listeners())
+                    }),
             )
             .when(buttons, |this| this.child(self.scroll_button(true, cx)))
             .child(self.new_tab_button(cx))
