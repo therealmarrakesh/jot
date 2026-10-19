@@ -3646,15 +3646,11 @@ impl<M: InputModeKind> InputBaseState<M> {
     }
 
     /// Returns the true to let InputElement to render cursor, when Input is focused and current BlinkCursor is visible.
-    pub(crate) fn show_cursor(&self, window: &Window, cx: &App) -> bool {
+    pub fn show_cursor(&self, window: &Window, cx: &App) -> bool {
         (self.focus_handle.is_focused(window) || M::is_context_menu_open(self, cx))
             && !self.disabled
             && self.blink_cursor.read(cx).visible()
             && window.is_window_active()
-    }
-
-    pub fn caret_visible(&self, cx: &App) -> bool {
-        self.blink_cursor.read(cx).visible()
     }
 
     fn on_focus(&mut self, _: &mut Window, cx: &mut Context<Self>) {

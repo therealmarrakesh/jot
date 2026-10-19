@@ -64,7 +64,7 @@ pub(crate) fn button(
     } else {
         (
             rgb(surface.fill),
-            rgb(surface.button_hover),
+            rgb(surface.hover),
             rgb(surface.button_pressed),
             rgb(surface.button_stroke),
             rgb(surface.button_bottom),
@@ -189,9 +189,7 @@ fn field_glyph(
 
 fn field_caret(input: &Entity<InputState>, window: &Window, cx: &App) -> impl IntoElement + use<> {
     let input = input.clone();
-    let shown = input.read(cx).caret_visible(cx)
-        && window.is_window_active()
-        && input.focus_handle(cx).is_focused(window);
+    let shown = input.read(cx).show_cursor(window, cx);
     caret_canvas(
         move |cx| {
             let input = input.read(cx);
@@ -241,7 +239,7 @@ pub(crate) fn text_field(
         .border_r_1()
         .border_color(rgb(surface.field_stroke))
         .when(!focused, |this| {
-            this.hover(move |style| style.bg(rgb(surface.button_hover)))
+            this.hover(move |style| style.bg(rgb(surface.hover)))
         })
         .pb(px(1.))
         .child(

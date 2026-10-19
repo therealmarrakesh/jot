@@ -645,10 +645,8 @@ impl Jot {
     fn caret(&self, window: &Window, cx: &App) -> impl IntoElement {
         let editor = self.active_editor().clone();
         let height = self.caret_height();
-        let shown = editor.read(cx).caret_visible(cx)
-            && !self.menu_bar.read(cx).access_active()
-            && window.is_window_active()
-            && editor.focus_handle(cx).is_focused(window);
+        let shown =
+            editor.read(cx).show_cursor(window, cx) && !self.menu_bar.read(cx).access_active();
 
         caret_canvas(
             move |cx| {
