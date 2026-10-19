@@ -1,5 +1,5 @@
 use super::*;
-use field::{BODY_SIZE, CONTROL_HEIGHT, CONTROL_RADIUS, FieldStyle, OVERLAY_RADIUS};
+use field::{BODY_SIZE, CONTROL_HEIGHT, CONTROL_RADIUS, OVERLAY_RADIUS, text_field};
 use gpui_kit::base::{MotionStatus, Presence, Transition, transition_with_status};
 use gpui_kit::component::input::InputState;
 use menu::Entry;
@@ -229,17 +229,12 @@ pub(crate) struct FindBar {
     matcher: Option<Matcher>,
     buffer: Vec<u8>,
     options_bounds: Rc<Cell<Bounds<Pixels>>>,
-    _observers: [Subscription; 2],
 }
 
 impl FindBar {
     pub(crate) fn new(window: &mut Window, cx: &mut Context<Jot>) -> Self {
-        let query = cx.new(|cx| InputState::new(window, cx));
-        let replacement = cx.new(|cx| InputState::new(window, cx));
-        let _observers = [
-            Jot::watch_field(&query, cx),
-            Jot::watch_field(&replacement, cx),
-        ];
+        let query = cx.new(|cx| InputState::new(window, cx).placeholder("Find"));
+        let replacement = cx.new(|cx| InputState::new(window, cx).placeholder("Replace"));
         Self {
             visible: false,
             closing: false,
@@ -255,7 +250,6 @@ impl FindBar {
             matcher: None,
             buffer: Vec::new(),
             options_bounds: Rc::new(Cell::new(Bounds::default())),
-            _observers,
         }
     }
 
@@ -486,7 +480,6 @@ impl Jot {
         let editor = self.active_editor();
         editor.update(cx, |editor, cx| editor.set_selection_focus(None, cx));
         editor.focus_handle(cx).focus(window, cx);
-        self.restart_caret_blink(cx);
     }
 
     pub(crate) fn sync_find_selection(&mut self, cx: &mut Context<Self>) {
@@ -646,7 +639,7 @@ impl Jot {
                 .justify_center()
                 .p(u(CARD_PADDING))
                 .rounded(u(OVERLAY_RADIUS - BORDER))
-                .bg(rgb(p.card_fill))
+                .bg(rgb(p.card_surface.panel))
                 .occlude()
                 .cursor_default()
                 .on_action(
@@ -693,12 +686,9 @@ impl Jot {
                     .flex_1()
                     .min_w_0()
                     .key_context(QUERY_CONTEXT)
-                    .child(self.text_field(
+                    .child(text_field(
                         &self.find.query,
-                        FieldStyle {
-                            placeholder: Some("Find"),
-                            search_icon: true,
-                        },
+                        true,
                         p.card_surface,
                         s,
                         window,
@@ -758,12 +748,9 @@ impl Jot {
                     .flex_1()
                     .min_w_0()
                     .key_context(REPLACEMENT_CONTEXT)
-                    .child(self.text_field(
+                    .child(text_field(
                         &self.find.replacement,
-                        FieldStyle {
-                            placeholder: Some("Replace"),
-                            search_icon: false,
-                        },
+                        false,
                         p.card_surface,
                         s,
                         window,

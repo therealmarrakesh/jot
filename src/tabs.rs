@@ -434,16 +434,6 @@ impl Jot {
                 }
             }
         });
-        let _observer = cx.observe(&editor, |this, editor, cx| {
-            if &editor != this.active_editor() {
-                return;
-            }
-            let key = caret_key(editor.read(cx));
-            if key != this.caret_key {
-                this.caret_key = key;
-                this.restart_caret_blink(cx);
-            }
-        });
         Tab {
             editor,
             zoom: data.zoom,
@@ -451,7 +441,6 @@ impl Jot {
             format: data.format,
             dirty: data.dirty,
             slot: tabs::Slot::at(0., tabs::TAB_WIDTH),
-            _observer,
             _changes,
         }
     }

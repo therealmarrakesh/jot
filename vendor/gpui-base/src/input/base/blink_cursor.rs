@@ -1,8 +1,31 @@
 use gpui::{Context, Pixels, Task, px};
 use instant::Duration;
 
+#[cfg(not(target_os = "windows"))]
 static INTERVAL: Duration = Duration::from_millis(500);
+#[cfg(not(target_os = "windows"))]
 static PAUSE_DELAY: Duration = Duration::from_millis(300);
+
+#[cfg(target_os = "windows")]
+fn interval() -> Option<Duration> {
+    let millis = unsafe { windows::Win32::UI::WindowsAndMessaging::GetCaretBlinkTime() };
+    (millis != 0 && millis != u32::MAX).then(|| Duration::from_millis(millis.into()))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn interval() -> Option<Duration> {
+    Some(INTERVAL)
+}
+
+#[cfg(target_os = "windows")]
+fn pause_delay() -> Option<Duration> {
+    interval()
+}
+
+#[cfg(not(target_os = "windows"))]
+fn pause_delay() -> Option<Duration> {
+    Some(PAUSE_DELAY)
+}
 
 // On Windows, Linux, we should use integer to avoid blurry cursor.
 #[cfg(not(target_os = "macos"))]
@@ -36,6 +59,7 @@ impl BlinkCursor {
 
     /// Start the blinking
     pub(crate) fn start(&mut self, cx: &mut Context<Self>) {
+        self.visible = false;
         self.blink(self.epoch, cx);
     }
 
@@ -65,13 +89,20 @@ impl BlinkCursor {
             return;
         }
 
+        let Some(interval) = interval() else {
+            self.visible = true;
+            self._task = Task::ready(());
+            cx.notify();
+            return;
+        };
+
         self.visible = !self.visible;
         cx.notify();
 
         // Schedule the next blink
         let epoch = self.next_epoch();
         self._task = cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(INTERVAL).await;
+            cx.background_executor().timer(interval).await;
             if let Some(this) = this.upgrade() {
                 this.update(cx, |this, cx| this.blink(epoch, cx));
             }
@@ -101,8 +132,12 @@ impl BlinkCursor {
 
         // Every pause replaces the pending timer, keeping repeated input visible.
         let epoch = self.next_epoch();
+        let Some(delay) = pause_delay() else {
+            self._task = Task::ready(());
+            return;
+        };
         self._task = cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(PAUSE_DELAY).await;
+            cx.background_executor().timer(delay).await;
 
             if let Some(this) = this.upgrade() {
                 this.update(cx, |this, cx| {

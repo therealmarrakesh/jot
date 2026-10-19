@@ -17,17 +17,12 @@ const FIELD_GLYPH_SIZE: f32 = 12.;
 const CLEAR_GLYPH: &str = "\u{E894}";
 const SEARCH_GLYPH: &str = "\u{E721}";
 
-pub(crate) struct FieldStyle {
-    pub placeholder: Option<&'static str>,
-    pub search_icon: bool,
-}
-
-fn mix(color: Rgba, toward: f32, amount: f32) -> Rgba {
-    let blend = |c: f32| c + (toward - c) * amount;
+fn mix(color: Rgba, toward: Rgba, amount: f32) -> Rgba {
+    let blend = |c: f32, t: f32| c + (t - c) * amount;
     Rgba {
-        r: blend(color.r),
-        g: blend(color.g),
-        b: blend(color.b),
+        r: blend(color.r, toward.r),
+        g: blend(color.g, toward.g),
+        b: blend(color.b, toward.b),
         a: 1.,
     }
 }
@@ -57,18 +52,18 @@ pub(crate) fn button(
     let ring =
         focus.is_some_and(|focus| focus.is_focused(window) && window.last_input_was_keyboard());
     let (fill, hover, pressed, edge, bottom, text) = if accented {
-        let backdrop = f32::from(p.dialog_command.to_be_bytes()[3]) / 255.;
+        let panel = rgb(surface.panel);
         (
             accent,
-            mix(accent, backdrop, 1. - ACCENT_HOVER_OPACITY),
-            mix(accent, backdrop, 1. - ACCENT_PRESSED_OPACITY),
-            mix(accent, 1., ACCENT_TOP_EDGE),
-            mix(accent, 0., p.accent_bottom_edge),
+            mix(accent, panel, 1. - ACCENT_HOVER_OPACITY),
+            mix(accent, panel, 1. - ACCENT_PRESSED_OPACITY),
+            mix(accent, rgb(0xffffff), ACCENT_TOP_EDGE),
+            mix(accent, rgb(0x000000), p.accent_bottom_edge),
             rgb(p.on_accent),
         )
     } else {
         (
-            rgb(surface.button_fill),
+            rgb(surface.fill),
             rgb(surface.button_hover),
             rgb(surface.button_pressed),
             rgb(surface.button_stroke),
@@ -192,129 +187,94 @@ fn field_glyph(
         .child(glyph)
 }
 
-impl Jot {
-    pub(crate) fn watch_field(input: &Entity<InputState>, cx: &mut Context<Self>) -> Subscription {
-        cx.observe(input, |jot, input, cx| {
-            let id = input.entity_id();
+fn field_caret(input: &Entity<InputState>, window: &Window, cx: &App) -> impl IntoElement + use<> {
+    let input = input.clone();
+    let shown = input.read(cx).caret_visible(cx)
+        && window.is_window_active()
+        && input.focus_handle(cx).is_focused(window);
+    caret_canvas(
+        move |cx| {
             let input = input.read(cx);
-            let key = (id, input.cursor(), input.selected_range());
-            if jot.field_caret.as_ref() != Some(&key) {
-                jot.field_caret = Some(key);
-                jot.restart_caret_blink(cx);
-            }
-        })
-    }
+            input
+                .selected_range()
+                .is_empty()
+                .then(|| input.prepaint_caret_geometry())
+                .flatten()
+        },
+        px(FIELD_CARET),
+        shown,
+    )
+}
 
-    fn field_caret(
-        &self,
-        input: &Entity<InputState>,
-        window: &Window,
-        cx: &App,
-    ) -> impl IntoElement + use<> {
-        let input = input.clone();
-        let shown = self.caret_visible
-            && window.is_window_active()
-            && input.focus_handle(cx).is_focused(window);
-        caret_canvas(
-            move |cx| {
-                let input = input.read(cx);
-                input
-                    .selected_range()
-                    .is_empty()
-                    .then(|| input.prepaint_caret_geometry())
-                    .flatten()
-            },
-            px(FIELD_CARET),
-            shown,
+pub(crate) fn text_field(
+    input: &Entity<InputState>,
+    search_icon: bool,
+    surface: Surface,
+    s: f32,
+    window: &Window,
+    cx: &App,
+) -> Div {
+    let p = palette(cx);
+    let u = |v: f32| px(v * s);
+    let focused = input.focus_handle(cx).is_focused(window);
+    let empty = input.read(cx).text().len() == 0;
+    let id = input.entity_id();
+    let (trailing, clear_right) = if search_icon {
+        (
+            2. * FIELD_GLYPH_WIDTH + FIELD_GLYPH_RIGHT,
+            FIELD_GLYPH_RIGHT + FIELD_GLYPH_WIDTH - 1.,
         )
-    }
-
-    pub(crate) fn text_field(
-        &self,
-        input: &Entity<InputState>,
-        style: FieldStyle,
-        surface: Surface,
-        s: f32,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) -> Div {
-        let p = palette(cx);
-        let u = |v: f32| px(v * s);
-        let focused = input.focus_handle(cx).is_focused(window);
-        let empty = input.read(cx).text().len() == 0;
-        let id = input.entity_id();
-        let (trailing, clear_right) = if style.search_icon {
-            (
-                2. * FIELD_GLYPH_WIDTH + FIELD_GLYPH_RIGHT,
-                FIELD_GLYPH_RIGHT + FIELD_GLYPH_WIDTH - 1.,
-            )
+    } else {
+        (FIELD_GLYPH_WIDTH + FIELD_GLYPH_RIGHT, FIELD_GLYPH_RIGHT)
+    };
+    div()
+        .relative()
+        .h(u(CONTROL_HEIGHT))
+        .rounded(u(CONTROL_RADIUS))
+        .bg(if focused {
+            rgba(p.field_focused)
         } else {
-            (FIELD_GLYPH_WIDTH + FIELD_GLYPH_RIGHT, FIELD_GLYPH_RIGHT)
-        };
-        div()
-            .relative()
-            .h(u(CONTROL_HEIGHT))
-            .rounded(u(CONTROL_RADIUS))
-            .bg(if focused {
-                rgba(p.field_focused)
+            rgb(surface.fill)
+        })
+        .border_t_1()
+        .border_l_1()
+        .border_r_1()
+        .border_color(rgb(surface.field_stroke))
+        .when(!focused, |this| {
+            this.hover(move |style| style.bg(rgb(surface.button_hover)))
+        })
+        .pb(px(1.))
+        .child(
+            Input::new(input)
+                .appearance(false)
+                .h_full()
+                .py(px(0.))
+                .pl(u(FIELD_PADDING - 1.))
+                .pr(u(trailing))
+                .font_family(TEXT_FONT)
+                .text_size(u(BODY_SIZE))
+                .line_height(u(BODY_LINE + 2.))
+                .text_color(rgba(p.text_primary)),
+        )
+        .child(field_caret(input, window, cx))
+        .child(bottom_edge(
+            focused,
+            if focused {
+                accent_color(cx)
             } else {
-                rgb(surface.field_fill)
-            })
-            .border_t_1()
-            .border_l_1()
-            .border_r_1()
-            .border_color(rgb(surface.field_stroke))
-            .when(!focused, |this| {
-                this.hover(move |style| style.bg(rgb(surface.button_hover)))
-            })
-            .pb(px(1.))
-            .child(
-                Input::new(input)
-                    .appearance(false)
-                    .h_full()
-                    .py(px(0.))
-                    .pl(u(FIELD_PADDING - 1.))
-                    .pr(u(trailing))
-                    .font_family(TEXT_FONT)
-                    .text_size(u(BODY_SIZE))
-                    .line_height(u(BODY_LINE + 2.))
-                    .text_color(rgba(p.text_primary)),
+                rgb(surface.field_bottom)
+            },
+            s,
+        ))
+        .when(search_icon, |this| {
+            this.child(
+                field_glyph(p, ("field-search", id), SEARCH_GLYPH, FIELD_GLYPH_RIGHT, s)
+                    .when(!focused, |this| this.text_color(rgba(p.text_primary))),
             )
-            .when_some(style.placeholder.filter(|_| empty), |this, placeholder| {
-                this.child(
-                    div()
-                        .absolute()
-                        .top_0()
-                        .bottom_0()
-                        .left(u(FIELD_PADDING - 1.))
-                        .flex()
-                        .items_center()
-                        .font_family(TEXT_FONT)
-                        .text_size(u(BODY_SIZE))
-                        .text_color(rgba(p.text_secondary))
-                        .child(placeholder),
-                )
-            })
-            .child(self.field_caret(input, window, cx))
-            .child(bottom_edge(
-                focused,
-                if focused {
-                    accent_color(cx)
-                } else {
-                    rgb(surface.field_bottom)
-                },
-                s,
-            ))
-            .when(style.search_icon, |this| {
-                this.child(
-                    field_glyph(p, ("field-search", id), SEARCH_GLYPH, FIELD_GLYPH_RIGHT, s)
-                        .when(!focused, |this| this.text_color(rgba(p.text_primary))),
-                )
-            })
-            .when(focused && !empty, |this| {
-                this.child(clear_button(p, input.clone(), clear_right, s))
-            })
-    }
+        })
+        .when(focused && !empty, |this| {
+            this.child(clear_button(p, input.clone(), clear_right, s))
+        })
 }
 
 fn bottom_edge(focused: bool, color: Rgba, s: f32) -> Div {

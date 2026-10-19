@@ -1,5 +1,5 @@
 use super::*;
-use field::{BODY_LINE, BODY_SIZE, FieldStyle};
+use field::{BODY_LINE, BODY_SIZE, text_field};
 use futures::channel::oneshot;
 use gpui_kit::base::FocusTrapElement as _;
 use gpui_kit::base::actions::{Cancel, Confirm};
@@ -105,7 +105,6 @@ pub(crate) struct Dialogs {
     serial: usize,
     focus: FocusHandle,
     line: Entity<InputState>,
-    _line_observer: Subscription,
 }
 
 impl Dialogs {
@@ -113,14 +112,12 @@ impl Dialogs {
         let line = cx.new(|cx| {
             InputState::new(window, cx).validate(|text, _| text.chars().all(|c| c.is_ascii_digit()))
         });
-        let _line_observer = Jot::watch_field(&line, cx);
         line.read(cx).focus_handle(cx).tab_index(0).tab_stop(true);
         Self {
             open: Vec::new(),
             serial: 0,
             focus: cx.focus_handle(),
             line,
-            _line_observer,
         }
     }
 
@@ -183,7 +180,6 @@ impl Jot {
             input.select_all(window, cx);
             input.focus(window, cx);
         });
-        self.restart_caret_blink(cx);
     }
 
     fn confirm_dialog(&mut self, _: &Confirm, window: &mut Window, cx: &mut Context<Self>) {
@@ -253,7 +249,6 @@ impl Jot {
     fn close_dialogs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.dialogs.hide();
         self.active_editor().focus_handle(cx).focus(window, cx);
-        self.restart_caret_blink(cx);
     }
 
     fn submit_go_to(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -394,12 +389,9 @@ impl Jot {
                     .h(px(BODY_LINE * s))
                     .mb(px(HEADER_GAP * s)),
             )
-            .child(self.text_field(
+            .child(text_field(
                 &self.dialogs.line,
-                FieldStyle {
-                    placeholder: None,
-                    search_icon: false,
-                },
+                false,
                 p.content_surface,
                 s,
                 window,
@@ -439,7 +431,7 @@ fn dialog_frame(
                 .flex()
                 .flex_col()
                 .rounded(u(field::OVERLAY_RADIUS - BORDER))
-                .bg(rgb(p.dialog_command))
+                .bg(rgb(p.command_surface.panel))
                 .font_family(TEXT_FONT)
                 .text_size(u(BODY_SIZE))
                 .text_color(rgba(p.text_primary))
@@ -464,7 +456,7 @@ fn dialog_content(p: Palette, s: f32, title: SharedString, body: Div) -> Div {
     div()
         .p(u(PADDING))
         .rounded_t(u(field::OVERLAY_RADIUS - BORDER))
-        .bg(rgb(p.dialog_content))
+        .bg(rgb(p.content_surface.panel))
         .border_b_1()
         .border_color(rgb(p.dialog_divider))
         .child(

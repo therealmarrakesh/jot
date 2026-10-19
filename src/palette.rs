@@ -10,10 +10,10 @@ pub(crate) const NOISE_OPACITY: f32 = 0.02;
 
 #[derive(Clone, Copy)]
 pub(crate) struct Surface {
-    pub field_fill: u32,
+    pub panel: u32,
+    pub fill: u32,
     pub field_stroke: u32,
     pub field_bottom: u32,
-    pub button_fill: u32,
     pub button_hover: u32,
     pub button_pressed: u32,
     pub button_stroke: u32,
@@ -48,13 +48,10 @@ pub(crate) struct Palette {
     pub menu_separator: u32,
     pub smoke: u32,
     pub surface_stroke: u32,
-    pub dialog_content: u32,
-    pub dialog_command: u32,
     pub dialog_divider: u32,
     pub content_surface: Surface,
     pub command_surface: Surface,
     pub card_surface: Surface,
-    pub card_fill: u32,
     pub notice_fill: u32,
     pub field_focused: u32,
     pub focus_outer: u32,
@@ -97,40 +94,37 @@ const LIGHT: Palette = Palette {
     menu_separator: 0xededed,
     smoke: 0x0000004d,
     surface_stroke: 0x75757566,
-    dialog_content: 0xffffff,
-    dialog_command: 0xf3f3f3,
     dialog_divider: 0xe5e5e5,
     content_surface: Surface {
-        field_fill: 0xffffff,
+        panel: 0xffffff,
+        fill: 0xffffff,
         field_stroke: 0xf0f0f0,
         field_bottom: 0x8d8d8d,
-        button_fill: 0xffffff,
         button_hover: 0xf9f9f9,
         button_pressed: 0xf9f9f9,
         button_stroke: 0xf0f0f0,
         button_bottom: 0xd6d6d6,
     },
     command_surface: Surface {
-        field_fill: 0xfbfbfb,
+        panel: 0xf3f3f3,
+        fill: 0xfbfbfb,
         field_stroke: 0xe5e5e5,
         field_bottom: 0x8d8d8d,
-        button_fill: 0xfbfbfb,
         button_hover: 0xf6f6f6,
         button_pressed: 0xf5f5f5,
         button_stroke: 0xe5e5e5,
         button_bottom: 0xcccccc,
     },
     card_surface: Surface {
-        field_fill: 0xfdfdfd,
+        panel: 0xf9f9f9,
+        fill: 0xfdfdfd,
         field_stroke: 0xeaeaea,
         field_bottom: 0x8a8a8a,
-        button_fill: 0xfdfdfd,
         button_hover: 0xf9f9f9,
         button_pressed: 0xf9f9f9,
         button_stroke: 0xeaeaea,
         button_bottom: 0xd1d1d1,
     },
-    card_fill: 0xf9f9f9,
     notice_fill: 0xf9f9f9,
     field_focused: 0xffffffff,
     focus_outer: 0x1a1a1a,
@@ -171,40 +165,37 @@ const DARK: Palette = Palette {
     menu_separator: 0x3d3d3d,
     smoke: 0x0000004d,
     surface_stroke: 0x75757566,
-    dialog_content: 0x2b2b2b,
-    dialog_command: 0x202020,
     dialog_divider: 0x1d1d1d,
     content_surface: Surface {
-        field_fill: 0x373737,
+        panel: 0x2b2b2b,
+        fill: 0x373737,
         field_stroke: 0x3a3a3a,
         field_bottom: 0x9e9e9e,
-        button_fill: 0x373737,
         button_hover: 0x3c3c3c,
         button_pressed: 0x313131,
         button_stroke: 0x3c3c3c,
         button_bottom: 0x353535,
     },
     command_surface: Surface {
-        field_fill: 0x2d2d2d,
+        panel: 0x202020,
+        fill: 0x2d2d2d,
         field_stroke: 0x353535,
         field_bottom: 0x9a9a9a,
-        button_fill: 0x2d2d2d,
         button_hover: 0x323232,
         button_pressed: 0x272727,
         button_stroke: 0x353535,
         button_bottom: 0x2f2f2f,
     },
     card_surface: Surface {
-        field_fill: 0x353535,
+        panel: 0x282828,
+        fill: 0x353535,
         field_stroke: 0x373737,
         field_bottom: 0x9d9d9d,
-        button_fill: 0x353535,
         button_hover: 0x3a3a3a,
         button_pressed: 0x2f2f2f,
         button_stroke: 0x3c3c3c,
         button_bottom: 0x373737,
     },
-    card_fill: 0x282828,
     notice_fill: 0x2d2d2d,
     field_focused: 0x1e1e1eb3,
     focus_outer: 0xffffff,
@@ -263,11 +254,14 @@ pub(crate) fn apply(appearance: WindowAppearance, cx: &mut App) {
     Theme::change(mode, None, cx);
     let background = transparent_black();
     let caret = hsla(0., 0., 0., f32::EPSILON);
+    let placeholder = Hsla::from(rgba(palette(cx).text_secondary));
     let theme = Theme::global_mut(cx);
     theme.background = background;
     theme.tokens.background = background.into();
     theme.caret = caret;
     theme.tokens.caret = caret.into();
+    theme.muted_foreground = placeholder;
+    theme.tokens.muted_foreground = placeholder.into();
     cx.refresh_windows();
 }
 

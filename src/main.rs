@@ -42,7 +42,7 @@ use windows_sys::Win32::Globalization::{
 use windows_sys::Win32::Graphics::Gdi::ClientToScreen;
 use windows_sys::Win32::System::SystemInformation::GetLocalTime;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    GetCaretBlinkTime, GetCursorPos, SystemParametersInfoW, USER_DEFAULT_SCREEN_DPI,
+    GetCursorPos, SystemParametersInfoW, USER_DEFAULT_SCREEN_DPI,
 };
 
 const APP_NAME: &str = "Jot";
@@ -91,8 +91,6 @@ const CARET_HEIGHT: f32 = 18.;
 const ZOOM_STEP: f32 = 0.1;
 const ZOOM_MIN: f32 = 0.1;
 const ZOOM_MAX: f32 = 5.;
-
-type CaretKey = (usize, Range<usize>, usize);
 
 fn separator(p: Palette) -> Div {
     div()
@@ -333,11 +331,6 @@ fn open_jot_window(
     .expect("Failed to open window")
 }
 
-fn caret_blink_period() -> Option<Duration> {
-    let millis = unsafe { GetCaretBlinkTime() };
-    (millis != 0 && millis != u32::MAX).then(|| Duration::from_millis(millis.into()))
-}
-
 fn round_half_up(value: f32) -> f32 {
     (value + 0.5).floor()
 }
@@ -449,14 +442,6 @@ fn caret_origin(geometry: &PrepaintCaretGeometry, window: &Window) -> Point<Pixe
     window.pixel_snap_point(point(origin.x, origin.y + geometry.scroll_offset().y))
 }
 
-fn caret_key(editor: &TextareaState) -> CaretKey {
-    (
-        editor.cursor(),
-        editor.selected_range(),
-        editor.text().len(),
-    )
-}
-
 struct TabData {
     editor: Entity<TextareaState>,
     zoom: f32,
@@ -472,7 +457,6 @@ struct Tab {
     format: document::Format,
     dirty: bool,
     slot: tabs::Slot,
-    _observer: Subscription,
     _changes: Subscription,
 }
 
@@ -499,10 +483,6 @@ struct Jot {
     menu_bar: Entity<MenuBar>,
     dialogs: dialog::Dialogs,
     find: find::FindBar,
-    field_caret: Option<(EntityId, usize, Range<usize>)>,
-    caret_visible: bool,
-    caret_key: CaretKey,
-    _caret_blink: Task<()>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -550,10 +530,7 @@ impl Jot {
                 cx.notify();
             }),
             cx.observe_window_activation(window, |this, window, cx| {
-                if window.is_window_active() {
-                    this.restart_caret_blink(cx);
-                } else {
-                    this._caret_blink = Task::ready(());
+                if !window.is_window_active() {
                     this.menu_bar
                         .update(cx, |menu_bar, cx| menu_bar.exit_access(cx));
                     cx.notify();
@@ -584,10 +561,6 @@ impl Jot {
             menu_bar,
             dialogs,
             find,
-            field_caret: None,
-            caret_visible: true,
-            caret_key: (0, 0..0, 0),
-            _caret_blink: Task::ready(()),
             _subscriptions,
         };
         jot.activate_tab(0, window, cx);
@@ -661,9 +634,7 @@ impl Jot {
         editor.focus_handle(cx).focus(window, cx);
         self.menu_bar
             .update(cx, |menu_bar, _| menu_bar.editor = editor.clone());
-        self.caret_key = caret_key(editor.read(cx));
         self.sync_find_selection(cx);
-        self.restart_caret_blink(cx);
         self.refresh_title(window);
     }
 
@@ -671,31 +642,10 @@ impl Jot {
         self.add_tab(window, cx);
     }
 
-    fn restart_caret_blink(&mut self, cx: &mut Context<Self>) {
-        self.caret_visible = true;
-        cx.notify();
-        let Some(period) = caret_blink_period() else {
-            self._caret_blink = Task::ready(());
-            return;
-        };
-        self._caret_blink = cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor().timer(period).await;
-                let toggled = this.update(cx, |this, cx| {
-                    this.caret_visible = !this.caret_visible;
-                    cx.notify();
-                });
-                if toggled.is_err() {
-                    break;
-                }
-            }
-        });
-    }
-
     fn caret(&self, window: &Window, cx: &App) -> impl IntoElement {
         let editor = self.active_editor().clone();
         let height = self.caret_height();
-        let shown = self.caret_visible
+        let shown = editor.read(cx).caret_visible(cx)
             && !self.menu_bar.read(cx).access_active()
             && window.is_window_active()
             && editor.focus_handle(cx).is_focused(window);

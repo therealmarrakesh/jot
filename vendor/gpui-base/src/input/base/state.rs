@@ -764,13 +764,14 @@ impl<M: InputModeKind> InputBaseState<M> {
         vec![
             // Blink the cursor when the window is active, pause when it's not.
             cx.observe_window_activation(window, |input, window, cx| {
-                if window.is_window_active() {
-                    let focus_handle = input.focus_handle.clone();
-                    if focus_handle.is_focused(window) {
-                        input.blink_cursor.update(cx, |blink_cursor, cx| {
-                            blink_cursor.start(cx);
-                        });
-                    }
+                if !window.is_window_active() {
+                    input.blink_cursor.update(cx, |blink_cursor, cx| {
+                        blink_cursor.stop(cx);
+                    });
+                } else if input.focus_handle.is_focused(window) {
+                    input.blink_cursor.update(cx, |blink_cursor, cx| {
+                        blink_cursor.start(cx);
+                    });
                 }
             }),
             cx.on_focus(focus_handle, window, Self::on_focus),
@@ -3650,6 +3651,10 @@ impl<M: InputModeKind> InputBaseState<M> {
             && !self.disabled
             && self.blink_cursor.read(cx).visible()
             && window.is_window_active()
+    }
+
+    pub fn caret_visible(&self, cx: &App) -> bool {
+        self.blink_cursor.read(cx).visible()
     }
 
     fn on_focus(&mut self, _: &mut Window, cx: &mut Context<Self>) {
