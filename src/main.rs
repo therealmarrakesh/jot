@@ -18,7 +18,6 @@ mod tooltip;
 use brush::{BrushTransitionExt as _, Brushes};
 use gpui_kit::Edges;
 use gpui_kit::base::Easing;
-use gpui_kit::base::animation::cubic_bezier;
 use gpui_kit::component::input::{
     self, InputEvent, PrepaintCaretGeometry, Rope, RopeExt as _, Textarea, TextareaState,
 };
@@ -507,6 +506,7 @@ impl Jot {
                 if !window.is_window_active() {
                     this.menu_bar
                         .update(cx, |menu_bar, cx| menu_bar.cancel(window, cx));
+                    tooltip::window_deactivated(window.window_handle(), cx);
                     cx.notify();
                 }
             }),
@@ -897,10 +897,7 @@ impl Render for Jot {
         let root = div()
             .relative()
             .size_full()
-            .on_mouse_move(|_, _, cx| tooltip::pointer_moved(cx))
-            .on_modifiers_changed(|event, _, cx| tooltip::modifiers_changed(&event.modifiers, cx))
             .capture_key_down(|event: &KeyDownEvent, _, cx| {
-                tooltip::key_down(cx);
                 if event.keystroke.key == "escape" && tab_drag::dragging(cx) {
                     cx.stop_propagation();
                     cx.defer(tab_drag::cancel);

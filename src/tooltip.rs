@@ -1,14 +1,10 @@
 use super::*;
+use gpui_kit::base::{Transition, transition};
 use std::collections::HashMap;
 use std::time::Instant;
 use windows_sys::Win32::Foundation::{POINT, RECT};
 use windows_sys::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint,
-};
-use windows_sys::Win32::UI::Controls::{
-    CloseThemeData, GetThemeAnimationProperty, GetThemeAnimationTransform, GetThemeTimingFunction,
-    OpenThemeData, TA_CUBIC_BEZIER, TA_TRANSFORM_OPACITY, TAP_TRANSFORMCOUNT, TATT_OPACITY,
-    TTFT_CUBIC_BEZIER,
 };
 use windows_sys::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows_sys::Win32::UI::WindowsAndMessaging::SPI_GETMOUSEHOVERTIME;
@@ -30,219 +26,101 @@ const DEFAULT_HOVER_TIME: u32 = 400;
 const SHOW_DELAY_FACTOR: f32 = 2.;
 const RESHOW_DELAY_FACTOR: f32 = 1.5;
 const RESHOW_WINDOW: Duration = Duration::from_millis(200);
-const SAFE_ZONE_CHECK: Duration = Duration::from_secs(1);
-const FADE_IN_STORYBOARD: i32 = 4;
-const FADE_OUT_STORYBOARD: i32 = 5;
-const FADE_TARGET: i32 = 1;
-const DEFAULT_FADE: Duration = Duration::from_millis(167);
-#[derive(Clone, Copy)]
-struct Fade {
-    delay: Duration,
-    duration: Duration,
-    curve: [f32; 4],
-}
+const FADE: Duration = Duration::from_millis(167);
 
-impl Fade {
-    const LINEAR: Self = Self {
-        delay: Duration::ZERO,
-        duration: DEFAULT_FADE,
-        curve: [0., 0., 1., 1.],
-    };
-
-    fn total(&self) -> Duration {
-        self.delay + self.duration
-    }
-
-    fn progress(&self, since: Instant, now: Instant) -> f32 {
-        let elapsed = now.saturating_duration_since(since);
-        if elapsed <= self.delay {
-            return 0.;
-        }
-        if self.duration.is_zero() {
-            return 1.;
-        }
-        let t = ((elapsed - self.delay).as_secs_f32() / self.duration.as_secs_f32()).min(1.);
-        let [x1, y1, x2, y2] = self.curve;
-        cubic_bezier(x1, y1, x2, y2)(t)
-    }
-}
-
-fn theme_fade(storyboard: i32) -> Fade {
-    let theme = unsafe { OpenThemeData(std::ptr::null_mut(), windows_sys::w!("Animations")) };
-    let timing = unsafe { OpenThemeData(std::ptr::null_mut(), windows_sys::w!("timingfunction")) };
-    let mut fade = None;
-    let mut count = 0u32;
-    let mut written = 0u32;
-    if unsafe {
-        GetThemeAnimationProperty(
-            theme,
-            storyboard,
-            FADE_TARGET,
-            TAP_TRANSFORMCOUNT,
-            (&raw mut count).cast(),
-            size_of::<u32>() as u32,
-            &mut written,
+fn card(p: Palette, text: SharedString, size: gpui_kit::Size<Pixels>) -> Div {
+    div()
+        .w(size.width)
+        .h(size.height)
+        .rounded(px(field::CONTROL_RADIUS))
+        .border_1()
+        .border_color(rgba(p.flyout_stroke))
+        .shadow(theme_shadow(p.dark, ELEVATION * 2., 1.))
+        .child(
+            div()
+                .relative()
+                .size_full()
+                .rounded(px(field::CONTROL_RADIUS - BORDER))
+                .overflow_hidden()
+                .bg(rgb(p.acrylic_fallback))
+                .child(div().absolute().size_full().bg(rgba(p.acrylic_luminosity)))
+                .child(
+                    div()
+                        .relative()
+                        .size_full()
+                        .px(px(PADDING_X))
+                        .pt(px(PADDING_TOP))
+                        .pb(px(PADDING_BOTTOM))
+                        .font_family(SMALL_FONT)
+                        .text_size(px(FONT_SIZE))
+                        .line_height(px(LINE_HEIGHT))
+                        .text_color(rgba(p.text_primary))
+                        .when(size.height <= px(SINGLE_HEIGHT), |this| {
+                            this.whitespace_nowrap()
+                        })
+                        .child(text),
+                ),
         )
-    } == 0
-    {
-        for index in 0..count {
-            let mut transform = TA_TRANSFORM_OPACITY::default();
-            if unsafe {
-                GetThemeAnimationTransform(
-                    theme,
-                    storyboard,
-                    FADE_TARGET,
-                    index,
-                    (&raw mut transform).cast(),
-                    size_of::<TA_TRANSFORM_OPACITY>() as u32,
-                    &mut written,
-                )
-            } != 0
-                || transform.header.eTransformType != TATT_OPACITY
-            {
-                continue;
-            }
-            let mut bezier = TA_CUBIC_BEZIER::default();
-            let curve = if unsafe {
-                GetThemeTimingFunction(
-                    timing,
-                    transform.header.dwTimingFunctionId as i32,
-                    (&raw mut bezier).cast(),
-                    size_of::<TA_CUBIC_BEZIER>() as u32,
-                    &mut written,
-                )
-            } == 0
-                && bezier.header.eTimingFunctionType == TTFT_CUBIC_BEZIER
-            {
-                [bezier.rX0, bezier.rY0, bezier.rX1, bezier.rY1]
-            } else {
-                Fade::LINEAR.curve
-            };
-            fade = Some(Fade {
-                delay: Duration::from_millis(transform.header.dwStartTime.into()),
-                duration: Duration::from_millis(transform.header.dwDurationTime.into()),
-                curve,
-            });
-            break;
-        }
-    }
-    unsafe {
-        CloseThemeData(theme);
-        CloseThemeData(timing);
-    }
-    fade.unwrap_or(Fade::LINEAR)
-}
-
-#[derive(Clone, Copy)]
-enum Phase {
-    In(Instant),
-    Out(Instant, f32),
 }
 
 struct TooltipView {
     text: SharedString,
     size: gpui_kit::Size<Pixels>,
-    phase: Phase,
-    fade_in: Fade,
-    fade_out: Fade,
-}
-
-impl TooltipView {
-    fn opacity(&self, now: Instant) -> f32 {
-        match self.phase {
-            Phase::In(since) => self.fade_in.progress(since, now),
-            Phase::Out(since, from) => from * (1. - self.fade_out.progress(since, now)),
-        }
-    }
-
-    fn settled(&self, now: Instant) -> bool {
-        let (since, fade) = match self.phase {
-            Phase::In(since) => (since, self.fade_in),
-            Phase::Out(since, _) => (since, self.fade_out),
-        };
-        now.saturating_duration_since(since) >= fade.total()
-    }
+    visible: bool,
 }
 
 impl Render for TooltipView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
-        let now = Instant::now();
-        if !self.settled(now) {
-            window.request_animation_frame();
-        }
-        div().size_full().opacity(self.opacity(now)).child(
+        let opacity = transition(
+            "tooltip-fade",
+            if self.visible { 1. } else { 0. },
+            Transition::new(FADE),
+            window,
+            cx,
+        );
+        div().size_full().opacity(opacity).child(
             div()
                 .absolute()
                 .left(px(SHADOW_SIDE))
                 .top(px(SHADOW_TOP))
-                .w(self.size.width)
-                .h(self.size.height)
-                .rounded(px(field::CONTROL_RADIUS))
-                .border_1()
-                .border_color(rgba(p.flyout_stroke))
-                .shadow(theme_shadow(p.dark, ELEVATION * 2., 1.))
-                .child(
-                    div()
-                        .relative()
-                        .size_full()
-                        .rounded(px(field::CONTROL_RADIUS - BORDER))
-                        .overflow_hidden()
-                        .bg(rgb(p.acrylic_fallback))
-                        .child(div().absolute().size_full().bg(rgba(p.acrylic_luminosity)))
-                        .child(
-                            div()
-                                .relative()
-                                .size_full()
-                                .px(px(PADDING_X))
-                                .pt(px(PADDING_TOP))
-                                .pb(px(PADDING_BOTTOM))
-                                .font_family(SMALL_FONT)
-                                .text_size(px(FONT_SIZE))
-                                .line_height(px(LINE_HEIGHT))
-                                .text_color(rgba(p.text_primary))
-                                .when(self.size.height <= px(SINGLE_HEIGHT), |this| {
-                                    this.whitespace_nowrap()
-                                })
-                                .child(self.text.clone()),
-                        ),
-                ),
+                .child(card(p, self.text.clone(), self.size)),
         )
     }
 }
 
 #[derive(Clone, PartialEq, Eq)]
-struct Key<W> {
-    window: W,
+struct Key {
+    window: AnyWindowHandle,
     id: ElementId,
 }
 
 #[derive(Clone)]
-struct Snap<W> {
-    key: Key<W>,
+struct Snap {
+    key: Key,
     text: SharedString,
     owner: RECT,
     entered: POINT,
 }
 
 #[derive(Default)]
-enum State<W> {
+enum State {
     #[default]
     Idle,
     Waiting {
-        snap: Snap<W>,
+        snap: Snap,
         epoch: u64,
     },
     Showing {
-        snap: Snap<W>,
+        snap: Snap,
     },
     Suppressed {
-        key: Key<W>,
+        key: Key,
     },
 }
 
-impl<W> State<W> {
-    fn key(&self) -> Option<&Key<W>> {
+impl State {
+    fn key(&self) -> Option<&Key> {
         match self {
             Self::Idle => None,
             Self::Waiting { snap, .. } | Self::Showing { snap } => Some(&snap.key),
@@ -251,17 +129,16 @@ impl<W> State<W> {
     }
 }
 
-enum Report<W> {
-    Owner(Snap<W>),
-    NoneIn(W),
-    Gone(Key<W>),
-    Press(W),
+enum Report {
+    Owner(Snap),
+    NoneIn(AnyWindowHandle),
+    Gone(Key),
+    Suppress(AnyWindowHandle),
     Dismiss,
-    LeftSafeZone,
     Timer(u64),
 }
 
-fn transition<W: PartialEq>(state: State<W>, report: Report<W>, epoch: &mut u64) -> State<W> {
+fn transition_state(state: State, report: Report, epoch: &mut u64) -> State {
     let mut wait = |snap| {
         *epoch += 1;
         State::Waiting {
@@ -270,15 +147,23 @@ fn transition<W: PartialEq>(state: State<W>, report: Report<W>, epoch: &mut u64)
         }
     };
     match (state, report) {
+        (State::Waiting { snap, epoch }, Report::Owner(seen)) if snap.key == seen.key => {
+            State::Waiting {
+                snap: Snap {
+                    text: seen.text,
+                    owner: seen.owner,
+                    ..snap
+                },
+                epoch,
+            }
+        }
         (state, Report::Owner(snap)) if state.key() == Some(&snap.key) => state,
         (_, Report::Owner(snap)) => wait(snap),
-        (state @ (State::Waiting { .. } | State::Suppressed { .. }), Report::NoneIn(window))
-            if state.key().is_some_and(|key| key.window == window) =>
-        {
+        (state, Report::NoneIn(window)) if state.key().is_some_and(|key| key.window == window) => {
             State::Idle
         }
         (state, Report::Gone(key)) if state.key() == Some(&key) => State::Idle,
-        (State::Waiting { snap, .. } | State::Showing { snap }, Report::Press(window))
+        (State::Waiting { snap, .. } | State::Showing { snap }, Report::Suppress(window))
             if snap.key.window == window =>
         {
             State::Suppressed { key: snap.key }
@@ -286,31 +171,11 @@ fn transition<W: PartialEq>(state: State<W>, report: Report<W>, epoch: &mut u64)
         (State::Waiting { snap, .. } | State::Showing { snap }, Report::Dismiss) => {
             State::Suppressed { key: snap.key }
         }
-        (State::Showing { .. }, Report::LeftSafeZone) => State::Idle,
         (State::Waiting { snap, epoch }, Report::Timer(fired)) if epoch == fired => {
             State::Showing { snap }
         }
         (state, _) => state,
     }
-}
-
-fn topmost<T>(entries: &[T], hovered: impl Fn(&T) -> bool) -> Option<&T> {
-    entries.iter().rev().find(|entry| hovered(entry))
-}
-
-fn observe<W>(
-    window: W,
-    hovered: bool,
-    pressed: bool,
-    owner: impl FnOnce() -> Option<Snap<W>>,
-) -> Option<Report<W>> {
-    if !hovered {
-        return Some(Report::NoneIn(window));
-    }
-    if pressed {
-        return None;
-    }
-    Some(owner().map_or(Report::NoneIn(window), Report::Owner))
 }
 
 struct Entry {
@@ -320,17 +185,15 @@ struct Entry {
 }
 
 struct Shown {
-    key: Key<AnyWindowHandle>,
+    key: Key,
     owner: RECT,
-    tip: RECT,
-    checked: POINT,
 }
 
 #[derive(Default)]
 struct Tooltips {
     popup: Option<overlay::Overlay<TooltipView>>,
     owners: HashMap<AnyWindowHandle, Vec<Entry>>,
-    state: State<AnyWindowHandle>,
+    state: State,
     epoch: u64,
     pressed: bool,
     shown: Option<Shown>,
@@ -338,7 +201,6 @@ struct Tooltips {
     control_only: bool,
     opening: Option<(u64, Task<()>)>,
     hiding: Option<Task<()>>,
-    watching: Option<Task<()>>,
 }
 
 impl Global for Tooltips {}
@@ -427,7 +289,7 @@ impl Element for Host {
         window.on_mouse_event(|_: &MouseDownEvent, phase, window, cx| {
             if phase == DispatchPhase::Capture {
                 cx.default_global::<Tooltips>().pressed = true;
-                report(Report::Press(window.window_handle()), cx);
+                report(Report::Suppress(window.window_handle()), cx);
             }
         });
         window.on_mouse_event(|_: &MouseUpEvent, phase, _, cx| {
@@ -435,6 +297,12 @@ impl Element for Host {
                 cx.default_global::<Tooltips>().pressed = false;
             }
         });
+        window.on_key_event(|_: &KeyDownEvent, phase, _, cx| {
+            if phase == DispatchPhase::Capture {
+                cx.default_global::<Tooltips>().control_only = false;
+            }
+        });
+        window.on_modifiers_changed(|event, _, cx| modifiers_changed(&event.modifiers, cx));
         window.defer(cx, evaluate);
         self.child.paint(window, cx);
     }
@@ -474,20 +342,27 @@ fn evaluate(window: &mut Window, cx: &mut App) {
                 })
         })
         .cloned();
-    let observed = observe(handle, window.is_window_hovered(), tips.pressed, || {
-        topmost(entries, |entry| {
-            entry.hitbox.is_hovered_at(position, window)
-        })
-        .map(|entry| Snap {
-            key: Key {
-                window: handle,
-                id: entry.id.clone(),
-            },
-            text: entry.text.clone(),
-            owner: overlay::screen_rect(entry.hitbox.bounds, scale, origin),
-            entered: cursor(),
-        })
-    });
+    let observed = if !window.is_window_hovered() {
+        Some(Report::NoneIn(handle))
+    } else if tips.pressed {
+        None
+    } else {
+        let hovered = entries
+            .iter()
+            .rev()
+            .find(|entry| entry.hitbox.is_hovered_at(position, window));
+        Some(hovered.map_or(Report::NoneIn(handle), |entry| {
+            Report::Owner(Snap {
+                key: Key {
+                    window: handle,
+                    id: entry.id.clone(),
+                },
+                text: entry.text.clone(),
+                owner: overlay::screen_rect(entry.hitbox.bounds, scale, origin),
+                entered: cursor(),
+            })
+        }))
+    };
     if let Some(key) = gone {
         report(Report::Gone(key), cx);
     }
@@ -496,10 +371,10 @@ fn evaluate(window: &mut Window, cx: &mut App) {
     }
 }
 
-fn report(report: Report<AnyWindowHandle>, cx: &mut App) {
+fn report(report: Report, cx: &mut App) {
     let tips = cx.default_global::<Tooltips>();
     let state = std::mem::take(&mut tips.state);
-    tips.state = transition(state, report, &mut tips.epoch);
+    tips.state = transition_state(state, report, &mut tips.epoch);
     cx.defer(render);
 }
 
@@ -569,29 +444,11 @@ pub(crate) fn window_closed(window: WindowId, cx: &mut App) {
     }
 }
 
-pub(crate) fn pointer_moved(cx: &mut App) {
-    let point = cursor();
-    let Some(tips) = cx.try_global::<Tooltips>() else {
-        return;
-    };
-    if tips
-        .shown
-        .as_ref()
-        .is_some_and(|shown| !in_safe_zone(point, shown.owner, shown.tip))
-    {
-        report(Report::LeftSafeZone, cx);
-    }
+pub(crate) fn window_deactivated(window: AnyWindowHandle, cx: &mut App) {
+    report(Report::Suppress(window), cx);
 }
 
-pub(crate) fn key_down(cx: &mut App) {
-    if let Some(tips) = cx.try_global::<Tooltips>()
-        && tips.control_only
-    {
-        cx.default_global::<Tooltips>().control_only = false;
-    }
-}
-
-pub(crate) fn modifiers_changed(modifiers: &Modifiers, cx: &mut App) {
+fn modifiers_changed(modifiers: &Modifiers, cx: &mut App) {
     let only_control = *modifiers == Modifiers::control();
     let released = !modifiers.modified();
     let tips = cx.default_global::<Tooltips>();
@@ -615,71 +472,22 @@ fn show_delay(reshow: bool) -> Duration {
     Duration::from_millis((hover * factor) as u64)
 }
 
-fn cross(o: (f64, f64), a: (f64, f64), b: (f64, f64)) -> f64 {
-    (a.0 - o.0) * (b.1 - o.1) - (a.1 - o.1) * (b.0 - o.0)
-}
-
-fn in_safe_zone(point: POINT, owner: RECT, tip: RECT) -> bool {
-    let inside = |r: RECT| {
-        point.x >= r.left && point.x <= r.right && point.y >= r.top && point.y <= r.bottom
-    };
-    if inside(owner) || inside(tip) {
-        return true;
-    }
-    let mut points: Vec<(f64, f64)> = [owner, tip]
-        .iter()
-        .flat_map(|r| {
-            [
-                (r.left, r.top),
-                (r.left, r.bottom),
-                (r.right, r.bottom),
-                (r.right, r.top),
-            ]
-        })
-        .map(|(x, y)| (x as f64, y as f64))
-        .collect();
-    points.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let mut hull: Vec<(f64, f64)> = Vec::new();
-    for pass in 0..2 {
-        let start = hull.len();
-        let ordered: Vec<(f64, f64)> = if pass == 0 {
-            points.clone()
-        } else {
-            points.iter().rev().copied().collect()
-        };
-        for p in ordered {
-            while hull.len() >= start + 2
-                && cross(hull[hull.len() - 2], hull[hull.len() - 1], p) <= 0.
-            {
-                hull.pop();
-            }
-            hull.push(p);
-        }
-        hull.pop();
-    }
-    let p = (point.x as f64, point.y as f64);
-    (0..hull.len()).all(|i| cross(hull[i], hull[(i + 1) % hull.len()], p) >= 0.)
-}
-
 fn hide(cx: &mut App) {
     let tips = cx.default_global::<Tooltips>();
     if tips.shown.take().is_none() {
         return;
     }
     tips.closed_at = Some(Instant::now());
-    tips.watching = None;
     let Some(popup) = &tips.popup else {
         return;
     };
     let (view, hwnd) = (popup.view.clone(), popup.hwnd);
-    let fade = view.update(cx, |view, cx| {
-        let now = Instant::now();
-        view.phase = Phase::Out(now, view.opacity(now));
+    view.update(cx, |view, cx| {
+        view.visible = false;
         cx.notify();
-        view.fade_out.total()
     });
     let task = cx.spawn(async move |cx| {
-        cx.background_executor().timer(fade).await;
+        cx.background_executor().timer(FADE).await;
         cx.update(|cx| {
             let tips = cx.default_global::<Tooltips>();
             if tips.shown.is_none() {
@@ -695,17 +503,11 @@ fn popup(cx: &mut App) -> Option<overlay::Overlay<TooltipView>> {
     if let Some(popup) = &cx.default_global::<Tooltips>().popup {
         return Some(popup.clone());
     }
-    let (fade_in, fade_out) = (
-        theme_fade(FADE_IN_STORYBOARD),
-        theme_fade(FADE_OUT_STORYBOARD),
-    );
     let popup = overlay::open(
         |_| TooltipView {
             text: "".into(),
             size: size(px(0.), px(0.)),
-            phase: Phase::Out(Instant::now(), 0.),
-            fade_in,
-            fade_out,
+            visible: false,
         },
         cx,
     )?;
@@ -713,7 +515,7 @@ fn popup(cx: &mut App) -> Option<overlay::Overlay<TooltipView>> {
     Some(popup)
 }
 
-fn measure(text: &SharedString, window: &mut Window) -> (f32, f32) {
+fn measure(text: &SharedString, window: &mut Window) -> gpui_kit::Size<Pixels> {
     let runs = [TextRun {
         len: text.len(),
         font: font(SMALL_FONT),
@@ -729,7 +531,7 @@ fn measure(text: &SharedString, window: &mut Window) -> (f32, f32) {
             .text_system()
             .shape_text(text.clone(), px(FONT_SIZE), &runs, Some(px(wrap)), None)
     else {
-        return (MAX_WIDTH, SINGLE_HEIGHT);
+        return size(px(MAX_WIDTH), px(SINGLE_HEIGHT));
     };
     let count: usize = lines
         .iter()
@@ -745,41 +547,13 @@ fn measure(text: &SharedString, window: &mut Window) -> (f32, f32) {
             }
         })
         .fold(0., f32::max);
-    (
-        (widest.ceil() + chrome).min(MAX_WIDTH),
-        SINGLE_HEIGHT + count.saturating_sub(1) as f32 * LINE_HEIGHT,
+    size(
+        px((widest.ceil() + chrome).min(MAX_WIDTH)),
+        px(SINGLE_HEIGHT + count.saturating_sub(1) as f32 * LINE_HEIGHT),
     )
 }
 
-fn watch_safe_zone(cx: &mut App) {
-    let task = cx.spawn(async move |cx| {
-        loop {
-            cx.background_executor().timer(SAFE_ZONE_CHECK).await;
-            let open = cx.update(|cx| {
-                let point = cursor();
-                let tips = cx.default_global::<Tooltips>();
-                let Some(shown) = tips.shown.as_mut() else {
-                    return false;
-                };
-                if point.x == shown.checked.x && point.y == shown.checked.y {
-                    return true;
-                }
-                shown.checked = point;
-                if in_safe_zone(point, shown.owner, shown.tip) {
-                    return true;
-                }
-                report(Report::LeftSafeZone, cx);
-                false
-            });
-            if !open {
-                break;
-            }
-        }
-    });
-    cx.default_global::<Tooltips>().watching = Some(task);
-}
-
-fn show(snap: Snap<AnyWindowHandle>, cx: &mut App) {
+fn show(snap: Snap, cx: &mut App) {
     let Some(popup) = popup(cx) else {
         return;
     };
@@ -804,30 +578,30 @@ fn show(snap: Snap<AnyWindowHandle>, cx: &mut App) {
         },
     );
     let text = snap.text.clone();
-    let Ok((width, height)) = popup.handle.update(cx, |_, window, cx| {
+    let Ok(measured) = popup.handle.update(cx, |_, window, cx| {
         let measured = measure(&text, window);
         popup.view.update(cx, |view, cx| {
             view.text = text.clone();
-            view.size = size(px(measured.0), px(measured.1));
-            view.phase = Phase::In(Instant::now());
+            view.size = measured;
+            view.visible = true;
             cx.notify();
         });
         measured
     }) else {
         return;
     };
-    let physical = |v: f32| (v * scale).round() as i32;
-    let (w, h) = (physical(width), physical(height));
-    let gap = physical(POINTER_OFFSET);
+    let physical = |v: Pixels| (v.as_f32() * scale).round() as i32;
+    let (w, h) = (physical(measured.width), physical(measured.height));
+    let gap = physical(px(POINTER_OFFSET));
     let left = (entered.x - w / 2).clamp(work.left, (work.right - w).max(work.left));
     let mut top = entered.y - gap - h;
     if top < work.top {
         top = entered.y + gap;
     }
     let (side, above, below) = (
-        physical(SHADOW_SIDE),
-        physical(SHADOW_TOP),
-        physical(SHADOW_BOTTOM),
+        physical(px(SHADOW_SIDE)),
+        physical(px(SHADOW_TOP)),
+        physical(px(SHADOW_BOTTOM)),
     );
     overlay::place(
         popup.hwnd,
@@ -844,13 +618,5 @@ fn show(snap: Snap<AnyWindowHandle>, cx: &mut App) {
     tips.shown = Some(Shown {
         key: snap.key,
         owner: snap.owner,
-        tip: RECT {
-            left,
-            top,
-            right: left + w,
-            bottom: top + h,
-        },
-        checked: cursor(),
     });
-    watch_safe_zone(cx);
 }
