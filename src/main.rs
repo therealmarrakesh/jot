@@ -974,6 +974,7 @@ fn main() {
 
         cx.on_window_closed(|cx, window| {
             tooltip::window_closed(window, cx);
+            keytips::window_closed(window, cx);
             if cx
                 .windows()
                 .into_iter()

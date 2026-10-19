@@ -1,5 +1,5 @@
 use super::*;
-use windows_sys::Win32::Foundation::HWND;
+use windows_sys::Win32::Foundation::{HWND, POINT, RECT};
 use windows_sys::Win32::Graphics::Dwm::{
     DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE, DWMWA_TRANSITIONS_FORCEDISABLED,
     DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND, DwmSetWindowAttribute,
@@ -33,7 +33,7 @@ const ACCENT_DISABLED: u32 = 0;
 type SetCompositionAttribute =
     unsafe extern "system" fn(hwnd: HWND, data: *mut CompositionAttribute) -> i32;
 
-pub(crate) fn clear_backdrop(hwnd: isize) {
+fn clear_backdrop(hwnd: isize) {
     let Some(address) = (unsafe {
         GetProcAddress(
             GetModuleHandleW(windows_sys::w!("user32.dll")),
@@ -148,21 +148,36 @@ pub(crate) fn open<V: Render>(
     Some(Overlay { view, handle, hwnd })
 }
 
-pub(crate) fn place(hwnd: isize, left: i32, top: i32, width: i32, height: i32) {
+pub(crate) fn screen_rect(bounds: Bounds<Pixels>, scale: f32, origin: POINT) -> RECT {
+    let physical = |v: Pixels| (v.as_f32() * scale).round() as i32;
+    RECT {
+        left: origin.x + physical(bounds.origin.x),
+        top: origin.y + physical(bounds.origin.y),
+        right: origin.x + physical(bounds.origin.x + bounds.size.width),
+        bottom: origin.y + physical(bounds.origin.y + bounds.size.height),
+    }
+}
+
+pub(crate) fn same_rect(a: RECT, b: RECT) -> bool {
+    (a.left, a.top, a.right, a.bottom) == (b.left, b.top, b.right, b.bottom)
+}
+
+pub(crate) fn place(hwnd: isize, rect: RECT) {
     unsafe {
         SetWindowPos(
             hwnd as HWND,
             HWND_TOPMOST,
-            left,
-            top,
-            width,
-            height,
+            rect.left,
+            rect.top,
+            rect.right - rect.left,
+            rect.bottom - rect.top,
             SWP_NOACTIVATE,
         );
     }
 }
 
 pub(crate) fn show(hwnd: isize) {
+    clear_backdrop(hwnd);
     unsafe { ShowWindow(hwnd as HWND, SW_SHOWNOACTIVATE) };
 }
 

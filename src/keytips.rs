@@ -1,5 +1,5 @@
 use super::*;
-use windows_sys::Win32::Foundation::POINT;
+use windows_sys::Win32::Foundation::{POINT, RECT};
 
 const FILL: u32 = 0x767676;
 const PADDING: f32 = 4.;
@@ -50,8 +50,17 @@ impl Render for KeyTipView {
 struct KeyTips {
     overlay: Option<overlay::Overlay<KeyTipView>>,
     owner: Option<AnyWindowHandle>,
-    shown: Vec<KeyTip>,
-    rect: [i32; 4],
+    rect: RECT,
+}
+
+impl KeyTips {
+    fn hide(&mut self) {
+        self.owner = None;
+        self.rect = RECT::default();
+        if let Some(overlay) = &self.overlay {
+            overlay::hide(overlay.hwnd);
+        }
+    }
 }
 
 impl Global for KeyTips {}
@@ -96,28 +105,24 @@ pub(crate) fn show(
     let state = cx.default_global::<KeyTips>();
     let Some(union) = tips.iter().map(|tip| tip.bounds).reduce(|a, b| a.union(&b)) else {
         if state.owner == Some(owner) {
-            state.owner = None;
-            state.shown.clear();
-            if let Some(overlay) = &state.overlay {
-                overlay::hide(overlay.hwnd);
-            }
+            state.hide();
         }
         return;
     };
     for tip in &mut tips {
         tip.bounds.origin -= union.origin;
     }
-    let physical = |value: Pixels| (value.as_f32() * scale).round() as i32;
-    let rect = [
-        origin.x + physical(union.origin.x),
-        origin.y + physical(union.origin.y),
-        physical(union.size.width),
-        physical(union.size.height),
-    ];
-    if state.owner == Some(owner) && state.shown == tips && state.rect == rect {
+    let rect = overlay::screen_rect(union, scale, origin);
+    let unchanged = state.owner == Some(owner) && overlay::same_rect(state.rect, rect);
+    let current = state.overlay.clone();
+    if unchanged
+        && current
+            .as_ref()
+            .is_some_and(|overlay| overlay.view.read(cx).tips == tips)
+    {
         return;
     }
-    let overlay = match state.overlay.clone() {
+    let overlay = match current {
         Some(overlay) => overlay,
         None => {
             let Some(overlay) = overlay::open(|_| KeyTipView { tips: Vec::new() }, cx) else {
@@ -128,14 +133,19 @@ pub(crate) fn show(
         }
     };
     overlay.view.update(cx, |view, cx| {
-        view.tips = tips.clone();
+        view.tips = tips;
         cx.notify();
     });
-    overlay::clear_backdrop(overlay.hwnd);
-    overlay::place(overlay.hwnd, rect[0], rect[1], rect[2], rect[3]);
+    overlay::place(overlay.hwnd, rect);
     overlay::show(overlay.hwnd);
     let state = cx.default_global::<KeyTips>();
     state.owner = Some(owner);
-    state.shown = tips;
     state.rect = rect;
+}
+
+pub(crate) fn window_closed(window: WindowId, cx: &mut App) {
+    let state = cx.default_global::<KeyTips>();
+    if state.owner.is_some_and(|owner| owner.window_id() == window) {
+        state.hide();
+    }
 }

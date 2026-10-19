@@ -328,20 +328,6 @@ fn observe<W>(
     Some(owner().map_or(Report::NoneIn(window), Report::Owner))
 }
 
-fn screen_rect(bounds: Bounds<Pixels>, scale: f32, origin: POINT) -> RECT {
-    let physical = |v: Pixels| (v.as_f32() * scale).round() as i32;
-    RECT {
-        left: origin.x + physical(bounds.origin.x),
-        top: origin.y + physical(bounds.origin.y),
-        right: origin.x + physical(bounds.origin.x + bounds.size.width),
-        bottom: origin.y + physical(bounds.origin.y + bounds.size.height),
-    }
-}
-
-fn same_rect(a: RECT, b: RECT) -> bool {
-    (a.left, a.top, a.right, a.bottom) == (b.left, b.top, b.right, b.bottom)
-}
-
 struct Entry {
     id: ElementId,
     text: SharedString,
@@ -495,9 +481,9 @@ fn evaluate(window: &mut Window, cx: &mut App) {
                 .is_none_or(|entry| {
                     tips.shown.as_ref().is_some_and(|shown| {
                         shown.key == **key
-                            && !same_rect(
+                            && !overlay::same_rect(
                                 shown.owner,
-                                screen_rect(entry.hitbox.bounds, scale, origin),
+                                overlay::screen_rect(entry.hitbox.bounds, scale, origin),
                             )
                     })
                 })
@@ -513,7 +499,7 @@ fn evaluate(window: &mut Window, cx: &mut App) {
                 id: entry.id.clone(),
             },
             text: entry.text.clone(),
-            owner: screen_rect(entry.hitbox.bounds, scale, origin),
+            owner: overlay::screen_rect(entry.hitbox.bounds, scale, origin),
             entered: cursor(),
         })
     });
@@ -823,8 +809,15 @@ fn show(snap: Snap<AnyWindowHandle>, cx: &mut App) {
     unsafe { GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y) };
     let scale = dpi_x as f32 / USER_DEFAULT_SCREEN_DPI as f32;
     let work = info.rcWork;
-    overlay::place(popup.hwnd, entered.x, entered.y, 1, 1);
-    overlay::clear_backdrop(popup.hwnd);
+    overlay::place(
+        popup.hwnd,
+        RECT {
+            left: entered.x,
+            top: entered.y,
+            right: entered.x + 1,
+            bottom: entered.y + 1,
+        },
+    );
     let text = snap.text.clone();
     let Ok((width, height)) = popup.handle.update(cx, |_, window, cx| {
         let measured = measure(&text, window);
@@ -853,10 +846,12 @@ fn show(snap: Snap<AnyWindowHandle>, cx: &mut App) {
     );
     overlay::place(
         popup.hwnd,
-        left - side,
-        top - above,
-        w + 2 * side,
-        h + above + below,
+        RECT {
+            left: left - side,
+            top: top - above,
+            right: left + w + side,
+            bottom: top + h + below,
+        },
     );
     overlay::show(popup.hwnd);
     let tips = cx.default_global::<Tooltips>();
