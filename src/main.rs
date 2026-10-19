@@ -11,7 +11,6 @@ mod measure;
 mod menu;
 mod overlay;
 mod palette;
-mod scrollbar;
 mod tab_drag;
 mod tabs;
 mod tooltip;
@@ -461,7 +460,6 @@ struct Jot {
     active: usize,
     hovered_tab: Option<EntityId>,
     strip: tabs::TabStrip,
-    scroll: scrollbar::ScrollChrome,
     hwnd: isize,
     menu_bar: Entity<MenuBar>,
     dialogs: dialog::Dialogs,
@@ -534,7 +532,6 @@ impl Jot {
             active: 0,
             hovered_tab: None,
             strip: tabs::TabStrip::new(),
-            scroll: scrollbar::ScrollChrome::new(),
             hwnd: window_hwnd(window),
             menu_bar,
             dialogs,
@@ -786,7 +783,6 @@ impl Jot {
     fn editor(
         &self,
         find: Option<impl IntoElement>,
-        scrollbars: impl IntoElement,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
@@ -800,12 +796,6 @@ impl Jot {
             .pl(px(EDITOR_PADDING_LEFT))
             .pt(px(EDITOR_PADDING_TOP))
             .bg(rgb(p.editor))
-            .on_mouse_move(cx.listener(|this, _, _, cx| this.scroll_activity(cx)))
-            .on_hover(cx.listener(|this, _, _, cx| this.scroll_activity(cx)))
-            .on_prepaint({
-                let area = self.scroll.area.clone();
-                move |bounds, _, _| area.set(bounds)
-            })
             .child(
                 div()
                     .relative()
@@ -829,7 +819,6 @@ impl Jot {
                     )
                     .child(self.caret(window, cx)),
             )
-            .child(scrollbars)
             .children(find)
     }
 
@@ -902,8 +891,6 @@ impl Render for Jot {
         let p = palette(cx);
         let status_bar = cx.global::<ViewSettings>().status_bar;
         self.sample_tabs(window);
-        self.sample_scrollbars(cx);
-        let scrollbars = self.scrollbars(window, cx);
         let dialogs = self.render_dialogs(window, cx);
         let min_size = self.min_size_probe(status_bar, cx);
         let find = self.render_find(window, cx);
@@ -952,7 +939,7 @@ impl Render for Jot {
                     .size_full()
                     .child(self.title_bar(window, cx))
                     .child(self.render_menu_bar(p))
-                    .child(self.editor(find, scrollbars, window, cx))
+                    .child(self.editor(find, window, cx))
                     .when(status_bar, |this| this.child(self.status_bar(cx))),
             )
             .children(dialogs)

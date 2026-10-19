@@ -717,9 +717,12 @@ impl Jot {
             .child(tooltip::owner(
                 "find-options",
                 "More options",
-                icon_button(p, "find-options", OPTIONS_GLYPH, ICON_SIZE, s)
-                    .on_click(cx.listener(|this, _, window, cx| this.open_find_options(window, cx)))
-                    .on_prepaint(move |bounds, _, _| options_bounds.set(bounds)),
+                measure::measured(
+                    icon_button(p, "find-options", OPTIONS_GLYPH, ICON_SIZE, s).on_click(
+                        cx.listener(|this, _, window, cx| this.open_find_options(window, cx)),
+                    ),
+                    move |bounds, _, _| options_bounds.set(bounds),
+                ),
             ))
             .child(tooltip::owner(
                 "find-close",

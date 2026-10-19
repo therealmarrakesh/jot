@@ -4,7 +4,7 @@ The crates in this folder are copies of crates.io releases, licensed under the A
 
 ## gpui-base 0.7.3
 
-- `src/input/base/state.rs`: wheel scrolling by WinUI's notch size (using the system's lines and characters per notch), a hidden built-in scrollbar, a scroll extent query, re-binding an editor to a new window when its tab moves between windows, an undo availability query, atomic multi-range replace, and line-ending normalization on paste.
+- `src/input/base/state.rs`: wheel scrolling by WinUI's notch size (using the system's lines and characters per notch), re-binding an editor to a new window when its tab moves between windows, an undo availability query, atomic multi-range replace, and line-ending normalization on paste.
 - `src/input/base/undo_manager.rs`: undo availability is exposed outside tests.
 - `src/input/editor/display_map/text_wrapper.rs`: lines made only of characters from certain Unicode ranges wrap by character width without text shaping.
 - `src/input/base/blink_cursor.rs`, `src/input/base/state.rs`: on Windows the caret blinks at the system's caret blink rate (never, when blinking is turned off) and stays visible for a full period after each move or edit. The caret starts visible, stops blinking while its window is inactive, and whether the caret shows can be queried (`show_cursor` is public).

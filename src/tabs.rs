@@ -403,7 +403,6 @@ impl Jot {
         let editor = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .soft_wrap(word_wrap)
-                .hide_scrollbar()
                 .viewport_wheel_step()
                 .default_value(text)
         });

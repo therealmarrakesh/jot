@@ -522,7 +522,6 @@ pub struct InputBaseState<M: InputModeKind> {
     /// The size of the scrollable content.
     pub(crate) scroll_size: gpui::Size<Pixels>,
     pub(super) editor_scrollbar_snapshot: Cell<Option<EditorScrollbarSnapshot>>,
-    hide_scrollbar: bool,
     viewport_wheel_step: bool,
     /// The unwrapped width of the longest line and what it was measured for.
     pub(super) longest_line_width: Cell<Option<(LongestLineKey, Pixels)>>,
@@ -712,25 +711,12 @@ impl<M: InputModeKind> InputBaseState<M> {
     /// thumb inside every text field, which is a control the field does not
     /// have.
     pub(crate) fn shows_scrollbar(&self) -> bool {
-        self.is_multi_line() && !self.hide_scrollbar
-    }
-
-    pub fn hide_scrollbar(mut self) -> Self {
-        self.hide_scrollbar = true;
-        self
+        self.is_multi_line()
     }
 
     pub fn viewport_wheel_step(mut self) -> Self {
         self.viewport_wheel_step = true;
         self
-    }
-
-    pub fn scroll_extent(&self) -> (gpui::Size<Pixels>, gpui::Size<Pixels>, Point<Pixels>) {
-        (
-            self.input_bounds.size,
-            self.scroll_size,
-            self.scroll_handle.offset(),
-        )
     }
 
     pub fn is_multi_line(&self) -> bool {
@@ -927,7 +913,6 @@ impl<M: InputModeKind> InputBaseState<M> {
             scroll_handle: ScrollHandle::new(),
             scroll_size: gpui::size(px(0.), px(0.)),
             editor_scrollbar_snapshot: Cell::new(None),
-            hide_scrollbar: false,
             viewport_wheel_step: false,
             longest_line_width: Cell::new(None),
             editor_paddings: Edges::default(),
