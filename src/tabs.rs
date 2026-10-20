@@ -34,6 +34,12 @@ const SCROLL_GLYPH_SIZE: f32 = 8.;
 const NEW_TAB_GAP: f32 = 5.;
 const NEW_TAB_GAP_SCROLLING: f32 = 3.;
 const SLIDE_DURATION: Duration = Duration::from_millis(200);
+const SLIDE_EASING: Easing = Easing::CubicBezier {
+    x1: 1. / 3.,
+    y1: 2. / 3.,
+    x2: 2. / 3.,
+    y2: 1.,
+};
 const REORDER_THRESHOLD: f32 = 16.;
 const CARET_LEFT: &str = "\u{EDD9}";
 const CARET_RIGHT: &str = "\u{EDDA}";
@@ -67,8 +73,7 @@ impl Motion {
     }
 
     fn value(&self, now: Instant) -> f32 {
-        let t = self.progress(now);
-        let eased = 1. - (1. - t) * (1. - t);
+        let eased = SLIDE_EASING.sample(self.progress(now));
         (self.from + (self.to - self.from) * eased).round()
     }
 
