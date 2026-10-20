@@ -212,15 +212,25 @@ pub(crate) fn owner(
 ) -> measure::Measured {
     let (id, text) = (id.into(), text.into());
     measure::measured(child, move |bounds, window, cx| {
-        let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
-        let owners = cx
-            .default_global::<Tooltips>()
-            .owners
-            .entry(window.window_handle())
-            .or_default();
-        owners.retain(|entry| entry.id != id);
-        owners.push(Entry { id, text, hitbox });
+        register(id, text, bounds, window, cx)
     })
+}
+
+pub(crate) fn register(
+    id: ElementId,
+    text: SharedString,
+    bounds: Bounds<Pixels>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
+    let owners = cx
+        .default_global::<Tooltips>()
+        .owners
+        .entry(window.window_handle())
+        .or_default();
+    owners.retain(|entry| entry.id != id);
+    owners.push(Entry { id, text, hitbox });
 }
 
 pub(crate) struct Host {

@@ -721,12 +721,11 @@ impl Jot {
                     .bg(rgba(p.layer))
                     .child(self.menu_bar.clone())
                     .child(div().flex_1())
-                    .child(tooltip::owner(
-                        "theme",
-                        "Switch theme",
+                    .child(
                         field::icon_button(
                             p,
                             "theme",
+                            "Switch theme",
                             if p.dark { SUN_GLYPH } else { MOON_GLYPH },
                             px(THEME_GLYPH_SIZE),
                             size(px(THEME_BUTTON_WIDTH), px(MENU_BAR_HEIGHT)),
@@ -737,7 +736,7 @@ impl Jot {
                         .on_click(|_, window, cx| {
                             window.dispatch_action(Box::new(ToggleTheme), cx);
                         }),
-                    )),
+                    ),
             )
             .child(separator(p))
     }

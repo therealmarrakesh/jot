@@ -117,6 +117,7 @@ pub(crate) fn button(
 pub(crate) fn icon_button(
     p: Palette,
     id: impl Into<ElementId>,
+    tip: impl Into<SharedString>,
     glyph: &'static str,
     glyph_size: Pixels,
     size: gpui::Size<Pixels>,
@@ -150,6 +151,7 @@ pub(crate) fn icon_button(
         })
         .when(enabled, |this| {
             this.pressed(move |style| style.text_color(rgba(p.text_secondary)))
+                .tooltip(tip)
         })
 }
 

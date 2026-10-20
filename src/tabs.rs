@@ -359,6 +359,7 @@ fn unsaved_dot(p: Palette, inset: f32) -> Div {
 fn strip_button(
     p: Palette,
     id: impl Into<ElementId>,
+    tip: &'static str,
     glyph: &'static str,
     glyph_size: f32,
     enabled: bool,
@@ -366,6 +367,7 @@ fn strip_button(
     field::icon_button(
         p,
         id,
+        tip,
         glyph,
         px(glyph_size),
         size(px(BUTTON_WIDTH), px(BUTTON_HEIGHT)),
@@ -822,17 +824,23 @@ impl Jot {
         inset: f32,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
-        let button = strip_button(p, ("close-tab", id), CLOSE_GLYPH, BUTTON_GLYPH_SIZE, true)
-            .absolute()
-            .top(px(CLOSE_BUTTON_TOP - inset))
-            .right(px(CLOSE_BUTTON_RIGHT - inset))
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .on_click(cx.listener(move |this, _, window, cx| {
-                if let Some(ix) = this.tab_index(id) {
-                    this.close_tab(ix, window, cx);
-                }
-            }));
-        tooltip::owner(("close-tab", id), "Close tab (Ctrl+W)", button)
+        strip_button(
+            p,
+            ("close-tab", id),
+            "Close tab (Ctrl+W)",
+            CLOSE_GLYPH,
+            BUTTON_GLYPH_SIZE,
+            true,
+        )
+        .absolute()
+        .top(px(CLOSE_BUTTON_TOP - inset))
+        .right(px(CLOSE_BUTTON_RIGHT - inset))
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_click(cx.listener(move |this, _, window, cx| {
+            if let Some(ix) = this.tab_index(id) {
+                this.close_tab(ix, window, cx);
+            }
+        }))
     }
 
     fn stop_repeat(&mut self, _: &MouseUpEvent, _: &mut Window, _: &mut Context<Self>) {
@@ -841,11 +849,17 @@ impl Jot {
 
     fn new_tab_button(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let p = palette(cx);
-        let button = strip_button(p, "new-tab", ADD_GLYPH, BUTTON_GLYPH_SIZE, true)
-            .ml(px(self.strip.new_tab_gap()))
-            .mt(px(BUTTON_TOP))
-            .on_click(cx.listener(|this, _, window, cx| this.add_tab(window, cx)));
-        tooltip::owner("new-tab", "New tab (Ctrl+N)", button)
+        strip_button(
+            p,
+            "new-tab",
+            "New tab (Ctrl+N)",
+            ADD_GLYPH,
+            BUTTON_GLYPH_SIZE,
+            true,
+        )
+        .ml(px(self.strip.new_tab_gap()))
+        .mt(px(BUTTON_TOP))
+        .on_click(cx.listener(|this, _, window, cx| this.add_tab(window, cx)))
     }
 
     fn scroll_button(&self, forward: bool, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -875,7 +889,7 @@ impl Jot {
         } else {
             (SCROLL_OUTER_PAD, SCROLL_INNER_PAD)
         };
-        let button = strip_button(p, key, glyph, SCROLL_GLYPH_SIZE, enabled)
+        let button = strip_button(p, key, tip, glyph, SCROLL_GLYPH_SIZE, enabled)
             .mt(px(BUTTON_TOP))
             .when(enabled, |this| {
                 this.text_color(rgba(p.text_secondary)).on_mouse_down(
@@ -899,7 +913,7 @@ impl Jot {
             .h_full()
             .pl(px(left))
             .pr(px(right))
-            .child(tooltip::owner(key, tip, button))
+            .child(button)
     }
 
     pub(crate) fn tab_strip(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {

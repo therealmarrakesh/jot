@@ -664,16 +664,15 @@ impl Jot {
             .flex()
             .items_center()
             .gap(u(ICON_GAP))
-            .child(tooltip::owner(
-                "find-expand",
-                if replace {
-                    "Close replace options"
-                } else {
-                    "Open replace options"
-                },
+            .child(
                 icon_button(
                     p,
                     "find-expand",
+                    if replace {
+                        "Close replace options"
+                    } else {
+                        "Open replace options"
+                    },
                     if replace {
                         CHEVRON_DOWN_GLYPH
                     } else {
@@ -686,7 +685,7 @@ impl Jot {
                     this.find.replace = !this.find.replace;
                     this.refocus_find(window, cx);
                 })),
-            ))
+            )
             .child(
                 div()
                     .flex_1()
@@ -701,34 +700,51 @@ impl Jot {
                         cx,
                     )),
             )
-            .child(tooltip::owner(
-                "find-next",
-                "Search down",
-                icon_button(p, "find-next", ARROW_DOWN_GLYPH, ICON_SIZE, s)
-                    .on_click(cx.listener(|this, _, window, cx| this.find_step(true, window, cx))),
+            .child(
+                icon_button(
+                    p,
+                    "find-next",
+                    "Search down",
+                    ARROW_DOWN_GLYPH,
+                    ICON_SIZE,
+                    s,
+                )
+                .on_click(cx.listener(|this, _, window, cx| this.find_step(true, window, cx))),
+            )
+            .child(
+                icon_button(
+                    p,
+                    "find-previous",
+                    "Search up",
+                    ARROW_UP_GLYPH,
+                    ICON_SIZE,
+                    s,
+                )
+                .on_click(cx.listener(|this, _, window, cx| this.find_step(false, window, cx))),
+            )
+            .child(measure::measured(
+                icon_button(
+                    p,
+                    "find-options",
+                    "More options",
+                    OPTIONS_GLYPH,
+                    ICON_SIZE,
+                    s,
+                )
+                .on_click(cx.listener(|this, _, window, cx| this.open_find_options(window, cx))),
+                move |bounds, _, _| options_bounds.set(bounds),
             ))
-            .child(tooltip::owner(
-                "find-previous",
-                "Search up",
-                icon_button(p, "find-previous", ARROW_UP_GLYPH, ICON_SIZE, s)
-                    .on_click(cx.listener(|this, _, window, cx| this.find_step(false, window, cx))),
-            ))
-            .child(tooltip::owner(
-                "find-options",
-                "More options",
-                measure::measured(
-                    icon_button(p, "find-options", OPTIONS_GLYPH, ICON_SIZE, s).on_click(
-                        cx.listener(|this, _, window, cx| this.open_find_options(window, cx)),
-                    ),
-                    move |bounds, _, _| options_bounds.set(bounds),
-                ),
-            ))
-            .child(tooltip::owner(
-                "find-close",
-                "Exit Find and Replace",
-                icon_button(p, "find-close", CLOSE_GLYPH, ICON_SIZE, s)
-                    .on_click(cx.listener(|this, _, window, cx| this.close_find(window, cx))),
-            ))
+            .child(
+                icon_button(
+                    p,
+                    "find-close",
+                    "Exit Find and Replace",
+                    CLOSE_GLYPH,
+                    ICON_SIZE,
+                    s,
+                )
+                .on_click(cx.listener(|this, _, window, cx| this.close_find(window, cx))),
+            )
     }
 
     fn find_replace_row(
@@ -823,6 +839,7 @@ fn notice(p: Palette, text: SharedString, top: f32) -> Div {
 fn icon_button(
     p: Palette,
     id: &'static str,
+    tip: &'static str,
     glyph: &'static str,
     size: f32,
     s: f32,
@@ -831,6 +848,7 @@ fn icon_button(
     field::icon_button(
         p,
         id,
+        tip,
         glyph,
         u(size),
         gpui::size(u(ICON_BUTTON_SIZE), u(ICON_BUTTON_SIZE)),

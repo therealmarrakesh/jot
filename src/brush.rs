@@ -66,6 +66,14 @@ impl Pressed {
 pub(crate) struct BrushTransition {
     element: Stateful<Div>,
     brushes: Brushes,
+    tooltip: Option<SharedString>,
+}
+
+impl BrushTransition {
+    pub(crate) fn tooltip(mut self, text: impl Into<SharedString>) -> Self {
+        self.tooltip = Some(text.into());
+        self
+    }
 }
 
 pub(crate) trait PressedExt: StatefulInteractiveElement + Sized {
@@ -90,6 +98,7 @@ impl BrushTransitionExt for Stateful<Div> {
         BrushTransition {
             element: self,
             brushes,
+            tooltip: None,
         }
     }
 }
@@ -152,6 +161,9 @@ impl Element for BrushTransition {
             let pressed = pressed.clone();
             move |_, window, _| pressed.set(false, window)
         });
+        if let Some((tip_id, text)) = Element::id(&self.element).zip(self.tooltip.take()) {
+            tooltip::register(tip_id, text, bounds, window, cx);
+        }
         let prepaint = self
             .element
             .prepaint(id, inspector_id, bounds, request_layout, window, cx);
