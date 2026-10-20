@@ -18,6 +18,7 @@ mod tooltip;
 use brush::{BrushTransitionExt as _, Brushes, PressedExt as _};
 use gpui_kit::Edges;
 use gpui_kit::base::Easing;
+use gpui_kit::base::actions::Cancel;
 use gpui_kit::component::input::{
     self, InputEvent, PrepaintCaretGeometry, Rope, RopeExt as _, Textarea, TextareaState,
 };
@@ -268,6 +269,7 @@ impl Global for ViewSettings {}
 
 fn key_bindings() -> Vec<KeyBinding> {
     vec![
+        KeyBinding::new("escape", Cancel, Some(CONTEXT)),
         KeyBinding::new("ctrl-n", NewTab, Some(CONTEXT)),
         KeyBinding::new("ctrl-shift-n", NewWindow, Some(CONTEXT)),
         KeyBinding::new("ctrl-o", Open, Some(CONTEXT)),
@@ -665,6 +667,16 @@ impl Jot {
         cx.notify();
     }
 
+    fn cancel(&mut self, _: &Cancel, window: &mut Window, cx: &mut Context<Self>) {
+        if tab_drag::dragging(cx) {
+            cx.defer(tab_drag::cancel);
+        } else if self.find.is_open() {
+            self.close_find(window, cx);
+        } else {
+            cx.propagate();
+        }
+    }
+
     fn close_window(&mut self, _: &CloseWindow, window: &mut Window, cx: &mut Context<Self>) {
         if self.request_close_window(window, cx) {
             window.remove_window();
@@ -890,17 +902,12 @@ impl Render for Jot {
         let root = div()
             .relative()
             .size_full()
-            .capture_key_down(|event: &KeyDownEvent, _, cx| {
-                if event.keystroke.key == "escape" && tab_drag::dragging(cx) {
-                    cx.stop_propagation();
-                    cx.defer(tab_drag::cancel);
-                }
-            })
             .capture_any_mouse_down(cx.listener(|this, _, _, cx| {
                 this.menu_bar
                     .update(cx, |menu_bar, cx| menu_bar.pointer_down(cx));
             }))
             .on_drop(cx.listener(Self::open_dropped))
+            .on_action(cx.listener(Self::cancel))
             .on_action(cx.listener(Self::show_context_menu))
             .on_action(cx.listener(Self::zoom_in))
             .on_action(cx.listener(Self::zoom_out))

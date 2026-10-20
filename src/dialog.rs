@@ -296,9 +296,6 @@ impl Jot {
                 .size_full()
                 .on_action(cx.listener(Self::confirm_dialog))
                 .on_action(cx.listener(Self::cancel_dialog))
-                .on_action(cx.listener(|this, _: &input::Escape, window, cx| {
-                    this.cancel_dialog(&Cancel, window, cx)
-                }))
                 .children(layers)
                 .focus_trap(("jot-dialog-trap", serial), &self.dialogs.focus),
         )

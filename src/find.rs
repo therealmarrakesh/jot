@@ -280,7 +280,7 @@ impl FindBar {
         self.is_open().then(|| self.focus.clone())
     }
 
-    fn is_open(&self) -> bool {
+    pub(crate) fn is_open(&self) -> bool {
         self.visible && !self.closing
     }
 
@@ -482,7 +482,7 @@ impl Jot {
         cx.notify();
     }
 
-    fn close_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn close_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.find.is_open() {
             return;
         }
@@ -648,9 +648,6 @@ impl Jot {
                 .bg(rgb(p.card_surface.panel))
                 .occlude()
                 .cursor_default()
-                .on_action(
-                    cx.listener(|this, _: &input::Escape, window, cx| this.close_find(window, cx)),
-                )
                 .child(query_row)
                 .children(replace_row),
         )
