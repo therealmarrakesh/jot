@@ -144,14 +144,11 @@ pub(crate) fn icon_button(
         }))
         .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
         .child(glyph)
-        .brush_transition(if enabled {
-            Brushes::subtle(p)
-        } else {
-            Brushes::solid(transparent_black().into())
-        })
+        .brush_transition(Brushes::subtle(p))
+        .disabled(!enabled)
+        .tooltip(tip)
         .when(enabled, |this| {
             this.pressed(move |style| style.text_color(rgba(p.text_secondary)))
-                .tooltip(tip)
         })
 }
 

@@ -1052,11 +1052,8 @@ impl MenuBar {
                             .text_size(px(COMMAND_LABEL_SIZE))
                             .child(command.label),
                     )
-                    .brush_transition(if enabled {
-                        Brushes::subtle(p)
-                    } else {
-                        Brushes::solid(transparent_black().into())
-                    })
+                    .brush_transition(Brushes::subtle(p))
+                    .disabled(!enabled)
                     .when(enabled, |this| {
                         this.pressed(move |style| style.text_color(rgba(p.text_secondary)))
                     })

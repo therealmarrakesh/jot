@@ -18,14 +18,6 @@ impl Brushes {
             pressed: rgba(p.subtle_tertiary),
         }
     }
-
-    pub(crate) fn solid(color: Rgba) -> Self {
-        Self {
-            rest: color,
-            hover: color,
-            pressed: color,
-        }
-    }
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -67,11 +59,17 @@ pub(crate) struct BrushTransition {
     element: Stateful<Div>,
     brushes: Brushes,
     tooltip: Option<SharedString>,
+    disabled: bool,
 }
 
 impl BrushTransition {
     pub(crate) fn tooltip(mut self, text: impl Into<SharedString>) -> Self {
         self.tooltip = Some(text.into());
+        self
+    }
+
+    pub(crate) fn disabled(mut self, disabled: bool) -> Self {
+        self.disabled = disabled;
         self
     }
 }
@@ -99,6 +97,7 @@ impl BrushTransitionExt for Stateful<Div> {
             element: self,
             brushes,
             tooltip: None,
+            disabled: false,
         }
     }
 }
@@ -134,35 +133,40 @@ impl Element for BrushTransition {
         window: &mut Window,
         cx: &mut App,
     ) -> Self::PrepaintState {
-        let pressed = id.map_or_else(Pressed::default, |id| {
-            window.with_element_state(id, |pressed: Option<Pressed>, _| {
-                let pressed = pressed.unwrap_or_default();
-                (pressed.clone(), pressed)
-            })
-        });
-        let interactivity = self.element.interactivity();
-        interactivity.capture_any_mouse_down({
-            let pressed = pressed.clone();
-            move |event, window, _| {
-                if event.button == MouseButton::Left {
-                    pressed.set(true, window);
-                }
+        let pressed = match id {
+            Some(id) if !self.disabled => {
+                window.with_element_state(id, |pressed: Option<Pressed>, _| {
+                    let pressed = pressed.unwrap_or_default();
+                    (pressed.clone(), pressed)
+                })
             }
-        });
-        interactivity.capture_any_mouse_up({
-            let pressed = pressed.clone();
-            move |event, window, _| {
-                if event.button == MouseButton::Left {
-                    pressed.set(false, window);
+            _ => Pressed::default(),
+        };
+        if !self.disabled {
+            let interactivity = self.element.interactivity();
+            interactivity.capture_any_mouse_down({
+                let pressed = pressed.clone();
+                move |event, window, _| {
+                    if event.button == MouseButton::Left {
+                        pressed.set(true, window);
+                    }
                 }
+            });
+            interactivity.capture_any_mouse_up({
+                let pressed = pressed.clone();
+                move |event, window, _| {
+                    if event.button == MouseButton::Left {
+                        pressed.set(false, window);
+                    }
+                }
+            });
+            interactivity.on_mouse_up_out(MouseButton::Left, {
+                let pressed = pressed.clone();
+                move |_, window, _| pressed.set(false, window)
+            });
+            if let Some((tip_id, text)) = Element::id(&self.element).zip(self.tooltip.take()) {
+                tooltip::register(tip_id, text, bounds, window, cx);
             }
-        });
-        interactivity.on_mouse_up_out(MouseButton::Left, {
-            let pressed = pressed.clone();
-            move |_, window, _| pressed.set(false, window)
-        });
-        if let Some((tip_id, text)) = Element::id(&self.element).zip(self.tooltip.take()) {
-            tooltip::register(tip_id, text, bounds, window, cx);
         }
         let prepaint = self
             .element
@@ -180,9 +184,10 @@ impl Element for BrushTransition {
         window: &mut Window,
         cx: &mut App,
     ) {
-        let hovered = hitbox
-            .as_ref()
-            .is_some_and(|hitbox| hitbox.is_hovered(window));
+        let hovered = !self.disabled
+            && hitbox
+                .as_ref()
+                .is_some_and(|hitbox| hitbox.is_hovered(window));
         let Brushes {
             rest,
             hover,
@@ -203,7 +208,7 @@ impl Element for BrushTransition {
             cx,
         );
         self.element.style().background = Some(color.into());
-        if let Some(hitbox) = hitbox.clone() {
+        if let Some(hitbox) = hitbox.clone().filter(|_| !self.disabled) {
             window.on_mouse_event(move |_: &MouseMoveEvent, phase, window, _| {
                 if phase == DispatchPhase::Capture && hitbox.is_hovered(window) != hovered {
                     window.refresh();
