@@ -451,7 +451,7 @@ struct TabData {
 
 struct Tab {
     data: TabData,
-    slot: tabs::Slot,
+    slot: tabs::SlotKey,
     _changes: Subscription,
 }
 
@@ -597,7 +597,7 @@ impl Jot {
 
     fn activate_tab(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         self.active = ix;
-        self.reveal_tab(ix, cx);
+        self.reveal_tab(ix);
         self.active_editor().focus_handle(cx).focus(window, cx);
         self.sync_selection_focus(cx);
         self.refresh_title(window);
@@ -687,7 +687,12 @@ impl Jot {
         self.close_tab(self.active, window, cx);
     }
 
-    fn title_bar(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn title_bar(
+        &self,
+        strip: &tabs::StripFrame,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let p = palette(cx);
 
         div()
@@ -710,7 +715,7 @@ impl Jot {
                             .h(px(tabs::STRIP_TOP))
                             .window_control_area(WindowControlArea::Drag),
                     )
-                    .child(self.tab_strip(cx)),
+                    .child(self.tab_strip(strip, cx)),
             )
             .child(
                 div()
@@ -894,7 +899,7 @@ impl Render for Jot {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
         let status_bar = cx.global::<ViewSettings>().status_bar;
-        self.sample_tabs(window);
+        let strip = self.sample_tabs(window, cx);
         let dialogs = self.render_dialogs(window, cx);
         let min_size = self.min_size_probe(status_bar, cx);
         let find = self.render_find(window, cx);
@@ -933,7 +938,7 @@ impl Render for Jot {
                     .key_context(CONTEXT)
                     .v_flex()
                     .size_full()
-                    .child(self.title_bar(window, cx))
+                    .child(self.title_bar(&strip, window, cx))
                     .child(self.render_menu_bar(p))
                     .child(self.editor(find, window, cx))
                     .when(status_bar, |this| this.child(self.status_bar(cx))),
