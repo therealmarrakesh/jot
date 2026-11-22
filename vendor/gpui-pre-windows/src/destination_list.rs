@@ -1,6 +1,5 @@
 use std::{path::PathBuf, sync::Arc};
 
-use itertools::Itertools;
 use smallvec::SmallVec;
 use windows::{
     Win32::{
@@ -144,6 +143,7 @@ fn add_recent_folders(
                 folder_path
                     .iter()
                     .map(|path| format!("\"{}\"", path.display()))
+                    .collect::<Vec<_>>()
                     .join(" "),
             );
 
@@ -165,6 +165,7 @@ fn add_recent_folders(
                         .map(|name| name.to_string_lossy())
                         .unwrap_or_else(|| p.to_string_lossy())
                 })
+                .collect::<Vec<_>>()
                 .join(", ");
 
             tasks.AddObject(&create_shell_link(

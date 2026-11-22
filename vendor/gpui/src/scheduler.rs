@@ -1,5 +1,5 @@
+use crate::futures::channel::oneshot;
 use async_task::Runnable;
-use futures::channel::oneshot;
 use std::{
     any::Any,
     future::Future,
@@ -440,46 +440,6 @@ impl BackgroundExecutor {
     }
 }
 
-pub struct DedicatedExecutor {
-    sender: async_channel::Sender<Runnable<RunnableMeta>>,
-    _session: Task<()>,
-}
-
-impl DedicatedExecutor {
-    #[track_caller]
-    pub fn new(executor: &BackgroundExecutor) -> Self {
-        let (sender, receiver) = async_channel::unbounded::<Runnable<RunnableMeta>>();
-        let session = executor.spawn_dedicated(move |_executor| async move {
-            while let Ok(runnable) = receiver.recv().await {
-                runnable.run();
-            }
-        });
-        Self {
-            sender,
-            _session: session,
-        }
-    }
-
-    #[track_caller]
-    pub fn spawn<F>(&self, future: F) -> Task<F::Output>
-    where
-        F: Future + Send + 'static,
-        F::Output: Send + 'static,
-    {
-        let sender = self.sender.clone();
-        let (runnable, task) = async_task::Builder::new()
-            .metadata(RunnableMeta::new_with_callers_location())
-            .spawn(
-                move |_| future,
-                move |runnable| {
-                    let _ = sender.try_send(runnable);
-                },
-            );
-        runnable.schedule();
-        Task(TaskState::Spawned(task))
-    }
-}
-
 #[must_use]
 pub struct Task<T>(TaskState<T>);
 
@@ -502,7 +462,7 @@ enum RendezvousState<T> {
 }
 
 pub(crate) struct RendezvousReceiver<T> {
-    shared: Arc<parking_lot::Mutex<RendezvousState<T>>>,
+    shared: Arc<crate::sync::Mutex<RendezvousState<T>>>,
 }
 
 impl<T> RendezvousReceiver<T> {
@@ -559,7 +519,7 @@ impl<T> Drop for RendezvousReceiver<T> {
 }
 
 pub(crate) struct RendezvousSender<T> {
-    shared: Arc<parking_lot::Mutex<RendezvousState<T>>>,
+    shared: Arc<crate::sync::Mutex<RendezvousState<T>>>,
 }
 
 impl<T> RendezvousSender<T> {
@@ -599,7 +559,7 @@ impl<T> Task<T> {
     }
 
     pub(crate) fn rendezvous() -> (Self, RendezvousSender<T>) {
-        let shared = Arc::new(parking_lot::Mutex::new(RendezvousState::Pending(None)));
+        let shared = Arc::new(crate::sync::Mutex::new(RendezvousState::Pending(None)));
         (
             Task(TaskState::Rendezvous(RendezvousReceiver {
                 shared: shared.clone(),

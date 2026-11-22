@@ -3,7 +3,7 @@ use std::ops::Range;
 
 use gpui::{Context, Window};
 use ropey::Rope;
-use sum_tree::Bias;
+use crate::base::input::rope_ext::Bias;
 
 use super::{InputBaseState, RopeExt as _};
 use crate::base::text_boundary::word_range_from_chars;

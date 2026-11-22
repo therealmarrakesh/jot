@@ -1,5 +1,4 @@
-use etagere::BucketedAtlasAllocator;
-use parking_lot::Mutex;
+use gpui::sync::Mutex;
 use windows::Win32::Graphics::{
     Direct3D11::{
         D3D11_BIND_SHADER_RESOURCE, D3D11_BOX, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
@@ -10,8 +9,156 @@ use windows::Win32::Graphics::{
 
 use gpui::{
     AtlasBackend, AtlasKey, AtlasState, AtlasTextureId, AtlasTextureKind, AtlasTextureList,
-    AtlasTile, Bounds, DevicePixels, PlatformAtlas, Point, Size,
+    AtlasTile, Bounds, DevicePixels, PlatformAtlas, Point, Size, TileId,
 };
+
+struct Shelf {
+    y: i32,
+    height: i32,
+    free_spans: Vec<(i32, i32)>,
+}
+
+struct ShelfSlot {
+    shelf_ix: usize,
+    x: i32,
+    width: i32,
+}
+
+/// Simple shelf-based 2D rectangle allocator with deallocation and span coalescing.
+struct ShelfAtlasAllocator {
+    width: i32,
+    height: i32,
+    next_y: i32,
+    shelves: Vec<Shelf>,
+    slots: Vec<Option<ShelfSlot>>,
+    free_slot_ids: Vec<u32>,
+}
+
+impl ShelfAtlasAllocator {
+    fn new(size: Size<DevicePixels>) -> Self {
+        Self {
+            width: size.width.0,
+            height: size.height.0,
+            next_y: 0,
+            shelves: Vec::new(),
+            slots: Vec::new(),
+            free_slot_ids: Vec::new(),
+        }
+    }
+
+    fn allocate(&mut self, size: Size<DevicePixels>) -> Option<(TileId, Point<DevicePixels>)> {
+        let w = size.width.0;
+        let h = size.height.0;
+        if w <= 0 || h <= 0 || w > self.width || h > self.height {
+            return None;
+        }
+
+        // First fit an existing shelf with a reasonably tight height bucket.
+        let mut best: Option<(usize, usize, i32)> = None;
+        for (shelf_ix, shelf) in self.shelves.iter().enumerate() {
+            if shelf.height < h || shelf.height > h.saturating_mul(2).saturating_add(8) {
+                continue;
+            }
+            if let Some((span_ix, _)) = shelf
+                .free_spans
+                .iter()
+                .enumerate()
+                .find(|(_, (_, span_w))| *span_w >= w)
+            {
+                let waste = shelf.height - h;
+                if best.is_none_or(|(_, _, best_waste)| waste < best_waste) {
+                    best = Some((shelf_ix, span_ix, waste));
+                    if waste == 0 {
+                        break;
+                    }
+                }
+            }
+        }
+
+        let (shelf_ix, x, y) = if let Some((shelf_ix, span_ix, _)) = best {
+            let shelf = &mut self.shelves[shelf_ix];
+            let (span_x, span_w) = shelf.free_spans[span_ix];
+            if span_w == w {
+                shelf.free_spans.remove(span_ix);
+            } else {
+                shelf.free_spans[span_ix] = (span_x + w, span_w - w);
+            }
+            (shelf_ix, span_x, shelf.y)
+        } else {
+            // Open a new shelf.
+            let shelf_h = ((h + 3) & !3).min(self.height - self.next_y);
+            if shelf_h < h {
+                return None;
+            }
+            let y = self.next_y;
+            self.next_y += shelf_h;
+            let mut free_spans = Vec::new();
+            if w < self.width {
+                free_spans.push((w, self.width - w));
+            }
+            let shelf_ix = self.shelves.len();
+            self.shelves.push(Shelf {
+                y,
+                height: shelf_h,
+                free_spans,
+            });
+            (shelf_ix, 0, y)
+        };
+
+        let slot = ShelfSlot {
+            shelf_ix,
+            x,
+            width: w,
+        };
+        let id = if let Some(id) = self.free_slot_ids.pop() {
+            self.slots[id as usize] = Some(slot);
+            id
+        } else {
+            let id = self.slots.len() as u32;
+            self.slots.push(Some(slot));
+            id
+        };
+        Some((
+            TileId(id),
+            Point {
+                x: DevicePixels(x),
+                y: DevicePixels(y),
+            },
+        ))
+    }
+
+    fn deallocate(&mut self, id: TileId) {
+        let Some(slot) = self.slots.get_mut(id.0 as usize).and_then(Option::take) else {
+            return;
+        };
+        self.free_slot_ids.push(id.0);
+
+        let shelf = &mut self.shelves[slot.shelf_ix];
+        let pos = shelf
+            .free_spans
+            .partition_point(|&(span_x, _)| span_x < slot.x);
+        shelf.free_spans.insert(pos, (slot.x, slot.width));
+
+        // Coalesce with right neighbor.
+        if pos + 1 < shelf.free_spans.len() {
+            let (lx, lw) = shelf.free_spans[pos];
+            let (rx, rw) = shelf.free_spans[pos + 1];
+            if lx + lw == rx {
+                shelf.free_spans[pos] = (lx, lw + rw);
+                shelf.free_spans.remove(pos + 1);
+            }
+        }
+        // Coalesce with left neighbor.
+        if pos > 0 {
+            let (lx, lw) = shelf.free_spans[pos - 1];
+            let (rx, rw) = shelf.free_spans[pos];
+            if lx + lw == rx {
+                shelf.free_spans[pos - 1] = (lx, lw + rw);
+                shelf.free_spans.remove(pos);
+            }
+        }
+    }
+}
 
 pub(crate) struct DirectXAtlas(Mutex<AtlasState<DirectXAtlasTextures>>);
 
@@ -26,7 +173,7 @@ struct DirectXAtlasTextures {
 struct DirectXAtlasTexture {
     id: AtlasTextureId,
     bytes_per_pixel: u32,
-    allocator: BucketedAtlasAllocator,
+    allocator: ShelfAtlasAllocator,
     texture: ID3D11Texture2D,
     view: [Option<ID3D11ShaderResourceView>; 1],
     live_atlas_keys: u32,
@@ -119,7 +266,7 @@ impl AtlasBackend for DirectXAtlasTextures {
         };
 
         if let Some(mut texture) = texture_slot.take() {
-            texture.allocator.deallocate(tile.tile_id.into());
+            texture.allocator.deallocate(tile.tile_id);
             texture.decrement_ref_count();
             if texture.is_unreferenced() {
                 textures.free_list.push(texture.id.index as usize);
@@ -236,7 +383,7 @@ impl DirectXAtlasTextures {
                 kind,
             },
             bytes_per_pixel,
-            allocator: etagere::BucketedAtlasAllocator::new(device_size_to_etagere(size)),
+            allocator: ShelfAtlasAllocator::new(size),
             texture,
             view,
             live_atlas_keys: 0,
@@ -262,14 +409,11 @@ impl DirectXAtlasTextures {
 
 impl DirectXAtlasTexture {
     fn allocate(&mut self, size: Size<DevicePixels>) -> Option<AtlasTile> {
-        let allocation = self.allocator.allocate(device_size_to_etagere(size))?;
+        let (tile_id, origin) = self.allocator.allocate(size)?;
         let tile = AtlasTile {
             texture_id: self.id,
-            tile_id: allocation.id.into(),
-            bounds: Bounds {
-                origin: etagere_point_to_device(allocation.rectangle.min),
-                size,
-            },
+            tile_id,
+            bounds: Bounds { origin, size },
             padding: 0,
         };
         self.live_atlas_keys += 1;
@@ -325,17 +469,6 @@ impl DirectXAtlasTexture {
 
     fn is_unreferenced(&mut self) -> bool {
         self.live_atlas_keys == 0
-    }
-}
-
-fn device_size_to_etagere(size: Size<DevicePixels>) -> etagere::Size {
-    etagere::Size::new(size.width.into(), size.height.into())
-}
-
-fn etagere_point_to_device(value: etagere::Point) -> Point<DevicePixels> {
-    Point {
-        x: DevicePixels::from(value.x),
-        y: DevicePixels::from(value.y),
     }
 }
 

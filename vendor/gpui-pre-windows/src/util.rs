@@ -1,7 +1,7 @@
 use std::sync::{Mutex, OnceLock, PoisonError};
 
 use anyhow::Context;
-use gpui_util::ResultExt;
+use gpui::gpui_util::ResultExt;
 use windows::{
     UI::{
         Color,

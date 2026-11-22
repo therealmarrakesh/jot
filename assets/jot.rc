@@ -1,4 +1,5 @@
 1 ICON "{icon}"
+1 24 "{manifest}"
 
 1 VERSIONINFO
 FILEVERSION {major},{minor},{patch},0

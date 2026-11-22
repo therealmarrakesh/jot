@@ -11,8 +11,8 @@ use std::{
 };
 
 use anyhow::{Context as _, Result};
-use futures::channel::oneshot::{self, Receiver};
-use gpui_util::ResultExt;
+use gpui::futures::channel::oneshot::{self, Receiver};
+use gpui::gpui_util::ResultExt;
 use raw_window_handle as rwh;
 use smallvec::SmallVec;
 use windows::{
@@ -803,8 +803,8 @@ impl PlatformWindow for WindowsWindow {
         self.0
             .executor
             .spawn(async move {
-                if let futures::future::Either::Left((result, _)) =
-                    futures::future::select(dialog, done_tx.cancellation()).await
+                if let gpui::futures::future::Either::Left((result, _)) =
+                    gpui::futures::future::select(dialog, done_tx.cancellation()).await
                     && let Some(Some(clicked)) = result
                         .context("native dialog thread stopped")
                         .and_then(|result| result)

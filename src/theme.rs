@@ -3,7 +3,7 @@ use crate::base::{
     ColorTokens, ScrollbarEntrance, ScrollbarMode, ScrollbarMotion, ScrollbarStyles,
     ScrollbarTheme, Theme, ThemeAppearance,
 };
-use windows_sys::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_BINARY, RegGetValueW};
+use windows::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_BINARY, RegGetValueW};
 
 #[derive(Clone, Copy)]
 pub(crate) struct Surface {
@@ -274,15 +274,15 @@ fn system_accent(dark: bool) -> Option<u32> {
     let status = unsafe {
         RegGetValueW(
             HKEY_CURRENT_USER,
-            windows_sys::w!(r"Software\Microsoft\Windows\CurrentVersion\Explorer\Accent"),
-            windows_sys::w!("AccentPalette"),
+            windows::core::w!(r"Software\Microsoft\Windows\CurrentVersion\Explorer\Accent"),
+            windows::core::w!("AccentPalette"),
             RRF_RT_REG_BINARY,
-            std::ptr::null_mut(),
-            shades.as_mut_ptr().cast(),
-            &mut len,
+            None,
+            Some(shades.as_mut_ptr().cast()),
+            Some(&mut len),
         )
     };
     let at = if dark { 4 } else { 16 };
-    (status == 0 && len as usize >= at + 3)
+    (status.0 == 0 && len as usize >= at + 3)
         .then(|| u32::from_be_bytes([0, shades[at], shades[at + 1], shades[at + 2]]))
 }

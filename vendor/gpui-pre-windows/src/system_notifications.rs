@@ -5,8 +5,7 @@ use std::collections::{HashMap, hash_map::DefaultHasher};
 use std::hash::{Hash as _, Hasher as _};
 use std::rc::Rc;
 
-use futures::StreamExt as _;
-use futures::channel::mpsc;
+use gpui::futures::channel::mpsc;
 use gpui::{
     ForegroundExecutor, SharedString, SystemNotification, SystemNotificationResponse, Task,
 };

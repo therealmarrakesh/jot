@@ -1,5 +1,4 @@
 use bitflags::bitflags;
-use thiserror::Error;
 
 use crate::Pixels;
 
@@ -78,6 +77,13 @@ pub struct LayerShellOptions {
 
 /// An error indicating that an action failed because the compositor doesn't support the required
 /// layer_shell protocol.
-#[derive(Debug, Error)]
-#[error("Compositor doesn't support zwlr_layer_shell_v1")]
+#[derive(Debug)]
 pub struct LayerShellNotSupportedError;
+
+impl std::fmt::Display for LayerShellNotSupportedError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Compositor doesn't support zwlr_layer_shell_v1")
+    }
+}
+
+impl std::error::Error for LayerShellNotSupportedError {}

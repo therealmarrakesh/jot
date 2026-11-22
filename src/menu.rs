@@ -1,9 +1,9 @@
 use super::*;
 use crate::base::actions::{Cancel, Confirm, SelectDown, SelectLeft, SelectRight, SelectUp};
 use crate::base::{MotionStatus, Presence, Transition, transition_with_status};
-use windows_sys::Win32::System::DataExchange::IsClipboardFormatAvailable;
-use windows_sys::Win32::System::Ole::CF_UNICODETEXT;
-use windows_sys::Win32::UI::WindowsAndMessaging::SPI_GETMENUSHOWDELAY;
+use windows::Win32::System::DataExchange::IsClipboardFormatAvailable;
+use windows::Win32::System::Ole::CF_UNICODETEXT;
+use windows::Win32::UI::WindowsAndMessaging::SPI_GETMENUSHOWDELAY;
 
 const CONTEXT: &str = "JotMenu";
 const OPEN_DURATION: Duration = Duration::from_millis(250);
@@ -135,7 +135,7 @@ fn context_menu(editor: &TextareaState) -> (Vec<CommandButton>, Vec<Entry>) {
 }
 
 fn clipboard_has_text() -> bool {
-    unsafe { IsClipboardFormatAvailable(CF_UNICODETEXT.into()) != 0 }
+    unsafe { IsClipboardFormatAvailable(CF_UNICODETEXT.0 as u32) }.is_ok()
 }
 
 fn display_label(label: &str) -> SharedString {

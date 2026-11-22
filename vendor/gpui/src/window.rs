@@ -24,18 +24,15 @@ use crate::{
 use crate::gestures::{GestureTuning, RecognizedTouchGesture, TouchGestureRecognizer};
 use crate::interactive::TouchEvent;
 use anyhow::{Context as _, Result, anyhow};
-use collections::{FxHashMap, FxHashSet};
-use derive_more::{Deref, DerefMut};
-use futures::channel::oneshot;
-use gpui_util::post_inc;
-use gpui_util::{ResultExt, measure};
-use itertools::FoldWhile::{Continue, Done};
-use itertools::Itertools;
-use parking_lot::RwLock;
+use crate::collections::{FxHashMap, FxHashSet};
+use crate::futures::channel::oneshot;
+use crate::gpui_util::post_inc;
+use crate::gpui_util::{ResultExt, measure};
+use crate::sync::RwLock;
 use raw_window_handle::{HandleError, HasDisplayHandle, HasWindowHandle};
-use refineable::Refineable;
+use crate::Refineable;
 use crate::scheduler::Instant;
-use slotmap::SlotMap;
+use crate::slotmap::SlotMap;
 use smallvec::SmallVec;
 use std::{
     any::{Any, TypeId},
@@ -55,7 +52,7 @@ use std::{
     thread::AccessError,
     time::Duration,
 };
-use uuid::Uuid;
+use crate::Uuid;
 
 mod prompts;
 
@@ -320,7 +317,7 @@ pub struct FocusOutEvent {
     pub blurred: WeakFocusHandle,
 }
 
-slotmap::new_key_type! {
+crate::new_key_type! {
     /// A globally unique identifier for a focusable element.
     pub struct FocusId;
 }
@@ -815,17 +812,23 @@ impl HitboxId {
 
 /// A rectangular region that potentially blocks hitboxes inserted prior.
 /// See [Window::insert_hitbox] for more details.
-#[derive(Clone, Debug, Deref)]
+#[derive(Clone, Debug)]
 pub struct Hitbox {
     /// A unique identifier for the hitbox.
     pub id: HitboxId,
     /// The bounds of the hitbox.
-    #[deref]
     pub bounds: Bounds<Pixels>,
     /// The content mask when the hitbox was inserted.
     pub content_mask: ContentMask<Pixels>,
     /// Flags that specify hitbox behavior.
     pub behavior: HitboxBehavior,
+}
+
+impl std::ops::Deref for Hitbox {
+    type Target = Bounds<Pixels>;
+    fn deref(&self) -> &Self::Target {
+        &self.bounds
+    }
 }
 
 impl Hitbox {
@@ -1134,18 +1137,18 @@ impl Frame {
     }
 
     pub(crate) fn cursor_style(&self, window: &Window) -> Option<CursorStyle> {
-        self.cursor_styles
-            .iter()
-            .rev()
-            .fold_while(None, |style, request| match request.hitbox_id {
-                None => Done(Some(request.style)),
-                Some(hitbox_id) => Continue(style.or_else(|| {
-                    hitbox_id
-                        .is_hovered_ignoring_last_input(window)
-                        .then_some(request.style)
-                })),
-            })
-            .into_inner()
+        let mut style = None;
+        for request in self.cursor_styles.iter().rev() {
+            match request.hitbox_id {
+                None => return Some(request.style),
+                Some(hitbox_id) => {
+                    if style.is_none() && hitbox_id.is_hovered_ignoring_last_input(window) {
+                        style = Some(request.style);
+                    }
+                }
+            }
+        }
+        style
     }
 
     pub(crate) fn hit_test(&self, position: Point<Pixels>) -> HitTest {
@@ -6795,7 +6798,7 @@ impl Window {
 }
 
 // #[derive(Clone, Copy, Eq, PartialEq, Hash)]
-slotmap::new_key_type! {
+crate::new_key_type! {
     /// A unique identifier for a window.
     pub struct WindowId;
 }
@@ -6809,18 +6812,28 @@ impl WindowId {
 
 impl From<u64> for WindowId {
     fn from(value: u64) -> Self {
-        WindowId(slotmap::KeyData::from_ffi(value))
+        WindowId(crate::slotmap::KeyData::from_ffi(value))
     }
 }
 
 /// A handle to a window with a specific root view type.
 /// Note that this does not keep the window alive on its own.
-#[derive(Deref, DerefMut)]
 pub struct WindowHandle<V> {
-    #[deref]
-    #[deref_mut]
     pub(crate) any_handle: AnyWindowHandle,
     state_type: PhantomData<fn(V) -> V>,
+}
+
+impl<V> std::ops::Deref for WindowHandle<V> {
+    type Target = AnyWindowHandle;
+    fn deref(&self) -> &Self::Target {
+        &self.any_handle
+    }
+}
+
+impl<V> std::ops::DerefMut for WindowHandle<V> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.any_handle
+    }
 }
 
 impl<V> Debug for WindowHandle<V> {

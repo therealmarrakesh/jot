@@ -1,9 +1,8 @@
 use crate::{App, AppContext, GpuiBorrow, VisualContext, Window, seal::Sealed};
 use anyhow::{Context as _, Result};
-use collections::FxHashSet;
-use derive_more::{Deref, DerefMut};
-use parking_lot::{RwLock, RwLockUpgradableReadGuard};
-use slotmap::{KeyData, SecondaryMap, SlotMap};
+use crate::collections::FxHashSet;
+use crate::sync::RwLock;
+use crate::slotmap::{KeyData, SecondaryMap, SlotMap};
 use std::{
     any::{Any, TypeId, type_name},
     cell::RefCell,
@@ -22,9 +21,9 @@ use std::{
 use super::Context;
 use crate::util::atomic_incr_if_not_zero;
 #[cfg(any(test, gpui_leak_detection))]
-use collections::HashMap;
+use crate::collections::HashMap;
 
-slotmap::new_key_type! {
+crate::new_key_type! {
     /// A unique identifier for a entity across the application.
     pub struct EntityId;
 }
@@ -260,8 +259,20 @@ impl Drop for LeaseInner {
     }
 }
 
-#[derive(Deref, DerefMut)]
 pub(crate) struct Slot<T>(Entity<T>);
+
+impl<T> std::ops::Deref for Slot<T> {
+    type Target = Entity<T>;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<T> std::ops::DerefMut for Slot<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
 
 /// A dynamically typed reference to a entity, which can be downcast into a `Entity<T>`.
 pub struct AnyEntity {
@@ -360,17 +371,19 @@ impl Clone for AnyEntity {
 impl Drop for AnyEntity {
     fn drop(&mut self) {
         if let Some(entity_map) = self.entity_map.upgrade() {
-            let entity_map = entity_map.upgradable_read();
-            let count = entity_map
-                .counts
-                .get(self.entity_id)
-                .expect("detected over-release of a handle.");
-            let prev_count = count.fetch_sub(1, SeqCst);
-            assert_ne!(prev_count, 0, "Detected over-release of a entity.");
+            let prev_count = {
+                let entity_map = entity_map.read();
+                let count = entity_map
+                    .counts
+                    .get(self.entity_id)
+                    .expect("detected over-release of a handle.");
+                let prev_count = count.fetch_sub(1, SeqCst);
+                assert_ne!(prev_count, 0, "Detected over-release of a entity.");
+                prev_count
+            };
             if prev_count == 1 {
                 // We were the last reference to this entity, so we can remove it.
-                let mut entity_map = RwLockUpgradableReadGuard::upgrade(entity_map);
-                entity_map.dropped_entity_ids.push(self.entity_id);
+                entity_map.write().dropped_entity_ids.push(self.entity_id);
             }
         }
 
@@ -431,12 +444,22 @@ impl std::fmt::Debug for AnyEntity {
 
 /// A strong, well-typed reference to a struct which is managed
 /// by GPUI
-#[derive(Deref, DerefMut)]
 pub struct Entity<T> {
-    #[deref]
-    #[deref_mut]
     pub(crate) any_entity: AnyEntity,
     pub(crate) entity_type: PhantomData<fn(T) -> T>,
+}
+
+impl<T> std::ops::Deref for Entity<T> {
+    type Target = AnyEntity;
+    fn deref(&self) -> &Self::Target {
+        &self.any_entity
+    }
+}
+
+impl<T> std::ops::DerefMut for Entity<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.any_entity
+    }
 }
 
 impl<T> Sealed for Entity<T> {}
@@ -761,12 +784,22 @@ impl PartialOrd for AnyWeakEntity {
 }
 
 /// A weak reference to a entity of the given type.
-#[derive(Deref, DerefMut)]
 pub struct WeakEntity<T> {
-    #[deref]
-    #[deref_mut]
     any_entity: AnyWeakEntity,
     entity_type: PhantomData<fn(T) -> T>,
+}
+
+impl<T> std::ops::Deref for WeakEntity<T> {
+    type Target = AnyWeakEntity;
+    fn deref(&self) -> &Self::Target {
+        &self.any_entity
+    }
+}
+
+impl<T> std::ops::DerefMut for WeakEntity<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.any_entity
+    }
 }
 
 impl<T> std::fmt::Debug for WeakEntity<T> {
@@ -972,7 +1005,7 @@ pub(crate) struct LeakDetector {
 #[derive(Default)]
 pub struct LeakDetectorSnapshot {
     #[cfg(any(test, gpui_leak_detection))]
-    entity_ids: collections::HashSet<EntityId>,
+    entity_ids: crate::collections::HashSet<EntityId>,
 }
 
 #[cfg(any(test, gpui_leak_detection))]
@@ -989,7 +1022,7 @@ impl LeakDetector {
         entity_id: EntityId,
         type_name: Option<&'static str>,
     ) -> HandleId {
-        let id = gpui_util::post_inc(&mut self.next_handle_id);
+        let id = crate::gpui_util::post_inc(&mut self.next_handle_id);
         let handle_id = HandleId { id };
         let handles = self
             .entity_handles

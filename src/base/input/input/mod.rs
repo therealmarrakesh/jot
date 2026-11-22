@@ -6,9 +6,16 @@ use super::{InputBaseState, InputMode};
 pub type InputState = InputBaseState<InputMode>;
 
 /// An unstyled single-line text input.
-#[derive(IntoElement)]
 pub struct Input {
     state: Entity<InputState>,
+}
+
+impl IntoElement for Input {
+    type Element = gpui::ViewElement<Self>;
+
+    fn into_element(self) -> Self::Element {
+        gpui::ViewElement::new(self)
+    }
 }
 
 impl Input {

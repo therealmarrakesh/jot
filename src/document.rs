@@ -4,16 +4,17 @@ use std::fs;
 use std::io::{self, BufWriter, Read, Seek, SeekFrom, Write};
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
-use std::ptr::{null, null_mut};
-use windows_sys::Win32::Foundation::ERROR_UNABLE_TO_MOVE_REPLACEMENT_2;
-use windows_sys::Win32::Globalization::{
-    CP_UTF8, GetACP, MultiByteToWideChar, WC_NO_BEST_FIT_CHARS, WideCharToMultiByte,
+use windows::Win32::Foundation::ERROR_UNABLE_TO_MOVE_REPLACEMENT_2;
+use windows::Win32::Globalization::{
+    CP_UTF8, GetACP, MULTI_BYTE_TO_WIDE_CHAR_FLAGS, MultiByteToWideChar, WC_NO_BEST_FIT_CHARS,
+    WideCharToMultiByte,
 };
-use windows_sys::Win32::Storage::FileSystem::{
+use windows::Win32::Storage::FileSystem::{
     REPLACEFILE_IGNORE_ACL_ERRORS, REPLACEFILE_IGNORE_MERGE_ERRORS, ReplaceFileW,
 };
-use windows_sys::Win32::System::Com::CoTaskMemFree;
-use windows_sys::Win32::UI::Shell::{FOLDERID_Documents, KF_FLAG_DEFAULT, SHGetKnownFolderPath};
+use windows::Win32::System::Com::CoTaskMemFree;
+use windows::Win32::UI::Shell::{FOLDERID_Documents, KF_FLAG_DEFAULT, SHGetKnownFolderPath};
+use windows::core::{BOOL, PCWSTR};
 
 const UTF8_BOM: &[u8] = b"\xef\xbb\xbf";
 const UTF16_LE_BOM: &[u8] = b"\xff\xfe";
@@ -558,20 +559,21 @@ fn replace(path: &Path, target: &Path, temp: &Path) -> io::Result<()> {
     let (replaced, replacement, backed_up) = (wide(target), wide(temp), wide(&backup));
     let done = unsafe {
         ReplaceFileW(
-            replaced.as_ptr(),
-            replacement.as_ptr(),
-            backed_up.as_ptr(),
+            PCWSTR(replaced.as_ptr()),
+            PCWSTR(replacement.as_ptr()),
+            PCWSTR(backed_up.as_ptr()),
             REPLACEFILE_IGNORE_MERGE_ERRORS | REPLACEFILE_IGNORE_ACL_ERRORS,
-            null(),
-            null(),
+            None,
+            None,
         )
-    } != 0;
+    }
+    .is_ok();
     if done {
         fs::remove_file(&backup).ok();
         return Ok(());
     }
     let error = io::Error::last_os_error();
-    if error.raw_os_error() == Some(ERROR_UNABLE_TO_MOVE_REPLACEMENT_2 as i32)
+    if error.raw_os_error() == Some(ERROR_UNABLE_TO_MOVE_REPLACEMENT_2.0 as i32)
         && fs::rename(&backup, target).is_err()
     {
         let shown = |sibling: &Path| path.with_file_name(sibling.file_name().unwrap_or_default());
@@ -627,12 +629,18 @@ fn ansi_decode(bytes: &[u8]) -> Option<String> {
     if bytes.is_empty() {
         return Some(String::new());
     }
-    let input = i32::try_from(bytes.len()).ok()?;
+    let _ = i32::try_from(bytes.len()).ok()?;
     let page = unsafe { GetACP() };
-    let length = unsafe { MultiByteToWideChar(page, 0, bytes.as_ptr(), input, null_mut(), 0) };
+    let length = unsafe { MultiByteToWideChar(page, MULTI_BYTE_TO_WIDE_CHAR_FLAGS(0), bytes, None) };
     let mut wide = vec![0u16; usize::try_from(length).ok().filter(|&n| n > 0)?];
-    let written =
-        unsafe { MultiByteToWideChar(page, 0, bytes.as_ptr(), input, wide.as_mut_ptr(), length) };
+    let written = unsafe {
+        MultiByteToWideChar(
+            page,
+            MULTI_BYTE_TO_WIDE_CHAR_FLAGS(0),
+            bytes,
+            Some(&mut wide),
+        )
+    };
     wide.truncate(usize::try_from(written).ok()?);
     Some(String::from_utf16_lossy(&wide))
 }
@@ -641,24 +649,21 @@ fn ansi_wide_lossy(page: u32, wide: &[u16]) -> io::Result<bool> {
     if wide.is_empty() {
         return Ok(false);
     }
-    let input = i32::try_from(wide.len()).expect("chunk fits in i32");
-    let mut used_default = 0;
+    let mut used_default = BOOL(0);
     let written = unsafe {
         WideCharToMultiByte(
             page,
             WC_NO_BEST_FIT_CHARS,
-            wide.as_ptr(),
-            input,
-            null_mut(),
-            0,
-            null(),
-            &mut used_default,
+            wide,
+            None,
+            None,
+            Some(&mut used_default),
         )
     };
     if written == 0 {
         return Err(io::Error::last_os_error());
     }
-    Ok(used_default != 0)
+    Ok(used_default.as_bool())
 }
 
 fn encode_ansi_wide(page: u32, wide: &[u16], out: &mut Vec<u8>) -> io::Result<()> {
@@ -666,35 +671,13 @@ fn encode_ansi_wide(page: u32, wide: &[u16], out: &mut Vec<u8>) -> io::Result<()
     if wide.is_empty() {
         return Ok(());
     }
-    let input = i32::try_from(wide.len()).expect("chunk fits in i32");
-    let length = unsafe {
-        WideCharToMultiByte(
-            page,
-            WC_NO_BEST_FIT_CHARS,
-            wide.as_ptr(),
-            input,
-            null_mut(),
-            0,
-            null(),
-            null_mut(),
-        )
-    };
+    let length = unsafe { WideCharToMultiByte(page, WC_NO_BEST_FIT_CHARS, wide, None, None, None) };
     if length == 0 {
         return Err(io::Error::last_os_error());
     }
     out.resize(usize::try_from(length).unwrap_or(0), 0);
-    let written = unsafe {
-        WideCharToMultiByte(
-            page,
-            WC_NO_BEST_FIT_CHARS,
-            wide.as_ptr(),
-            input,
-            out.as_mut_ptr(),
-            length,
-            null(),
-            null_mut(),
-        )
-    };
+    let written =
+        unsafe { WideCharToMultiByte(page, WC_NO_BEST_FIT_CHARS, wide, Some(out), None, None) };
     if written == 0 {
         return Err(io::Error::last_os_error());
     }
@@ -734,24 +717,9 @@ pub(crate) fn default_directory(path: Option<&Path>) -> PathBuf {
 }
 
 fn documents() -> Option<PathBuf> {
-    let mut path = null_mut();
-    let result = unsafe {
-        SHGetKnownFolderPath(
-            &FOLDERID_Documents,
-            KF_FLAG_DEFAULT as u32,
-            null_mut(),
-            &mut path,
-        )
-    };
-    let documents = (result >= 0 && !path.is_null()).then(|| {
-        let length = (0..)
-            .take_while(|&ix| unsafe { *path.add(ix) } != 0)
-            .count();
-        PathBuf::from(OsString::from_wide(unsafe {
-            std::slice::from_raw_parts(path, length)
-        }))
-    });
-    unsafe { CoTaskMemFree(path.cast()) };
+    let path = unsafe { SHGetKnownFolderPath(&FOLDERID_Documents, KF_FLAG_DEFAULT, None) }.ok()?;
+    let documents = (!path.0.is_null()).then(|| PathBuf::from(OsString::from_wide(unsafe { path.as_wide() })));
+    unsafe { CoTaskMemFree(Some(path.0.cast())) };
     documents
 }
 

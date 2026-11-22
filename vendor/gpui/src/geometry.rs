@@ -4,9 +4,8 @@
 
 use anyhow::{Context as _, anyhow};
 use core::fmt::Debug;
-use derive_more::{Add, AddAssign, Div, DivAssign, Mul, Neg, Sub, SubAssign};
-use refineable::Refineable;
-use std::ops::{AddAssign, Range};
+use crate::refineable::{IsEmpty, Refineable};
+use std::ops::{AddAssign, DivAssign, Range, SubAssign};
 use std::{
     cmp::{self, PartialOrd},
     fmt::{self, Display},
@@ -60,27 +59,123 @@ pub trait Along {
 /// let point = Point { x: 10, y: 20 };
 /// println!("{:?}", point); // Outputs: Point { x: 10, y: 20 }
 /// ```
-#[derive(
-    Refineable,
-    Default,
-    Add,
-    AddAssign,
-    Sub,
-    SubAssign,
-    Copy,
-    Debug,
-    PartialEq,
-    Eq,
-    Hash,
-    Neg,
-)]
-#[refineable(Debug, PartialEq)]
+#[derive(Default, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(C)]
 pub struct Point<T: Clone + Debug + Default + PartialEq> {
     /// The x coordinate of the point.
     pub x: T,
     /// The y coordinate of the point.
     pub y: T,
+}
+
+#[derive(Clone, PartialEq)]
+pub struct PointRefinement<T: Clone + Debug + Default + PartialEq> {
+    pub x: Option<T>,
+    pub y: Option<T>,
+}
+
+impl<T: Clone + Debug + Default + PartialEq> Default for PointRefinement<T> {
+    fn default() -> Self {
+        Self { x: None, y: None }
+    }
+}
+
+impl<T: Clone + Debug + Default + PartialEq> PointRefinement<T> {
+    pub fn is_some(&self) -> bool {
+        self.x.is_some() || self.y.is_some()
+    }
+}
+
+impl<T: Clone + Debug + Default + PartialEq> fmt::Debug for PointRefinement<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut s = f.debug_struct("PointRefinement");
+        let mut all = true;
+        if self.x.is_some() { s.field("x", &self.x); } else { all = false; }
+        if self.y.is_some() { s.field("y", &self.y); } else { all = false; }
+        if all { s.finish() } else { s.finish_non_exhaustive() }
+    }
+}
+
+impl<T: Clone + Debug + Default + PartialEq> IsEmpty for PointRefinement<T> {
+    fn is_empty(&self) -> bool {
+        self.x.is_none() && self.y.is_none()
+    }
+}
+
+impl<T: Clone + Debug + Default + PartialEq> From<PointRefinement<T>> for Point<T> {
+    fn from(v: PointRefinement<T>) -> Self {
+        Self {
+            x: v.x.unwrap_or_default(),
+            y: v.y.unwrap_or_default(),
+        }
+    }
+}
+
+impl<T: Clone + Debug + Default + PartialEq> Refineable for Point<T> {
+    type Refinement = PointRefinement<T>;
+    fn refine(&mut self, r: &Self::Refinement) {
+        if let Some(v) = &r.x { self.x = v.clone(); }
+        if let Some(v) = &r.y { self.y = v.clone(); }
+    }
+    fn refined(mut self, r: Self::Refinement) -> Self {
+        if let Some(v) = r.x { self.x = v; }
+        if let Some(v) = r.y { self.y = v; }
+        self
+    }
+    fn is_superset_of(&self, r: &Self::Refinement) -> bool {
+        if let Some(v) = &r.x && &self.x != v { return false; }
+        if let Some(v) = &r.y && &self.y != v { return false; }
+        true
+    }
+    fn subtract(&self, r: &Self::Refinement) -> Self::Refinement {
+        PointRefinement {
+            x: if r.x.as_ref() == Some(&self.x) { None } else { Some(self.x.clone()) },
+            y: if r.y.as_ref() == Some(&self.y) { None } else { Some(self.y.clone()) },
+        }
+    }
+}
+
+impl<T: Clone + Debug + Default + PartialEq> Refineable for PointRefinement<T> {
+    type Refinement = PointRefinement<T>;
+    fn refine(&mut self, r: &Self::Refinement) {
+        if let Some(v) = &r.x { self.x = Some(v.clone()); }
+        if let Some(v) = &r.y { self.y = Some(v.clone()); }
+    }
+    fn refined(mut self, r: Self::Refinement) -> Self {
+        if let Some(v) = r.x { self.x = Some(v); }
+        if let Some(v) = r.y { self.y = Some(v); }
+        self
+    }
+    fn is_superset_of(&self, r: &Self::Refinement) -> bool {
+        if r.x.is_some() && self.x != r.x { return false; }
+        if r.y.is_some() && self.y != r.y { return false; }
+        true
+    }
+    fn subtract(&self, r: &Self::Refinement) -> Self::Refinement {
+        PointRefinement {
+            x: if self.x == r.x { None } else { self.x.clone() },
+            y: if self.y == r.y { None } else { self.y.clone() },
+        }
+    }
+}
+
+impl<T: Add<Output = O> + Clone + Debug + Default + PartialEq, O: Clone + Debug + Default + PartialEq> Add for Point<T> {
+    type Output = Point<O>;
+    fn add(self, rhs: Self) -> Self::Output { Point { x: self.x + rhs.x, y: self.y + rhs.y } }
+}
+impl<T: AddAssign + Clone + Debug + Default + PartialEq> AddAssign for Point<T> {
+    fn add_assign(&mut self, rhs: Self) { self.x += rhs.x; self.y += rhs.y; }
+}
+impl<T: Sub<Output = O> + Clone + Debug + Default + PartialEq, O: Clone + Debug + Default + PartialEq> Sub for Point<T> {
+    type Output = Point<O>;
+    fn sub(self, rhs: Self) -> Self::Output { Point { x: self.x - rhs.x, y: self.y - rhs.y } }
+}
+impl<T: SubAssign + Clone + Debug + Default + PartialEq> SubAssign for Point<T> {
+    fn sub_assign(&mut self, rhs: Self) { self.x -= rhs.x; self.y -= rhs.y; }
+}
+impl<T: Neg<Output = O> + Clone + Debug + Default + PartialEq, O: Clone + Debug + Default + PartialEq> Neg for Point<T> {
+    type Output = Point<O>;
+    fn neg(self) -> Self::Output { Point { x: -self.x, y: -self.y } }
 }
 
 /// Constructs a new `Point<T>` with the given x and y coordinates.
@@ -382,16 +477,121 @@ impl<T: Clone + Debug + Default + PartialEq + Display> Display for Point<T> {
 ///
 /// This struct is generic over the type `T`, which can be any type that implements `Clone`, `Default`, and `Debug`.
 /// It is commonly used to specify dimensions for elements in a UI, such as a window or element.
-#[derive(
-    Add, Clone, Copy, Default, Div, Hash, Neg, PartialEq, Refineable, Sub,
-)]
-#[refineable(Debug, PartialEq)]
+#[derive(Clone, Copy, Default, Hash, PartialEq)]
 #[repr(C)]
 pub struct Size<T: Clone + Debug + Default + PartialEq> {
     /// The width component of the size.
     pub width: T,
     /// The height component of the size.
     pub height: T,
+}
+
+#[derive(Clone, PartialEq)]
+pub struct SizeRefinement<T: Clone + Debug + Default + PartialEq> {
+    pub width: Option<T>,
+    pub height: Option<T>,
+}
+
+impl<T: Clone + Debug + Default + PartialEq> Default for SizeRefinement<T> {
+    fn default() -> Self {
+        Self { width: None, height: None }
+    }
+}
+
+impl<T: Clone + Debug + Default + PartialEq> SizeRefinement<T> {
+    pub fn is_some(&self) -> bool {
+        self.width.is_some() || self.height.is_some()
+    }
+}
+
+impl<T: Clone + Debug + Default + PartialEq> fmt::Debug for SizeRefinement<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut s = f.debug_struct("SizeRefinement");
+        let mut all = true;
+        if self.width.is_some() { s.field("width", &self.width); } else { all = false; }
+        if self.height.is_some() { s.field("height", &self.height); } else { all = false; }
+        if all { s.finish() } else { s.finish_non_exhaustive() }
+    }
+}
+
+impl<T: Clone + Debug + Default + PartialEq> IsEmpty for SizeRefinement<T> {
+    fn is_empty(&self) -> bool {
+        self.width.is_none() && self.height.is_none()
+    }
+}
+
+impl<T: Clone + Debug + Default + PartialEq> From<SizeRefinement<T>> for Size<T> {
+    fn from(v: SizeRefinement<T>) -> Self {
+        Self {
+            width: v.width.unwrap_or_default(),
+            height: v.height.unwrap_or_default(),
+        }
+    }
+}
+
+impl<T: Clone + Debug + Default + PartialEq> Refineable for Size<T> {
+    type Refinement = SizeRefinement<T>;
+    fn refine(&mut self, r: &Self::Refinement) {
+        if let Some(v) = &r.width { self.width = v.clone(); }
+        if let Some(v) = &r.height { self.height = v.clone(); }
+    }
+    fn refined(mut self, r: Self::Refinement) -> Self {
+        if let Some(v) = r.width { self.width = v; }
+        if let Some(v) = r.height { self.height = v; }
+        self
+    }
+    fn is_superset_of(&self, r: &Self::Refinement) -> bool {
+        if let Some(v) = &r.width && &self.width != v { return false; }
+        if let Some(v) = &r.height && &self.height != v { return false; }
+        true
+    }
+    fn subtract(&self, r: &Self::Refinement) -> Self::Refinement {
+        SizeRefinement {
+            width: if r.width.as_ref() == Some(&self.width) { None } else { Some(self.width.clone()) },
+            height: if r.height.as_ref() == Some(&self.height) { None } else { Some(self.height.clone()) },
+        }
+    }
+}
+
+impl<T: Clone + Debug + Default + PartialEq> Refineable for SizeRefinement<T> {
+    type Refinement = SizeRefinement<T>;
+    fn refine(&mut self, r: &Self::Refinement) {
+        if let Some(v) = &r.width { self.width = Some(v.clone()); }
+        if let Some(v) = &r.height { self.height = Some(v.clone()); }
+    }
+    fn refined(mut self, r: Self::Refinement) -> Self {
+        if let Some(v) = r.width { self.width = Some(v); }
+        if let Some(v) = r.height { self.height = Some(v); }
+        self
+    }
+    fn is_superset_of(&self, r: &Self::Refinement) -> bool {
+        if r.width.is_some() && self.width != r.width { return false; }
+        if r.height.is_some() && self.height != r.height { return false; }
+        true
+    }
+    fn subtract(&self, r: &Self::Refinement) -> Self::Refinement {
+        SizeRefinement {
+            width: if self.width == r.width { None } else { self.width.clone() },
+            height: if self.height == r.height { None } else { self.height.clone() },
+        }
+    }
+}
+
+impl<T: Add<Output = O> + Clone + Debug + Default + PartialEq, O: Clone + Debug + Default + PartialEq> Add for Size<T> {
+    type Output = Size<O>;
+    fn add(self, rhs: Self) -> Self::Output { Size { width: self.width + rhs.width, height: self.height + rhs.height } }
+}
+impl<T: Sub<Output = O> + Clone + Debug + Default + PartialEq, O: Clone + Debug + Default + PartialEq> Sub for Size<T> {
+    type Output = Size<O>;
+    fn sub(self, rhs: Self) -> Self::Output { Size { width: self.width - rhs.width, height: self.height - rhs.height } }
+}
+impl<T: Div<Rhs, Output = O> + Clone + Debug + Default + PartialEq, Rhs: Copy, O: Clone + Debug + Default + PartialEq> Div<Rhs> for Size<T> {
+    type Output = Size<O>;
+    fn div(self, rhs: Rhs) -> Self::Output { Size { width: self.width / rhs, height: self.height / rhs } }
+}
+impl<T: Neg<Output = O> + Clone + Debug + Default + PartialEq, O: Clone + Debug + Default + PartialEq> Neg for Size<T> {
+    type Output = Size<O>;
+    fn neg(self) -> Self::Output { Size { width: -self.width, height: -self.height } }
 }
 
 impl<T: Clone + Debug + Default + PartialEq> Size<T> {
@@ -711,14 +911,104 @@ impl Size<Length> {
 /// assert_eq!(bounds.origin, origin);
 /// assert_eq!(bounds.size, size);
 /// ```
-#[derive(Refineable, Copy, Clone, Default, Debug, Eq, PartialEq, Hash)]
-#[refineable(Debug)]
+#[derive(Copy, Clone, Default, Debug, Eq, PartialEq, Hash)]
 #[repr(C)]
 pub struct Bounds<T: Clone + Debug + Default + PartialEq> {
     /// The origin point of this area.
     pub origin: Point<T>,
     /// The size of the rectangle.
     pub size: Size<T>,
+}
+
+#[derive(Clone)]
+pub struct BoundsRefinement<T: Clone + Debug + Default + PartialEq> {
+    pub origin: Option<Point<T>>,
+    pub size: Option<Size<T>>,
+}
+
+impl<T: Clone + Debug + Default + PartialEq> Default for BoundsRefinement<T> {
+    fn default() -> Self {
+        Self { origin: None, size: None }
+    }
+}
+
+impl<T: Clone + Debug + Default + PartialEq> BoundsRefinement<T> {
+    pub fn is_some(&self) -> bool {
+        self.origin.is_some() || self.size.is_some()
+    }
+}
+
+impl<T: Clone + Debug + Default + PartialEq> fmt::Debug for BoundsRefinement<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut s = f.debug_struct("BoundsRefinement");
+        let mut all = true;
+        if self.origin.is_some() { s.field("origin", &self.origin); } else { all = false; }
+        if self.size.is_some() { s.field("size", &self.size); } else { all = false; }
+        if all { s.finish() } else { s.finish_non_exhaustive() }
+    }
+}
+
+impl<T: Clone + Debug + Default + PartialEq> IsEmpty for BoundsRefinement<T> {
+    fn is_empty(&self) -> bool {
+        self.origin.is_none() && self.size.is_none()
+    }
+}
+
+impl<T: Clone + Debug + Default + PartialEq> From<BoundsRefinement<T>> for Bounds<T> {
+    fn from(v: BoundsRefinement<T>) -> Self {
+        Self {
+            origin: v.origin.unwrap_or_default(),
+            size: v.size.unwrap_or_default(),
+        }
+    }
+}
+
+impl<T: Clone + Debug + Default + PartialEq> Refineable for Bounds<T> {
+    type Refinement = BoundsRefinement<T>;
+    fn refine(&mut self, r: &Self::Refinement) {
+        if let Some(v) = &r.origin { self.origin = v.clone(); }
+        if let Some(v) = &r.size { self.size = v.clone(); }
+    }
+    fn refined(mut self, r: Self::Refinement) -> Self {
+        if let Some(v) = r.origin { self.origin = v; }
+        if let Some(v) = r.size { self.size = v; }
+        self
+    }
+    fn is_superset_of(&self, r: &Self::Refinement) -> bool {
+        if let Some(v) = &r.origin && &self.origin != v { return false; }
+        if let Some(v) = &r.size && &self.size != v { return false; }
+        true
+    }
+    fn subtract(&self, r: &Self::Refinement) -> Self::Refinement {
+        BoundsRefinement {
+            origin: if r.origin.as_ref() == Some(&self.origin) { None } else { Some(self.origin.clone()) },
+            size: if r.size.as_ref() == Some(&self.size) { None } else { Some(self.size.clone()) },
+        }
+    }
+}
+
+impl<T: Clone + Debug + Default + PartialEq> Refineable for BoundsRefinement<T> {
+    type Refinement = BoundsRefinement<T>;
+    fn refine(&mut self, r: &Self::Refinement) {
+        if let Some(v) = &r.origin { self.origin = Some(v.clone()); }
+        if let Some(v) = &r.size { self.size = Some(v.clone()); }
+    }
+    fn refined(mut self, r: Self::Refinement) -> Self {
+        if let Some(v) = r.origin { self.origin = Some(v); }
+        if let Some(v) = r.size { self.size = Some(v); }
+        self
+    }
+    fn is_superset_of(&self, r: &Self::Refinement) -> bool {
+        if r.origin.is_some() && self.origin != r.origin { return false; }
+        if r.size.is_some() && self.size != r.size { return false; }
+        true
+    }
+    fn subtract(&self, r: &Self::Refinement) -> Self::Refinement {
+        BoundsRefinement {
+            origin: if self.origin == r.origin { None } else { self.origin.clone() },
+            size: if self.size == r.size { None } else { self.size.clone() },
+        }
+    }
 }
 
 /// Create a bounds with the given origin and size
@@ -1741,8 +2031,7 @@ impl Bounds<DevicePixels> {
 /// assert_eq!(edges.bottom, 30.0);
 /// assert_eq!(edges.left, 40.0);
 /// ```
-#[derive(Refineable, Clone, Default, Debug, Eq, PartialEq)]
-#[refineable(Debug, PartialEq)]
+#[derive(Clone, Default, Debug, Eq, PartialEq)]
 #[repr(C)]
 pub struct Edges<T: Clone + Debug + Default + PartialEq> {
     /// The size of the top edge.
@@ -1753,6 +2042,119 @@ pub struct Edges<T: Clone + Debug + Default + PartialEq> {
     pub bottom: T,
     /// The size of the left edge.
     pub left: T,
+}
+
+#[derive(Clone, PartialEq)]
+pub struct EdgesRefinement<T: Clone + Debug + Default + PartialEq> {
+    pub top: Option<T>,
+    pub right: Option<T>,
+    pub bottom: Option<T>,
+    pub left: Option<T>,
+}
+
+impl<T: Clone + Debug + Default + PartialEq> Default for EdgesRefinement<T> {
+    fn default() -> Self {
+        Self { top: None, right: None, bottom: None, left: None }
+    }
+}
+
+impl<T: Clone + Debug + Default + PartialEq> EdgesRefinement<T> {
+    pub fn is_some(&self) -> bool {
+        self.top.is_some() || self.right.is_some() || self.bottom.is_some() || self.left.is_some()
+    }
+}
+
+impl<T: Clone + Debug + Default + PartialEq> fmt::Debug for EdgesRefinement<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut s = f.debug_struct("EdgesRefinement");
+        let mut all = true;
+        if self.top.is_some() { s.field("top", &self.top); } else { all = false; }
+        if self.right.is_some() { s.field("right", &self.right); } else { all = false; }
+        if self.bottom.is_some() { s.field("bottom", &self.bottom); } else { all = false; }
+        if self.left.is_some() { s.field("left", &self.left); } else { all = false; }
+        if all { s.finish() } else { s.finish_non_exhaustive() }
+    }
+}
+
+impl<T: Clone + Debug + Default + PartialEq> IsEmpty for EdgesRefinement<T> {
+    fn is_empty(&self) -> bool {
+        self.top.is_none() && self.right.is_none() && self.bottom.is_none() && self.left.is_none()
+    }
+}
+
+impl<T: Clone + Debug + Default + PartialEq> From<EdgesRefinement<T>> for Edges<T> {
+    fn from(v: EdgesRefinement<T>) -> Self {
+        Self {
+            top: v.top.unwrap_or_default(),
+            right: v.right.unwrap_or_default(),
+            bottom: v.bottom.unwrap_or_default(),
+            left: v.left.unwrap_or_default(),
+        }
+    }
+}
+
+impl<T: Clone + Debug + Default + PartialEq> Refineable for Edges<T> {
+    type Refinement = EdgesRefinement<T>;
+    fn refine(&mut self, r: &Self::Refinement) {
+        if let Some(v) = &r.top { self.top = v.clone(); }
+        if let Some(v) = &r.right { self.right = v.clone(); }
+        if let Some(v) = &r.bottom { self.bottom = v.clone(); }
+        if let Some(v) = &r.left { self.left = v.clone(); }
+    }
+    fn refined(mut self, r: Self::Refinement) -> Self {
+        if let Some(v) = r.top { self.top = v; }
+        if let Some(v) = r.right { self.right = v; }
+        if let Some(v) = r.bottom { self.bottom = v; }
+        if let Some(v) = r.left { self.left = v; }
+        self
+    }
+    fn is_superset_of(&self, r: &Self::Refinement) -> bool {
+        if let Some(v) = &r.top && &self.top != v { return false; }
+        if let Some(v) = &r.right && &self.right != v { return false; }
+        if let Some(v) = &r.bottom && &self.bottom != v { return false; }
+        if let Some(v) = &r.left && &self.left != v { return false; }
+        true
+    }
+    fn subtract(&self, r: &Self::Refinement) -> Self::Refinement {
+        EdgesRefinement {
+            top: if r.top.as_ref() == Some(&self.top) { None } else { Some(self.top.clone()) },
+            right: if r.right.as_ref() == Some(&self.right) { None } else { Some(self.right.clone()) },
+            bottom: if r.bottom.as_ref() == Some(&self.bottom) { None } else { Some(self.bottom.clone()) },
+            left: if r.left.as_ref() == Some(&self.left) { None } else { Some(self.left.clone()) },
+        }
+    }
+}
+
+impl<T: Clone + Debug + Default + PartialEq> Refineable for EdgesRefinement<T> {
+    type Refinement = EdgesRefinement<T>;
+    fn refine(&mut self, r: &Self::Refinement) {
+        if let Some(v) = &r.top { self.top = Some(v.clone()); }
+        if let Some(v) = &r.right { self.right = Some(v.clone()); }
+        if let Some(v) = &r.bottom { self.bottom = Some(v.clone()); }
+        if let Some(v) = &r.left { self.left = Some(v.clone()); }
+    }
+    fn refined(mut self, r: Self::Refinement) -> Self {
+        if let Some(v) = r.top { self.top = Some(v); }
+        if let Some(v) = r.right { self.right = Some(v); }
+        if let Some(v) = r.bottom { self.bottom = Some(v); }
+        if let Some(v) = r.left { self.left = Some(v); }
+        self
+    }
+    fn is_superset_of(&self, r: &Self::Refinement) -> bool {
+        if r.top.is_some() && self.top != r.top { return false; }
+        if r.right.is_some() && self.right != r.right { return false; }
+        if r.bottom.is_some() && self.bottom != r.bottom { return false; }
+        if r.left.is_some() && self.left != r.left { return false; }
+        true
+    }
+    fn subtract(&self, r: &Self::Refinement) -> Self::Refinement {
+        EdgesRefinement {
+            top: if self.top == r.top { None } else { self.top.clone() },
+            right: if self.right == r.right { None } else { self.right.clone() },
+            bottom: if self.bottom == r.bottom { None } else { self.bottom.clone() },
+            left: if self.left == r.left { None } else { self.left.clone() },
+        }
+    }
 }
 
 impl<T> Mul for Edges<T>
@@ -2258,8 +2660,7 @@ impl Anchor {
 /// Represents the corners of a box in a 2D space, such as border radius.
 ///
 /// Each field represents the size of the corner on one side of the box: `top_left`, `top_right`, `bottom_right`, and `bottom_left`.
-#[derive(Refineable, Clone, Default, Debug, Eq, PartialEq)]
-#[refineable(Debug, PartialEq)]
+#[derive(Clone, Default, Debug, Eq, PartialEq)]
 #[repr(C)]
 pub struct Corners<T: Clone + Debug + Default + PartialEq> {
     /// The value associated with the top left corner.
@@ -2270,6 +2671,119 @@ pub struct Corners<T: Clone + Debug + Default + PartialEq> {
     pub bottom_right: T,
     /// The value associated with the bottom left corner.
     pub bottom_left: T,
+}
+
+#[derive(Clone, PartialEq)]
+pub struct CornersRefinement<T: Clone + Debug + Default + PartialEq> {
+    pub top_left: Option<T>,
+    pub top_right: Option<T>,
+    pub bottom_right: Option<T>,
+    pub bottom_left: Option<T>,
+}
+
+impl<T: Clone + Debug + Default + PartialEq> Default for CornersRefinement<T> {
+    fn default() -> Self {
+        Self { top_left: None, top_right: None, bottom_right: None, bottom_left: None }
+    }
+}
+
+impl<T: Clone + Debug + Default + PartialEq> CornersRefinement<T> {
+    pub fn is_some(&self) -> bool {
+        self.top_left.is_some() || self.top_right.is_some() || self.bottom_right.is_some() || self.bottom_left.is_some()
+    }
+}
+
+impl<T: Clone + Debug + Default + PartialEq> fmt::Debug for CornersRefinement<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut s = f.debug_struct("CornersRefinement");
+        let mut all = true;
+        if self.top_left.is_some() { s.field("top_left", &self.top_left); } else { all = false; }
+        if self.top_right.is_some() { s.field("top_right", &self.top_right); } else { all = false; }
+        if self.bottom_right.is_some() { s.field("bottom_right", &self.bottom_right); } else { all = false; }
+        if self.bottom_left.is_some() { s.field("bottom_left", &self.bottom_left); } else { all = false; }
+        if all { s.finish() } else { s.finish_non_exhaustive() }
+    }
+}
+
+impl<T: Clone + Debug + Default + PartialEq> IsEmpty for CornersRefinement<T> {
+    fn is_empty(&self) -> bool {
+        self.top_left.is_none() && self.top_right.is_none() && self.bottom_right.is_none() && self.bottom_left.is_none()
+    }
+}
+
+impl<T: Clone + Debug + Default + PartialEq> From<CornersRefinement<T>> for Corners<T> {
+    fn from(v: CornersRefinement<T>) -> Self {
+        Self {
+            top_left: v.top_left.unwrap_or_default(),
+            top_right: v.top_right.unwrap_or_default(),
+            bottom_right: v.bottom_right.unwrap_or_default(),
+            bottom_left: v.bottom_left.unwrap_or_default(),
+        }
+    }
+}
+
+impl<T: Clone + Debug + Default + PartialEq> Refineable for Corners<T> {
+    type Refinement = CornersRefinement<T>;
+    fn refine(&mut self, r: &Self::Refinement) {
+        if let Some(v) = &r.top_left { self.top_left = v.clone(); }
+        if let Some(v) = &r.top_right { self.top_right = v.clone(); }
+        if let Some(v) = &r.bottom_right { self.bottom_right = v.clone(); }
+        if let Some(v) = &r.bottom_left { self.bottom_left = v.clone(); }
+    }
+    fn refined(mut self, r: Self::Refinement) -> Self {
+        if let Some(v) = r.top_left { self.top_left = v; }
+        if let Some(v) = r.top_right { self.top_right = v; }
+        if let Some(v) = r.bottom_right { self.bottom_right = v; }
+        if let Some(v) = r.bottom_left { self.bottom_left = v; }
+        self
+    }
+    fn is_superset_of(&self, r: &Self::Refinement) -> bool {
+        if let Some(v) = &r.top_left && &self.top_left != v { return false; }
+        if let Some(v) = &r.top_right && &self.top_right != v { return false; }
+        if let Some(v) = &r.bottom_right && &self.bottom_right != v { return false; }
+        if let Some(v) = &r.bottom_left && &self.bottom_left != v { return false; }
+        true
+    }
+    fn subtract(&self, r: &Self::Refinement) -> Self::Refinement {
+        CornersRefinement {
+            top_left: if r.top_left.as_ref() == Some(&self.top_left) { None } else { Some(self.top_left.clone()) },
+            top_right: if r.top_right.as_ref() == Some(&self.top_right) { None } else { Some(self.top_right.clone()) },
+            bottom_right: if r.bottom_right.as_ref() == Some(&self.bottom_right) { None } else { Some(self.bottom_right.clone()) },
+            bottom_left: if r.bottom_left.as_ref() == Some(&self.bottom_left) { None } else { Some(self.bottom_left.clone()) },
+        }
+    }
+}
+
+impl<T: Clone + Debug + Default + PartialEq> Refineable for CornersRefinement<T> {
+    type Refinement = CornersRefinement<T>;
+    fn refine(&mut self, r: &Self::Refinement) {
+        if let Some(v) = &r.top_left { self.top_left = Some(v.clone()); }
+        if let Some(v) = &r.top_right { self.top_right = Some(v.clone()); }
+        if let Some(v) = &r.bottom_right { self.bottom_right = Some(v.clone()); }
+        if let Some(v) = &r.bottom_left { self.bottom_left = Some(v.clone()); }
+    }
+    fn refined(mut self, r: Self::Refinement) -> Self {
+        if let Some(v) = r.top_left { self.top_left = Some(v); }
+        if let Some(v) = r.top_right { self.top_right = Some(v); }
+        if let Some(v) = r.bottom_right { self.bottom_right = Some(v); }
+        if let Some(v) = r.bottom_left { self.bottom_left = Some(v); }
+        self
+    }
+    fn is_superset_of(&self, r: &Self::Refinement) -> bool {
+        if r.top_left.is_some() && self.top_left != r.top_left { return false; }
+        if r.top_right.is_some() && self.top_right != r.top_right { return false; }
+        if r.bottom_right.is_some() && self.bottom_right != r.bottom_right { return false; }
+        if r.bottom_left.is_some() && self.bottom_left != r.bottom_left { return false; }
+        true
+    }
+    fn subtract(&self, r: &Self::Refinement) -> Self::Refinement {
+        CornersRefinement {
+            top_left: if self.top_left == r.top_left { None } else { self.top_left.clone() },
+            top_right: if self.top_right == r.top_right { None } else { self.top_right.clone() },
+            bottom_right: if self.bottom_right == r.bottom_right { None } else { self.bottom_right.clone() },
+            bottom_left: if self.bottom_left == r.bottom_left { None } else { self.bottom_left.clone() },
+        }
+    }
 }
 
 impl<T> Corners<T>
@@ -2581,23 +3095,41 @@ impl From<Pixels> for Corners<Pixels> {
     }
 }
 
+macro_rules! impl_scalar_newtype_ops {
+    ($name:ident, $inner:ty) => {
+        impl Add for $name {
+            type Output = Self;
+            fn add(self, rhs: Self) -> Self { Self(self.0 + rhs.0) }
+        }
+        impl AddAssign for $name {
+            fn add_assign(&mut self, rhs: Self) { self.0 += rhs.0; }
+        }
+        impl Sub for $name {
+            type Output = Self;
+            fn sub(self, rhs: Self) -> Self { Self(self.0 - rhs.0) }
+        }
+        impl SubAssign for $name {
+            fn sub_assign(&mut self, rhs: Self) { self.0 -= rhs.0; }
+        }
+        impl Neg for $name {
+            type Output = Self;
+            fn neg(self) -> Self { Self(-self.0) }
+        }
+        impl Div<$inner> for $name {
+            type Output = Self;
+            fn div(self, rhs: $inner) -> Self { Self(self.0 / rhs) }
+        }
+        impl DivAssign<$inner> for $name {
+            fn div_assign(&mut self, rhs: $inner) { self.0 /= rhs; }
+        }
+    };
+}
+
 /// Represents an angle in Radians
-#[derive(
-    Clone,
-    Copy,
-    Default,
-    Add,
-    AddAssign,
-    Sub,
-    SubAssign,
-    Neg,
-    Div,
-    DivAssign,
-    PartialEq,
-    Debug,
-)]
+#[derive(Clone, Copy, Default, PartialEq, Debug)]
 #[repr(transparent)]
 pub struct Radians(pub f32);
+impl_scalar_newtype_ops!(Radians, f32);
 
 /// Create a `Radian` from a raw value
 pub fn radians(value: f32) -> Radians {
@@ -2605,22 +3137,10 @@ pub fn radians(value: f32) -> Radians {
 }
 
 /// A type representing a percentage value.
-#[derive(
-    Clone,
-    Copy,
-    Default,
-    Add,
-    AddAssign,
-    Sub,
-    SubAssign,
-    Neg,
-    Div,
-    DivAssign,
-    PartialEq,
-    Debug,
-)]
+#[derive(Clone, Copy, Default, PartialEq, Debug)]
 #[repr(transparent)]
 pub struct Percentage(pub f32);
+impl_scalar_newtype_ops!(Percentage, f32);
 
 /// Generate a `Radian` from a percentage of a full circle.
 pub fn percentage(value: f32) -> Percentage {
@@ -2659,21 +3179,10 @@ impl From<Percentage> for Radians {
 /// let scaled_length = length.scale(2.0);
 /// assert_eq!(scaled_length, ScaledPixels::from(20.0));
 /// ```
-#[derive(
-    Clone,
-    Copy,
-    Default,
-    Add,
-    AddAssign,
-    Sub,
-    SubAssign,
-    Neg,
-    Div,
-    DivAssign,
-    PartialEq,
-)]
+#[derive(Clone, Copy, Default, PartialEq)]
 #[repr(transparent)]
 pub struct Pixels(pub(crate) f32);
+impl_scalar_newtype_ops!(Pixels, f32);
 
 impl Div for Pixels {
     type Output = f32;
@@ -2960,23 +3469,28 @@ impl From<usize> for Pixels {
 /// interfacing with hardware that operates on the pixel level. Unlike logical pixels that may be
 /// affected by the device's scale factor, `DevicePixels` always correspond to real pixels on the
 /// display.
-#[derive(
-    Add,
-    AddAssign,
-    Clone,
-    Copy,
-    Default,
-    Div,
-    Eq,
-    Hash,
-    Ord,
-    PartialEq,
-    PartialOrd,
-    Sub,
-    SubAssign,
-)]
+#[derive(Clone, Copy, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 #[repr(transparent)]
 pub struct DevicePixels(pub i32);
+
+impl Add for DevicePixels {
+    type Output = Self;
+    fn add(self, rhs: Self) -> Self { Self(self.0 + rhs.0) }
+}
+impl AddAssign for DevicePixels {
+    fn add_assign(&mut self, rhs: Self) { self.0 += rhs.0; }
+}
+impl Sub for DevicePixels {
+    type Output = Self;
+    fn sub(self, rhs: Self) -> Self { Self(self.0 - rhs.0) }
+}
+impl SubAssign for DevicePixels {
+    fn sub_assign(&mut self, rhs: Self) { self.0 -= rhs.0; }
+}
+impl Div<i32> for DevicePixels {
+    type Output = Self;
+    fn div(self, rhs: i32) -> Self { Self(self.0 / rhs) }
+}
 
 impl DevicePixels {
     /// Converts the `DevicePixels` value to the number of bytes needed to represent it in memory.
@@ -3067,9 +3581,31 @@ impl From<usize> for DevicePixels {
 /// a single logical pixel may correspond to multiple physical pixels. By using `ScaledPixels`,
 /// dimensions and positions can be specified in a way that scales appropriately across different
 /// display resolutions.
-#[derive(Clone, Copy, Default, Add, AddAssign, Sub, SubAssign, Div, DivAssign, PartialEq)]
+#[derive(Clone, Copy, Default, PartialEq)]
 #[repr(transparent)]
 pub struct ScaledPixels(pub f32);
+
+impl Add for ScaledPixels {
+    type Output = Self;
+    fn add(self, rhs: Self) -> Self { Self(self.0 + rhs.0) }
+}
+impl AddAssign for ScaledPixels {
+    fn add_assign(&mut self, rhs: Self) { self.0 += rhs.0; }
+}
+impl Sub for ScaledPixels {
+    type Output = Self;
+    fn sub(self, rhs: Self) -> Self { Self(self.0 - rhs.0) }
+}
+impl SubAssign for ScaledPixels {
+    fn sub_assign(&mut self, rhs: Self) { self.0 -= rhs.0; }
+}
+impl Div<f32> for ScaledPixels {
+    type Output = Self;
+    fn div(self, rhs: f32) -> Self { Self(self.0 / rhs) }
+}
+impl DivAssign<f32> for ScaledPixels {
+    fn div_assign(&mut self, rhs: f32) { self.0 /= rhs; }
+}
 
 impl ScaledPixels {
     /// Returns the raw `f32` value of this `ScaledPixels`.
@@ -3231,8 +3767,29 @@ impl MulAssign<f32> for ScaledPixels {
 /// For example, if the root element's font-size is `16px`, then `1rem` equals `16px`. A length of `2rems` would then be `32px`.
 ///
 /// [set_rem_size]: crate::Window::set_rem_size
-#[derive(Clone, Copy, Default, Add, Sub, Mul, Div, Neg, PartialEq)]
+#[derive(Clone, Copy, Default, PartialEq)]
 pub struct Rems(pub f32);
+
+impl Add for Rems {
+    type Output = Self;
+    fn add(self, rhs: Self) -> Self { Self(self.0 + rhs.0) }
+}
+impl Sub for Rems {
+    type Output = Self;
+    fn sub(self, rhs: Self) -> Self { Self(self.0 - rhs.0) }
+}
+impl Mul<f32> for Rems {
+    type Output = Self;
+    fn mul(self, rhs: f32) -> Self { Self(self.0 * rhs) }
+}
+impl Div<f32> for Rems {
+    type Output = Self;
+    fn div(self, rhs: f32) -> Self { Self(self.0 / rhs) }
+}
+impl Neg for Rems {
+    type Output = Self;
+    fn neg(self) -> Self { Self(-self.0) }
+}
 
 impl Rems {
     /// A length of zero.
@@ -3291,12 +3848,22 @@ impl TryFrom<&'_ str> for Rems {
 /// affected by the current font size, or a number of rems, which is relative to the font size of
 /// the root element. It is used for specifying dimensions that are either independent of or
 /// related to the typographic scale.
-#[derive(Clone, Copy, Neg, PartialEq)]
+#[derive(Clone, Copy, PartialEq)]
 pub enum AbsoluteLength {
     /// A length in pixels.
     Pixels(Pixels),
     /// A length in rems.
     Rems(Rems),
+}
+
+impl Neg for AbsoluteLength {
+    type Output = Self;
+    fn neg(self) -> Self {
+        match self {
+            AbsoluteLength::Pixels(p) => AbsoluteLength::Pixels(-p),
+            AbsoluteLength::Rems(r) => AbsoluteLength::Rems(-r),
+        }
+    }
 }
 
 impl AbsoluteLength {
@@ -3411,12 +3978,22 @@ impl TryFrom<&'_ str> for AbsoluteLength {
 /// This enum represents lengths that have a specific value, as opposed to lengths that are automatically
 /// determined by the context. It includes absolute lengths in pixels or rems, and relative lengths as a
 /// fraction of the parent's size.
-#[derive(Clone, Copy, Neg, PartialEq)]
+#[derive(Clone, Copy, PartialEq)]
 pub enum DefiniteLength {
     /// An absolute length specified in pixels or rems.
     Absolute(AbsoluteLength),
     /// A relative length specified as a fraction of the parent's size, between 0 and 1.
     Fraction(f32),
+}
+
+impl Neg for DefiniteLength {
+    type Output = Self;
+    fn neg(self) -> Self {
+        match self {
+            DefiniteLength::Absolute(a) => DefiniteLength::Absolute(-a),
+            DefiniteLength::Fraction(f) => DefiniteLength::Fraction(-f),
+        }
+    }
 }
 
 impl DefiniteLength {

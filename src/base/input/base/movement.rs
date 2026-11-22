@@ -1,6 +1,6 @@
 use crate::base::input::InputModeKind;
 use gpui::{Context, Pixels, Point, Window};
-use sum_tree::Bias;
+use crate::base::input::rope_ext::Bias;
 
 use crate::base::input::{
     InputBaseState, MoveDown, MoveEnd, MoveHome, MoveLeft, MovePageDown, MovePageUp, MoveRight,

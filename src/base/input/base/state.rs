@@ -15,7 +15,7 @@ use std::borrow::Cow;
 use std::cell::Cell;
 use std::ops::Range;
 use std::rc::Rc;
-use sum_tree::Bias;
+use super::rope_ext::Bias;
 use unicode_segmentation::*;
 
 use super::{
@@ -43,8 +43,9 @@ const MIN_WHEEL_STEP: f32 = 48.;
 
 #[cfg(target_os = "windows")]
 fn wheel_scroll_amount(horizontal: bool) -> u32 {
-    use windows_sys::Win32::UI::WindowsAndMessaging::{
-        SPI_GETWHEELSCROLLCHARS, SPI_GETWHEELSCROLLLINES, SystemParametersInfoW,
+    use windows::Win32::UI::WindowsAndMessaging::{
+        SPI_GETWHEELSCROLLCHARS, SPI_GETWHEELSCROLLLINES, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
+        SystemParametersInfoW,
     };
     let action = if horizontal {
         SPI_GETWHEELSCROLLCHARS
@@ -53,7 +54,12 @@ fn wheel_scroll_amount(horizontal: bool) -> u32 {
     };
     let mut amount = DEFAULT_WHEEL_SCROLL;
     let _ = unsafe {
-        SystemParametersInfoW(action, 0, (&mut amount as *mut u32).cast(), 0)
+        SystemParametersInfoW(
+            action,
+            0,
+            Some((&raw mut amount).cast()),
+            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+        )
     };
     amount
 }

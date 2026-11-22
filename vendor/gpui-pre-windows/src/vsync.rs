@@ -5,7 +5,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use gpui::FrameRequestSource;
-use gpui_util::ResultExt;
+use gpui::gpui_util::ResultExt;
 use windows::Win32::{
     Foundation::HWND,
     Graphics::Dwm::{DWM_TIMING_INFO, DwmFlush, DwmGetCompositionTimingInfo},

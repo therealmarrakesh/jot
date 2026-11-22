@@ -6,8 +6,8 @@ use crate::{
 };
 use crate::{Empty, Window};
 use anyhow::Result;
-use collections::FxHashSet;
-use refineable::Refineable;
+use crate::collections::FxHashSet;
+use crate::Refineable;
 use std::mem;
 use std::{
     any::{TypeId, type_name},

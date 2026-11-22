@@ -6,7 +6,7 @@ use crate::{
     },
 };
 use async_task::Runnable;
-use futures::channel::oneshot;
+use crate::futures::channel::oneshot;
 use std::task::{Context, Poll};
 use std::{
     any::Any,
@@ -57,30 +57,33 @@ impl Scheduler for PlatformScheduler {
         mut future: Pin<&mut dyn Future<Output = ()>>,
         timeout: Option<Duration>,
     ) -> bool {
-        use waker_fn::waker_fn;
+        struct ThreadWaker(std::thread::Thread);
+        impl std::task::Wake for ThreadWaker {
+            fn wake(self: Arc<Self>) {
+                self.0.unpark();
+            }
+            fn wake_by_ref(self: &Arc<Self>) {
+                self.0.unpark();
+            }
+        }
+
         let deadline = timeout.map(|t| Instant::now() + t);
-        let parker = parking::Parker::new();
-        let unparker = parker.unparker();
-        let waker = waker_fn(move || {
-            unparker.unpark();
-        });
+        let waker = std::task::Waker::from(Arc::new(ThreadWaker(std::thread::current())));
         let mut cx = Context::from_waker(&waker);
         if let Poll::Ready(()) = future.as_mut().poll(&mut cx) {
             return true;
         }
 
-        let park_deadline = |deadline: Instant| {
-            let _timer_guard = self.dispatcher.increase_timer_resolution();
-            parker.park_deadline(deadline)
-        };
-
         loop {
             match deadline {
-                Some(deadline) if !park_deadline(deadline) && deadline <= Instant::now() => {
-                    return false;
+                Some(deadline) => {
+                    let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                        return false;
+                    };
+                    let _timer_guard = self.dispatcher.increase_timer_resolution();
+                    std::thread::park_timeout(remaining);
                 }
-                Some(_) => (),
-                None => parker.park(),
+                None => std::thread::park(),
             }
             if let Poll::Ready(()) = future.as_mut().poll(&mut cx) {
                 break true;
@@ -262,7 +265,7 @@ mod tests {
 
     #[test]
     fn spawn_dedicated_dropping_task_cancels_future() {
-        use parking_lot::Mutex;
+        use crate::sync::Mutex;
         use std::sync::mpsc;
 
         let background =

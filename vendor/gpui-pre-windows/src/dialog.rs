@@ -8,13 +8,13 @@ use std::{
 };
 
 use anyhow::{Context as _, Result, anyhow};
-use futures::{
+use gpui::futures::{
     channel::oneshot,
     future::{Either, select},
     lock::Mutex,
 };
 use gpui::ForegroundExecutor;
-use gpui_util::ResultExt;
+use gpui::gpui_util::ResultExt;
 use windows::{
     Win32::{
         Foundation::*,

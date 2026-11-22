@@ -5,9 +5,8 @@ use crate::{
     Window, WindowHandle,
 };
 use anyhow::{Context as _, bail};
-use derive_more::{Deref, DerefMut};
-use futures::channel::oneshot;
-use futures::future::FutureExt;
+use crate::futures::channel::oneshot;
+use crate::futures::future::FutureExt;
 use std::{future::Future, rc::Weak};
 
 use super::{Context, WeakEntity};
@@ -281,10 +280,10 @@ impl AsyncApp {
         &self,
         entity: &WeakEntity<T>,
         f: Callback,
-    ) -> gpui_util::Deferred<impl FnOnce() + use<T, Callback>> {
+    ) -> crate::gpui_util::Deferred<impl FnOnce() + use<T, Callback>> {
         let entity = entity.clone();
         let mut cx = self.clone();
-        gpui_util::defer(move || {
+        crate::gpui_util::defer(move || {
             entity.update(&mut cx, f).ok();
         })
     }
@@ -292,12 +291,23 @@ impl AsyncApp {
 
 /// A cloneable, owned handle to the application context,
 /// composed with the window associated with the current task.
-#[derive(Clone, Deref, DerefMut)]
+#[derive(Clone)]
 pub struct AsyncWindowContext {
-    #[deref]
-    #[deref_mut]
     app: AsyncApp,
     window: AnyWindowHandle,
+}
+
+impl std::ops::Deref for AsyncWindowContext {
+    type Target = AsyncApp;
+    fn deref(&self) -> &Self::Target {
+        &self.app
+    }
+}
+
+impl std::ops::DerefMut for AsyncWindowContext {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.app
+    }
 }
 
 impl AsyncWindowContext {

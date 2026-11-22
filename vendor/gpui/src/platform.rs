@@ -48,12 +48,11 @@ use crate::{
 use anyhow::bail;
 use anyhow::Result;
 use async_task::Runnable;
-use collections::FxHashMap;
-use futures::channel::oneshot;
+use crate::collections::FxHashMap;
+use crate::futures::channel::oneshot;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use crate::scheduler::Instant;
 pub use crate::scheduler::RunnableMeta;
-use seahash::SeaHasher;
 use smallvec::SmallVec;
 use std::borrow::Cow;
 use std::collections::hash_map::Entry;
@@ -68,7 +67,7 @@ use std::{
     rc::Rc,
     sync::Arc,
 };
-use uuid::Uuid;
+use crate::Uuid;
 
 pub use app_menu::*;
 pub use keyboard::*;
@@ -176,14 +175,14 @@ pub use visual_test::VisualTestPlatform;
 
 /// Keeps an operating system activity, such as an idle sleep inhibitor, alive until dropped.
 pub struct ActivityGuard {
-    _release: gpui_util::Deferred<Box<dyn FnOnce() + Send>>,
+    _release: crate::gpui_util::Deferred<Box<dyn FnOnce() + Send>>,
 }
 
 impl ActivityGuard {
     /// Runs `release` when the guard is dropped.
     pub fn new(release: impl FnOnce() + Send + 'static) -> Self {
         Self {
-            _release: gpui_util::defer(Box::new(release)),
+            _release: crate::gpui_util::defer(Box::new(release)),
         }
     }
 
@@ -1372,7 +1371,7 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
 pub type RunnableVariant = Runnable<RunnableMeta>;
 
 #[doc(hidden)]
-pub type TimerResolutionGuard = gpui_util::Deferred<Box<dyn FnOnce() + Send>>;
+pub type TimerResolutionGuard = crate::gpui_util::Deferred<Box<dyn FnOnce() + Send>>;
 
 #[doc(hidden)]
 pub enum TasksIncluded {
@@ -1409,7 +1408,7 @@ pub trait PlatformDispatcher: Send + Sync {
     }
 
     fn increase_timer_resolution(&self) -> TimerResolutionGuard {
-        gpui_util::defer(Box::new(|| {}))
+        crate::gpui_util::defer(Box::new(|| {}))
     }
 
     fn prevent_app_nap(&self, _reason: &str) -> ActivityGuard {
@@ -1752,7 +1751,7 @@ impl<Backend: AtlasBackend> AtlasState<Backend> {
 /// tiles without uploading any pixels, so glyph, SVG, and image painting can
 /// run to completion in tests and headless platforms.
 #[derive(Default)]
-pub struct HeadlessAtlas(parking_lot::Mutex<AtlasState<HeadlessAtlasBackend>>);
+pub struct HeadlessAtlas(crate::sync::Mutex<AtlasState<HeadlessAtlasBackend>>);
 
 #[doc(hidden)]
 #[derive(Default)]
@@ -1888,18 +1887,6 @@ pub enum AtlasTextureKind {
 #[repr(C)]
 #[expect(missing_docs)]
 pub struct TileId(pub u32);
-
-impl From<etagere::AllocId> for TileId {
-    fn from(id: etagere::AllocId) -> Self {
-        Self(id.serialize())
-    }
-}
-
-impl From<TileId> for etagere::AllocId {
-    fn from(id: TileId) -> Self {
-        Self::deserialize(id.0)
-    }
-}
 
 #[expect(missing_docs)]
 pub struct PlatformInputHandler {
@@ -3054,7 +3041,7 @@ impl ClipboardString {
     #[cfg_attr(any(target_os = "linux", target_os = "freebsd"), allow(dead_code))]
     /// Compute a hash of the given text for clipboard change detection.
     pub fn text_hash(text: &str) -> u64 {
-        let mut hasher = SeaHasher::new();
+        let mut hasher = crate::collections::FxHasher::default();
         text.hash(&mut hasher);
         hasher.finish()
     }

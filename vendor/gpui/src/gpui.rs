@@ -13,15 +13,20 @@ mod app;
 mod arena;
 mod assets;
 mod bounds_tree;
+pub mod collections;
 mod color;
 pub mod colors;
 mod element;
 mod elements;
 mod executor;
+pub mod futures;
+#[macro_use]
+pub mod gpui_util;
 mod platform_scheduler;
 pub(crate) use platform_scheduler::PlatformScheduler;
 pub mod scheduler;
 mod shared_string;
+pub mod slotmap;
 mod geometry;
 mod gestures;
 mod global;
@@ -30,15 +35,16 @@ mod inspector;
 mod interactive;
 mod key_dispatch;
 mod keymap;
-mod path_builder;
 mod platform;
 pub mod prelude;
 #[expect(missing_docs)]
 pub mod queue;
+mod refineable;
 mod scene;
 mod style;
 mod styled;
 mod subscription;
+pub mod sync;
 mod tab_stop;
 mod taffy;
 mod text_system;
@@ -49,7 +55,42 @@ mod window;
 #[doc(hidden)]
 pub mod private {
     pub use anyhow;
-    pub use rand;
+}
+
+/// Minimal 128-bit identifier (replaces the external `uuid` crate).
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Hash, Ord, PartialOrd)]
+pub struct Uuid(pub [u8; 16]);
+
+impl Uuid {
+    pub const fn from_bytes(bytes: [u8; 16]) -> Self {
+        Self(bytes)
+    }
+
+    pub fn from_hash_bytes(data: &[u8]) -> Self {
+        use std::hash::Hasher as _;
+        let mut h1 = collections::FxHasher::with_seed(0x9e37_79b9_7f4a_7c15);
+        h1.write(data);
+        let a = h1.finish().to_be_bytes();
+        let mut h2 = collections::FxHasher::with_seed(0xbf58_476d_1ce4_e5b9);
+        h2.write(data);
+        let b = h2.finish().to_be_bytes();
+        Self([
+            a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7], b[0], b[1], b[2], b[3], b[4], b[5],
+            b[6], b[7],
+        ])
+    }
+}
+
+impl std::fmt::Display for Uuid {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let b = &self.0;
+        write!(
+            f,
+            "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+            b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7], b[8], b[9], b[10], b[11], b[12], b[13],
+            b[14], b[15]
+        )
+    }
 }
 
 mod seal {
@@ -62,14 +103,12 @@ pub use app::*;
 pub(crate) use arena::*;
 pub use assets::*;
 pub use color::*;
-pub use ctor::ctor;
 pub use element::*;
 pub use elements::*;
 pub use executor::*;
 pub use geometry::*;
 pub use gestures::*;
 pub use global::*;
-pub use gpui_macros::{AppContext, IntoElement, Render, VisualContext};
 pub use gpui_util::arc_cow::ArcCow;
 pub use shared_string::*;
 pub use input::*;
@@ -77,7 +116,6 @@ pub use inspector::*;
 pub use interactive::*;
 use key_dispatch::*;
 pub use keymap::*;
-pub use path_builder::*;
 pub use platform::*;
 pub use queue::{PriorityQueueReceiver, PriorityQueueSender};
 pub use refineable::*;
@@ -93,8 +131,6 @@ pub use text_system::*;
 pub use util::{FutureExt, Timeout};
 pub use view::*;
 pub use window::*;
-
-pub use pollster::block_on;
 
 pub trait AppContext {
     #[expect(

@@ -6,13 +6,12 @@ use std::{
 
 use crate::{
     AbsoluteLength, App, Background, BackgroundTag, BorderStyle, Bounds, ContentMask, Corners,
-    CornersRefinement, CursorStyle, DefiniteLength, DevicePixels, Edges, EdgesRefinement, Font,
-    FontFallbacks, FontFeatures, FontStyle, FontWeight, GridLocation, Hsla, Length, Pixels, Point,
-    PointRefinement, Rgba, SharedString, Size, SizeRefinement, Styled, TextRun, Window, black, phi,
-    point, px, quad, rems, size,
+    CursorStyle, DefiniteLength, DevicePixels, Edges, Font, FontFallbacks, FontFeatures, FontStyle,
+    FontWeight, GridLocation, Hsla, Length, Pixels, Point, Rgba, SharedString, Size, Styled,
+    TextRun, Window, black, phi, point, px, quad, rems, size,
 };
-use collections::HashSet;
-use refineable::Refineable;
+use crate::collections::HashSet;
+use crate::refineable::{IsEmpty, Refineable};
 
 /// Use this struct for interfacing with the 'debug_below' styling from your own elements.
 /// If a parent element has this style set on it, then this struct will be set as a global in
@@ -149,7 +148,7 @@ pub enum GridTemplateMinSize {
 }
 
 /// A simplified representation of the grid-template-* value
-#[derive(Copy, Clone, Refineable, PartialEq, Eq, PartialOrd, Ord, Debug, Default)]
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Default)]
 pub struct GridTemplate {
     /// How this template directive should be repeated
     pub repeat: u16,
@@ -157,9 +156,83 @@ pub struct GridTemplate {
     pub min_size: GridTemplateMinSize,
 }
 
+#[derive(Clone, Default)]
+pub struct GridTemplateRefinement {
+    pub repeat: Option<u16>,
+    pub min_size: Option<GridTemplateMinSize>,
+}
+
+impl GridTemplateRefinement {
+    pub fn is_some(&self) -> bool {
+        self.repeat.is_some() || self.min_size.is_some()
+    }
+}
+
+impl IsEmpty for GridTemplateRefinement {
+    fn is_empty(&self) -> bool {
+        self.repeat.is_none() && self.min_size.is_none()
+    }
+}
+
+impl From<GridTemplateRefinement> for GridTemplate {
+    fn from(v: GridTemplateRefinement) -> Self {
+        Self {
+            repeat: v.repeat.unwrap_or_default(),
+            min_size: v.min_size.unwrap_or_default(),
+        }
+    }
+}
+
+impl Refineable for GridTemplate {
+    type Refinement = GridTemplateRefinement;
+    fn refine(&mut self, r: &Self::Refinement) {
+        if let Some(v) = r.repeat { self.repeat = v; }
+        if let Some(v) = r.min_size { self.min_size = v; }
+    }
+    fn refined(mut self, r: Self::Refinement) -> Self {
+        if let Some(v) = r.repeat { self.repeat = v; }
+        if let Some(v) = r.min_size { self.min_size = v; }
+        self
+    }
+    fn is_superset_of(&self, r: &Self::Refinement) -> bool {
+        if let Some(v) = r.repeat && self.repeat != v { return false; }
+        if let Some(v) = r.min_size && self.min_size != v { return false; }
+        true
+    }
+    fn subtract(&self, r: &Self::Refinement) -> Self::Refinement {
+        GridTemplateRefinement {
+            repeat: if r.repeat == Some(self.repeat) { None } else { Some(self.repeat) },
+            min_size: if r.min_size == Some(self.min_size) { None } else { Some(self.min_size) },
+        }
+    }
+}
+
+impl Refineable for GridTemplateRefinement {
+    type Refinement = GridTemplateRefinement;
+    fn refine(&mut self, r: &Self::Refinement) {
+        if let Some(v) = r.repeat { self.repeat = Some(v); }
+        if let Some(v) = r.min_size { self.min_size = Some(v); }
+    }
+    fn refined(mut self, r: Self::Refinement) -> Self {
+        if let Some(v) = r.repeat { self.repeat = Some(v); }
+        if let Some(v) = r.min_size { self.min_size = Some(v); }
+        self
+    }
+    fn is_superset_of(&self, r: &Self::Refinement) -> bool {
+        if r.repeat.is_some() && self.repeat != r.repeat { return false; }
+        if r.min_size.is_some() && self.min_size != r.min_size { return false; }
+        true
+    }
+    fn subtract(&self, r: &Self::Refinement) -> Self::Refinement {
+        GridTemplateRefinement {
+            repeat: if self.repeat == r.repeat { None } else { self.repeat },
+            min_size: if self.min_size == r.min_size { None } else { self.min_size },
+        }
+    }
+}
+
 /// The CSS styling that can be applied to an element via the `Styled` trait
-#[derive(Clone, Refineable, Debug)]
-#[refineable(Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct Style {
     /// What layout strategy should be used?
     pub display: Display,
@@ -169,68 +242,36 @@ pub struct Style {
 
     // Overflow properties
     /// How children overflowing their container should affect layout
-    #[refineable]
     pub overflow: Point<Overflow>,
     /// How much space (in points) should be reserved for the scrollbars of `Overflow::Scroll` and `Overflow::Auto` nodes.
     pub scrollbar_width: AbsoluteLength,
     /// Whether both x and y axis should be scrollable at the same time.
     pub allow_concurrent_scroll: bool,
     /// Whether scrolling should be restricted to the input gesture's axis.
-    ///
-    /// Pixel-based scroll gestures are locked to their initially dominant axis. The lock may be
-    /// released when the gesture changes direction strongly. Touch phases delimit gestures when
-    /// available, with a timeout fallback for platforms that only emit moved events.
-    ///
-    /// This also prevents input from being remapped to another axis. For example, horizontal input
-    /// will not scroll a container that only has vertical overflow enabled. Mouse wheel platforms
-    /// typically report ordinary wheel input on the Y axis and Shift-modified input on the X axis.
-    ///
-    /// ## Motivation
-    ///
-    /// On the web when scrolling with the mouse wheel, scrolling up and down will always scroll the Y axis, even when
-    /// the mouse is over a horizontally-scrollable element.
-    ///
-    /// The only way to scroll horizontally is to hold down `Shift` while scrolling, which then changes the scroll axis
-    /// to the X axis.
-    ///
-    /// Currently, GPUI operates differently from the web in that it will scroll an element in either the X or Y axis
-    /// when scrolling with just the mouse wheel. This causes problems when scrolling in a vertical list that contains
-    /// horizontally-scrollable elements, as when you get to the horizontally-scrollable elements the scroll will be
-    /// hijacked.
-    ///
-    /// Ideally we would match the web's behavior and not have a need for this, but right now we're adding this opt-in
-    /// style property to limit the potential blast radius.
     pub restrict_scroll_to_axis: bool,
 
     // Position properties
     /// What should the `position` value of this struct use as a base offset?
     pub position: Position,
     /// How should the position of this element be tweaked relative to the layout defined?
-    #[refineable]
     pub inset: Edges<Length>,
 
     // Size properties
     /// Sets the initial size of the item
-    #[refineable]
     pub size: Size<Length>,
     /// Controls the minimum size of the item
-    #[refineable]
     pub min_size: Size<Length>,
     /// Controls the maximum size of the item
-    #[refineable]
     pub max_size: Size<Length>,
     /// Sets the preferred aspect ratio for the item. The ratio is calculated as width divided by height.
     pub aspect_ratio: Option<f32>,
 
     // Spacing Properties
     /// How large should the margin be on each side?
-    #[refineable]
     pub margin: Edges<Length>,
     /// How large should the padding be on each side?
-    #[refineable]
     pub padding: Edges<DefiniteLength>,
     /// How large should the border be on each side?
-    #[refineable]
     pub border_widths: Edges<AbsoluteLength>,
 
     // Alignment properties
@@ -243,7 +284,6 @@ pub struct Style {
     /// How should contained within this item be aligned in the main/inline axis
     pub justify_content: Option<JustifyContent>,
     /// How large should the gaps between items in a flex container be?
-    #[refineable]
     pub gap: Size<DefiniteLength>,
 
     // Flexbox properties
@@ -268,14 +308,12 @@ pub struct Style {
     pub border_style: BorderStyle,
 
     /// The radius of the corners of this element
-    #[refineable]
     pub corner_radii: Corners<AbsoluteLength>,
 
     /// Box shadow of the element
     pub box_shadow: Vec<BoxShadow>,
 
     /// The text style of this element
-    #[refineable]
     pub text: TextStyleRefinement,
 
     /// The mouse cursor style shown when the mouse pointer is over an element.
@@ -285,11 +323,9 @@ pub struct Style {
     pub opacity: Option<f32>,
 
     /// The grid columns of this element
-    /// Roughly equivalent to the Tailwind `grid-cols-<number>`
     pub grid_cols: Option<GridTemplate>,
 
     /// The row span of this element
-    /// Equivalent to the Tailwind `grid-rows-<number>`
     pub grid_rows: Option<GridTemplate>,
 
     /// The grid location of this element
@@ -302,6 +338,435 @@ pub struct Style {
     /// Whether to draw a red debugging outline around this element and all of its conforming children
     #[cfg(debug_assertions)]
     pub debug_below: bool,
+}
+
+#[derive(Clone, Default, PartialEq)]
+pub struct StyleRefinement {
+    pub display: Option<Display>,
+    pub visibility: Option<Visibility>,
+    pub overflow: crate::PointRefinement<Overflow>,
+    pub scrollbar_width: Option<AbsoluteLength>,
+    pub allow_concurrent_scroll: Option<bool>,
+    pub restrict_scroll_to_axis: Option<bool>,
+    pub position: Option<Position>,
+    pub inset: crate::EdgesRefinement<Length>,
+    pub size: crate::SizeRefinement<Length>,
+    pub min_size: crate::SizeRefinement<Length>,
+    pub max_size: crate::SizeRefinement<Length>,
+    pub aspect_ratio: Option<f32>,
+    pub margin: crate::EdgesRefinement<Length>,
+    pub padding: crate::EdgesRefinement<DefiniteLength>,
+    pub border_widths: crate::EdgesRefinement<AbsoluteLength>,
+    pub align_items: Option<AlignItems>,
+    pub align_self: Option<AlignSelf>,
+    pub align_content: Option<AlignContent>,
+    pub justify_content: Option<JustifyContent>,
+    pub gap: crate::SizeRefinement<DefiniteLength>,
+    pub flex_direction: Option<FlexDirection>,
+    pub flex_wrap: Option<FlexWrap>,
+    pub flex_basis: Option<Length>,
+    pub flex_grow: Option<f32>,
+    pub flex_shrink: Option<f32>,
+    pub background: Option<Fill>,
+    pub border_color: Option<Hsla>,
+    pub border_style: Option<BorderStyle>,
+    pub corner_radii: crate::CornersRefinement<AbsoluteLength>,
+    pub box_shadow: Option<Vec<BoxShadow>>,
+    pub text: TextStyleRefinement,
+    pub mouse_cursor: Option<CursorStyle>,
+    pub opacity: Option<f32>,
+    pub grid_cols: Option<GridTemplate>,
+    pub grid_rows: Option<GridTemplate>,
+    pub grid_location: Option<GridLocation>,
+    #[cfg(debug_assertions)]
+    pub debug: Option<bool>,
+    #[cfg(debug_assertions)]
+    pub debug_below: Option<bool>,
+}
+
+impl StyleRefinement {
+    pub fn is_some(&self) -> bool {
+        !self.is_empty()
+    }
+}
+
+impl std::fmt::Debug for StyleRefinement {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut s = f.debug_struct("StyleRefinement");
+        if self.display.is_some() { s.field("display", &self.display); }
+        if self.visibility.is_some() { s.field("visibility", &self.visibility); }
+        if self.overflow.is_some() { s.field("overflow", &self.overflow); }
+        if self.position.is_some() { s.field("position", &self.position); }
+        if self.size.is_some() { s.field("size", &self.size); }
+        if self.background.is_some() { s.field("background", &self.background); }
+        if self.text.is_some() { s.field("text", &self.text); }
+        s.finish_non_exhaustive()
+    }
+}
+
+impl IsEmpty for StyleRefinement {
+    fn is_empty(&self) -> bool {
+        let base = self.display.is_none()
+            && self.visibility.is_none()
+            && self.overflow.is_empty()
+            && self.scrollbar_width.is_none()
+            && self.allow_concurrent_scroll.is_none()
+            && self.restrict_scroll_to_axis.is_none()
+            && self.position.is_none()
+            && self.inset.is_empty()
+            && self.size.is_empty()
+            && self.min_size.is_empty()
+            && self.max_size.is_empty()
+            && self.aspect_ratio.is_none()
+            && self.margin.is_empty()
+            && self.padding.is_empty()
+            && self.border_widths.is_empty()
+            && self.align_items.is_none()
+            && self.align_self.is_none()
+            && self.align_content.is_none()
+            && self.justify_content.is_none()
+            && self.gap.is_empty()
+            && self.flex_direction.is_none()
+            && self.flex_wrap.is_none()
+            && self.flex_basis.is_none()
+            && self.flex_grow.is_none()
+            && self.flex_shrink.is_none()
+            && self.background.is_none()
+            && self.border_color.is_none()
+            && self.border_style.is_none()
+            && self.corner_radii.is_empty()
+            && self.box_shadow.is_none()
+            && self.text.is_empty()
+            && self.mouse_cursor.is_none()
+            && self.opacity.is_none()
+            && self.grid_cols.is_none()
+            && self.grid_rows.is_none()
+            && self.grid_location.is_none();
+        #[cfg(debug_assertions)]
+        let base = base && self.debug.is_none() && self.debug_below.is_none();
+        base
+    }
+}
+
+impl From<StyleRefinement> for Style {
+    fn from(v: StyleRefinement) -> Self {
+        Self {
+            display: v.display.unwrap_or_default(),
+            visibility: v.visibility.unwrap_or_default(),
+            overflow: v.overflow.into(),
+            scrollbar_width: v.scrollbar_width.unwrap_or_default(),
+            allow_concurrent_scroll: v.allow_concurrent_scroll.unwrap_or_default(),
+            restrict_scroll_to_axis: v.restrict_scroll_to_axis.unwrap_or_default(),
+            position: v.position.unwrap_or_default(),
+            inset: v.inset.into(),
+            size: v.size.into(),
+            min_size: v.min_size.into(),
+            max_size: v.max_size.into(),
+            aspect_ratio: v.aspect_ratio,
+            margin: v.margin.into(),
+            padding: v.padding.into(),
+            border_widths: v.border_widths.into(),
+            align_items: v.align_items,
+            align_self: v.align_self,
+            align_content: v.align_content,
+            justify_content: v.justify_content,
+            gap: v.gap.into(),
+            flex_direction: v.flex_direction.unwrap_or_default(),
+            flex_wrap: v.flex_wrap.unwrap_or_default(),
+            flex_basis: v.flex_basis.unwrap_or_default(),
+            flex_grow: v.flex_grow.unwrap_or_default(),
+            flex_shrink: v.flex_shrink.unwrap_or_default(),
+            background: v.background,
+            border_color: v.border_color,
+            border_style: v.border_style.unwrap_or_default(),
+            corner_radii: v.corner_radii.into(),
+            box_shadow: v.box_shadow.unwrap_or_default(),
+            text: v.text,
+            mouse_cursor: v.mouse_cursor,
+            opacity: v.opacity,
+            grid_cols: v.grid_cols,
+            grid_rows: v.grid_rows,
+            grid_location: v.grid_location,
+            #[cfg(debug_assertions)]
+            debug: v.debug.unwrap_or_default(),
+            #[cfg(debug_assertions)]
+            debug_below: v.debug_below.unwrap_or_default(),
+        }
+    }
+}
+
+impl Refineable for Style {
+    type Refinement = StyleRefinement;
+    fn refine(&mut self, r: &Self::Refinement) {
+        if let Some(v) = &r.display { self.display = *v; }
+        if let Some(v) = &r.visibility { self.visibility = *v; }
+        self.overflow.refine(&r.overflow);
+        if let Some(v) = &r.scrollbar_width { self.scrollbar_width = *v; }
+        if let Some(v) = &r.allow_concurrent_scroll { self.allow_concurrent_scroll = *v; }
+        if let Some(v) = &r.restrict_scroll_to_axis { self.restrict_scroll_to_axis = *v; }
+        if let Some(v) = &r.position { self.position = *v; }
+        self.inset.refine(&r.inset);
+        self.size.refine(&r.size);
+        self.min_size.refine(&r.min_size);
+        self.max_size.refine(&r.max_size);
+        if let Some(v) = &r.aspect_ratio { self.aspect_ratio = Some(*v); }
+        self.margin.refine(&r.margin);
+        self.padding.refine(&r.padding);
+        self.border_widths.refine(&r.border_widths);
+        if let Some(v) = &r.align_items { self.align_items = Some(*v); }
+        if let Some(v) = &r.align_self { self.align_self = Some(*v); }
+        if let Some(v) = &r.align_content { self.align_content = Some(*v); }
+        if let Some(v) = &r.justify_content { self.justify_content = Some(*v); }
+        self.gap.refine(&r.gap);
+        if let Some(v) = &r.flex_direction { self.flex_direction = *v; }
+        if let Some(v) = &r.flex_wrap { self.flex_wrap = *v; }
+        if let Some(v) = &r.flex_basis { self.flex_basis = *v; }
+        if let Some(v) = &r.flex_grow { self.flex_grow = *v; }
+        if let Some(v) = &r.flex_shrink { self.flex_shrink = *v; }
+        if let Some(v) = &r.background { self.background = Some(v.clone()); }
+        if let Some(v) = &r.border_color { self.border_color = Some(*v); }
+        if let Some(v) = &r.border_style { self.border_style = *v; }
+        self.corner_radii.refine(&r.corner_radii);
+        if let Some(v) = &r.box_shadow { self.box_shadow = v.clone(); }
+        self.text.refine(&r.text);
+        if let Some(v) = &r.mouse_cursor { self.mouse_cursor = Some(*v); }
+        if let Some(v) = &r.opacity { self.opacity = Some(*v); }
+        if let Some(v) = &r.grid_cols { self.grid_cols = Some(*v); }
+        if let Some(v) = &r.grid_rows { self.grid_rows = Some(*v); }
+        if let Some(v) = &r.grid_location { self.grid_location = Some(v.clone()); }
+        #[cfg(debug_assertions)]
+        if let Some(v) = &r.debug { self.debug = *v; }
+        #[cfg(debug_assertions)]
+        if let Some(v) = &r.debug_below { self.debug_below = *v; }
+    }
+    fn refined(mut self, r: Self::Refinement) -> Self {
+        self.refine(&r);
+        self
+    }
+    fn is_superset_of(&self, r: &Self::Refinement) -> bool {
+        if let Some(v) = &r.display && &self.display != v { return false; }
+        if let Some(v) = &r.visibility && &self.visibility != v { return false; }
+        if !self.overflow.is_superset_of(&r.overflow) { return false; }
+        if let Some(v) = &r.scrollbar_width && &self.scrollbar_width != v { return false; }
+        if let Some(v) = &r.allow_concurrent_scroll && &self.allow_concurrent_scroll != v { return false; }
+        if let Some(v) = &r.restrict_scroll_to_axis && &self.restrict_scroll_to_axis != v { return false; }
+        if let Some(v) = &r.position && &self.position != v { return false; }
+        if !self.inset.is_superset_of(&r.inset) { return false; }
+        if !self.size.is_superset_of(&r.size) { return false; }
+        if !self.min_size.is_superset_of(&r.min_size) { return false; }
+        if !self.max_size.is_superset_of(&r.max_size) { return false; }
+        if r.aspect_ratio.is_some() && self.aspect_ratio != r.aspect_ratio { return false; }
+        if !self.margin.is_superset_of(&r.margin) { return false; }
+        if !self.padding.is_superset_of(&r.padding) { return false; }
+        if !self.border_widths.is_superset_of(&r.border_widths) { return false; }
+        if r.align_items.is_some() && self.align_items != r.align_items { return false; }
+        if r.align_self.is_some() && self.align_self != r.align_self { return false; }
+        if r.align_content.is_some() && self.align_content != r.align_content { return false; }
+        if r.justify_content.is_some() && self.justify_content != r.justify_content { return false; }
+        if !self.gap.is_superset_of(&r.gap) { return false; }
+        if let Some(v) = &r.flex_direction && &self.flex_direction != v { return false; }
+        if let Some(v) = &r.flex_wrap && &self.flex_wrap != v { return false; }
+        if let Some(v) = &r.flex_basis && &self.flex_basis != v { return false; }
+        if let Some(v) = &r.flex_grow && &self.flex_grow != v { return false; }
+        if let Some(v) = &r.flex_shrink && &self.flex_shrink != v { return false; }
+        if r.background.is_some() && self.background != r.background { return false; }
+        if r.border_color.is_some() && self.border_color != r.border_color { return false; }
+        if let Some(v) = &r.border_style && &self.border_style != v { return false; }
+        if !self.corner_radii.is_superset_of(&r.corner_radii) { return false; }
+        if let Some(v) = &r.box_shadow && &self.box_shadow != v { return false; }
+        if !self.text.is_superset_of(&r.text) { return false; }
+        if r.mouse_cursor.is_some() && self.mouse_cursor != r.mouse_cursor { return false; }
+        if r.opacity.is_some() && self.opacity != r.opacity { return false; }
+        if r.grid_cols.is_some() && self.grid_cols != r.grid_cols { return false; }
+        if r.grid_rows.is_some() && self.grid_rows != r.grid_rows { return false; }
+        if r.grid_location.is_some() && self.grid_location != r.grid_location { return false; }
+        #[cfg(debug_assertions)]
+        if let Some(v) = &r.debug && &self.debug != v { return false; }
+        #[cfg(debug_assertions)]
+        if let Some(v) = &r.debug_below && &self.debug_below != v { return false; }
+        true
+    }
+    fn subtract(&self, r: &Self::Refinement) -> Self::Refinement {
+        StyleRefinement {
+            display: if r.display == Some(self.display) { None } else { Some(self.display) },
+            visibility: if r.visibility == Some(self.visibility) { None } else { Some(self.visibility) },
+            overflow: self.overflow.subtract(&r.overflow),
+            scrollbar_width: if r.scrollbar_width == Some(self.scrollbar_width) { None } else { Some(self.scrollbar_width) },
+            allow_concurrent_scroll: if r.allow_concurrent_scroll == Some(self.allow_concurrent_scroll) { None } else { Some(self.allow_concurrent_scroll) },
+            restrict_scroll_to_axis: if r.restrict_scroll_to_axis == Some(self.restrict_scroll_to_axis) { None } else { Some(self.restrict_scroll_to_axis) },
+            position: if r.position == Some(self.position) { None } else { Some(self.position) },
+            inset: self.inset.subtract(&r.inset),
+            size: self.size.subtract(&r.size),
+            min_size: self.min_size.subtract(&r.min_size),
+            max_size: self.max_size.subtract(&r.max_size),
+            aspect_ratio: if self.aspect_ratio == r.aspect_ratio { None } else { self.aspect_ratio },
+            margin: self.margin.subtract(&r.margin),
+            padding: self.padding.subtract(&r.padding),
+            border_widths: self.border_widths.subtract(&r.border_widths),
+            align_items: if self.align_items == r.align_items { None } else { self.align_items },
+            align_self: if self.align_self == r.align_self { None } else { self.align_self },
+            align_content: if self.align_content == r.align_content { None } else { self.align_content },
+            justify_content: if self.justify_content == r.justify_content { None } else { self.justify_content },
+            gap: self.gap.subtract(&r.gap),
+            flex_direction: if r.flex_direction == Some(self.flex_direction) { None } else { Some(self.flex_direction) },
+            flex_wrap: if r.flex_wrap == Some(self.flex_wrap) { None } else { Some(self.flex_wrap) },
+            flex_basis: if r.flex_basis == Some(self.flex_basis) { None } else { Some(self.flex_basis) },
+            flex_grow: if r.flex_grow == Some(self.flex_grow) { None } else { Some(self.flex_grow) },
+            flex_shrink: if r.flex_shrink == Some(self.flex_shrink) { None } else { Some(self.flex_shrink) },
+            background: if self.background == r.background { None } else { self.background.clone() },
+            border_color: if self.border_color == r.border_color { None } else { self.border_color },
+            border_style: if r.border_style == Some(self.border_style) { None } else { Some(self.border_style) },
+            corner_radii: self.corner_radii.subtract(&r.corner_radii),
+            box_shadow: if r.box_shadow.as_ref() == Some(&self.box_shadow) { None } else { Some(self.box_shadow.clone()) },
+            text: self.text.subtract(&r.text),
+            mouse_cursor: if self.mouse_cursor == r.mouse_cursor { None } else { self.mouse_cursor },
+            opacity: if self.opacity == r.opacity { None } else { self.opacity },
+            grid_cols: if self.grid_cols == r.grid_cols { None } else { self.grid_cols },
+            grid_rows: if self.grid_rows == r.grid_rows { None } else { self.grid_rows },
+            grid_location: if self.grid_location == r.grid_location { None } else { self.grid_location.clone() },
+            #[cfg(debug_assertions)]
+            debug: if r.debug == Some(self.debug) { None } else { Some(self.debug) },
+            #[cfg(debug_assertions)]
+            debug_below: if r.debug_below == Some(self.debug_below) { None } else { Some(self.debug_below) },
+        }
+    }
+}
+
+impl Refineable for StyleRefinement {
+    type Refinement = StyleRefinement;
+    fn refine(&mut self, r: &Self::Refinement) {
+        if let Some(v) = &r.display { self.display = Some(*v); }
+        if let Some(v) = &r.visibility { self.visibility = Some(*v); }
+        self.overflow.refine(&r.overflow);
+        if let Some(v) = &r.scrollbar_width { self.scrollbar_width = Some(*v); }
+        if let Some(v) = &r.allow_concurrent_scroll { self.allow_concurrent_scroll = Some(*v); }
+        if let Some(v) = &r.restrict_scroll_to_axis { self.restrict_scroll_to_axis = Some(*v); }
+        if let Some(v) = &r.position { self.position = Some(*v); }
+        self.inset.refine(&r.inset);
+        self.size.refine(&r.size);
+        self.min_size.refine(&r.min_size);
+        self.max_size.refine(&r.max_size);
+        if let Some(v) = &r.aspect_ratio { self.aspect_ratio = Some(*v); }
+        self.margin.refine(&r.margin);
+        self.padding.refine(&r.padding);
+        self.border_widths.refine(&r.border_widths);
+        if let Some(v) = &r.align_items { self.align_items = Some(*v); }
+        if let Some(v) = &r.align_self { self.align_self = Some(*v); }
+        if let Some(v) = &r.align_content { self.align_content = Some(*v); }
+        if let Some(v) = &r.justify_content { self.justify_content = Some(*v); }
+        self.gap.refine(&r.gap);
+        if let Some(v) = &r.flex_direction { self.flex_direction = Some(*v); }
+        if let Some(v) = &r.flex_wrap { self.flex_wrap = Some(*v); }
+        if let Some(v) = &r.flex_basis { self.flex_basis = Some(*v); }
+        if let Some(v) = &r.flex_grow { self.flex_grow = Some(*v); }
+        if let Some(v) = &r.flex_shrink { self.flex_shrink = Some(*v); }
+        if let Some(v) = &r.background { self.background = Some(v.clone()); }
+        if let Some(v) = &r.border_color { self.border_color = Some(*v); }
+        if let Some(v) = &r.border_style { self.border_style = Some(*v); }
+        self.corner_radii.refine(&r.corner_radii);
+        if let Some(v) = &r.box_shadow { self.box_shadow = Some(v.clone()); }
+        self.text.refine(&r.text);
+        if let Some(v) = &r.mouse_cursor { self.mouse_cursor = Some(*v); }
+        if let Some(v) = &r.opacity { self.opacity = Some(*v); }
+        if let Some(v) = &r.grid_cols { self.grid_cols = Some(*v); }
+        if let Some(v) = &r.grid_rows { self.grid_rows = Some(*v); }
+        if let Some(v) = &r.grid_location { self.grid_location = Some(v.clone()); }
+        #[cfg(debug_assertions)]
+        if let Some(v) = &r.debug { self.debug = Some(*v); }
+        #[cfg(debug_assertions)]
+        if let Some(v) = &r.debug_below { self.debug_below = Some(*v); }
+    }
+    fn refined(mut self, r: Self::Refinement) -> Self {
+        self.refine(&r);
+        self
+    }
+    fn is_superset_of(&self, r: &Self::Refinement) -> bool {
+        if r.display.is_some() && self.display != r.display { return false; }
+        if r.visibility.is_some() && self.visibility != r.visibility { return false; }
+        if !self.overflow.is_superset_of(&r.overflow) { return false; }
+        if r.scrollbar_width.is_some() && self.scrollbar_width != r.scrollbar_width { return false; }
+        if r.allow_concurrent_scroll.is_some() && self.allow_concurrent_scroll != r.allow_concurrent_scroll { return false; }
+        if r.restrict_scroll_to_axis.is_some() && self.restrict_scroll_to_axis != r.restrict_scroll_to_axis { return false; }
+        if r.position.is_some() && self.position != r.position { return false; }
+        if !self.inset.is_superset_of(&r.inset) { return false; }
+        if !self.size.is_superset_of(&r.size) { return false; }
+        if !self.min_size.is_superset_of(&r.min_size) { return false; }
+        if !self.max_size.is_superset_of(&r.max_size) { return false; }
+        if r.aspect_ratio.is_some() && self.aspect_ratio != r.aspect_ratio { return false; }
+        if !self.margin.is_superset_of(&r.margin) { return false; }
+        if !self.padding.is_superset_of(&r.padding) { return false; }
+        if !self.border_widths.is_superset_of(&r.border_widths) { return false; }
+        if r.align_items.is_some() && self.align_items != r.align_items { return false; }
+        if r.align_self.is_some() && self.align_self != r.align_self { return false; }
+        if r.align_content.is_some() && self.align_content != r.align_content { return false; }
+        if r.justify_content.is_some() && self.justify_content != r.justify_content { return false; }
+        if !self.gap.is_superset_of(&r.gap) { return false; }
+        if r.flex_direction.is_some() && self.flex_direction != r.flex_direction { return false; }
+        if r.flex_wrap.is_some() && self.flex_wrap != r.flex_wrap { return false; }
+        if r.flex_basis.is_some() && self.flex_basis != r.flex_basis { return false; }
+        if r.flex_grow.is_some() && self.flex_grow != r.flex_grow { return false; }
+        if r.flex_shrink.is_some() && self.flex_shrink != r.flex_shrink { return false; }
+        if r.background.is_some() && self.background != r.background { return false; }
+        if r.border_color.is_some() && self.border_color != r.border_color { return false; }
+        if r.border_style.is_some() && self.border_style != r.border_style { return false; }
+        if !self.corner_radii.is_superset_of(&r.corner_radii) { return false; }
+        if r.box_shadow.is_some() && self.box_shadow != r.box_shadow { return false; }
+        if !self.text.is_superset_of(&r.text) { return false; }
+        if r.mouse_cursor.is_some() && self.mouse_cursor != r.mouse_cursor { return false; }
+        if r.opacity.is_some() && self.opacity != r.opacity { return false; }
+        if r.grid_cols.is_some() && self.grid_cols != r.grid_cols { return false; }
+        if r.grid_rows.is_some() && self.grid_rows != r.grid_rows { return false; }
+        if r.grid_location.is_some() && self.grid_location != r.grid_location { return false; }
+        #[cfg(debug_assertions)]
+        if r.debug.is_some() && self.debug != r.debug { return false; }
+        #[cfg(debug_assertions)]
+        if r.debug_below.is_some() && self.debug_below != r.debug_below { return false; }
+        true
+    }
+    fn subtract(&self, r: &Self::Refinement) -> Self::Refinement {
+        StyleRefinement {
+            display: if self.display == r.display { None } else { self.display },
+            visibility: if self.visibility == r.visibility { None } else { self.visibility },
+            overflow: self.overflow.subtract(&r.overflow),
+            scrollbar_width: if self.scrollbar_width == r.scrollbar_width { None } else { self.scrollbar_width },
+            allow_concurrent_scroll: if self.allow_concurrent_scroll == r.allow_concurrent_scroll { None } else { self.allow_concurrent_scroll },
+            restrict_scroll_to_axis: if self.restrict_scroll_to_axis == r.restrict_scroll_to_axis { None } else { self.restrict_scroll_to_axis },
+            position: if self.position == r.position { None } else { self.position },
+            inset: self.inset.subtract(&r.inset),
+            size: self.size.subtract(&r.size),
+            min_size: self.min_size.subtract(&r.min_size),
+            max_size: self.max_size.subtract(&r.max_size),
+            aspect_ratio: if self.aspect_ratio == r.aspect_ratio { None } else { self.aspect_ratio },
+            margin: self.margin.subtract(&r.margin),
+            padding: self.padding.subtract(&r.padding),
+            border_widths: self.border_widths.subtract(&r.border_widths),
+            align_items: if self.align_items == r.align_items { None } else { self.align_items },
+            align_self: if self.align_self == r.align_self { None } else { self.align_self },
+            align_content: if self.align_content == r.align_content { None } else { self.align_content },
+            justify_content: if self.justify_content == r.justify_content { None } else { self.justify_content },
+            gap: self.gap.subtract(&r.gap),
+            flex_direction: if self.flex_direction == r.flex_direction { None } else { self.flex_direction },
+            flex_wrap: if self.flex_wrap == r.flex_wrap { None } else { self.flex_wrap },
+            flex_basis: if self.flex_basis == r.flex_basis { None } else { self.flex_basis },
+            flex_grow: if self.flex_grow == r.flex_grow { None } else { self.flex_grow },
+            flex_shrink: if self.flex_shrink == r.flex_shrink { None } else { self.flex_shrink },
+            background: if self.background == r.background { None } else { self.background.clone() },
+            border_color: if self.border_color == r.border_color { None } else { self.border_color },
+            border_style: if self.border_style == r.border_style { None } else { self.border_style },
+            corner_radii: self.corner_radii.subtract(&r.corner_radii),
+            box_shadow: if self.box_shadow == r.box_shadow { None } else { self.box_shadow.clone() },
+            text: self.text.subtract(&r.text),
+            mouse_cursor: if self.mouse_cursor == r.mouse_cursor { None } else { self.mouse_cursor },
+            opacity: if self.opacity == r.opacity { None } else { self.opacity },
+            grid_cols: if self.grid_cols == r.grid_cols { None } else { self.grid_cols },
+            grid_rows: if self.grid_rows == r.grid_rows { None } else { self.grid_rows },
+            grid_location: if self.grid_location == r.grid_location { None } else { self.grid_location.clone() },
+            #[cfg(debug_assertions)]
+            debug: if self.debug == r.debug { None } else { self.debug },
+            #[cfg(debug_assertions)]
+            debug_below: if self.debug_below == r.debug_below { None } else { self.debug_below },
+        }
+    }
 }
 
 impl Styled for StyleRefinement {
@@ -416,53 +881,240 @@ pub enum TextAlign {
 }
 
 /// The properties that can be used to style text in GPUI
-#[derive(Refineable, Clone, Debug, PartialEq)]
-#[refineable(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct TextStyle {
     /// The color of the text
     pub color: Hsla,
-
     /// The font family to use
     pub font_family: SharedString,
-
     /// The font features to use
     pub font_features: FontFeatures,
-
     /// The fallback fonts to use
     pub font_fallbacks: Option<FontFallbacks>,
-
     /// The font size to use, in pixels or rems.
     pub font_size: AbsoluteLength,
-
     /// The line height to use, in pixels or fractions
     pub line_height: DefiniteLength,
-
     /// The font weight, e.g. bold
     pub font_weight: FontWeight,
-
     /// The font style, e.g. italic
     pub font_style: FontStyle,
-
     /// The background color of the text
     pub background_color: Option<Hsla>,
-
     /// The underline style of the text
     pub underline: Option<UnderlineStyle>,
-
     /// The strikethrough style of the text
     pub strikethrough: Option<StrikethroughStyle>,
-
     /// How to handle whitespace in the text
     pub white_space: WhiteSpace,
-
     /// The text should be truncated if it overflows the width of the element
     pub text_overflow: Option<TextOverflow>,
-
     /// How the text should be aligned within the element
     pub text_align: TextAlign,
-
     /// The number of lines to display before truncating the text
     pub line_clamp: Option<usize>,
+}
+
+#[derive(Clone, Default, PartialEq)]
+pub struct TextStyleRefinement {
+    pub color: Option<Hsla>,
+    pub font_family: Option<SharedString>,
+    pub font_features: Option<FontFeatures>,
+    pub font_fallbacks: Option<FontFallbacks>,
+    pub font_size: Option<AbsoluteLength>,
+    pub line_height: Option<DefiniteLength>,
+    pub font_weight: Option<FontWeight>,
+    pub font_style: Option<FontStyle>,
+    pub background_color: Option<Hsla>,
+    pub underline: Option<UnderlineStyle>,
+    pub strikethrough: Option<StrikethroughStyle>,
+    pub white_space: Option<WhiteSpace>,
+    pub text_overflow: Option<TextOverflow>,
+    pub text_align: Option<TextAlign>,
+    pub line_clamp: Option<usize>,
+}
+
+impl TextStyleRefinement {
+    pub fn is_some(&self) -> bool {
+        !self.is_empty()
+    }
+}
+
+impl std::fmt::Debug for TextStyleRefinement {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut s = f.debug_struct("TextStyleRefinement");
+        if self.color.is_some() { s.field("color", &self.color); }
+        if self.font_family.is_some() { s.field("font_family", &self.font_family); }
+        if self.font_size.is_some() { s.field("font_size", &self.font_size); }
+        if self.font_weight.is_some() { s.field("font_weight", &self.font_weight); }
+        s.finish_non_exhaustive()
+    }
+}
+
+impl IsEmpty for TextStyleRefinement {
+    fn is_empty(&self) -> bool {
+        self.color.is_none()
+            && self.font_family.is_none()
+            && self.font_features.is_none()
+            && self.font_fallbacks.is_none()
+            && self.font_size.is_none()
+            && self.line_height.is_none()
+            && self.font_weight.is_none()
+            && self.font_style.is_none()
+            && self.background_color.is_none()
+            && self.underline.is_none()
+            && self.strikethrough.is_none()
+            && self.white_space.is_none()
+            && self.text_overflow.is_none()
+            && self.text_align.is_none()
+            && self.line_clamp.is_none()
+    }
+}
+
+impl From<TextStyleRefinement> for TextStyle {
+    fn from(v: TextStyleRefinement) -> Self {
+        Self {
+            color: v.color.unwrap_or_default(),
+            font_family: v.font_family.unwrap_or_default(),
+            font_features: v.font_features.unwrap_or_default(),
+            font_fallbacks: v.font_fallbacks,
+            font_size: v.font_size.unwrap_or_default(),
+            line_height: v.line_height.unwrap_or_default(),
+            font_weight: v.font_weight.unwrap_or_default(),
+            font_style: v.font_style.unwrap_or_default(),
+            background_color: v.background_color,
+            underline: v.underline,
+            strikethrough: v.strikethrough,
+            white_space: v.white_space.unwrap_or_default(),
+            text_overflow: v.text_overflow,
+            text_align: v.text_align.unwrap_or_default(),
+            line_clamp: v.line_clamp,
+        }
+    }
+}
+
+impl Refineable for TextStyle {
+    type Refinement = TextStyleRefinement;
+    fn refine(&mut self, r: &Self::Refinement) {
+        if let Some(v) = &r.color { self.color = *v; }
+        if let Some(v) = &r.font_family { self.font_family = v.clone(); }
+        if let Some(v) = &r.font_features { self.font_features = v.clone(); }
+        if let Some(v) = &r.font_fallbacks { self.font_fallbacks = Some(v.clone()); }
+        if let Some(v) = &r.font_size { self.font_size = *v; }
+        if let Some(v) = &r.line_height { self.line_height = *v; }
+        if let Some(v) = &r.font_weight { self.font_weight = *v; }
+        if let Some(v) = &r.font_style { self.font_style = *v; }
+        if let Some(v) = &r.background_color { self.background_color = Some(*v); }
+        if let Some(v) = &r.underline { self.underline = Some(*v); }
+        if let Some(v) = &r.strikethrough { self.strikethrough = Some(*v); }
+        if let Some(v) = &r.white_space { self.white_space = *v; }
+        if let Some(v) = &r.text_overflow { self.text_overflow = Some(v.clone()); }
+        if let Some(v) = &r.text_align { self.text_align = *v; }
+        if let Some(v) = &r.line_clamp { self.line_clamp = Some(*v); }
+    }
+    fn refined(mut self, r: Self::Refinement) -> Self {
+        self.refine(&r);
+        self
+    }
+    fn is_superset_of(&self, r: &Self::Refinement) -> bool {
+        if let Some(v) = &r.color && &self.color != v { return false; }
+        if let Some(v) = &r.font_family && &self.font_family != v { return false; }
+        if let Some(v) = &r.font_features && &self.font_features != v { return false; }
+        if r.font_fallbacks.is_some() && self.font_fallbacks != r.font_fallbacks { return false; }
+        if let Some(v) = &r.font_size && &self.font_size != v { return false; }
+        if let Some(v) = &r.line_height && &self.line_height != v { return false; }
+        if let Some(v) = &r.font_weight && &self.font_weight != v { return false; }
+        if let Some(v) = &r.font_style && &self.font_style != v { return false; }
+        if r.background_color.is_some() && self.background_color != r.background_color { return false; }
+        if r.underline.is_some() && self.underline != r.underline { return false; }
+        if r.strikethrough.is_some() && self.strikethrough != r.strikethrough { return false; }
+        if let Some(v) = &r.white_space && &self.white_space != v { return false; }
+        if r.text_overflow.is_some() && self.text_overflow != r.text_overflow { return false; }
+        if let Some(v) = &r.text_align && &self.text_align != v { return false; }
+        if r.line_clamp.is_some() && self.line_clamp != r.line_clamp { return false; }
+        true
+    }
+    fn subtract(&self, r: &Self::Refinement) -> Self::Refinement {
+        TextStyleRefinement {
+            color: if r.color == Some(self.color) { None } else { Some(self.color) },
+            font_family: if r.font_family.as_ref() == Some(&self.font_family) { None } else { Some(self.font_family.clone()) },
+            font_features: if r.font_features.as_ref() == Some(&self.font_features) { None } else { Some(self.font_features.clone()) },
+            font_fallbacks: if self.font_fallbacks == r.font_fallbacks { None } else { self.font_fallbacks.clone() },
+            font_size: if r.font_size == Some(self.font_size) { None } else { Some(self.font_size) },
+            line_height: if r.line_height == Some(self.line_height) { None } else { Some(self.line_height) },
+            font_weight: if r.font_weight == Some(self.font_weight) { None } else { Some(self.font_weight) },
+            font_style: if r.font_style == Some(self.font_style) { None } else { Some(self.font_style) },
+            background_color: if self.background_color == r.background_color { None } else { self.background_color },
+            underline: if self.underline == r.underline { None } else { self.underline },
+            strikethrough: if self.strikethrough == r.strikethrough { None } else { self.strikethrough },
+            white_space: if r.white_space == Some(self.white_space) { None } else { Some(self.white_space) },
+            text_overflow: if self.text_overflow == r.text_overflow { None } else { self.text_overflow.clone() },
+            text_align: if r.text_align == Some(self.text_align) { None } else { Some(self.text_align) },
+            line_clamp: if self.line_clamp == r.line_clamp { None } else { self.line_clamp },
+        }
+    }
+}
+
+impl Refineable for TextStyleRefinement {
+    type Refinement = TextStyleRefinement;
+    fn refine(&mut self, r: &Self::Refinement) {
+        if let Some(v) = &r.color { self.color = Some(*v); }
+        if let Some(v) = &r.font_family { self.font_family = Some(v.clone()); }
+        if let Some(v) = &r.font_features { self.font_features = Some(v.clone()); }
+        if let Some(v) = &r.font_fallbacks { self.font_fallbacks = Some(v.clone()); }
+        if let Some(v) = &r.font_size { self.font_size = Some(*v); }
+        if let Some(v) = &r.line_height { self.line_height = Some(*v); }
+        if let Some(v) = &r.font_weight { self.font_weight = Some(*v); }
+        if let Some(v) = &r.font_style { self.font_style = Some(*v); }
+        if let Some(v) = &r.background_color { self.background_color = Some(*v); }
+        if let Some(v) = &r.underline { self.underline = Some(*v); }
+        if let Some(v) = &r.strikethrough { self.strikethrough = Some(*v); }
+        if let Some(v) = &r.white_space { self.white_space = Some(*v); }
+        if let Some(v) = &r.text_overflow { self.text_overflow = Some(v.clone()); }
+        if let Some(v) = &r.text_align { self.text_align = Some(*v); }
+        if let Some(v) = &r.line_clamp { self.line_clamp = Some(*v); }
+    }
+    fn refined(mut self, r: Self::Refinement) -> Self {
+        self.refine(&r);
+        self
+    }
+    fn is_superset_of(&self, r: &Self::Refinement) -> bool {
+        if r.color.is_some() && self.color != r.color { return false; }
+        if r.font_family.is_some() && self.font_family != r.font_family { return false; }
+        if r.font_features.is_some() && self.font_features != r.font_features { return false; }
+        if r.font_fallbacks.is_some() && self.font_fallbacks != r.font_fallbacks { return false; }
+        if r.font_size.is_some() && self.font_size != r.font_size { return false; }
+        if r.line_height.is_some() && self.line_height != r.line_height { return false; }
+        if r.font_weight.is_some() && self.font_weight != r.font_weight { return false; }
+        if r.font_style.is_some() && self.font_style != r.font_style { return false; }
+        if r.background_color.is_some() && self.background_color != r.background_color { return false; }
+        if r.underline.is_some() && self.underline != r.underline { return false; }
+        if r.strikethrough.is_some() && self.strikethrough != r.strikethrough { return false; }
+        if r.white_space.is_some() && self.white_space != r.white_space { return false; }
+        if r.text_overflow.is_some() && self.text_overflow != r.text_overflow { return false; }
+        if r.text_align.is_some() && self.text_align != r.text_align { return false; }
+        if r.line_clamp.is_some() && self.line_clamp != r.line_clamp { return false; }
+        true
+    }
+    fn subtract(&self, r: &Self::Refinement) -> Self::Refinement {
+        TextStyleRefinement {
+            color: if self.color == r.color { None } else { self.color },
+            font_family: if self.font_family == r.font_family { None } else { self.font_family.clone() },
+            font_features: if self.font_features == r.font_features { None } else { self.font_features.clone() },
+            font_fallbacks: if self.font_fallbacks == r.font_fallbacks { None } else { self.font_fallbacks.clone() },
+            font_size: if self.font_size == r.font_size { None } else { self.font_size },
+            line_height: if self.line_height == r.line_height { None } else { self.line_height },
+            font_weight: if self.font_weight == r.font_weight { None } else { self.font_weight },
+            font_style: if self.font_style == r.font_style { None } else { self.font_style },
+            background_color: if self.background_color == r.background_color { None } else { self.background_color },
+            underline: if self.underline == r.underline { None } else { self.underline },
+            strikethrough: if self.strikethrough == r.strikethrough { None } else { self.strikethrough },
+            white_space: if self.white_space == r.white_space { None } else { self.white_space },
+            text_overflow: if self.text_overflow == r.text_overflow { None } else { self.text_overflow.clone() },
+            text_align: if self.text_align == r.text_align { None } else { self.text_align },
+            line_clamp: if self.line_clamp == r.line_clamp { None } else { self.line_clamp },
+        }
+    }
 }
 
 impl Default for TextStyle {
@@ -805,26 +1457,165 @@ impl Default for Style {
 }
 
 /// The properties that can be applied to an underline.
-#[derive(Refineable, Copy, Clone, Default, Debug, PartialEq, Eq, Hash)]
+#[derive(Copy, Clone, Default, Debug, PartialEq, Eq, Hash)]
 pub struct UnderlineStyle {
     /// The thickness of the underline.
     pub thickness: Pixels,
-
     /// The color of the underline.
     pub color: Option<Hsla>,
-
     /// Whether the underline should be wavy, like in a spell checker.
     pub wavy: bool,
 }
 
+#[derive(Clone, Default)]
+pub struct UnderlineStyleRefinement {
+    pub thickness: Option<Pixels>,
+    pub color: Option<Hsla>,
+    pub wavy: Option<bool>,
+}
+
+impl UnderlineStyleRefinement {
+    pub fn is_some(&self) -> bool {
+        self.thickness.is_some() || self.color.is_some() || self.wavy.is_some()
+    }
+}
+
+impl IsEmpty for UnderlineStyleRefinement {
+    fn is_empty(&self) -> bool {
+        self.thickness.is_none() && self.color.is_none() && self.wavy.is_none()
+    }
+}
+
+impl From<UnderlineStyleRefinement> for UnderlineStyle {
+    fn from(v: UnderlineStyleRefinement) -> Self {
+        Self {
+            thickness: v.thickness.unwrap_or_default(),
+            color: v.color,
+            wavy: v.wavy.unwrap_or_default(),
+        }
+    }
+}
+
+impl Refineable for UnderlineStyle {
+    type Refinement = UnderlineStyleRefinement;
+    fn refine(&mut self, r: &Self::Refinement) {
+        if let Some(v) = r.thickness { self.thickness = v; }
+        if let Some(v) = r.color { self.color = Some(v); }
+        if let Some(v) = r.wavy { self.wavy = v; }
+    }
+    fn refined(mut self, r: Self::Refinement) -> Self { self.refine(&r); self }
+    fn is_superset_of(&self, r: &Self::Refinement) -> bool {
+        if let Some(v) = r.thickness && self.thickness != v { return false; }
+        if r.color.is_some() && self.color != r.color { return false; }
+        if let Some(v) = r.wavy && self.wavy != v { return false; }
+        true
+    }
+    fn subtract(&self, r: &Self::Refinement) -> Self::Refinement {
+        UnderlineStyleRefinement {
+            thickness: if r.thickness == Some(self.thickness) { None } else { Some(self.thickness) },
+            color: if self.color == r.color { None } else { self.color },
+            wavy: if r.wavy == Some(self.wavy) { None } else { Some(self.wavy) },
+        }
+    }
+}
+
+impl Refineable for UnderlineStyleRefinement {
+    type Refinement = UnderlineStyleRefinement;
+    fn refine(&mut self, r: &Self::Refinement) {
+        if let Some(v) = r.thickness { self.thickness = Some(v); }
+        if let Some(v) = r.color { self.color = Some(v); }
+        if let Some(v) = r.wavy { self.wavy = Some(v); }
+    }
+    fn refined(mut self, r: Self::Refinement) -> Self { self.refine(&r); self }
+    fn is_superset_of(&self, r: &Self::Refinement) -> bool {
+        if r.thickness.is_some() && self.thickness != r.thickness { return false; }
+        if r.color.is_some() && self.color != r.color { return false; }
+        if r.wavy.is_some() && self.wavy != r.wavy { return false; }
+        true
+    }
+    fn subtract(&self, r: &Self::Refinement) -> Self::Refinement {
+        UnderlineStyleRefinement {
+            thickness: if self.thickness == r.thickness { None } else { self.thickness },
+            color: if self.color == r.color { None } else { self.color },
+            wavy: if self.wavy == r.wavy { None } else { self.wavy },
+        }
+    }
+}
+
 /// The properties that can be applied to a strikethrough.
-#[derive(Refineable, Copy, Clone, Default, Debug, PartialEq, Eq, Hash)]
+#[derive(Copy, Clone, Default, Debug, PartialEq, Eq, Hash)]
 pub struct StrikethroughStyle {
     /// The thickness of the strikethrough.
     pub thickness: Pixels,
-
     /// The color of the strikethrough.
     pub color: Option<Hsla>,
+}
+
+#[derive(Clone, Default)]
+pub struct StrikethroughStyleRefinement {
+    pub thickness: Option<Pixels>,
+    pub color: Option<Hsla>,
+}
+
+impl StrikethroughStyleRefinement {
+    pub fn is_some(&self) -> bool {
+        self.thickness.is_some() || self.color.is_some()
+    }
+}
+
+impl IsEmpty for StrikethroughStyleRefinement {
+    fn is_empty(&self) -> bool {
+        self.thickness.is_none() && self.color.is_none()
+    }
+}
+
+impl From<StrikethroughStyleRefinement> for StrikethroughStyle {
+    fn from(v: StrikethroughStyleRefinement) -> Self {
+        Self {
+            thickness: v.thickness.unwrap_or_default(),
+            color: v.color,
+        }
+    }
+}
+
+impl Refineable for StrikethroughStyle {
+    type Refinement = StrikethroughStyleRefinement;
+    fn refine(&mut self, r: &Self::Refinement) {
+        if let Some(v) = r.thickness { self.thickness = v; }
+        if let Some(v) = r.color { self.color = Some(v); }
+    }
+    fn refined(mut self, r: Self::Refinement) -> Self { self.refine(&r); self }
+    fn is_superset_of(&self, r: &Self::Refinement) -> bool {
+        if let Some(v) = r.thickness && self.thickness != v { return false; }
+        if r.color.is_some() && self.color != r.color { return false; }
+        true
+    }
+    fn subtract(&self, r: &Self::Refinement) -> Self::Refinement {
+        StrikethroughStyleRefinement {
+            thickness: if r.thickness == Some(self.thickness) { None } else { Some(self.thickness) },
+            color: if self.color == r.color { None } else { self.color },
+        }
+    }
+}
+
+impl Refineable for StrikethroughStyleRefinement {
+    type Refinement = StrikethroughStyleRefinement;
+    fn refine(&mut self, r: &Self::Refinement) {
+        if let Some(v) = r.thickness { self.thickness = Some(v); }
+        if let Some(v) = r.color { self.color = Some(v); }
+    }
+    fn refined(mut self, r: Self::Refinement) -> Self { self.refine(&r); self }
+    fn is_superset_of(&self, r: &Self::Refinement) -> bool {
+        if r.thickness.is_some() && self.thickness != r.thickness { return false; }
+        if r.color.is_some() && self.color != r.color { return false; }
+        true
+    }
+    fn subtract(&self, r: &Self::Refinement) -> Self::Refinement {
+        StrikethroughStyleRefinement {
+            thickness: if self.thickness == r.thickness { None } else { self.thickness },
+            color: if self.color == r.color { None } else { self.color },
+        }
+    }
 }
 
 /// The kinds of fill that can be applied to a shape.

@@ -5,9 +5,9 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use collections::HashMap;
-use gpui_util::{ResultExt, maybe};
-use parking_lot::{RwLock, RwLockUpgradableReadGuard};
+use gpui::collections::HashMap;
+use gpui::gpui_util::{ResultExt, maybe};
+use gpui::sync::RwLock;
 use windows::{
     Win32::{
         Foundation::*,
@@ -243,14 +243,15 @@ impl PlatformTextSystem for DirectWriteTextSystem {
     }
 
     fn font_id(&self, font: &Font) -> Result<FontId> {
-        let lock = self.state.upgradable_read();
-        if let Some(font_id) = lock.font_to_font_id.get(font) {
-            Ok(*font_id)
-        } else {
-            RwLockUpgradableReadGuard::upgrade(lock)
-                .select_and_cache_font(&self.components, font)
-                .with_context(|| format!("Failed to select font: {:?}", font))
+        if let Some(font_id) = self.state.read().font_to_font_id.get(font) {
+            return Ok(*font_id);
         }
+        let mut lock = self.state.write();
+        if let Some(font_id) = lock.font_to_font_id.get(font) {
+            return Ok(*font_id);
+        }
+        lock.select_and_cache_font(&self.components, font)
+            .with_context(|| format!("Failed to select font: {:?}", font))
     }
 
     fn font_metrics(&self, font_id: FontId) -> FontMetrics {

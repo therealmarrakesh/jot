@@ -15,11 +15,9 @@ use crate::{
     StrikethroughStyle, TextRenderingMode, UnderlineStyle, px,
 };
 use anyhow::{Context as _, anyhow};
-use collections::{FxHashMap, FxHashSet};
+use crate::collections::{FxHashMap, FxHashSet};
 use core::fmt;
-use derive_more::{Add, Deref, FromStr, Sub};
-use itertools::Itertools;
-use parking_lot::{Mutex, RwLock, RwLockUpgradableReadGuard};
+use crate::sync::{Mutex, RwLock};
 use smallvec::{SmallVec, smallvec};
 use std::{
     borrow::Cow,
@@ -125,7 +123,7 @@ struct QueuedMissingGlyph {
 /// Collects missing-glyph reports without invoking application code during layout.
 struct MissingGlyphReporter {
     generation: Arc<AtomicUsize>,
-    sender: async_channel::Sender<QueuedMissingGlyph>,
+    sender: crate::futures::channel::mpsc::Sender<QueuedMissingGlyph>,
 }
 
 impl MissingGlyphSink for MissingGlyphReporter {
@@ -137,7 +135,8 @@ impl MissingGlyphSink for MissingGlyphReporter {
         let generation = self.generation.load(Ordering::Acquire);
         // Repetitions within a line must not fill the queue before its other
         // missing glyphs. Cross-report deduplication belongs to the receiver.
-        for missing_glyph in missing_glyphs.into_iter().unique() {
+        let mut seen = FxHashSet::default();
+        for missing_glyph in missing_glyphs.into_iter().filter(|g| seen.insert(g.clone())) {
             let queued = QueuedMissingGlyph {
                 generation,
                 missing_glyph,
@@ -159,18 +158,14 @@ impl MissingGlyphReporter {
 pub(crate) struct MissingGlyphReceiver {
     state: MissingGlyphState,
     generation: Arc<AtomicUsize>,
-    receiver: async_channel::Receiver<QueuedMissingGlyph>,
+    receiver: crate::futures::channel::mpsc::Receiver<QueuedMissingGlyph>,
 }
 
 impl MissingGlyphReceiver {
     /// Waits until at least one new missing glyph has been observed.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`async_channel::RecvError`] if the reporting channel is closed.
     pub(crate) async fn recv(
         &mut self,
-    ) -> std::result::Result<Vec<MissingGlyph>, async_channel::RecvError> {
+    ) -> std::result::Result<Vec<MissingGlyph>, crate::futures::channel::mpsc::RecvError> {
         loop {
             let queued = self.receiver.recv().await?;
             let mut missing_glyphs = Vec::new();
@@ -241,7 +236,7 @@ pub struct TextSystem {
 impl TextSystem {
     /// Create a new TextSystem with the given platform text system.
     pub fn new(platform_text_system: Arc<dyn PlatformTextSystem>) -> Self {
-        let (sender, receiver) = async_channel::bounded(MAX_REPORTED_MISSING_GLYPHS);
+        let (sender, receiver) = crate::futures::channel::mpsc::bounded(MAX_REPORTED_MISSING_GLYPHS);
         let missing_glyph_generation = Arc::<AtomicUsize>::default();
         TextSystem {
             platform_text_system,
@@ -380,7 +375,8 @@ impl TextSystem {
             font.family,
             self.fallback_font_stack
                 .iter()
-                .map(|fallback| &fallback.family)
+                .map(|fallback| fallback.family.as_ref())
+                .collect::<Vec<_>>()
                 .join(", ")
         );
     }
@@ -526,17 +522,14 @@ impl TextSystem {
     }
 
     fn read_metrics<T>(&self, font_id: FontId, read: impl FnOnce(&FontMetrics) -> T) -> T {
-        let lock = self.font_metrics.upgradable_read();
-
-        if let Some(metrics) = lock.get(&font_id) {
-            read(metrics)
-        } else {
-            let mut lock = RwLockUpgradableReadGuard::upgrade(lock);
-            let metrics = lock
-                .entry(font_id)
-                .or_insert_with(|| self.platform_text_system.font_metrics(font_id));
-            read(metrics)
+        if let Some(metrics) = self.font_metrics.read().get(&font_id) {
+            return read(metrics);
         }
+        let mut lock = self.font_metrics.write();
+        let metrics = lock
+            .entry(font_id)
+            .or_insert_with(|| self.platform_text_system.font_metrics(font_id));
+        read(metrics)
     }
 
     /// Returns a handle to a line wrapper, for the given font and font size.
@@ -558,15 +551,12 @@ impl TextSystem {
 
     /// Get the rasterized size and location of a specific, rendered glyph.
     pub(crate) fn raster_bounds(&self, params: &RenderGlyphParams) -> Result<Bounds<DevicePixels>> {
-        let raster_bounds = self.raster_bounds.upgradable_read();
-        if let Some(bounds) = raster_bounds.get(params) {
-            Ok(*bounds)
-        } else {
-            let mut raster_bounds = RwLockUpgradableReadGuard::upgrade(raster_bounds);
-            let bounds = self.platform_text_system.glyph_raster_bounds(params)?;
-            raster_bounds.insert(params.clone(), bounds);
-            Ok(bounds)
+        if let Some(bounds) = self.raster_bounds.read().get(params) {
+            return Ok(*bounds);
         }
+        let bounds = self.platform_text_system.glyph_raster_bounds(params)?;
+        self.raster_bounds.write().insert(params.clone(), bounds);
+        Ok(bounds)
     }
 
     pub(crate) fn rasterize_glyph(
@@ -596,11 +586,16 @@ impl TextSystem {
 }
 
 /// The GPUI text layout subsystem.
-#[derive(Deref)]
 pub struct WindowTextSystem {
     line_layout_cache: LineLayoutCache,
-    #[deref]
     text_system: Arc<TextSystem>,
+}
+
+impl std::ops::Deref for WindowTextSystem {
+    type Target = Arc<TextSystem>;
+    fn deref(&self) -> &Self::Target {
+        &self.text_system
+    }
 }
 
 impl WindowTextSystem {
@@ -1121,8 +1116,29 @@ impl DerefMut for LineWrapperHandle {
 
 /// The degree of blackness or stroke thickness of a font. This value ranges from 100.0 to 900.0,
 /// with 400.0 as normal.
-#[derive(Clone, Copy, Debug, PartialEq, PartialOrd, Add, Sub, FromStr)]
+#[derive(Clone, Copy, Debug, PartialEq, PartialOrd)]
 pub struct FontWeight(pub f32);
+
+impl std::ops::Add for FontWeight {
+    type Output = Self;
+    fn add(self, rhs: Self) -> Self {
+        Self(self.0 + rhs.0)
+    }
+}
+
+impl std::ops::Sub for FontWeight {
+    type Output = Self;
+    fn sub(self, rhs: Self) -> Self {
+        Self(self.0 - rhs.0)
+    }
+}
+
+impl std::str::FromStr for FontWeight {
+    type Err = std::num::ParseFloatError;
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        s.parse::<f32>().map(Self)
+    }
+}
 
 impl Display for FontWeight {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -1465,7 +1481,7 @@ mod missing_glyph_tests {
     }
 
     fn missing_glyph_channel() -> (MissingGlyphReporter, MissingGlyphReceiver) {
-        let (sender, receiver) = async_channel::bounded(MAX_REPORTED_MISSING_GLYPHS);
+        let (sender, receiver) = crate::futures::channel::mpsc::bounded(MAX_REPORTED_MISSING_GLYPHS);
         let generation = Arc::<AtomicUsize>::default();
         let reporter = MissingGlyphReporter {
             generation: generation.clone(),

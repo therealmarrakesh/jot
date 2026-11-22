@@ -2,12 +2,12 @@ use super::*;
 use crate::base::{Transition, transition};
 use std::collections::HashMap;
 use std::time::Instant;
-use windows_sys::Win32::Foundation::{POINT, RECT};
-use windows_sys::Win32::Graphics::Gdi::{
+use windows::Win32::Foundation::{POINT, RECT};
+use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint,
 };
-use windows_sys::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
-use windows_sys::Win32::UI::WindowsAndMessaging::SPI_GETMOUSEHOVERTIME;
+use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
+use windows::Win32::UI::WindowsAndMessaging::SPI_GETMOUSEHOVERTIME;
 
 const PADDING_X: f32 = 9.;
 const PADDING_TOP: f32 = 6.;
@@ -569,9 +569,9 @@ fn show(snap: Snap, cx: &mut App) {
         cbSize: size_of::<MONITORINFO>() as u32,
         ..Default::default()
     };
-    unsafe { GetMonitorInfoW(monitor, &mut info) };
+    let _ = unsafe { GetMonitorInfoW(monitor, &mut info) };
     let (mut dpi_x, mut dpi_y) = (USER_DEFAULT_SCREEN_DPI, USER_DEFAULT_SCREEN_DPI);
-    unsafe { GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y) };
+    let _ = unsafe { GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y) };
     let scale = dpi_x as f32 / USER_DEFAULT_SCREEN_DPI as f32;
     let work = info.rcWork;
     overlay::place(

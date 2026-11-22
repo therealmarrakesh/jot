@@ -81,28 +81,34 @@ impl<T: Future> FutureExt for T {
     }
 }
 
-#[pin_project::pin_project]
 pub struct WithTimeout<T> {
-    #[pin]
     future: T,
-    #[pin]
     timer: Task<()>,
 }
 
-#[derive(Debug, thiserror::Error)]
-#[error("Timed out before future resolved")]
 /// Error returned by with_timeout when the timeout duration elapsed before the future resolved
+#[derive(Debug)]
 pub struct Timeout;
+
+impl std::fmt::Display for Timeout {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Timed out before future resolved")
+    }
+}
+
+impl std::error::Error for Timeout {}
 
 impl<T: Future> Future for WithTimeout<T> {
     type Output = Result<T::Output, Timeout>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut task::Context) -> task::Poll<Self::Output> {
-        let this = self.project();
+        let this = unsafe { self.get_unchecked_mut() };
+        let future = unsafe { Pin::new_unchecked(&mut this.future) };
+        let timer = Pin::new(&mut this.timer);
 
-        if let task::Poll::Ready(output) = this.future.poll(cx) {
+        if let task::Poll::Ready(output) = future.poll(cx) {
             task::Poll::Ready(Ok(output))
-        } else if this.timer.poll(cx).is_ready() {
+        } else if timer.poll(cx).is_ready() {
             task::Poll::Ready(Err(Timeout))
         } else {
             task::Poll::Pending
@@ -245,7 +251,7 @@ mod tests {
             .timer(long_duration)
             .with_timeout(short_duration, &cx.executor());
         cx.executor().advance_clock(short_duration * 2);
-        futures::FutureExt::now_or_never(fut)
+        crate::futures::FutureExt::now_or_never(fut)
             .unwrap_or_else(|| panic!("timeout should have triggered"))
             .expect_err("timeout");
     }

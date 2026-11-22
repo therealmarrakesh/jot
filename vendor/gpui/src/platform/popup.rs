@@ -1,5 +1,4 @@
 use bitflags::bitflags;
-use thiserror::Error;
 
 use crate::{AnyWindowHandle, Bounds, Pixels, Point};
 
@@ -129,6 +128,13 @@ bitflags! {
 /// Native popups are separate from gpui's in-window popovers, which are drawn as elements inside
 /// an existing window. A caller that wants a popup on every platform should treat this error as
 /// a cue to fall back to that in-window rendering.
-#[derive(Debug, Error)]
-#[error("popups are not supported on this platform")]
+#[derive(Debug)]
 pub struct PopupNotSupportedError;
+
+impl std::fmt::Display for PopupNotSupportedError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("popups are not supported on this platform")
+    }
+}
+
+impl std::error::Error for PopupNotSupportedError {}

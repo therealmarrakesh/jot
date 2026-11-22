@@ -1,6 +1,6 @@
 use crate::{FontId, GlyphId, Pixels, PlatformTextSystem, Point, SharedString, Size, point, px};
-use collections::FxHashMap;
-use parking_lot::{Mutex, RwLock, RwLockUpgradableReadGuard};
+use crate::collections::FxHashMap;
+use crate::sync::{Mutex, RwLock};
 use smallvec::SmallVec;
 use std::{
     borrow::Borrow,
@@ -620,21 +620,22 @@ impl LineLayoutCache {
             force_width: None,
         } as &dyn AsCacheKeyRef;
 
-        let current_frame = self.current_frame.upgradable_read();
-        if let Some(layout) = current_frame.wrapped_lines.get(key) {
-            return layout.clone();
+        {
+            let current_frame = self.current_frame.read();
+            if let Some(layout) = current_frame.wrapped_lines.get(key) {
+                return layout.clone();
+            }
         }
 
         let previous_frame_entry = self.previous_frame.lock().wrapped_lines.remove_entry(key);
         if let Some((key, layout)) = previous_frame_entry {
-            let mut current_frame = RwLockUpgradableReadGuard::upgrade(current_frame);
+            let mut current_frame = self.current_frame.write();
             current_frame
                 .wrapped_lines
                 .insert(key.clone(), layout.clone());
             current_frame.used_wrapped_lines.push(key);
             layout
         } else {
-            drop(current_frame);
             let text = SharedString::from(text);
             let unwrapped_layout = self.layout_line::<&SharedString>(&text, font_size, runs, None);
             let wrap_boundaries = if let Some(wrap_width) = wrap_width {
@@ -685,12 +686,17 @@ impl LineLayoutCache {
             force_width,
         } as &dyn AsCacheKeyRef;
 
-        let current_frame = self.current_frame.upgradable_read();
+        {
+            let current_frame = self.current_frame.read();
+            if let Some(layout) = current_frame.lines.get(key) {
+                return layout.clone();
+            }
+        }
+
+        let mut current_frame = self.current_frame.write();
         if let Some(layout) = current_frame.lines.get(key) {
             return layout.clone();
         }
-
-        let mut current_frame = RwLockUpgradableReadGuard::upgrade(current_frame);
         if let Some((key, layout)) = self.previous_frame.lock().lines.remove_entry(key) {
             current_frame.lines.insert(key.clone(), layout.clone());
             current_frame.used_lines.push(key);
@@ -804,7 +810,23 @@ impl LineLayoutCache {
         };
 
         // Fast path: already cached (no allocation).
-        let current_frame = self.current_frame.upgradable_read();
+        {
+            let current_frame = self.current_frame.read();
+            if let Some((_, layout)) = current_frame.lines_by_hash.iter().find(|(key, _)| {
+                HashedCacheKeyRef {
+                    text_hash: key.text_hash,
+                    text_len: key.text_len,
+                    font_size: key.font_size,
+                    runs: key.runs.as_slice(),
+                    wrap_width: key.wrap_width,
+                    force_width: key.force_width,
+                } == key_ref
+            }) {
+                return layout.clone();
+            }
+        }
+
+        let mut current_frame = self.current_frame.write();
         if let Some((_, layout)) = current_frame.lines_by_hash.iter().find(|(key, _)| {
             HashedCacheKeyRef {
                 text_hash: key.text_hash,
@@ -817,8 +839,6 @@ impl LineLayoutCache {
         }) {
             return layout.clone();
         }
-
-        let mut current_frame = RwLockUpgradableReadGuard::upgrade(current_frame);
 
         // Try to reuse from previous frame without allocating; do a linear scan to find a matching key.
         // (We avoid `drain()` here because it would eagerly move all entries.)

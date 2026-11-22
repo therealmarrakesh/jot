@@ -3,7 +3,6 @@ use crate::{
     SharedString, StrikethroughStyle, TextAlign, UnderlineStyle, Window, WrapBoundary,
     WrappedLineLayout, black, fill, point, px, size, underline_y_offset,
 };
-use derive_more::{Deref, DerefMut};
 use smallvec::SmallVec;
 use std::{ops::Range, sync::Arc};
 
@@ -39,14 +38,25 @@ pub struct DecorationRun {
 }
 
 /// A line of text that has been shaped and decorated.
-#[derive(Clone, Default, Debug, Deref, DerefMut)]
+#[derive(Clone, Default, Debug)]
 pub struct ShapedLine {
-    #[deref]
-    #[deref_mut]
     pub(crate) layout: Arc<LineLayout>,
     /// The text that was shaped for this line.
     pub text: SharedString,
     pub(crate) decoration_runs: SmallVec<[DecorationRun; 32]>,
+}
+
+impl std::ops::Deref for ShapedLine {
+    type Target = Arc<LineLayout>;
+    fn deref(&self) -> &Self::Target {
+        &self.layout
+    }
+}
+
+impl std::ops::DerefMut for ShapedLine {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.layout
+    }
 }
 
 impl ShapedLine {
@@ -439,14 +449,25 @@ impl LineLayout {
 }
 
 /// A line of text that has been shaped, decorated, and wrapped by the text layout system.
-#[derive(Default, Debug, Deref, DerefMut)]
+#[derive(Default, Debug)]
 pub struct WrappedLine {
-    #[deref]
-    #[deref_mut]
     pub(crate) layout: Arc<WrappedLineLayout>,
     /// The text that was shaped for this line.
     pub text: SharedString,
     pub(crate) decoration_runs: Vec<DecorationRun>,
+}
+
+impl std::ops::Deref for WrappedLine {
+    type Target = Arc<WrappedLineLayout>;
+    fn deref(&self) -> &Self::Target {
+        &self.layout
+    }
+}
+
+impl std::ops::DerefMut for WrappedLine {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.layout
+    }
 }
 
 impl WrappedLine {

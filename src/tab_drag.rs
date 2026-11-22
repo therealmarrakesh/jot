@@ -1,23 +1,23 @@
 use super::*;
 use std::time::Instant;
 use tabs::{CAPTION_WIDTH, STRIP_LEFT, STRIP_TOP, TAB_HEIGHT, window_listeners};
-use windows_sys::Win32::Foundation::{HWND, LPARAM, POINT, RECT};
-use windows_sys::Win32::Graphics::Dwm::{
+use windows::Win32::Foundation::{HWND, LPARAM, POINT, RECT, WPARAM};
+use windows::Win32::Graphics::Dwm::{
     DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute,
 };
-use windows_sys::Win32::Graphics::Gdi::PtInRect;
-use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+use windows::Win32::Graphics::Gdi::PtInRect;
+use windows::Win32::UI::HiDpi::GetDpiForWindow;
+use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, ReleaseCapture, SetCapture, VK_LBUTTON, VK_RBUTTON,
 };
-use windows_sys::Win32::UI::WindowsAndMessaging::{
+use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GUI_INMOVESIZE, GUITHREADINFO, GWL_EXSTYLE, GetClientRect, GetGUIThreadInfo,
     GetSystemMetrics, GetWindowLongW, GetWindowPlacement, GetWindowRect, GetWindowThreadProcessId,
     HTCAPTION, IsIconic, IsWindowVisible, IsZoomed, PostMessageW, SC_MOVE, SM_SWAPBUTTON,
     SW_RESTORE, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SetForegroundWindow, SetWindowPlacement,
     SetWindowPos, ShowWindow, WINDOWPLACEMENT, WM_CANCELMODE, WM_SYSCOMMAND, WS_EX_TRANSPARENT,
 };
-use windows_sys::core::BOOL;
+use windows::core::BOOL;
 
 const DRAG_THRESHOLD: f32 = 10.;
 const DETACH_MAGNETISM: f32 = 15.;
@@ -85,7 +85,7 @@ pub(crate) fn press(
     alone: bool,
     cx: &mut App,
 ) {
-    if alone && unsafe { IsZoomed(owner.hwnd as HWND) } == 0 {
+    if alone && !unsafe { IsZoomed(HWND(owner.hwnd as _)) }.as_bool() {
         cx.defer(lift);
     }
     cx.set_global(TabDrag {
@@ -210,7 +210,7 @@ pub(crate) fn cancel(cx: &mut App) {
     let Some(drag) = end(cx) else {
         return;
     };
-    unsafe { ReleaseCapture() };
+    let _ = unsafe { ReleaseCapture() };
     if let Phase::Pressed = drag.phase {
         return;
     }
@@ -256,7 +256,7 @@ fn attach(drag: &mut TabDrag, target: Owner, point: POINT, cx: &mut App) {
     with_jot(target, cx, |jot, window, cx| {
         jot.insert_dragged_tab(data, x, grab, window, cx)
     });
-    unsafe { SetCapture(target.hwnd as HWND) };
+    unsafe { SetCapture(HWND(target.hwnd as _)) };
     drag.owner = target;
     drag.phase = Phase::Dragging;
 }
@@ -281,8 +281,8 @@ fn detach(drag: &mut TabDrag, alone: bool, point: POINT, cx: &mut App) {
         if hwnd == drag.source.hwnd && drag.source_placement.is_none() {
             drag.source_placement = placement(hwnd);
         }
-        if unsafe { IsZoomed(hwnd as HWND) } != 0 {
-            unsafe { ShowWindow(hwnd as HWND, SW_RESTORE) };
+        if unsafe { IsZoomed(HWND(hwnd as _)) }.as_bool() {
+            let _ = unsafe { ShowWindow(HWND(hwnd as _), SW_RESTORE) };
         }
         with_jot(drag.owner, cx, |jot, _, cx| jot.release_tab(cx));
     }
@@ -300,13 +300,13 @@ fn run_move_loop(drag: &mut TabDrag, point: POINT, cx: &mut App) {
 
 fn start_move_loop(drag: &mut TabDrag, point: POINT, cx: &mut App) {
     let hwnd = drag.owner.hwnd;
-    let position = (((point.y as u16 as u32) << 16) | point.x as u16 as u32) as LPARAM;
+    let position = LPARAM((((point.y as u16 as u32) << 16) | point.x as u16 as u32) as isize);
     unsafe {
-        ReleaseCapture();
-        PostMessageW(
-            hwnd as HWND,
+        let _ = ReleaseCapture();
+        let _ = PostMessageW(
+            Some(HWND(hwnd as _)),
             WM_SYSCOMMAND,
-            SC_MOVE as usize | HTCAPTION as usize,
+            WPARAM(SC_MOVE as usize | HTCAPTION as usize),
             position,
         );
     }
@@ -338,7 +338,7 @@ fn poll(cx: &mut App) -> bool {
     if in_move_loop(hwnd) {
         let attaching = attaching || strip_window(point, hwnd, cx).is_some();
         if attaching && !matches!(drag.phase, Phase::Moving { attaching: true }) {
-            unsafe { PostMessageW(hwnd as HWND, WM_CANCELMODE, 0, 0) };
+            let _ = unsafe { PostMessageW(Some(HWND(hwnd as _)), WM_CANCELMODE, WPARAM(0), LPARAM(0)) };
         }
         drag.phase = Phase::Moving { attaching };
         cx.set_global(drag);
@@ -383,11 +383,11 @@ fn button_down() -> bool {
     } else {
         VK_LBUTTON
     };
-    (unsafe { GetAsyncKeyState(button as i32) }) < 0
+    (unsafe { GetAsyncKeyState(button.0 as i32) }) < 0
 }
 
 fn scale(hwnd: isize) -> f32 {
-    match unsafe { GetDpiForWindow(hwnd as HWND) } {
+    match unsafe { GetDpiForWindow(HWND(hwnd as _)) } {
         0 => 1.,
         dpi => dpi as f32 / USER_DEFAULT_SCREEN_DPI as f32,
     }
@@ -413,7 +413,7 @@ fn screen(hwnd: isize, position: Point<Pixels>) -> POINT {
 
 fn in_strip(hwnd: isize, point: POINT) -> bool {
     let mut client = RECT::default();
-    unsafe { GetClientRect(hwnd as HWND, &mut client) };
+    let _ = unsafe { GetClientRect(HWND(hwnd as _), &mut client) };
     let width = client.right as f32 / scale(hwnd);
     let position = local(hwnd, point);
     (STRIP_LEFT..width - CAPTION_WIDTH).contains(&position.x)
@@ -425,13 +425,13 @@ fn place(hwnd: isize, point: POINT, offset: Point<f32>) {
     let scale = scale(hwnd);
     let origin = client_origin(hwnd);
     let mut frame = RECT::default();
-    unsafe { GetWindowRect(hwnd as HWND, &mut frame) };
+    let _ = unsafe { GetWindowRect(HWND(hwnd as _), &mut frame) };
     let x = point.x - (offset.x * scale).round() as i32 - (origin.x - frame.left);
     let y = point.y - (offset.y * scale).round() as i32 - (origin.y - frame.top);
-    unsafe {
+    let _ = unsafe {
         SetWindowPos(
-            hwnd as HWND,
-            std::ptr::null_mut(),
+            HWND(hwnd as _),
+            None,
             x,
             y,
             0,
@@ -446,25 +446,29 @@ fn placement(hwnd: isize) -> Option<WINDOWPLACEMENT> {
         length: size_of::<WINDOWPLACEMENT>() as u32,
         ..Default::default()
     };
-    (unsafe { GetWindowPlacement(hwnd as HWND, &mut placement) } != 0).then_some(placement)
+    unsafe { GetWindowPlacement(HWND(hwnd as _), &mut placement) }
+        .is_ok()
+        .then_some(placement)
 }
 
 fn restore_placement(hwnd: isize, placement: Option<WINDOWPLACEMENT>) {
     if let Some(placement) = placement {
-        unsafe { SetWindowPlacement(hwnd as HWND, &placement) };
+        let _ = unsafe { SetWindowPlacement(HWND(hwnd as _), &placement) };
     }
 }
 
 fn foreground(hwnd: isize) {
-    unsafe { SetForegroundWindow(hwnd as HWND) };
+    let _ = unsafe { SetForegroundWindow(HWND(hwnd as _)) };
 }
 
 fn in_move_loop(hwnd: isize) -> bool {
-    let mut info: GUITHREADINFO = unsafe { std::mem::zeroed() };
-    info.cbSize = size_of::<GUITHREADINFO>() as u32;
+    let mut info = GUITHREADINFO {
+        cbSize: size_of::<GUITHREADINFO>() as u32,
+        ..Default::default()
+    };
     unsafe {
-        let thread = GetWindowThreadProcessId(hwnd as HWND, std::ptr::null_mut());
-        GetGUIThreadInfo(thread, &mut info) != 0 && info.flags & GUI_INMOVESIZE != 0
+        let thread = GetWindowThreadProcessId(HWND(hwnd as _), None);
+        GetGUIThreadInfo(thread, &mut info).is_ok() && (info.flags & GUI_INMOVESIZE).0 != 0
     }
 }
 
@@ -477,15 +481,16 @@ struct Search {
 fn shown(hwnd: HWND) -> bool {
     let mut cloaked = 0u32;
     unsafe {
-        IsWindowVisible(hwnd) != 0
-            && IsIconic(hwnd) == 0
-            && GetWindowLongW(hwnd, GWL_EXSTYLE) as u32 & WS_EX_TRANSPARENT == 0
+        IsWindowVisible(hwnd).as_bool()
+            && !IsIconic(hwnd).as_bool()
+            && GetWindowLongW(hwnd, GWL_EXSTYLE) as u32 & WS_EX_TRANSPARENT.0 == 0
             && (DwmGetWindowAttribute(
                 hwnd,
-                DWMWA_CLOAKED as _,
+                DWMWA_CLOAKED,
                 (&raw mut cloaked).cast(),
                 size_of::<u32>() as u32,
-            ) != 0
+            )
+            .is_err()
                 || cloaked == 0)
     }
 }
@@ -495,28 +500,28 @@ fn frame(hwnd: HWND) -> RECT {
     let status = unsafe {
         DwmGetWindowAttribute(
             hwnd,
-            DWMWA_EXTENDED_FRAME_BOUNDS as _,
+            DWMWA_EXTENDED_FRAME_BOUNDS,
             (&raw mut frame).cast(),
             size_of::<RECT>() as u32,
         )
     };
-    if status != 0 {
-        unsafe { GetWindowRect(hwnd, &mut frame) };
+    if status.is_err() {
+        let _ = unsafe { GetWindowRect(hwnd, &mut frame) };
     }
     frame
 }
 
 unsafe extern "system" fn visit(hwnd: HWND, data: LPARAM) -> BOOL {
-    let search = unsafe { &mut *(data as *mut Search) };
-    if hwnd as isize == search.exclude || !shown(hwnd) {
-        return 1;
+    let search = unsafe { &mut *(data.0 as *mut Search) };
+    if hwnd.0 as isize == search.exclude || !shown(hwnd) {
+        return BOOL(1);
     }
     let frame = frame(hwnd);
-    if unsafe { PtInRect(&frame, search.point) } != 0 {
-        search.found = hwnd as isize;
-        return 0;
+    if unsafe { PtInRect(&frame, search.point) }.as_bool() {
+        search.found = hwnd.0 as isize;
+        return BOOL(0);
     }
-    1
+    BOOL(1)
 }
 
 fn window_at(point: POINT, exclude: isize) -> isize {
@@ -525,6 +530,6 @@ fn window_at(point: POINT, exclude: isize) -> isize {
         exclude,
         found: 0,
     };
-    unsafe { EnumWindows(Some(visit), (&raw mut search) as LPARAM) };
+    let _ = unsafe { EnumWindows(Some(visit), LPARAM((&raw mut search) as isize)) };
     search.found
 }

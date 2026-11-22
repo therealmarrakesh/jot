@@ -1,5 +1,5 @@
 use super::*;
-use windows_sys::Win32::Foundation::{POINT, RECT};
+use windows::Win32::Foundation::{POINT, RECT};
 
 const FILL: u32 = 0x767676;
 const PADDING: f32 = 4.;

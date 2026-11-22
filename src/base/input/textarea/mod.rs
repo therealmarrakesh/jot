@@ -6,9 +6,16 @@ use super::{InputBaseState, TextareaMode};
 pub type TextareaState = InputBaseState<TextareaMode>;
 
 /// An unstyled ordinary multi-line text input.
-#[derive(IntoElement)]
 pub struct Textarea {
     state: Entity<TextareaState>,
+}
+
+impl IntoElement for Textarea {
+    type Element = gpui::ViewElement<Self>;
+
+    fn into_element(self) -> Self::Element {
+        gpui::ViewElement::new(self)
+    }
 }
 
 impl Textarea {

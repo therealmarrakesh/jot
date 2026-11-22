@@ -40,8 +40,8 @@ fn apply_preference(preference: Option<bool>, cx: &mut App) {
 
 #[cfg(target_os = "windows")]
 fn platform_read() -> Option<bool> {
-    use windows_sys::Win32::UI::WindowsAndMessaging::{
-        SPI_GETCLIENTAREAANIMATION, SystemParametersInfoW,
+    use windows::Win32::UI::WindowsAndMessaging::{
+        SPI_GETCLIENTAREAANIMATION, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SystemParametersInfoW,
     };
 
     let mut animations_enabled = 0i32;
@@ -49,10 +49,11 @@ fn platform_read() -> Option<bool> {
         SystemParametersInfoW(
             SPI_GETCLIENTAREAANIMATION,
             0,
-            (&raw mut animations_enabled).cast(),
-            0,
+            Some((&raw mut animations_enabled).cast()),
+            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
         )
-    } != 0;
+    }
+    .is_ok();
     ok.then_some(animations_enabled == 0)
 }
 

@@ -26,9 +26,9 @@ use crate::{
     ScrollWheelEvent, SharedString, Size, Style, StyleRefinement, Styled, Task, TooltipId,
     TouchPhase, Visibility, Window, WindowControlArea, point, px, size,
 };
-use collections::HashMap;
-use gpui_util::ResultExt;
-use refineable::Refineable;
+use crate::collections::HashMap;
+use crate::gpui_util::ResultExt;
+use crate::Refineable;
 use smallvec::SmallVec;
 use std::{
     any::{Any, TypeId},

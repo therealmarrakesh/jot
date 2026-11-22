@@ -1,15 +1,15 @@
 use crate::{ActivityGuard, App, PlatformDispatcher, PlatformScheduler};
 #[cfg(not(target_family = "wasm"))]
-use futures::channel::mpsc;
-use futures::prelude::*;
-use gpui_util::{TryFutureExt, TryFutureExtBacktrace};
+use crate::futures::channel::mpsc;
+use crate::futures::prelude::*;
+use crate::gpui_util::{TryFutureExt, TryFutureExtBacktrace};
 use crate::scheduler::{self, Instant, Scheduler};
 use std::{future::Future, marker::PhantomData, rc::Rc, sync::Arc, time::Duration};
 #[cfg(not(target_family = "wasm"))]
 use std::{mem, pin::Pin};
 
 pub use crate::scheduler::{
-    DedicatedExecutor, FallibleTask, LocalExecutor as SchedulerLocalExecutor, Priority, Task,
+    FallibleTask, LocalExecutor as SchedulerLocalExecutor, Priority, Task,
 };
 
 /// A pointer to the executor that is currently running,
@@ -262,7 +262,7 @@ impl BackgroundExecutor {
         if let Some(test) = self.dispatcher.as_test() {
             return test.num_cpus_override().unwrap_or(4);
         }
-        num_cpus::get()
+        std::thread::available_parallelism().map_or(1, |n| n.get())
     }
 
     /// Override the number of CPUs reported by this executor in tests.

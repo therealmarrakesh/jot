@@ -13,17 +13,15 @@ use std::{
 };
 
 use anyhow::{Context as _, Result, anyhow};
-use derive_more::{Deref, DerefMut};
-use futures::{Future, FutureExt, channel::oneshot, future::LocalBoxFuture};
-use itertools::Itertools;
-use parking_lot::RwLock;
-use slotmap::SlotMap;
+use crate::futures::{FutureExt, StdFuture as Future, channel::oneshot, future::LocalBoxFuture};
+use crate::sync::RwLock;
+use crate::slotmap::SlotMap;
 
 pub use async_context::*;
-use collections::{FxHashMap, FxHashSet, HashMap, TypeIdHashMap, TypeIdHashSet, VecDeque};
+use crate::collections::{FxHashMap, FxHashSet, HashMap, TypeIdHashMap, TypeIdHashSet, VecDeque};
 pub use context::*;
 pub use entity_map::*;
-use gpui_util::{ResultExt, debug_panic};
+use crate::gpui_util::{ResultExt, debug_panic};
 use smallvec::SmallVec;
 
 #[cfg(any(feature = "inspector", debug_assertions))]
@@ -93,8 +91,20 @@ impl AppCell {
 }
 
 #[doc(hidden)]
-#[derive(Deref, DerefMut)]
 pub struct AppRef<'a>(Ref<'a, App>);
+
+impl<'a> Deref for AppRef<'a> {
+    type Target = Ref<'a, App>;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl DerefMut for AppRef<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
 
 impl Drop for AppRef<'_> {
     fn drop(&mut self) {
@@ -106,8 +116,20 @@ impl Drop for AppRef<'_> {
 }
 
 #[doc(hidden)]
-#[derive(Deref, DerefMut)]
 pub struct AppRefMut<'a>(RefMut<'a, App>);
+
+impl<'a> Deref for AppRefMut<'a> {
+    type Target = RefMut<'a, App>;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl DerefMut for AppRefMut<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
 
 impl Drop for AppRefMut<'_> {
     fn drop(&mut self) {
@@ -617,12 +639,13 @@ impl SystemWindowTabController {
             .iter()
             .filter(|tab| tab.id != id)
             .map(|tab| tab.id)
-            .sorted()
             .collect();
+        expected_tab_ids.sort();
 
         let mut tab_group_id = None;
         for (group_id, group_tabs) in &controller.tab_groups {
-            let tab_ids: Vec<_> = group_tabs.iter().map(|tab| tab.id).sorted().collect();
+            let mut tab_ids: Vec<_> = group_tabs.iter().map(|tab| tab.id).collect();
+            tab_ids.sort();
             if tab_ids == expected_tab_ids {
                 tab_group_id = Some(*group_id);
                 break;
@@ -1089,7 +1112,7 @@ impl App {
         self.flush_effects();
         self.quitting = true;
 
-        let futures = futures::future::join_all(futures);
+        let futures = crate::futures::future::join_all(futures);
         #[cfg(not(target_family = "wasm"))]
         if self
             .foreground_executor

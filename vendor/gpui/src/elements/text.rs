@@ -6,8 +6,7 @@ use crate::{
     WrappedLineLayout, register_tooltip_mouse_handlers, set_tooltip_on_window,
 };
 use anyhow::Context as _;
-use gpui_util::ResultExt;
-use itertools::Itertools;
+use crate::gpui_util::ResultExt;
 use smallvec::SmallVec;
 use std::{
     borrow::Cow,
@@ -970,7 +969,8 @@ impl TextLayout {
             .unwrap()
             .lines
             .iter()
-            .map(|s| &s.text)
+            .map(|s| s.text.as_ref())
+            .collect::<Vec<_>>()
             .join("\n")
     }
 

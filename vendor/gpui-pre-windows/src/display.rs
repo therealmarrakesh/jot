@@ -1,8 +1,7 @@
-use gpui_util::ResultExt;
-use itertools::Itertools;
+use gpui::gpui_util::ResultExt;
 use smallvec::SmallVec;
 use std::rc::Rc;
-use uuid::Uuid;
+use gpui::Uuid;
 use windows::{
     Win32::{
         Foundation::*,
@@ -228,11 +227,11 @@ fn get_monitor_info(hmonitor: HMONITOR) -> anyhow::Result<MONITORINFOEXW> {
 }
 
 fn generate_uuid(device_name: &[u16]) -> Uuid {
-    let name = device_name
+    let name: Vec<u8> = device_name
         .iter()
         .flat_map(|&a| a.to_be_bytes())
-        .collect_vec();
-    Uuid::new_v5(&Uuid::NAMESPACE_DNS, &name)
+        .collect();
+    Uuid::from_hash_bytes(&name)
 }
 
 fn get_scale_factor_for_monitor(monitor: HMONITOR) -> Result<f32> {

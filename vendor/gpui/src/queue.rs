@@ -5,9 +5,32 @@ use std::{
     sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, TryLockError, atomic::AtomicUsize},
 };
 
-use rand::{Rng, SeedableRng, rngs::SmallRng};
-
 use crate::Priority;
+
+struct SmallRng(u64);
+
+impl SmallRng {
+    fn seed_from_u64(seed: u64) -> Self {
+        Self(seed.wrapping_add(0x9e37_79b9_7f4a_7c15))
+    }
+
+    #[inline]
+    fn next_u32(&mut self) -> u32 {
+        self.0 = self.0.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        (z ^ (z >> 31)) as u32
+    }
+
+    #[inline]
+    fn random_ratio(&mut self, numerator: u32, denominator: u32) -> bool {
+        if numerator >= denominator {
+            return true;
+        }
+        (self.next_u32() % denominator) < numerator
+    }
+}
 
 struct PriorityQueues<T> {
     high_priority: VecDeque<T>,
@@ -425,7 +448,7 @@ impl<T> FusedIterator for TryIter<T> {}
 
 #[cfg(test)]
 mod tests {
-    use collections::HashSet;
+    use crate::collections::HashSet;
 
     use super::*;
 

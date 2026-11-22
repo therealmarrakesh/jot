@@ -11,10 +11,9 @@ use std::{
 };
 
 use anyhow::{Context as _, Result, anyhow};
-use futures::channel::oneshot::Receiver;
-use gpui_util::{ResultExt, get_powershell, new_std_command};
-use itertools::Itertools;
-use parking_lot::RwLock;
+use gpui::futures::channel::oneshot::Receiver;
+use gpui::gpui_util::{ResultExt, get_powershell, new_std_command};
+use gpui::sync::RwLock;
 use smallvec::SmallVec;
 use windows::{
     UI::ViewManagement::UISettings,
@@ -200,10 +199,11 @@ impl WindowsPlatform {
         };
 
         let (main_sender, main_receiver) = PriorityQueueReceiver::new();
-        let validation_number = if usize::BITS == 64 {
-            rand::random::<u64>() as usize
-        } else {
-            rand::random::<u32>() as usize
+        let validation_number = {
+            use std::hash::{BuildHasher as _, Hasher as _};
+            let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+            h.write_u64(std::process::id() as u64);
+            h.finish() as usize
         };
         let raw_window_handles = Arc::new(RwLock::new(SmallVec::new()));
 
@@ -751,7 +751,7 @@ impl Platform for WindowsPlatform {
     #[cfg(feature = "screen-capture")]
     fn screen_capture_sources(
         &self,
-    ) -> futures::channel::oneshot::Receiver<Result<Vec<Rc<dyn ScreenCaptureSource>>>> {
+    ) -> gpui::futures::channel::oneshot::Receiver<Result<Vec<Rc<dyn ScreenCaptureSource>>>> {
         gpui::scap_screen_capture::scap_screen_sources(&self.foreground_executor)
     }
 
@@ -1050,11 +1050,11 @@ impl Platform for WindowsPlatform {
             )));
         }
         let password = password.to_vec();
-        let mut username = username.encode_utf16().chain(Some(0)).collect_vec();
-        let mut target_name = windows_credentials_target_name(url)
+        let mut username: Vec<u16> = username.encode_utf16().chain(Some(0)).collect();
+        let mut target_name: Vec<u16> = windows_credentials_target_name(url)
             .encode_utf16()
             .chain(Some(0))
-            .collect_vec();
+            .collect();
         self.background_executor().spawn(async move {
             let credentials = CREDENTIALW {
                 LastWritten: unsafe { GetSystemTimeAsFileTime() },
@@ -1080,10 +1080,10 @@ impl Platform for WindowsPlatform {
     }
 
     fn read_credentials(&self, url: &str) -> Task<Result<Option<(String, Vec<u8>)>>> {
-        let target_name = windows_credentials_target_name(url)
+        let target_name: Vec<u16> = windows_credentials_target_name(url)
             .encode_utf16()
             .chain(Some(0))
-            .collect_vec();
+            .collect();
         self.background_executor().spawn(async move {
             let mut credentials: *mut CREDENTIALW = std::ptr::null_mut();
             let result = unsafe {
@@ -1116,10 +1116,10 @@ impl Platform for WindowsPlatform {
     }
 
     fn delete_credentials(&self, url: &str) -> Task<Result<()>> {
-        let target_name = windows_credentials_target_name(url)
+        let target_name: Vec<u16> = windows_credentials_target_name(url)
             .encode_utf16()
             .chain(Some(0))
-            .collect_vec();
+            .collect();
         self.background_executor().spawn(async move {
             unsafe {
                 CredDeleteW(
@@ -1639,8 +1639,10 @@ fn file_save_dialog(
             .context("failed to canonicalize directory")
             .log_err()
     {
-        let full_path = dunce::simplified(&full_path);
-        let full_path_string = full_path.display().to_string();
+        let full_path_raw = full_path.display().to_string();
+        let full_path_string = full_path_raw
+            .strip_prefix(r"\\?\")
+            .unwrap_or(&full_path_raw);
         let path_item: IShellItem =
             unsafe { SHCreateItemFromParsingName(&HSTRING::from(full_path_string), None)? };
         unsafe {

@@ -7,7 +7,7 @@ use gpui::{
 };
 use gpui::{
     Hitbox, HitboxBehavior, Hsla, IntoElement, LayoutId, MouseButton, MouseMoveEvent,
-    MouseUpEvent, Path, Pixels, Point, Position, SharedString, Size, Style, TextAlign, TextRun,
+    MouseUpEvent, Pixels, Point, Position, SharedString, Size, Style, TextAlign, TextRun,
     UnderlineStyle, Window, fill, point, px, relative, size,
 };
 use ropey::Rope;
@@ -486,22 +486,22 @@ impl<M: InputModeKind> TextElement<M> {
         (cursor_infos, scroll_offset, current_row)
     }
 
-    /// Layout the match range to a Path.
+    /// Layout the match range as row-aligned highlight rectangles.
     pub(crate) fn layout_match_range(
         range: Range<usize>,
         last_layout: &LastLayout,
         bounds: &Bounds<Pixels>,
-    ) -> Option<Path<Pixels>> {
-        let corners = Self::layout_range_corners(&range, last_layout)?;
-        let points = frame_outline_points(&corners);
+    ) -> Vec<Bounds<Pixels>> {
+        let Some(corners) = Self::layout_range_corners(&range, last_layout) else {
+            return Vec::new();
+        };
         let origin = bounds.origin + point(last_layout.line_number_width, px(0.));
-        let mut builder = gpui::PathBuilder::fill();
-        builder.move_to(origin + *points.first()?);
-        for point in points.iter().skip(1) {
-            builder.line_to(origin + *point);
-        }
-        builder.close();
-        builder.build().ok()
+        corners
+            .into_iter()
+            .map(|c| {
+                Bounds::from_corners(origin + c.top_left, origin + c.bottom_right)
+            })
+            .collect()
     }
 
     /// Project a buffer range through the visible (non-folded) shaped lines.
@@ -569,14 +569,14 @@ impl<M: InputModeKind> TextElement<M> {
         bounds: &mut Bounds<Pixels>,
         window: &mut Window,
         cx: &mut App,
-    ) -> Vec<Path<Pixels>> {
+    ) -> Vec<Bounds<Pixels>> {
         let state = self.state.read(cx);
         if !state.has_selection_focus(window, cx) {
             return vec![];
         }
 
         let active_id = state.active_selection().id;
-        let mut paths = Vec::new();
+        let mut rects = Vec::new();
 
         for selection in state.selections.iter() {
             let is_active = selection.id == active_id;
@@ -608,10 +608,10 @@ impl<M: InputModeKind> TextElement<M> {
                 continue;
             }
 
-            paths.extend(Self::layout_match_range(range, last_layout, bounds));
+            rects.extend(Self::layout_match_range(range, last_layout, bounds));
         }
 
-        paths
+        rects
     }
 
     /// Calculate the visible range of lines in the viewport.
@@ -823,7 +823,7 @@ pub(super) struct PrepaintState {
     scroll_size: Size<Pixels>,
     cursor_infos: Vec<CursorRenderInfo>,
     cursor_scroll_offset: Point<Pixels>,
-    selection_paths: Vec<Path<Pixels>>,
+    selection_bounds: Vec<Bounds<Pixels>>,
     hitbox: Hitbox,
     bounds: Bounds<Pixels>,
 }
@@ -851,72 +851,6 @@ impl<M: InputModeKind> IntoElement for TextElement<M> {
     fn into_element(self) -> Self::Element {
         self
     }
-}
-
-/// A debug function to print points as SVG path.
-#[allow(unused)]
-fn print_points_as_svg_path(
-    line_corners: &Vec<gpui::Corners<Pixels>>,
-    points: &Vec<Point<Pixels>>,
-) {
-    for corners in line_corners {
-        println!(
-            "tl: ({}, {}), tr: ({}, {}), bl: ({}, {}), br: ({}, {})",
-            corners.top_left.as_f32() as i32,
-            corners.top_left.as_f32() as i32,
-            corners.top_right.as_f32() as i32,
-            corners.top_right.as_f32() as i32,
-            corners.bottom_left.as_f32() as i32,
-            corners.bottom_left.as_f32() as i32,
-            corners.bottom_right.as_f32() as i32,
-            corners.bottom_right.as_f32() as i32,
-        );
-    }
-
-    if points.len() > 0 {
-        println!(
-            "M{},{}",
-            points[0].x.as_f32() as i32,
-            points[0].y.as_f32() as i32
-        );
-        for p in points.iter().skip(1) {
-            println!("L{},{}", p.x.as_f32() as i32, p.y.as_f32() as i32);
-        }
-    }
-}
-
-fn frame_outline_points(corners: &[Corners<Point<Pixels>>]) -> Vec<Point<Pixels>> {
-    let rects = corners
-        .iter()
-        .map(|corners| (corners.top_left, corners.bottom_right))
-        .collect::<Vec<_>>();
-    let mut points = Vec::with_capacity(rects.len() * 4);
-    let first = rects[0];
-    let last = rects[rects.len() - 1];
-    points.push(first.0);
-    points.push(point(first.1.x, first.0.y));
-    for pair in rects.windows(2) {
-        let current = pair[0];
-        let next = pair[1];
-        points.push(current.1);
-        points.push(point(next.1.x, current.1.y));
-        points.push(point(next.1.x, next.1.y));
-    }
-    if points.last() != Some(&last.1) {
-        points.push(last.1);
-    }
-    points.push(point(last.0.x, last.1.y));
-    for pair in rects.windows(2).rev() {
-        let current = pair[1];
-        let next = pair[0];
-        points.push(point(current.0.x, current.0.y));
-        points.push(point(next.0.x, current.0.y));
-        points.push(point(next.0.x, next.0.y));
-    }
-    if points.last() != points.first() {
-        points.push(points[0]);
-    }
-    points
 }
 
 impl<M: InputModeKind> Element for TextElement<M> {
@@ -1171,7 +1105,7 @@ impl<M: InputModeKind> Element for TextElement<M> {
             state.prepaint_caret_geometry = caret_geometry;
         });
 
-        let selection_paths = self.layout_selections(&last_layout, &mut bounds, window, cx);
+        let selection_bounds = self.layout_selections(&last_layout, &mut bounds, window, cx);
 
         let state = self.state.read(cx);
         state
@@ -1192,7 +1126,7 @@ impl<M: InputModeKind> Element for TextElement<M> {
             scroll_size,
             cursor_infos,
             cursor_scroll_offset,
-            selection_paths,
+            selection_bounds,
         }
     }
 
@@ -1254,8 +1188,8 @@ impl<M: InputModeKind> Element for TextElement<M> {
         }
 
         if window.is_window_active() {
-            for path in prepaint.selection_paths.drain(..) {
-                window.paint_path(path, editor_style.selection);
+            for rect in prepaint.selection_bounds.drain(..) {
+                window.paint_quad(fill(rect, editor_style.selection));
             }
         }
 

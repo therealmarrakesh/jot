@@ -1,7 +1,13 @@
 use std::ops::Range;
 
 use ropey::{LineType, Rope, RopeSlice};
-use sum_tree::Bias;
+
+/// Side bias when clamping a byte offset onto a UTF-8 char boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Bias {
+    Left,
+    Right,
+}
 
 /// Parser-independent byte/row/column position used for incremental edits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -451,7 +457,7 @@ impl RopeExt for Rope {
 mod tests {
     use super::Point;
     use ropey::Rope;
-    use sum_tree::Bias;
+    use super::Bias;
 
     use crate::base::input::{Position, RopeExt};
 

@@ -5,33 +5,334 @@ use crate::{
     SharedString, StrikethroughStyle, StyleRefinement, TextAlign, TextOverflow,
     TextStyleRefinement, UnderlineStyle, WhiteSpace, px, relative, rems,
 };
-pub use gpui_macros::{
-    border_style_methods, box_shadow_style_methods, cursor_style_methods, margin_style_methods,
-    overflow_style_methods, padding_style_methods, position_style_methods,
-    visibility_style_methods,
-};
 const ELLIPSIS: SharedString = SharedString::new_static("…");
 
 /// A trait for elements that can be styled.
 /// Use this to opt-in to a utility CSS-like styling API.
-// gate on rust-analyzer so rust-analyzer never needs to expand this macro, it takes up to 10 seconds to expand due to inefficiencies in rust-analyzers proc-macro srv
-#[cfg_attr(
-    all(any(feature = "inspector", debug_assertions), not(rust_analyzer)),
-    gpui_macros::derive_inspector_reflection
-)]
 pub trait Styled: Sized {
     /// Returns a reference to the style memory of this element.
     fn style(&mut self) -> &mut StyleRefinement;
 
-    gpui_macros::style_helpers!();
-    gpui_macros::visibility_style_methods!();
-    gpui_macros::margin_style_methods!();
-    gpui_macros::padding_style_methods!();
-    gpui_macros::position_style_methods!();
-    gpui_macros::overflow_style_methods!();
-    gpui_macros::cursor_style_methods!();
-    gpui_macros::border_style_methods!();
-    gpui_macros::box_shadow_style_methods!();
+    // -- Visibility --
+    fn visible(mut self) -> Self {
+        self.style().visibility = Some(gpui::Visibility::Visible);
+        self
+    }
+    fn invisible(mut self) -> Self {
+        self.style().visibility = Some(gpui::Visibility::Hidden);
+        self
+    }
+
+    // -- Position --
+    fn relative(mut self) -> Self {
+        self.style().position = Some(gpui::Position::Relative);
+        self
+    }
+    fn absolute(mut self) -> Self {
+        self.style().position = Some(gpui::Position::Absolute);
+        self
+    }
+    fn inset(mut self, length: impl Clone + Into<Length>) -> Self {
+        let s = self.style();
+        s.inset.top = Some(length.clone().into());
+        s.inset.right = Some(length.clone().into());
+        s.inset.bottom = Some(length.clone().into());
+        s.inset.left = Some(length.into());
+        self
+    }
+    fn inset_0(self) -> Self { self.inset(px(0.)) }
+    fn top(mut self, length: impl Into<Length>) -> Self { self.style().inset.top = Some(length.into()); self }
+    fn top_0(self) -> Self { self.top(px(0.)) }
+    fn bottom(mut self, length: impl Into<Length>) -> Self { self.style().inset.bottom = Some(length.into()); self }
+    fn bottom_0(self) -> Self { self.bottom(px(0.)) }
+    fn left(mut self, length: impl Into<Length>) -> Self { self.style().inset.left = Some(length.into()); self }
+    fn left_0(self) -> Self { self.left(px(0.)) }
+    fn right(mut self, length: impl Into<Length>) -> Self { self.style().inset.right = Some(length.into()); self }
+    fn right_0(self) -> Self { self.right(px(0.)) }
+
+    // -- Overflow --
+    fn overflow_hidden(mut self) -> Self {
+        self.style().overflow.x = Some(gpui::Overflow::Hidden);
+        self.style().overflow.y = Some(gpui::Overflow::Hidden);
+        self
+    }
+    fn overflow_x_hidden(mut self) -> Self {
+        self.style().overflow.x = Some(gpui::Overflow::Hidden);
+        self
+    }
+    fn overflow_y_hidden(mut self) -> Self {
+        self.style().overflow.y = Some(gpui::Overflow::Hidden);
+        self
+    }
+
+    // -- Cursor --
+    fn cursor(mut self, cursor: CursorStyle) -> Self { self.style().mouse_cursor = Some(cursor); self }
+    fn cursor_default(self) -> Self { self.cursor(CursorStyle::Arrow) }
+    fn cursor_pointer(self) -> Self { self.cursor(CursorStyle::PointingHand) }
+    fn cursor_text(self) -> Self { self.cursor(CursorStyle::IBeam) }
+    fn cursor_move(self) -> Self { self.cursor(CursorStyle::ClosedHand) }
+    fn cursor_not_allowed(self) -> Self { self.cursor(CursorStyle::OperationNotAllowed) }
+    fn cursor_context_menu(self) -> Self { self.cursor(CursorStyle::ContextualMenu) }
+    fn cursor_crosshair(self) -> Self { self.cursor(CursorStyle::Crosshair) }
+    fn cursor_vertical_text(self) -> Self { self.cursor(CursorStyle::IBeamCursorForVerticalLayout) }
+    fn cursor_alias(self) -> Self { self.cursor(CursorStyle::DragLink) }
+    fn cursor_copy(self) -> Self { self.cursor(CursorStyle::DragCopy) }
+    fn cursor_no_drop(self) -> Self { self.cursor(CursorStyle::OperationNotAllowed) }
+    fn cursor_grab(self) -> Self { self.cursor(CursorStyle::OpenHand) }
+    fn cursor_grabbing(self) -> Self { self.cursor(CursorStyle::ClosedHand) }
+    fn cursor_ew_resize(self) -> Self { self.cursor(CursorStyle::ResizeLeftRight) }
+    fn cursor_ns_resize(self) -> Self { self.cursor(CursorStyle::ResizeUpDown) }
+    fn cursor_nesw_resize(self) -> Self { self.cursor(CursorStyle::ResizeUpRightDownLeft) }
+    fn cursor_nwse_resize(self) -> Self { self.cursor(CursorStyle::ResizeUpLeftDownRight) }
+    fn cursor_col_resize(self) -> Self { self.cursor(CursorStyle::ResizeColumn) }
+    fn cursor_row_resize(self) -> Self { self.cursor(CursorStyle::ResizeRow) }
+    fn cursor_n_resize(self) -> Self { self.cursor(CursorStyle::ResizeUp) }
+    fn cursor_e_resize(self) -> Self { self.cursor(CursorStyle::ResizeRight) }
+    fn cursor_s_resize(self) -> Self { self.cursor(CursorStyle::ResizeDown) }
+    fn cursor_w_resize(self) -> Self { self.cursor(CursorStyle::ResizeLeft) }
+
+    // -- Margin --
+    fn m(mut self, length: impl Clone + Into<Length>) -> Self {
+        let s = self.style();
+        s.margin.top = Some(length.clone().into());
+        s.margin.bottom = Some(length.clone().into());
+        s.margin.left = Some(length.clone().into());
+        s.margin.right = Some(length.into());
+        self
+    }
+    fn m_0(self) -> Self { self.m(px(0.)) }
+    fn m_1(self) -> Self { self.m(rems(0.25)) }
+    fn m_2(self) -> Self { self.m(rems(0.5)) }
+    fn m_auto(self) -> Self { self.m(gpui::auto()) }
+    fn mx(mut self, length: impl Clone + Into<Length>) -> Self {
+        let s = self.style();
+        s.margin.left = Some(length.clone().into());
+        s.margin.right = Some(length.into());
+        self
+    }
+    fn mx_auto(self) -> Self { self.mx(gpui::auto()) }
+    fn my(mut self, length: impl Clone + Into<Length>) -> Self {
+        let s = self.style();
+        s.margin.top = Some(length.clone().into());
+        s.margin.bottom = Some(length.into());
+        self
+    }
+    fn mt(mut self, length: impl Into<Length>) -> Self { self.style().margin.top = Some(length.into()); self }
+    fn mt_0(self) -> Self { self.mt(px(0.)) }
+    fn mt_1(self) -> Self { self.mt(rems(0.25)) }
+    fn mt_2(self) -> Self { self.mt(rems(0.5)) }
+    fn mb(mut self, length: impl Into<Length>) -> Self { self.style().margin.bottom = Some(length.into()); self }
+    fn mb_0(self) -> Self { self.mb(px(0.)) }
+    fn mb_1(self) -> Self { self.mb(rems(0.25)) }
+    fn mb_2(self) -> Self { self.mb(rems(0.5)) }
+    fn ml(mut self, length: impl Into<Length>) -> Self { self.style().margin.left = Some(length.into()); self }
+    fn ml_auto(self) -> Self { self.ml(gpui::auto()) }
+    fn mr(mut self, length: impl Into<Length>) -> Self { self.style().margin.right = Some(length.into()); self }
+
+    // -- Padding --
+    fn p(mut self, length: impl Clone + Into<DefiniteLength>) -> Self {
+        let s = self.style();
+        s.padding.top = Some(length.clone().into());
+        s.padding.bottom = Some(length.clone().into());
+        s.padding.left = Some(length.clone().into());
+        s.padding.right = Some(length.into());
+        self
+    }
+    fn p_0(self) -> Self { self.p(px(0.)) }
+    fn p_1(self) -> Self { self.p(rems(0.25)) }
+    fn p_2(self) -> Self { self.p(rems(0.5)) }
+    fn p_3(self) -> Self { self.p(rems(0.75)) }
+    fn p_4(self) -> Self { self.p(rems(1.)) }
+    fn px(mut self, length: impl Clone + Into<DefiniteLength>) -> Self {
+        let s = self.style();
+        s.padding.left = Some(length.clone().into());
+        s.padding.right = Some(length.into());
+        self
+    }
+    fn px_1(self) -> Self { self.px(rems(0.25)) }
+    fn px_2(self) -> Self { self.px(rems(0.5)) }
+    fn px_3(self) -> Self { self.px(rems(0.75)) }
+    fn px_4(self) -> Self { self.px(rems(1.)) }
+    fn py(mut self, length: impl Clone + Into<DefiniteLength>) -> Self {
+        let s = self.style();
+        s.padding.top = Some(length.clone().into());
+        s.padding.bottom = Some(length.into());
+        self
+    }
+    fn py_1(self) -> Self { self.py(rems(0.25)) }
+    fn py_2(self) -> Self { self.py(rems(0.5)) }
+    fn pt(mut self, length: impl Into<DefiniteLength>) -> Self { self.style().padding.top = Some(length.into()); self }
+    fn pb(mut self, length: impl Into<DefiniteLength>) -> Self { self.style().padding.bottom = Some(length.into()); self }
+    fn pl(mut self, length: impl Into<DefiniteLength>) -> Self { self.style().padding.left = Some(length.into()); self }
+    fn pr(mut self, length: impl Into<DefiniteLength>) -> Self { self.style().padding.right = Some(length.into()); self }
+
+    // -- Sizing & Gap --
+    fn w(mut self, length: impl Into<Length>) -> Self { self.style().size.width = Some(length.into()); self }
+    fn w_0(self) -> Self { self.w(px(0.)) }
+    fn w_72(self) -> Self { self.w(rems(18.)) }
+    fn w_full(self) -> Self { self.w(relative(1.)) }
+    fn w_auto(self) -> Self { self.w(gpui::auto()) }
+    fn h(mut self, length: impl Into<Length>) -> Self { self.style().size.height = Some(length.into()); self }
+    fn h_0(self) -> Self { self.h(px(0.)) }
+    fn h_full(self) -> Self { self.h(relative(1.)) }
+    fn h_auto(self) -> Self { self.h(gpui::auto()) }
+    fn size(mut self, length: impl Clone + Into<Length>) -> Self {
+        let s = self.style();
+        s.size.width = Some(length.clone().into());
+        s.size.height = Some(length.into());
+        self
+    }
+    fn size_full(self) -> Self { self.size(relative(1.)) }
+    fn min_size(mut self, length: impl Clone + Into<Length>) -> Self {
+        let s = self.style();
+        s.min_size.width = Some(length.clone().into());
+        s.min_size.height = Some(length.into());
+        self
+    }
+    fn min_w(mut self, length: impl Into<Length>) -> Self { self.style().min_size.width = Some(length.into()); self }
+    fn min_w_0(self) -> Self { self.min_w(px(0.)) }
+    fn min_w_full(self) -> Self { self.min_w(relative(1.)) }
+    fn min_h(mut self, length: impl Into<Length>) -> Self { self.style().min_size.height = Some(length.into()); self }
+    fn min_h_0(self) -> Self { self.min_h(px(0.)) }
+    fn min_h_full(self) -> Self { self.min_h(relative(1.)) }
+    fn max_size(mut self, length: impl Clone + Into<Length>) -> Self {
+        let s = self.style();
+        s.max_size.width = Some(length.clone().into());
+        s.max_size.height = Some(length.into());
+        self
+    }
+    fn max_w(mut self, length: impl Into<Length>) -> Self { self.style().max_size.width = Some(length.into()); self }
+    fn max_w_full(self) -> Self { self.max_w(relative(1.)) }
+    fn max_h(mut self, length: impl Into<Length>) -> Self { self.style().max_size.height = Some(length.into()); self }
+    fn max_h_full(self) -> Self { self.max_h(relative(1.)) }
+    fn gap(mut self, length: impl Clone + Into<DefiniteLength>) -> Self {
+        let s = self.style();
+        s.gap.width = Some(length.clone().into());
+        s.gap.height = Some(length.into());
+        self
+    }
+    fn gap_1(self) -> Self { self.gap(rems(0.25)) }
+    fn gap_2(self) -> Self { self.gap(rems(0.5)) }
+    fn gap_3(self) -> Self { self.gap(rems(0.75)) }
+    fn gap_4(self) -> Self { self.gap(rems(1.)) }
+    fn gap_x(mut self, length: impl Into<DefiniteLength>) -> Self { self.style().gap.width = Some(length.into()); self }
+    fn gap_y(mut self, length: impl Into<DefiniteLength>) -> Self { self.style().gap.height = Some(length.into()); self }
+
+    // -- Corners --
+    fn rounded(mut self, radius: impl Clone + Into<AbsoluteLength>) -> Self {
+        let s = self.style();
+        s.corner_radii.top_left = Some(radius.clone().into());
+        s.corner_radii.top_right = Some(radius.clone().into());
+        s.corner_radii.bottom_right = Some(radius.clone().into());
+        s.corner_radii.bottom_left = Some(radius.into());
+        self
+    }
+    fn rounded_none(self) -> Self { self.rounded(px(0.)) }
+    fn rounded_xs(self) -> Self { self.rounded(rems(0.125)) }
+    fn rounded_sm(self) -> Self { self.rounded(rems(0.25)) }
+    fn rounded_md(self) -> Self { self.rounded(rems(0.375)) }
+    fn rounded_lg(self) -> Self { self.rounded(rems(0.5)) }
+    fn rounded_xl(self) -> Self { self.rounded(rems(0.75)) }
+    fn rounded_full(self) -> Self { self.rounded(px(9999.)) }
+    fn rounded_t(mut self, radius: impl Clone + Into<AbsoluteLength>) -> Self {
+        let s = self.style();
+        s.corner_radii.top_left = Some(radius.clone().into());
+        s.corner_radii.top_right = Some(radius.into());
+        self
+    }
+    fn rounded_b(mut self, radius: impl Clone + Into<AbsoluteLength>) -> Self {
+        let s = self.style();
+        s.corner_radii.bottom_left = Some(radius.clone().into());
+        s.corner_radii.bottom_right = Some(radius.into());
+        self
+    }
+    fn rounded_l(mut self, radius: impl Clone + Into<AbsoluteLength>) -> Self {
+        let s = self.style();
+        s.corner_radii.top_left = Some(radius.clone().into());
+        s.corner_radii.bottom_left = Some(radius.into());
+        self
+    }
+    fn rounded_r(mut self, radius: impl Clone + Into<AbsoluteLength>) -> Self {
+        let s = self.style();
+        s.corner_radii.top_right = Some(radius.clone().into());
+        s.corner_radii.bottom_right = Some(radius.into());
+        self
+    }
+    fn rounded_tl(mut self, radius: impl Into<AbsoluteLength>) -> Self { self.style().corner_radii.top_left = Some(radius.into()); self }
+    fn rounded_tr(mut self, radius: impl Into<AbsoluteLength>) -> Self { self.style().corner_radii.top_right = Some(radius.into()); self }
+    fn rounded_bl(mut self, radius: impl Into<AbsoluteLength>) -> Self { self.style().corner_radii.bottom_left = Some(radius.into()); self }
+    fn rounded_br(mut self, radius: impl Into<AbsoluteLength>) -> Self { self.style().corner_radii.bottom_right = Some(radius.into()); self }
+
+    // -- Border --
+    fn border_color<C: Into<Hsla>>(mut self, border_color: C) -> Self {
+        self.style().border_color = Some(border_color.into());
+        self
+    }
+    fn border(mut self, width: impl Clone + Into<AbsoluteLength>) -> Self {
+        let s = self.style();
+        s.border_widths.top = Some(width.clone().into());
+        s.border_widths.right = Some(width.clone().into());
+        s.border_widths.bottom = Some(width.clone().into());
+        s.border_widths.left = Some(width.into());
+        self
+    }
+    fn border_0(self) -> Self { self.border(px(0.)) }
+    fn border_1(self) -> Self { self.border(px(1.)) }
+    fn border_2(self) -> Self { self.border(px(2.)) }
+    fn border_t(mut self, width: impl Into<AbsoluteLength>) -> Self { self.style().border_widths.top = Some(width.into()); self }
+    fn border_t_1(self) -> Self { self.border_t(px(1.)) }
+    fn border_b(mut self, width: impl Into<AbsoluteLength>) -> Self { self.style().border_widths.bottom = Some(width.into()); self }
+    fn border_b_1(self) -> Self { self.border_b(px(1.)) }
+    fn border_l(mut self, width: impl Into<AbsoluteLength>) -> Self { self.style().border_widths.left = Some(width.into()); self }
+    fn border_l_1(self) -> Self { self.border_l(px(1.)) }
+    fn border_r(mut self, width: impl Into<AbsoluteLength>) -> Self { self.style().border_widths.right = Some(width.into()); self }
+    fn border_r_1(self) -> Self { self.border_r(px(1.)) }
+    fn border_x(mut self, width: impl Clone + Into<AbsoluteLength>) -> Self {
+        let s = self.style();
+        s.border_widths.left = Some(width.clone().into());
+        s.border_widths.right = Some(width.into());
+        self
+    }
+    fn border_y(mut self, width: impl Clone + Into<AbsoluteLength>) -> Self {
+        let s = self.style();
+        s.border_widths.top = Some(width.clone().into());
+        s.border_widths.bottom = Some(width.into());
+        self
+    }
+
+    // -- Box Shadow --
+    fn shadow(mut self, shadows: Vec<gpui::BoxShadow>) -> Self {
+        self.style().box_shadow = Some(shadows);
+        self
+    }
+    fn shadow_none(mut self) -> Self {
+        self.style().box_shadow = Some(Default::default());
+        self
+    }
+    fn shadow_sm(mut self) -> Self {
+        use gpui::{BoxShadow, hsla};
+        self.style().box_shadow = Some(vec![
+            BoxShadow::new(px(0.), px(1.), hsla(0., 0., 0., 0.1)).blur_radius(px(3.)),
+            BoxShadow::new(px(0.), px(1.), hsla(0., 0., 0., 0.1)).blur_radius(px(2.)).spread_radius(px(-1.)),
+        ]);
+        self
+    }
+    fn shadow_md(mut self) -> Self {
+        use gpui::{BoxShadow, hsla};
+        self.style().box_shadow = Some(vec![
+            BoxShadow::new(px(0.), px(4.), hsla(0., 0., 0., 0.1)).blur_radius(px(6.)).spread_radius(px(-1.)),
+            BoxShadow::new(px(0.), px(2.), hsla(0., 0., 0., 0.1)).blur_radius(px(4.)).spread_radius(px(-2.)),
+        ]);
+        self
+    }
+    fn shadow_lg(mut self) -> Self {
+        use gpui::{BoxShadow, hsla};
+        self.style().box_shadow = Some(vec![
+            BoxShadow::new(px(0.), px(10.), hsla(0., 0., 0., 0.1)).blur_radius(px(15.)).spread_radius(px(-3.)),
+            BoxShadow::new(px(0.), px(4.), hsla(0., 0., 0., 0.1)).blur_radius(px(6.)).spread_radius(px(-4.)),
+        ]);
+        self
+    }
 
     /// Sets the display type of the element to `block`.
     /// [Docs](https://tailwindcss.com/docs/display)

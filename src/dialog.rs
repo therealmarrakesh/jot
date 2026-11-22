@@ -1,6 +1,6 @@
 use super::*;
 use field::{BODY_LINE, BODY_SIZE, text_field};
-use futures::channel::oneshot;
+use gpui::futures::channel::oneshot;
 use crate::base::actions::{Cancel, Confirm};
 use crate::base::input::{InputState, Position};
 use crate::base::{MotionStatus, Presence, Transition, transition_with_status};

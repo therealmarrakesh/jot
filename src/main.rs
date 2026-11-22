@@ -31,14 +31,15 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Duration;
 use theme::{Palette, Surface, palette, theme_shadow};
-use windows_sys::Win32::Foundation::{HWND, POINT, SYSTEMTIME};
-use windows_sys::Win32::Globalization::{
+use windows::Win32::Foundation::{HWND, POINT};
+use windows::Win32::Globalization::{
     DATE_SHORTDATE, GetDateFormatEx, GetTimeFormatEx, TIME_NOSECONDS,
 };
-use windows_sys::Win32::Graphics::Gdi::ClientToScreen;
-use windows_sys::Win32::System::SystemInformation::GetLocalTime;
-use windows_sys::Win32::UI::WindowsAndMessaging::{
-    GetCursorPos, SystemParametersInfoW, USER_DEFAULT_SCREEN_DPI,
+use windows::Win32::Graphics::Gdi::ClientToScreen;
+use windows::Win32::System::SystemInformation::GetLocalTime;
+use windows::Win32::UI::WindowsAndMessaging::{
+    GetCursorPos, SYSTEM_PARAMETERS_INFO_ACTION, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
+    SystemParametersInfoW, USER_DEFAULT_SCREEN_DPI,
 };
 
 const APP_NAME: &str = "Jot";
@@ -377,44 +378,44 @@ fn window_hwnd(window: &Window) -> isize {
 
 fn cursor() -> POINT {
     let mut point = POINT::default();
-    unsafe { GetCursorPos(&mut point) };
+    let _ = unsafe { GetCursorPos(&mut point) };
     point
 }
 
 fn client_origin(hwnd: isize) -> POINT {
     let mut origin = POINT::default();
-    unsafe { ClientToScreen(hwnd as HWND, &mut origin) };
+    let _ = unsafe { ClientToScreen(HWND(hwnd as _), &mut origin) };
     origin
 }
 
-fn system_u32(action: u32) -> Option<u32> {
+fn system_u32(action: SYSTEM_PARAMETERS_INFO_ACTION) -> Option<u32> {
     let mut value = 0u32;
-    (unsafe { SystemParametersInfoW(action, 0, (&raw mut value).cast(), 0) } != 0).then_some(value)
+    unsafe {
+        SystemParametersInfoW(
+            action,
+            0,
+            Some((&raw mut value).cast()),
+            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+        )
+    }
+    .is_ok()
+    .then_some(value)
 }
 
 fn time_date() -> String {
-    let mut now = SYSTEMTIME::default();
+    let now = unsafe { GetLocalTime() };
     let mut time = [0u16; 128];
     let mut date = [0u16; 128];
     let (time_len, date_len) = unsafe {
-        GetLocalTime(&mut now);
         (
-            GetTimeFormatEx(
-                std::ptr::null(),
-                TIME_NOSECONDS,
-                &now,
-                std::ptr::null(),
-                time.as_mut_ptr(),
-                time.len() as i32,
-            ),
+            GetTimeFormatEx(None, TIME_NOSECONDS, Some(&now), None, Some(&mut time)),
             GetDateFormatEx(
-                std::ptr::null(),
+                None,
                 DATE_SHORTDATE,
-                &now,
-                std::ptr::null(),
-                date.as_mut_ptr(),
-                date.len() as i32,
-                std::ptr::null(),
+                Some(&now),
+                None,
+                Some(&mut date),
+                None,
             ),
         )
     };
