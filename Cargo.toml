@@ -14,13 +14,6 @@ ropey = { version = "=2.0.0-beta.1", features = [
     "metric_lines_lf",
     "metric_utf16",
 ] }
-taffy = { version = "0.13.0", default-features = false, features = [
-    "std",
-    "taffy_tree",
-    "flexbox",
-    "block_layout",
-    "content_size",
-] }
 unicode-segmentation = "1.12.0"
 windows = { version = "0.62", features = [
     "Wdk_System_SystemServices",

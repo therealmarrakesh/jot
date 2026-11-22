@@ -1,17 +1,17 @@
-//! Elements are the workhorses of GPUI. They are responsible for laying out and painting all of
-//! the contents of a window. Elements form a tree and are laid out according to the web layout
-//! standards as implemented by [taffy](https://github.com/DioxusLabs/taffy). Most of the time,
+//! Elements are the workhorses of the UI layer. They are responsible for laying out and painting
+//! all of the contents of a window. Elements form a tree and are laid out according to CSS
+//! block and flexbox rules by [`crate::ui::LayoutEngine`]. Most of the time,
 //! you won't need to interact with this module or these APIs directly. Elements provide their
-//! own APIs and GPUI, or other element implementation, uses the APIs in this module to convert
+//! own APIs and the UI layer uses the APIs in this module to convert
 //! that element tree into the pixels you see on the screen.
 //!
 //! # Element Basics
 //!
 //! Elements are constructed by calling [`Render::render()`] on the root view of the window,
-//! which recursively constructs the element tree from the current state of the application,.
-//! These elements are then laid out by Taffy, and painted to the screen according to their own
+//! which recursively constructs the element tree from the current state of the application.
+//! These elements are then laid out by the layout engine, and painted to the screen according to their own
 //! implementation of [`Element::paint()`]. Before the start of the next frame, the entire element
-//! tree and any callbacks they have registered with GPUI are dropped and the process repeats.
+//! tree and any callbacks they have registered are dropped and the process repeats.
 //!
 //! But some state is too simple and voluminous to store in every view that needs it, e.g.
 //! whether a hover has been started or not. For this, GPUI provides the [`Element::PrepaintState`], associated type.
@@ -44,7 +44,7 @@ use std::{
 };
 
 /// Implemented by types that participate in laying out and painting the contents of a window.
-/// Elements form a tree and are laid out according to web-based layout rules, as implemented by Taffy.
+/// Elements form a tree and are laid out according to CSS block and flexbox layout rules.
 /// You can create custom elements by implementing this trait, see the module-level documentation
 /// for more details.
 pub(crate) trait Element: 'static + IntoElement {
@@ -64,7 +64,7 @@ pub(crate) trait Element: 'static + IntoElement {
     fn id(&self) -> Option<ElementId>;
 
     /// Before an element can be painted, we need to know where it's going to be and how big it is.
-    /// Use this method to request a layout from Taffy and initialize the element's state.
+    /// Use this method to request a layout from the layout engine and initialize the element's state.
     fn request_layout(
         &mut self,
         id: Option<&GlobalElementId>,

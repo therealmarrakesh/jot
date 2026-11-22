@@ -17,12 +17,6 @@ pub(crate) struct Style {
     // Overflow properties
     /// How children overflowing their container should affect layout
     pub(crate) overflow: Point<Overflow>,
-    /// How much space (in points) should be reserved for the scrollbars of `Overflow::Scroll` and `Overflow::Auto` nodes.
-    pub(crate) scrollbar_width: AbsoluteLength,
-    /// Whether both x and y axis should be scrollable at the same time.
-    pub(crate) allow_concurrent_scroll: bool,
-    /// Whether scrolling should be restricted to the input gesture's axis.
-    pub(crate) restrict_scroll_to_axis: bool,
 
     // Position properties
     /// What should the `position` value of this struct use as a base offset?
@@ -37,8 +31,6 @@ pub(crate) struct Style {
     pub(crate) min_size: Size<Length>,
     /// Controls the maximum size of the item
     pub(crate) max_size: Size<Length>,
-    /// Sets the preferred aspect ratio for the item. The ratio is calculated as width divided by height.
-    pub(crate) aspect_ratio: Option<f32>,
 
     // Spacing Properties
     /// How large should the margin be on each side?
@@ -53,8 +45,6 @@ pub(crate) struct Style {
     pub(crate) align_items: Option<AlignItems>,
     /// How this node should be aligned in the cross/block axis. Falls back to the parents [`AlignItems`] if not set
     pub(crate) align_self: Option<AlignSelf>,
-    /// How should content contained within this item be aligned in the cross/block axis
-    pub(crate) align_content: Option<AlignContent>,
     /// How should contained within this item be aligned in the main/inline axis
     pub(crate) justify_content: Option<JustifyContent>,
     /// How large should the gaps between items in a flex container be?
@@ -97,21 +87,16 @@ pub(crate) struct StyleRefinement {
     pub(crate) display: Option<Display>,
     pub(crate) visibility: Option<Visibility>,
     pub(crate) overflow: crate::ui::PointRefinement<Overflow>,
-    pub(crate) scrollbar_width: Option<AbsoluteLength>,
-    pub(crate) allow_concurrent_scroll: Option<bool>,
-    pub(crate) restrict_scroll_to_axis: Option<bool>,
     pub(crate) position: Option<Position>,
     pub(crate) inset: crate::ui::EdgesRefinement<Length>,
     pub(crate) size: crate::ui::SizeRefinement<Length>,
     pub(crate) min_size: crate::ui::SizeRefinement<Length>,
     pub(crate) max_size: crate::ui::SizeRefinement<Length>,
-    pub(crate) aspect_ratio: Option<f32>,
     pub(crate) margin: crate::ui::EdgesRefinement<Length>,
     pub(crate) padding: crate::ui::EdgesRefinement<DefiniteLength>,
     pub(crate) border_widths: crate::ui::EdgesRefinement<AbsoluteLength>,
     pub(crate) align_items: Option<AlignItems>,
     pub(crate) align_self: Option<AlignSelf>,
-    pub(crate) align_content: Option<AlignContent>,
     pub(crate) justify_content: Option<JustifyContent>,
     pub(crate) gap: crate::ui::SizeRefinement<DefiniteLength>,
     pub(crate) flex_direction: Option<FlexDirection>,
@@ -146,21 +131,16 @@ impl IsEmpty for StyleRefinement {
         self.display.is_none()
             && self.visibility.is_none()
             && self.overflow.is_empty()
-            && self.scrollbar_width.is_none()
-            && self.allow_concurrent_scroll.is_none()
-            && self.restrict_scroll_to_axis.is_none()
             && self.position.is_none()
             && self.inset.is_empty()
             && self.size.is_empty()
             && self.min_size.is_empty()
             && self.max_size.is_empty()
-            && self.aspect_ratio.is_none()
             && self.margin.is_empty()
             && self.padding.is_empty()
             && self.border_widths.is_empty()
             && self.align_items.is_none()
             && self.align_self.is_none()
-            && self.align_content.is_none()
             && self.justify_content.is_none()
             && self.gap.is_empty()
             && self.flex_direction.is_none()
@@ -183,21 +163,16 @@ impl From<StyleRefinement> for Style {
             display: v.display.unwrap_or_default(),
             visibility: v.visibility.unwrap_or_default(),
             overflow: v.overflow.into(),
-            scrollbar_width: v.scrollbar_width.unwrap_or_default(),
-            allow_concurrent_scroll: v.allow_concurrent_scroll.unwrap_or_default(),
-            restrict_scroll_to_axis: v.restrict_scroll_to_axis.unwrap_or_default(),
             position: v.position.unwrap_or_default(),
             inset: v.inset.into(),
             size: v.size.into(),
             min_size: v.min_size.into(),
             max_size: v.max_size.into(),
-            aspect_ratio: v.aspect_ratio,
             margin: v.margin.into(),
             padding: v.padding.into(),
             border_widths: v.border_widths.into(),
             align_items: v.align_items,
             align_self: v.align_self,
-            align_content: v.align_content,
             justify_content: v.justify_content,
             gap: v.gap.into(),
             flex_direction: v.flex_direction.unwrap_or_default(),
@@ -221,21 +196,16 @@ impl Refineable for Style {
         if let Some(v) = &r.display { self.display = *v; }
         if let Some(v) = &r.visibility { self.visibility = *v; }
         self.overflow.refine(&r.overflow);
-        if let Some(v) = &r.scrollbar_width { self.scrollbar_width = *v; }
-        if let Some(v) = &r.allow_concurrent_scroll { self.allow_concurrent_scroll = *v; }
-        if let Some(v) = &r.restrict_scroll_to_axis { self.restrict_scroll_to_axis = *v; }
         if let Some(v) = &r.position { self.position = *v; }
         self.inset.refine(&r.inset);
         self.size.refine(&r.size);
         self.min_size.refine(&r.min_size);
         self.max_size.refine(&r.max_size);
-        if let Some(v) = &r.aspect_ratio { self.aspect_ratio = Some(*v); }
         self.margin.refine(&r.margin);
         self.padding.refine(&r.padding);
         self.border_widths.refine(&r.border_widths);
         if let Some(v) = &r.align_items { self.align_items = Some(*v); }
         if let Some(v) = &r.align_self { self.align_self = Some(*v); }
-        if let Some(v) = &r.align_content { self.align_content = Some(*v); }
         if let Some(v) = &r.justify_content { self.justify_content = Some(*v); }
         self.gap.refine(&r.gap);
         if let Some(v) = &r.flex_direction { self.flex_direction = *v; }
@@ -258,21 +228,16 @@ impl Refineable for StyleRefinement {
         if let Some(v) = &r.display { self.display = Some(*v); }
         if let Some(v) = &r.visibility { self.visibility = Some(*v); }
         self.overflow.refine(&r.overflow);
-        if let Some(v) = &r.scrollbar_width { self.scrollbar_width = Some(*v); }
-        if let Some(v) = &r.allow_concurrent_scroll { self.allow_concurrent_scroll = Some(*v); }
-        if let Some(v) = &r.restrict_scroll_to_axis { self.restrict_scroll_to_axis = Some(*v); }
         if let Some(v) = &r.position { self.position = Some(*v); }
         self.inset.refine(&r.inset);
         self.size.refine(&r.size);
         self.min_size.refine(&r.min_size);
         self.max_size.refine(&r.max_size);
-        if let Some(v) = &r.aspect_ratio { self.aspect_ratio = Some(*v); }
         self.margin.refine(&r.margin);
         self.padding.refine(&r.padding);
         self.border_widths.refine(&r.border_widths);
         if let Some(v) = &r.align_items { self.align_items = Some(*v); }
         if let Some(v) = &r.align_self { self.align_self = Some(*v); }
-        if let Some(v) = &r.align_content { self.align_content = Some(*v); }
         if let Some(v) = &r.justify_content { self.justify_content = Some(*v); }
         self.gap.refine(&r.gap);
         if let Some(v) = &r.flex_direction { self.flex_direction = Some(*v); }
@@ -618,9 +583,6 @@ impl Default for Style {
                 x: Overflow::Visible,
                 y: Overflow::Visible,
             },
-            allow_concurrent_scroll: false,
-            restrict_scroll_to_axis: false,
-            scrollbar_width: AbsoluteLength::default(),
             position: Position::Relative,
             inset: Edges::auto(),
             margin: Edges::<Length>::zero(),
@@ -629,12 +591,10 @@ impl Default for Style {
             size: Size::auto(),
             min_size: Size::auto(),
             max_size: Size::auto(),
-            aspect_ratio: None,
             gap: Size::default(),
             // Alignment
             align_items: None,
             align_self: None,
-            align_content: None,
             justify_content: None,
             // Flexbox
             flex_direction: FlexDirection::Row,
@@ -740,64 +700,44 @@ impl From<Background> for Fill {
     }
 }
 
-/// Used to control how child nodes are aligned.
-/// For Flexbox it controls alignment in the cross axis
-/// For Grid it controls alignment in the block axis
+/// Used to control how child nodes are aligned on the cross axis.
 ///
 /// [MDN](https://developer.mozilla.org/en-US/docs/Web/CSS/align-items)
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
-// Copy of taffy::style type of the same name.
 pub(crate) enum AlignItems {
     /// Items are packed toward the start of the axis
     Start,
     /// Items are packed along the center of the cross axis
     Center,
 }
-/// Used to control how the specified nodes is aligned.
-/// Overrides the parent Node's `AlignItems` property.
-/// For Flexbox it controls alignment in the cross axis
-/// For Grid it controls alignment in the block axis
+
+/// Used to control how the specified node is aligned on the cross axis,
+/// overriding the parent's [`AlignItems`].
 ///
 /// [MDN](https://developer.mozilla.org/en-US/docs/Web/CSS/align-self)
 pub(crate) type AlignSelf = AlignItems;
 
-/// Sets the distribution of space between and around content items
-/// For Flexbox it controls alignment in the cross axis
-/// For Grid it controls alignment in the block axis
+/// Sets the distribution of space between and around content items on the main axis.
 ///
-/// [MDN](https://developer.mozilla.org/en-US/docs/Web/CSS/align-content)
+/// [MDN](https://developer.mozilla.org/en-US/docs/Web/CSS/justify-content)
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
-// Copy of taffy::style type of the same name.
-pub(crate) enum AlignContent {
+pub(crate) enum JustifyContent {
     /// Items are centered around the middle of the axis
     Center,
 }
 
-/// Sets the distribution of space between and around content items
-/// For Flexbox it controls alignment in the main axis
-/// For Grid it controls alignment in the inline axis
-///
-/// [MDN](https://developer.mozilla.org/en-US/docs/Web/CSS/justify-content)
-pub(crate) type JustifyContent = AlignContent;
-
-/// Sets the layout used for the children of this node
-///
-/// The default values depends on on which feature flags are enabled. The order of precedence is: Flex, Grid, Block, None.
+/// Sets the layout algorithm used for the children of this node.
 #[derive(Copy, Clone, PartialEq, Eq, Debug, Default)]
-// Copy of taffy::style type of the same name.
 pub(crate) enum Display {
     /// The children will follow the block layout algorithm
     Block,
     /// The children will follow the flexbox layout algorithm
     #[default]
     Flex,
-    /// The children will not be laid out, and will follow absolute positioning
-    None,
 }
 
 /// The direction of the flexbox layout main axis.
 #[derive(Copy, Clone, PartialEq, Eq, Debug, Default)]
-// Copy of taffy::style type of the same name.
 pub(crate) enum FlexDirection {
     /// Defines +x as the main axis
     ///
@@ -810,80 +750,24 @@ pub(crate) enum FlexDirection {
     Column,
 }
 
-/// How children overflowing their container should affect layout
+/// How children overflowing their container should affect layout.
 #[derive(Copy, Clone, PartialEq, Eq, Debug, Default)]
-// Copy of taffy::style type of the same name.
 pub(crate) enum Overflow {
-    /// The automatic minimum size of this node as a flexbox/grid item should be based on the size of its content.
+    /// The automatic minimum size of this node as a flexbox item should be based on the size of its content.
     /// Content that overflows this node *should* contribute to the scroll region of its parent.
     #[default]
     Visible,
-    /// The automatic minimum size of this node as a flexbox/grid item should be `0`.
+    /// The automatic minimum size of this node as a flexbox item should be `0`.
     /// Content that overflows this node should *not* contribute to the scroll region of its parent.
     Hidden,
 }
 
 /// The positioning strategy for this item.
 #[derive(Copy, Clone, PartialEq, Eq, Debug, Default)]
-// Copy of taffy::style type of the same name.
 pub(crate) enum Position {
     /// The offset is computed relative to the final position given by the layout algorithm.
     #[default]
     Relative,
-    /// The offset is computed relative to this item's closest positioned ancestor, if any.
+    /// The offset is computed relative to this item's parent padding box.
     Absolute,
-}
-
-impl From<AlignItems> for taffy::style::AlignItems {
-    fn from(value: AlignItems) -> Self {
-        match value {
-            AlignItems::Start => Self::START,
-            AlignItems::Center => Self::CENTER,
-        }
-    }
-}
-
-impl From<AlignContent> for taffy::style::AlignContent {
-    fn from(value: AlignContent) -> Self {
-        match value {
-            AlignContent::Center => Self::CENTER,
-        }
-    }
-}
-
-impl From<Display> for taffy::style::Display {
-    fn from(value: Display) -> Self {
-        match value {
-            Display::Block => Self::Block,
-            Display::Flex => Self::Flex,
-            Display::None => Self::None,
-        }
-    }
-}
-
-impl From<FlexDirection> for taffy::style::FlexDirection {
-    fn from(value: FlexDirection) -> Self {
-        match value {
-            FlexDirection::Row => Self::Row,
-            FlexDirection::Column => Self::Column,
-        }
-    }
-}
-
-impl From<Overflow> for taffy::style::Overflow {
-    fn from(value: Overflow) -> Self {
-        match value {
-            Overflow::Visible => Self::Visible,
-            Overflow::Hidden => Self::Hidden,
-        }
-    }
-}
-
-impl From<Position> for taffy::style::Position {
-    fn from(value: Position) -> Self {
-        match value {
-            Position::Relative => Self::Relative,
-            Position::Absolute => Self::Absolute,
-        }
-    }
 }

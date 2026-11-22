@@ -4,7 +4,7 @@ use crate::ui::Refineable;
 use crate::ui::collections::HashMap;
 use crate::ui::smallvec::SmallVec;
 use crate::ui::{
-    Action, AnyElement, App, Bounds, ClickEvent, DispatchPhase, Display, Element, ElementId,
+    Action, AnyElement, App, Bounds, ClickEvent, DispatchPhase, Element, ElementId,
     ExternalPaths, FocusHandle, Global, GlobalElementId, Hitbox, HitboxBehavior, HitboxId,
     IntoElement, KeyContext, KeyDownEvent, KeyUpEvent, LayoutId, MouseButton, MouseClickEvent,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point,
@@ -504,11 +504,7 @@ impl Element for Div {
             content_size,
             window,
             cx,
-            |style, scroll_offset, hitbox, window, cx| {
-                if style.display == Display::None {
-                    return hitbox;
-                }
-
+            |_style, scroll_offset, hitbox, window, cx| {
                 window.with_element_offset(scroll_offset, |window| {
                     for child in &mut self.children {
                         child.prepaint(window, cx);
@@ -535,11 +531,7 @@ impl Element for Div {
             hitbox.as_ref(),
             window,
             cx,
-            |style, window, cx| {
-                if style.display == Display::None {
-                    return;
-                }
-
+            |_style, window, cx| {
                 for child in &mut self.children {
                     child.paint(window, cx);
                 }
