@@ -16,17 +16,15 @@ use gpui::gpui_util::{ResultExt, get_powershell, new_std_command};
 use gpui::sync::RwLock;
 use smallvec::SmallVec;
 use windows::{
-    UI::ViewManagement::UISettings,
     Win32::{
         Foundation::*,
         Graphics::{Direct3D11::ID3D11Device, Gdi::*},
-        Security::Credentials::*,
         System::{
             Com::*,
             LibraryLoader::*,
             Ole::*,
             Power::*,
-            SystemInformation::*,
+            Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW},
             SystemServices::POWER_REQUEST_CONTEXT_VERSION,
             Threading::{POWER_REQUEST_CONTEXT_SIMPLE_STRING, REASON_CONTEXT, REASON_CONTEXT_0},
         },
@@ -35,7 +33,7 @@ use windows::{
     core::*,
 };
 
-use crate::*;
+use crate::platform::win32::*;
 use gpui::*;
 
 struct TrackedWindow {
@@ -71,9 +69,6 @@ pub struct WindowsPlatform {
     handle: HWND,
     suspend_resume_notification: RefCell<Option<HPOWERNOTIFY>>,
     disable_direct_composition: bool,
-    has_package_identity: bool,
-    app_identity: RefCell<Option<(String, String)>>,
-    system_notifications: RefCell<SystemNotificationState>,
 }
 
 struct WindowsPlatformInner {
@@ -88,7 +83,6 @@ struct WindowsPlatformInner {
 pub(crate) struct WindowsPlatformState {
     callbacks: PlatformCallbacks,
     menus: RefCell<Vec<OwnedMenu>>,
-    jump_list: RefCell<JumpList>,
     // NOTE: standard cursor handles don't need to close.
     pub(crate) current_cursor: Cell<Option<HCURSOR>>,
     /// Shared with each window so `WM_SETCURSOR` can read it directly.
@@ -116,12 +110,10 @@ struct PlatformCallbacks {
 impl WindowsPlatformState {
     fn new(directx_devices: Option<DirectXDevices>) -> Self {
         let callbacks = PlatformCallbacks::default();
-        let jump_list = JumpList::new();
         let current_cursor = load_cursor(CursorStyle::Arrow);
 
         Self {
             callbacks,
-            jump_list: RefCell::new(jump_list),
             current_cursor: Cell::new(current_cursor),
             cursor_visible: Arc::new(AtomicBool::new(true)),
             draw_coordinator: Rc::new(DrawCoordinator::new()),
@@ -279,11 +271,8 @@ impl WindowsPlatform {
             direct_write_text_system,
             suspend_resume_notification: RefCell::new(None),
             disable_direct_composition,
-            has_package_identity: has_package_identity(),
             drop_target_helper,
             invalidate_devices: Arc::new(AtomicBool::new(false)),
-            app_identity: RefCell::new(None),
-            system_notifications: RefCell::new(SystemNotificationState::new()),
         })
     }
 
@@ -320,55 +309,6 @@ impl WindowsPlatform {
             invalidate_devices: self.invalidate_devices.clone(),
             draw_coordinator: self.inner.state.draw_coordinator.clone(),
         }
-    }
-
-    fn set_dock_menus(&self, menus: Vec<MenuItem>) {
-        let mut actions = Vec::new();
-        menus.into_iter().for_each(|menu| {
-            if let Some(dock_menu) = DockMenuItem::new(menu).log_err() {
-                actions.push(dock_menu);
-            }
-        });
-        self.inner.state.jump_list.borrow_mut().dock_menus = actions;
-        let borrow = self.inner.state.jump_list.borrow();
-        let dock_menus = borrow
-            .dock_menus
-            .iter()
-            .map(|menu| (menu.name.clone(), menu.description.clone()))
-            .collect::<Vec<_>>();
-        let recent_workspaces = borrow.recent_workspaces.clone();
-        self.background_executor
-            .spawn(async move {
-                update_jump_list(&recent_workspaces, &dock_menus).log_err();
-            })
-            .detach();
-    }
-
-    fn update_jump_list(
-        &self,
-        menus: Vec<MenuItem>,
-        entries: Vec<SmallVec<[PathBuf; 2]>>,
-    ) -> Task<Vec<SmallVec<[PathBuf; 2]>>> {
-        let mut actions = Vec::new();
-        menus.into_iter().for_each(|menu| {
-            if let Some(dock_menu) = DockMenuItem::new(menu).log_err() {
-                actions.push(dock_menu);
-            }
-        });
-        let mut jump_list = self.inner.state.jump_list.borrow_mut();
-        jump_list.dock_menus = actions;
-        jump_list.recent_workspaces = entries.into();
-        let dock_menus = jump_list
-            .dock_menus
-            .iter()
-            .map(|menu| (menu.name.clone(), menu.description.clone()))
-            .collect::<Vec<_>>();
-        let recent_workspaces = jump_list.recent_workspaces.clone();
-        self.background_executor.spawn(async move {
-            update_jump_list(&recent_workspaces, &dock_menus)
-                .log_err()
-                .unwrap_or_default()
-        })
     }
 
     fn find_current_active_window(&self) -> Option<HWND> {
@@ -748,13 +688,6 @@ impl Platform for WindowsPlatform {
         true
     }
 
-    #[cfg(feature = "screen-capture")]
-    fn screen_capture_sources(
-        &self,
-    ) -> gpui::futures::channel::oneshot::Receiver<Result<Vec<Rc<dyn ScreenCaptureSource>>>> {
-        gpui::scap_screen_capture::scap_screen_sources(&self.foreground_executor)
-    }
-
     fn active_window(&self) -> Option<AnyWindowHandle> {
         let active_window_hwnd = unsafe { GetActiveWindow() };
         self.window_from_hwnd(active_window_hwnd)
@@ -814,7 +747,7 @@ impl Platform for WindowsPlatform {
             .find_current_active_window()
             .and_then(|hwnd| self.window_from_hwnd(hwnd))
             .map(|window| window.dialog_owner.clone());
-        crate::dialog::show_dialog(owner, &self.foreground_executor, move |window| {
+        crate::platform::win32::dialog::show_dialog(owner, &self.foreground_executor, move |window| {
             file_open_dialog(options, Some(window))
         })
     }
@@ -830,7 +763,7 @@ impl Platform for WindowsPlatform {
             .find_current_active_window()
             .and_then(|hwnd| self.window_from_hwnd(hwnd))
             .map(|window| window.dialog_owner.clone());
-        crate::dialog::show_dialog(owner, &self.foreground_executor, move |window| {
+        crate::platform::win32::dialog::show_dialog(owner, &self.foreground_executor, move |window| {
             let options = SavePathOptions {
                 directory,
                 file_name: suggested_name,
@@ -900,12 +833,7 @@ impl Platform for WindowsPlatform {
         }
     }
 
-    fn set_app_identity(&self, identifier: &str, name: &str) {
-        // If the process has package identity, it's automatally granted an AUMID by the system.
-        if self.has_package_identity {
-            return;
-        }
-
+    fn set_app_identity(&self, identifier: &str, _name: &str) {
         let identifier_utf16 = windows::core::HSTRING::from(identifier);
         // SAFETY: `identifier_utf16` outlives the call and is null-terminated.
         if let Err(error) = unsafe {
@@ -915,34 +843,16 @@ impl Platform for WindowsPlatform {
         } {
             log::warn!("failed to set the process AppUserModelID: {error}");
         }
-        *self.app_identity.borrow_mut() = Some((identifier.to_string(), name.to_string()));
     }
 
-    fn show_system_notification(&self, notification: gpui::SystemNotification) {
-        let app_identity = self.app_identity.borrow().clone();
-        self.system_notifications
-            .borrow_mut()
-            .show(
-                self.has_package_identity,
-                app_identity
-                    .as_ref()
-                    .map(|(identifier, name)| (identifier.as_str(), name.as_str())),
-                notification,
-            )
-            .log_err();
-    }
+    fn show_system_notification(&self, _notification: gpui::SystemNotification) {}
 
-    fn dismiss_system_notification(&self, tag: &str) {
-        self.system_notifications.borrow_mut().dismiss(tag);
-    }
+    fn dismiss_system_notification(&self, _tag: &str) {}
 
     fn on_system_notification_response(
         &self,
-        callback: Box<dyn FnMut(gpui::SystemNotificationResponse)>,
+        _callback: Box<dyn FnMut(gpui::SystemNotificationResponse)>,
     ) {
-        self.system_notifications
-            .borrow_mut()
-            .on_response(&self.foreground_executor, callback);
     }
 
     fn set_menus(&self, menus: Vec<Menu>, _keymap: &Keymap) {
@@ -953,9 +863,7 @@ impl Platform for WindowsPlatform {
         Some(self.inner.state.menus.borrow().clone())
     }
 
-    fn set_dock_menu(&self, menus: Vec<MenuItem>, _keymap: &Keymap) {
-        self.set_dock_menus(menus);
-    }
+    fn set_dock_menu(&self, _menus: Vec<MenuItem>, _keymap: &Keymap) {}
 
     fn on_app_menu_action(&self, callback: Box<dyn FnMut(&dyn Action)>) {
         self.inner
@@ -1039,121 +947,30 @@ impl Platform for WindowsPlatform {
         read_from_clipboard()
     }
 
-    fn write_credentials(&self, url: &str, username: &str, password: &[u8]) -> Task<Result<()>> {
-        // CredWriteW rejects larger blobs with the opaque RPC error
-        // 0x800706F7 "The stub received bad data", so fail with a clear
-        // message instead.
-        if password.len() > CRED_MAX_CREDENTIAL_BLOB_SIZE as usize {
-            return Task::ready(Err(anyhow!(
-                "credential for {url} is {} bytes, which exceeds the Windows Credential Manager limit of {CRED_MAX_CREDENTIAL_BLOB_SIZE} bytes",
-                password.len()
-            )));
-        }
-        let password = password.to_vec();
-        let mut username: Vec<u16> = username.encode_utf16().chain(Some(0)).collect();
-        let mut target_name: Vec<u16> = windows_credentials_target_name(url)
-            .encode_utf16()
-            .chain(Some(0))
-            .collect();
-        self.background_executor().spawn(async move {
-            let credentials = CREDENTIALW {
-                LastWritten: unsafe { GetSystemTimeAsFileTime() },
-                Flags: CRED_FLAGS(0),
-                Type: CRED_TYPE_GENERIC,
-                TargetName: PWSTR::from_raw(target_name.as_mut_ptr()),
-                CredentialBlobSize: password.len() as u32,
-                CredentialBlob: password.as_ptr() as *mut _,
-                Persist: CRED_PERSIST_LOCAL_MACHINE,
-                UserName: PWSTR::from_raw(username.as_mut_ptr()),
-                ..CREDENTIALW::default()
-            };
-            unsafe {
-                CredWriteW(&credentials, 0).map_err(|err| {
-                    anyhow!(
-                        "Failed to write credentials to Windows Credential Manager: {}",
-                        err,
-                    )
-                })?;
-            }
-            Ok(())
-        })
+    fn write_credentials(&self, _url: &str, _username: &str, _password: &[u8]) -> Task<Result<()>> {
+        Task::ready(Err(anyhow!("credentials unimplemented")))
     }
 
-    fn read_credentials(&self, url: &str) -> Task<Result<Option<(String, Vec<u8>)>>> {
-        let target_name: Vec<u16> = windows_credentials_target_name(url)
-            .encode_utf16()
-            .chain(Some(0))
-            .collect();
-        self.background_executor().spawn(async move {
-            let mut credentials: *mut CREDENTIALW = std::ptr::null_mut();
-            let result = unsafe {
-                CredReadW(
-                    PCWSTR::from_raw(target_name.as_ptr()),
-                    CRED_TYPE_GENERIC,
-                    None,
-                    &mut credentials,
-                )
-            };
-
-            if let Err(err) = result {
-                // ERROR_NOT_FOUND means the credential doesn't exist.
-                // Return Ok(None) to match macOS and Linux behavior.
-                if err.code() == ERROR_NOT_FOUND.to_hresult() {
-                    return Ok(None);
-                }
-                return Err(err.into());
-            }
-
-            if credentials.is_null() {
-                return Ok(None);
-            }
-
-            // SAFETY: `CredReadW` succeeded, so this points to a valid `CREDENTIALW` until `CredFree` below.
-            let result = unsafe { username_and_password(&*credentials) };
-            unsafe { CredFree(credentials as *const _ as _) };
-            result.map(Some)
-        })
+    fn read_credentials(&self, _url: &str) -> Task<Result<Option<(String, Vec<u8>)>>> {
+        Task::ready(Ok(None))
     }
 
-    fn delete_credentials(&self, url: &str) -> Task<Result<()>> {
-        let target_name: Vec<u16> = windows_credentials_target_name(url)
-            .encode_utf16()
-            .chain(Some(0))
-            .collect();
-        self.background_executor().spawn(async move {
-            unsafe {
-                CredDeleteW(
-                    PCWSTR::from_raw(target_name.as_ptr()),
-                    CRED_TYPE_GENERIC,
-                    None,
-                )?
-            };
-            Ok(())
-        })
+    fn delete_credentials(&self, _url: &str) -> Task<Result<()>> {
+        Task::ready(Ok(()))
     }
 
     fn register_url_scheme(&self, _: &str) -> Task<anyhow::Result<()>> {
         Task::ready(Err(anyhow!("register_url_scheme unimplemented")))
     }
 
-    fn perform_dock_menu_action(&self, action: usize) {
-        unsafe {
-            PostMessageW(
-                Some(self.handle),
-                WM_GPUI_DOCK_MENU_ACTION,
-                WPARAM(self.inner.validation_number),
-                LPARAM(action as isize),
-            )
-            .log_err();
-        }
-    }
+    fn perform_dock_menu_action(&self, _action: usize) {}
 
     fn update_jump_list(
         &self,
-        menus: Vec<MenuItem>,
-        entries: Vec<SmallVec<[PathBuf; 2]>>,
+        _menus: Vec<MenuItem>,
+        _entries: Vec<SmallVec<[PathBuf; 2]>>,
     ) -> Task<Vec<SmallVec<[PathBuf; 2]>>> {
-        self.update_jump_list(menus, entries)
+        Task::ready(Vec::new())
     }
 }
 
@@ -1358,22 +1175,7 @@ impl WindowsPlatformInner {
         Some(0)
     }
 
-    fn handle_dock_action_event(&self, action_idx: usize) -> Option<isize> {
-        let Some(action) = self
-            .state
-            .jump_list
-            .borrow()
-            .dock_menus
-            .get(action_idx)
-            .map(|dock_menu| dock_menu.action.boxed_clone())
-        else {
-            log::error!("Dock menu for index {action_idx} not found");
-            return Some(1);
-        };
-        self.with_callback(
-            |callbacks| &callbacks.app_menu_action,
-            |callback| callback(&*action),
-        );
+    fn handle_dock_action_event(&self, _action_idx: usize) -> Option<isize> {
         Some(0)
     }
 
@@ -1455,24 +1257,6 @@ struct PlatformWindowCreateContext {
     main_receiver: Option<PriorityQueueReceiver<RunnableVariant>>,
     directx_devices: Option<DirectXDevices>,
     dispatcher: Option<Arc<WindowsDispatcher>>,
-}
-
-fn has_package_identity() -> bool {
-    let mut package_full_name_length = 0;
-    let result = unsafe {
-        windows::Win32::Storage::Packaging::Appx::GetCurrentPackageFullName(
-            &mut package_full_name_length,
-            None,
-        )
-    };
-    if result == ERROR_INSUFFICIENT_BUFFER {
-        true
-    } else if result == APPMODEL_ERROR_NO_PACKAGE {
-        false
-    } else {
-        log::warn!("failed to determine whether the process has package identity: {result:?}");
-        false
-    }
 }
 
 fn open_target(target: impl AsRef<OsStr>) -> Result<()> {
@@ -1619,7 +1403,7 @@ pub fn prompt_for_save_path(
     options: SavePathOptions,
 ) -> Receiver<Result<Option<(PathBuf, Option<usize>)>>> {
     let owner = window_from_hwnd(HWND(owner as _)).map(|window| window.dialog_owner.clone());
-    crate::dialog::show_dialog(owner, executor, move |window| {
+    crate::platform::win32::dialog::show_dialog(owner, executor, move |window| {
         file_save_dialog(&options, Some(window))
     })
 }
@@ -1749,8 +1533,20 @@ fn load_icon() -> Result<HICON> {
 
 #[inline]
 fn should_auto_hide_scrollbars() -> Result<bool> {
-    let ui_settings = UISettings::new()?;
-    Ok(ui_settings.AutoHideScrollBars()?)
+    let mut dynamic_scrollbars: u32 = 1;
+    let mut size = std::mem::size_of::<u32>() as u32;
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            w!(r"Control Panel\Accessibility"),
+            w!("DynamicScrollbars"),
+            RRF_RT_REG_DWORD,
+            None,
+            Some((&raw mut dynamic_scrollbars).cast()),
+            Some(&mut size),
+        )
+    };
+    Ok(status.0 != 0 || dynamic_scrollbars != 0)
 }
 
 fn check_device_lost(device: &ID3D11Device) -> bool {
@@ -1942,97 +1738,14 @@ unsafe extern "system" fn window_procedure(
 ///
 /// # Safety
 ///
-/// A non-null `UserName` must point to a NUL-terminated wide string and a
-/// non-null `CredentialBlob` must be readable for `CredentialBlobSize` bytes,
-/// as is the case for credentials returned by `CredReadW`.
-unsafe fn username_and_password(credential: &CREDENTIALW) -> Result<(String, Vec<u8>)> {
-    let username = if credential.UserName.is_null() {
-        String::new()
-    } else {
-        // SAFETY: guaranteed by the caller.
-        unsafe { credential.UserName.to_string()? }
-    };
-    let password = if credential.CredentialBlob.is_null() {
-        Vec::new()
-    } else {
-        // SAFETY: guaranteed by the caller.
-        unsafe {
-            std::slice::from_raw_parts(
-                credential.CredentialBlob,
-                credential.CredentialBlobSize as usize,
-            )
-        }
-        .to_vec()
-    };
-    Ok((username, password))
-}
-
 #[cfg(test)]
 mod tests {
     use std::ffi::{OsStr, OsString};
 
-    use crate::{read_from_clipboard, write_to_clipboard};
+    use crate::platform::win32::{read_from_clipboard, write_to_clipboard};
     use gpui::ClipboardItem;
-    use windows::Win32::Security::Credentials::{
-        CRED_PERSIST_SESSION, CRED_TYPE_GENERIC, CREDENTIALW, CredDeleteW, CredFree, CredReadW,
-        CredWriteW,
-    };
-    use windows::core::{PCWSTR, PWSTR};
 
-    use super::{encode_restart_arguments, username_and_password};
-
-    #[test]
-    fn test_read_credential_with_username() {
-        assert_eq!(
-            round_trip_credential(Some("alice"), b"secret"),
-            ("alice".to_string(), b"secret".to_vec())
-        );
-    }
-
-    #[test]
-    fn test_read_credential_without_username() {
-        assert_eq!(
-            round_trip_credential(None, b"secret"),
-            (String::new(), b"secret".to_vec())
-        );
-    }
-
-    fn round_trip_credential(username: Option<&str>, secret: &[u8]) -> (String, Vec<u8>) {
-        let mut target_name: Vec<u16> = format!(
-            "zed-test-{}-{}",
-            std::process::id(),
-            username.unwrap_or_default()
-        )
-        .encode_utf16()
-        .chain(Some(0))
-        .collect();
-        let mut username: Vec<u16> = username
-            .map(|username| username.encode_utf16().chain(Some(0)).collect())
-            .unwrap_or_default();
-        let mut secret = secret.to_vec();
-        let credential = CREDENTIALW {
-            Type: CRED_TYPE_GENERIC,
-            TargetName: PWSTR::from_raw(target_name.as_mut_ptr()),
-            CredentialBlobSize: secret.len() as u32,
-            CredentialBlob: secret.as_mut_ptr(),
-            Persist: CRED_PERSIST_SESSION,
-            UserName: if username.is_empty() {
-                PWSTR::null()
-            } else {
-                PWSTR::from_raw(username.as_mut_ptr())
-            },
-            ..CREDENTIALW::default()
-        };
-        let target_name = PCWSTR::from_raw(target_name.as_ptr());
-        unsafe { CredWriteW(&credential, 0) }.unwrap();
-
-        let mut credentials: *mut CREDENTIALW = std::ptr::null_mut();
-        unsafe { CredReadW(target_name, CRED_TYPE_GENERIC, None, &mut credentials) }.unwrap();
-        let result = unsafe { username_and_password(&*credentials) };
-        unsafe { CredFree(credentials as *const _ as _) };
-        unsafe { CredDeleteW(target_name, CRED_TYPE_GENERIC, None) }.unwrap();
-        result.unwrap()
-    }
+    use super::encode_restart_arguments;
 
     #[test]
     fn test_encode_restart_arguments() {

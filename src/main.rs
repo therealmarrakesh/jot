@@ -702,7 +702,7 @@ impl Jot {
                         size: next,
                     }));
                     if changed {
-                        gpui_windows::set_window_min_size(hwnd, Some(next));
+                        gpui::set_window_min_size(hwnd, Some(next));
                     }
                 },
                 |_, _, _, _| {},
@@ -1116,7 +1116,7 @@ impl Render for Jot {
 
 fn main() {
     let platform = Rc::new(
-        gpui_windows::WindowsPlatform::new(false).expect("Failed to initialize Windows platform"),
+        gpui::WindowsPlatform::new(false).expect("Failed to initialize Windows platform"),
     );
     Application::with_platform(platform).run(|cx| {
         base::init(cx);

@@ -17,7 +17,7 @@ use windows::{
     core::PCWSTR,
 };
 
-use crate::*;
+use crate::platform::win32::*;
 use gpui::*;
 
 pub(crate) const WM_GPUI_CURSOR_STYLE_CHANGED: u32 = WM_USER + 1;

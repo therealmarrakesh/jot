@@ -27,7 +27,7 @@ use windows::{
     core::{BOOL, HRESULT, w},
 };
 
-use crate::SafeHwnd;
+use crate::platform::win32::SafeHwnd;
 
 pub(crate) struct DialogOwner {
     hwnd: HWND,

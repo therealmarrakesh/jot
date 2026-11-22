@@ -1,35 +1,9 @@
 mod app_menu;
 mod keyboard;
 mod keystroke;
+#[cfg(target_os = "windows")]
+pub(crate) mod win32;
 
-#[cfg(all(target_os = "linux", feature = "wayland"))]
-#[expect(missing_docs)]
-pub mod layer_shell;
-
-/// Types for configuring parent-anchored popup windows such as menus, dropdowns and tooltips.
-pub mod popup;
-
-#[cfg(any(test, feature = "test-support", feature = "bench-support"))]
-mod threaded_dispatcher;
-
-#[cfg(any(test, feature = "test-support", feature = "bench-support"))]
-mod test;
-
-#[cfg(all(target_os = "macos", any(test, feature = "test-support")))]
-mod visual_test;
-
-#[cfg(all(
-    feature = "screen-capture",
-    any(target_os = "windows", target_os = "linux", target_os = "freebsd",)
-))]
-pub mod scap_screen_capture;
-
-#[cfg(all(
-    any(target_os = "windows", target_os = "linux"),
-    feature = "screen-capture"
-))]
-pub(crate) type PlatformScreenCaptureFrame = scap::frame::Frame;
-#[cfg(not(feature = "screen-capture"))]
 pub(crate) type PlatformScreenCaptureFrame = ();
 #[cfg(all(target_os = "macos", feature = "screen-capture"))]
 pub(crate) type PlatformScreenCaptureFrame =
@@ -1312,8 +1286,6 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     }
     fn start_window_resize(&self, _edge: ResizeEdge) {}
     fn set_exclusive_zone(&self, _zone: Pixels) {}
-    #[cfg(all(target_os = "linux", feature = "wayland"))]
-    fn set_exclusive_edge(&self, _edge: layer_shell::Anchor) {}
     fn set_input_region(&self, _region: Option<&[Bounds<Pixels>]>) {}
     fn window_decorations(&self) -> Decorations {
         Decorations::Server
@@ -2612,21 +2584,8 @@ pub enum WindowKind {
     /// use sparingly!
     PopUp,
 
-    /// A parent-anchored, platform-native popup window for menus, comboboxes, context menus and
-    /// tooltips. Unlike [`WindowKind::PopUp`], it is positioned relative to a parent window.
-    ///
-    /// The popup's size comes from [`WindowOptions::window_bounds`], whose origin is ignored.
-    /// See [`popup::PopupOptions`] for the placement options. Platforms without a native
-    /// implementation reject it with [`popup::PopupNotSupportedError`].
-    AnchoredPopup(popup::PopupOptions),
-
     /// A floating window that appears on top of its parent window
     Floating,
-
-    /// A Wayland LayerShell window, used to draw overlays or backgrounds for applications such as
-    /// docks, notifications or wallpapers.
-    #[cfg(all(target_os = "linux", feature = "wayland"))]
-    LayerShell(layer_shell::LayerShellOptions),
 
     /// A window that appears on top of its parent window and blocks interaction with it
     /// until the modal window is closed

@@ -117,6 +117,10 @@ pub use interactive::*;
 use key_dispatch::*;
 pub use keymap::*;
 pub use platform::*;
+#[cfg(target_os = "windows")]
+pub use platform::win32::{
+    SaveChoice, SavePathOptions, WindowsPlatform, prompt_for_save_path, set_window_min_size,
+};
 pub use queue::{PriorityQueueReceiver, PriorityQueueSender};
 pub use refineable::*;
 pub use scene::*;

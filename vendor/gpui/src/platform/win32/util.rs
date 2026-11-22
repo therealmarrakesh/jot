@@ -3,18 +3,19 @@ use std::sync::{Mutex, OnceLock, PoisonError};
 use anyhow::Context;
 use gpui::gpui_util::ResultExt;
 use windows::{
-    UI::{
-        Color,
-        ViewManagement::{UIColorType, UISettings},
-    },
     Win32::{
-        Foundation::*, Graphics::Dwm::*, System::LibraryLoader::LoadLibraryA,
+        Foundation::*,
+        Graphics::Dwm::*,
+        System::{
+            LibraryLoader::LoadLibraryA,
+            Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW},
+        },
         UI::WindowsAndMessaging::*,
     },
-    core::{BOOL, PCSTR},
+    core::{BOOL, PCSTR, w},
 };
 
-use crate::*;
+use crate::platform::win32::*;
 use gpui::*;
 
 pub(crate) trait HiLoWord {
@@ -84,10 +85,6 @@ pub(crate) unsafe fn set_window_long(
     unsafe {
         SetWindowLongW(hwnd, nindex, dwnewlong as i32) as isize
     }
-}
-
-pub(crate) fn windows_credentials_target_name(url: &str) -> String {
-    format!("zed:url={}", url)
 }
 
 pub(crate) fn load_cursor(style: CursorStyle) -> Option<HCURSOR> {
@@ -173,23 +170,26 @@ pub(crate) fn app_appearance() -> Result<WindowAppearance> {
     }
 }
 
-// https://learn.microsoft.com/en-us/windows/apps/desktop/modernize/apply-windows-themes
 #[inline]
 fn system_appearance() -> Result<WindowAppearance> {
-    let ui_settings = UISettings::new()?;
-    let foreground_color = ui_settings.GetColorValue(UIColorType::Foreground)?;
-    // If the foreground is light, then is_color_light will evaluate to true,
-    // meaning Dark mode is enabled.
-    if is_color_light(&foreground_color) {
+    let mut apps_use_light_theme: u32 = 1;
+    let mut size = std::mem::size_of::<u32>() as u32;
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            w!(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"),
+            w!("AppsUseLightTheme"),
+            RRF_RT_REG_DWORD,
+            None,
+            Some((&raw mut apps_use_light_theme).cast()),
+            Some(&mut size),
+        )
+    };
+    if status.0 == 0 && apps_use_light_theme == 0 {
         Ok(WindowAppearance::Dark)
     } else {
         Ok(WindowAppearance::Light)
     }
-}
-
-#[inline(always)]
-fn is_color_light(color: &Color) -> bool {
-    ((5 * color.G as u32) + (2 * color.R as u32) + color.B as u32) > (8 * 128)
 }
 
 pub(crate) fn with_dll_library<R, F>(dll_name: PCSTR, f: F) -> Result<R>

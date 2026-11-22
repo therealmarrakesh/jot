@@ -3,7 +3,6 @@ use field::{BODY_SIZE, CONTROL_HEIGHT, CONTROL_RADIUS, OVERLAY_RADIUS, text_fiel
 use crate::base::input::InputState;
 use crate::base::{MotionStatus, Presence, Transition, transition_with_status};
 use menu::Entry;
-use regex::bytes::{Regex, RegexBuilder};
 
 const QUERY_CONTEXT: &str = "JotFindQuery";
 const REPLACEMENT_CONTEXT: &str = "JotFindReplacement";
@@ -51,25 +50,74 @@ pub(crate) fn key_bindings() -> Vec<KeyBinding> {
     ]
 }
 
+#[inline]
+fn fold_char(c: char) -> char {
+    if c.is_ascii() {
+        return c.to_ascii_lowercase();
+    }
+    match c {
+        '\u{017F}' => 's',        // LATIN SMALL LETTER LONG S
+        '\u{03C2}' => '\u{03C3}', // GREEK SMALL LETTER FINAL SIGMA
+        '\u{03D0}' => '\u{03B2}',
+        '\u{03D1}' => '\u{03B8}',
+        '\u{03D5}' => '\u{03C6}',
+        '\u{03D6}' => '\u{03C0}',
+        '\u{03F0}' => '\u{03BA}',
+        '\u{03F1}' => '\u{03C1}',
+        '\u{03F5}' => '\u{03B5}',
+        '\u{1E9B}' => '\u{1E61}',
+        '\u{2126}' => '\u{03C9}', // OHM SIGN
+        '\u{212A}' => 'k',        // KELVIN SIGN
+        '\u{212B}' => '\u{00E5}', // ANGSTROM SIGN
+        _ => {
+            let mut lower = c.to_lowercase();
+            let first = lower.next().unwrap_or(c);
+            if lower.next().is_none() { first } else { c }
+        }
+    }
+}
+
+#[inline]
+fn match_rest_folded(haystack: &str, start: usize, rest: &[char]) -> Option<usize> {
+    if rest.is_empty() {
+        return Some(start);
+    }
+    let mut chars = haystack[start..].char_indices();
+    for &expected in rest {
+        let (_, ch) = chars.next()?;
+        if fold_char(ch) != expected {
+            return None;
+        }
+    }
+    let end = chars
+        .next()
+        .map_or(haystack.len(), |(rel, _)| start + rel);
+    Some(end)
+}
+
 struct Matcher {
     query: String,
     match_case: bool,
-    pattern: Regex,
+    folded: Vec<char>,
     overlap: usize,
     block: usize,
 }
 
 impl Matcher {
     fn new(query: &str, match_case: bool) -> Option<Self> {
-        let pattern = RegexBuilder::new(&regex::escape(query))
-            .case_insensitive(!match_case)
-            .build()
-            .ok()?;
+        if query.is_empty() {
+            return None;
+        }
+        let folded = if match_case {
+            Vec::new()
+        } else {
+            query.chars().map(fold_char).collect()
+        };
         let overlap = query.chars().count() * MAX_UTF8_LEN;
         Some(Self {
             query: query.to_string(),
             match_case,
-            pattern,
+            folded,
             overlap,
             block: BLOCK_SIZE.max(4 * overlap),
         })
@@ -85,10 +133,66 @@ impl Matcher {
         start
     }
 
+    fn find_at(&self, haystack: &str, at: usize) -> Option<Range<usize>> {
+        if at >= haystack.len() {
+            return None;
+        }
+        let at = haystack.ceil_char_boundary(at);
+        if self.match_case {
+            return haystack[at..]
+                .find(&self.query)
+                .map(|off| (at + off)..(at + off + self.query.len()));
+        }
+        let (&first, rest) = self.folded.split_first()?;
+        if first.is_ascii() {
+            let lower = first as u8;
+            let upper = lower.to_ascii_uppercase();
+            let check_non_ascii = lower == b'k' || lower == b's';
+            let bytes = haystack.as_bytes();
+            let mut i = at;
+            while i < bytes.len() {
+                let b = bytes[i];
+                if b < 0x80 {
+                    if (b == lower || b == upper)
+                        && let Some(end) = match_rest_folded(haystack, i + 1, rest)
+                    {
+                        return Some(i..end);
+                    }
+                    i += 1;
+                } else {
+                    let ch = haystack[i..].chars().next()?;
+                    let next = i + ch.len_utf8();
+                    if check_non_ascii
+                        && fold_char(ch) == first
+                        && let Some(end) = match_rest_folded(haystack, next, rest)
+                    {
+                        return Some(i..end);
+                    }
+                    i = next;
+                }
+            }
+            None
+        } else {
+            for (rel, ch) in haystack[at..].char_indices() {
+                if fold_char(ch) == first {
+                    let start = at + rel;
+                    if let Some(end) = match_rest_folded(haystack, start + ch.len_utf8(), rest) {
+                        return Some(start..end);
+                    }
+                }
+            }
+            None
+        }
+    }
+
     fn is_match(&self, text: &str) -> bool {
-        self.pattern
-            .find(text.as_bytes())
-            .is_some_and(|found| found.range() == (0..text.len()))
+        if self.match_case {
+            text == self.query
+        } else {
+            text.chars()
+                .map(fold_char)
+                .eq(self.folded.iter().copied())
+        }
     }
 
     fn next(
@@ -109,13 +213,14 @@ impl Matcher {
                 .min(len)
                 .min(limit + self.overlap);
             let start = Self::fill(text, pos..end, buffer);
+            let haystack = std::str::from_utf8(buffer).unwrap_or("");
             let safe = if end == len {
                 limit
             } else {
                 (end - self.overlap).min(limit)
             };
-            if let Some(found) = self.pattern.find_at(buffer, pos - start) {
-                let range = start + found.start()..start + found.end();
+            if let Some(found) = self.find_at(haystack, pos - start) {
+                let range = start + found.start..start + found.end;
                 if range.start < safe {
                     return Some(range);
                 }
@@ -140,19 +245,23 @@ impl Matcher {
         loop {
             let begin = before.saturating_sub(self.block).max(floor);
             let start = Self::fill(text, begin..(before + self.overlap).min(len), buffer);
+            let haystack = std::str::from_utf8(buffer).unwrap_or("");
             let limit = before - start;
-            let mut found = self
-                .pattern
-                .find_iter(buffer)
-                .take_while(|hit| hit.start() < limit)
-                .last()
-                .map(|hit| hit.range());
+            let mut found = None;
+            let mut cursor = 0;
+            while let Some(hit) = self.find_at(haystack, cursor) {
+                if hit.start >= limit {
+                    break;
+                }
+                cursor = hit.end;
+                found = Some(hit);
+            }
             while let Some(later) = found
                 .as_ref()
-                .and_then(|range| self.pattern.find_at(buffer, range.start + 1))
-                .filter(|later| later.start() < limit)
+                .and_then(|range| self.find_at(haystack, range.start + 1))
+                .filter(|later| later.start < limit)
             {
-                found = Some(later.range());
+                found = Some(later);
             }
             if let Some(range) = found {
                 return Some(start + range.start..start + range.end);
@@ -171,19 +280,22 @@ impl Matcher {
         loop {
             let end = (pos + self.block + self.overlap).min(len);
             let start = Self::fill(text, pos..end, buffer);
+            let haystack = std::str::from_utf8(buffer).unwrap_or("");
             let safe = if end == len {
                 usize::MAX
             } else {
                 end - self.overlap
             };
             let mut resume = safe;
-            for found in self.pattern.find_iter(&buffer[pos - start..]) {
-                let range = pos + found.start()..pos + found.end();
+            let mut cursor = pos - start;
+            while let Some(found) = self.find_at(haystack, cursor) {
+                let range = start + found.start..start + found.end;
                 if range.start >= safe {
                     break;
                 }
                 resume = resume.max(range.end);
                 ranges.push(range);
+                cursor = found.end;
             }
             if end == len {
                 return ranges;

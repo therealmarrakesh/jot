@@ -28,8 +28,8 @@ use windows::{
     core::*,
 };
 
-use crate::direct_manipulation::DirectManipulationHandler;
-use crate::*;
+use crate::platform::win32::direct_manipulation::DirectManipulationHandler;
+use crate::platform::win32::*;
 use gpui::*;
 
 pub(crate) struct WindowsWindow(pub Rc<WindowsWindowInner>);
@@ -94,7 +94,7 @@ pub struct WindowsWindowState {
 
 pub(crate) struct WindowsWindowInner {
     hwnd: HWND,
-    pub(crate) dialog_owner: Rc<crate::dialog::DialogOwner>,
+    pub(crate) dialog_owner: Rc<crate::platform::win32::dialog::DialogOwner>,
     drop_target_helper: IDropTargetHelper,
     pub(crate) state: WindowsWindowState,
     system_settings: WindowsSystemSettings,
@@ -299,7 +299,7 @@ impl WindowsWindowInner {
 
         Ok(Rc::new(Self {
             hwnd,
-            dialog_owner: crate::dialog::DialogOwner::new(hwnd),
+            dialog_owner: crate::platform::win32::dialog::DialogOwner::new(hwnd),
             drop_target_helper: context.drop_target_helper.clone(),
             state,
             handle: context.handle,
@@ -455,12 +455,6 @@ impl WindowsWindow {
         params: WindowParams,
         creation_info: WindowCreationInfo,
     ) -> Result<Self> {
-        // Native popups are not implemented on Windows yet. Rejecting lets callers fall back to
-        // gpui's in-window popovers.
-        if let WindowKind::AnchoredPopup(_) = params.kind {
-            return Err(popup::PopupNotSupportedError.into());
-        }
-
         let WindowCreationInfo {
             icon,
             executor,
@@ -735,7 +729,7 @@ impl PlatformWindow for WindowsWindow {
         let msg = msg.to_string();
         let detail_string = detail.map(|detail| detail.to_string());
         let answers = answers.to_vec();
-        let dialog = crate::dialog::show_dialog(
+        let dialog = crate::platform::win32::dialog::show_dialog(
             Some(self.0.dialog_owner.clone()),
             &self.0.executor,
             move |handle| {
@@ -791,7 +785,7 @@ impl PlatformWindow for WindowsWindow {
                     config.cButtons = buttons.len() as _;
                     config.pButtons = buttons.as_ptr();
 
-                    config.pfCallback = Some(crate::dialog::task_dialog_callback);
+                    config.pfCallback = Some(crate::platform::win32::dialog::task_dialog_callback);
                     config.lpCallbackData = button_id_map.contains(&IDCANCEL.0) as isize;
                     let mut res = std::mem::zeroed();
                     TaskDialogIndirect(&config, Some(&mut res), None, None)

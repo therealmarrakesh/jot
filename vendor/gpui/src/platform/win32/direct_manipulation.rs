@@ -11,7 +11,7 @@ use windows::Win32::{
     UI::{Input::Pointer::*, WindowsAndMessaging::*},
 };
 
-use crate::*;
+use crate::platform::win32::*;
 
 /// Default viewport size in pixels. The actual content size doesn't matter
 /// because we're using the viewport only for gesture recognition, not for

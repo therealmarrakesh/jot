@@ -6,7 +6,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use gpui::collections::HashMap;
-use gpui::gpui_util::{ResultExt, maybe};
+use gpui::gpui_util::ResultExt;
 use gpui::sync::RwLock;
 use windows::{
     Win32::{
@@ -23,7 +23,7 @@ use windows::{
 };
 use windows_numerics::Vector2;
 
-use crate::*;
+use crate::platform::win32::*;
 use gpui::*;
 
 #[derive(Debug)]
@@ -1137,7 +1137,7 @@ impl DirectWriteState {
         unsafe { device_context.PSSetSamplers(0, Some(std::slice::from_ref(&gpu_state.sampler))) };
         unsafe { device_context.OMSetBlendState(&gpu_state.blend_state, None, 0xffffffff) };
 
-        let crate::FontInfo {
+        let crate::platform::win32::FontInfo {
             gamma_ratios,
             grayscale_enhanced_contrast,
             ..
@@ -1964,8 +1964,8 @@ const DEFAULT_LOCALE_NAME: PCWSTR = windows::core::w!("en-US");
 #[cfg(test)]
 mod tests {
     use super::{DirectWriteState, DirectWriteTextSystem, GPUState, GlyphLayerTexture};
-    use crate::direct_write::ClusterAnalyzer;
-    use crate::directx_devices::DirectXDevices;
+    use crate::platform::win32::direct_write::ClusterAnalyzer;
+    use crate::platform::win32::directx_devices::DirectXDevices;
     use anyhow::Result;
     use gpui::{
         DevicePixels, Font, PlatformTextSystem, RenderGlyphParams, Rgba, bounds, point, px, size,

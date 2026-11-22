@@ -1,6 +1,6 @@
 use super::*;
 use document::{Encoding, Format, LoadError, default_directory, display_name, file_name};
-use gpui_windows::{SaveChoice, SavePathOptions};
+use gpui::{SaveChoice, SavePathOptions};
 use std::io;
 
 const UNTITLED_FILE_NAME: &str = "Untitled.txt";
@@ -208,7 +208,7 @@ impl Jot {
         let current = self.tabs[ix].data.path.clone();
         let format = self.tabs[ix].data.format;
         let suggested = file_name(current.as_deref()).unwrap_or_else(|| UNTITLED_FILE_NAME.into());
-        let target = gpui_windows::prompt_for_save_path(
+        let target = gpui::prompt_for_save_path(
             self.hwnd,
             cx.foreground_executor(),
             SavePathOptions {

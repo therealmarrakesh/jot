@@ -1,14 +1,19 @@
 use anyhow::Result;
 use gpui::collections::HashMap;
-use windows::Win32::UI::{
-    Input::KeyboardAndMouse::{
-        GetKeyboardLayoutNameW, MAPVK_VK_TO_CHAR, MAPVK_VK_TO_VSC, MapVirtualKeyW, ToUnicode,
-        VIRTUAL_KEY, VK_0, VK_1, VK_2, VK_3, VK_4, VK_5, VK_6, VK_7, VK_8, VK_9, VK_ABNT_C1,
-        VK_CONTROL, VK_MENU, VK_OEM_1, VK_OEM_2, VK_OEM_3, VK_OEM_4, VK_OEM_5, VK_OEM_6, VK_OEM_7,
-        VK_OEM_8, VK_OEM_102, VK_OEM_COMMA, VK_OEM_MINUS, VK_OEM_PERIOD, VK_OEM_PLUS, VK_SHIFT,
+use windows::Win32::{
+    System::Registry::{HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ, RegGetValueW},
+    UI::{
+        Input::KeyboardAndMouse::{
+            GetKeyboardLayoutNameW, MAPVK_VK_TO_CHAR, MAPVK_VK_TO_VSC, MapVirtualKeyW, ToUnicode,
+            VIRTUAL_KEY, VK_0, VK_1, VK_2, VK_3, VK_4, VK_5, VK_6, VK_7, VK_8, VK_9, VK_ABNT_C1,
+            VK_CONTROL, VK_MENU, VK_OEM_1, VK_OEM_2, VK_OEM_3, VK_OEM_4, VK_OEM_5, VK_OEM_6,
+            VK_OEM_7, VK_OEM_8, VK_OEM_102, VK_OEM_COMMA, VK_OEM_MINUS, VK_OEM_PERIOD,
+            VK_OEM_PLUS, VK_SHIFT,
+        },
+        WindowsAndMessaging::KL_NAMELENGTH,
     },
-    WindowsAndMessaging::KL_NAMELENGTH,
 };
+use windows::core::{PCWSTR, w};
 
 use gpui::{
     KeybindingKeystroke, Keystroke, Modifiers, PlatformKeyboardLayout, PlatformKeyboardMapper,
@@ -94,11 +99,30 @@ impl WindowsKeyboardLayout {
     pub(crate) fn new() -> Result<Self> {
         let mut buffer = [0u16; KL_NAMELENGTH as usize]; // KL_NAMELENGTH includes the null terminator
         unsafe { GetKeyboardLayoutNameW(&mut buffer)? };
-        let id = String::from_utf16_lossy(&buffer[..buffer.len() - 1]); // Remove the null terminator
-        let entry = windows_registry::LOCAL_MACHINE.open(format!(
-            "System\\CurrentControlSet\\Control\\Keyboard Layouts\\{id}"
-        ))?;
-        let name = entry.get_string("Layout Text")?;
+        let id_end = buffer.iter().position(|&c| c == 0).unwrap_or(buffer.len());
+        let id = String::from_utf16_lossy(&buffer[..id_end]);
+        let subkey: Vec<u16> = format!("System\\CurrentControlSet\\Control\\Keyboard Layouts\\{id}\0")
+            .encode_utf16()
+            .collect();
+        let mut name_buf = [0u16; 256];
+        let mut bytes = (name_buf.len() * std::mem::size_of::<u16>()) as u32;
+        let status = unsafe {
+            RegGetValueW(
+                HKEY_LOCAL_MACHINE,
+                PCWSTR(subkey.as_ptr()),
+                w!("Layout Text"),
+                RRF_RT_REG_SZ,
+                None,
+                Some(name_buf.as_mut_ptr().cast()),
+                Some(&mut bytes),
+            )
+        };
+        let name = if status.0 == 0 && bytes >= 2 {
+            let len = (bytes as usize / 2).saturating_sub(1);
+            String::from_utf16_lossy(&name_buf[..len])
+        } else {
+            id.clone()
+        };
         Ok(Self { id, name })
     }
 
@@ -316,7 +340,7 @@ const CANDIDATE_VKEYS: &[VIRTUAL_KEY] = &[
 
 #[cfg(test)]
 mod tests {
-    use crate::WindowsKeyboardMapper;
+    use crate::platform::win32::WindowsKeyboardMapper;
     use gpui::{Keystroke, Modifiers, PlatformKeyboardMapper};
 
     #[test]

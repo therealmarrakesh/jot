@@ -14,7 +14,7 @@ use windows::{
     core::*,
 };
 
-use crate::logical_point;
+use crate::platform::win32::logical_point;
 use gpui::{
     Bounds, DevicePixels, DisplayId, Pixels, PlatformDisplay, point, refresh_interval_from_hz, size,
 };

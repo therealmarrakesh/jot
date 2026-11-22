@@ -19,8 +19,8 @@ use windows::{
     core::{HSTRING, Interface},
 };
 
-use crate::directx_renderer::shader_resources::{RawShaderBytes, ShaderModule, ShaderTarget};
-use crate::*;
+use crate::platform::win32::directx_renderer::shader_resources::{RawShaderBytes, ShaderModule, ShaderTarget};
+use crate::platform::win32::*;
 use gpui::*;
 
 pub(crate) const DISABLE_DIRECT_COMPOSITION: &str = "GPUI_DISABLE_DIRECT_COMPOSITION";
@@ -1750,7 +1750,7 @@ pub(crate) mod shader_resources {
             let mut compile_blob = None;
             let mut error_blob = None;
             let shader_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join(&format!("src/{}", shader_name))
+                .join(&format!("src/platform/win32/{}", shader_name))
                 .canonicalize()?;
 
             let entry_point = PCSTR::from_raw(entry.as_ptr());
@@ -1817,7 +1817,7 @@ mod nvidia {
     use anyhow::Result;
     use windows::{Win32::System::LibraryLoader::GetProcAddress, core::s};
 
-    use crate::with_dll_library;
+    use crate::platform::win32::with_dll_library;
 
     // https://github.com/NVIDIA/nvapi/blob/7cb76fce2f52de818b3da497af646af1ec16ce27/nvapi_lite_common.h#L180
     const NVAPI_SHORT_STRING_MAX: usize = 64;
@@ -1884,7 +1884,7 @@ mod amd {
     use anyhow::Result;
     use windows::{Win32::System::LibraryLoader::GetProcAddress, core::s};
 
-    use crate::with_dll_library;
+    use crate::platform::win32::with_dll_library;
 
     // https://github.com/GPUOpen-LibrariesAndSDKs/AGS_SDK/blob/5d8812d703d0335741b6f7ffc37838eeb8b967f7/ags_lib/inc/amd_ags.h#L145
     const AGS_CURRENT_VERSION: i32 = (6 << 22) | (3 << 12);
