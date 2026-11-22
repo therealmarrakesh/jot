@@ -8,7 +8,7 @@ use gpui::{
 use gpui::{
     Hitbox, HitboxBehavior, Hsla, IntoElement, LayoutId, LongPressEvent,
     MouseButton, MouseMoveEvent, MouseUpEvent, ParentElement as _, Path, Pixels, Point, Position,
-    ShapedLine, SharedString, Size, Style, Styled as _, TextAlign, TextRun, TouchDragEvent,
+    SharedString, Size, Style, Styled as _, TextAlign, TextRun, TouchDragEvent,
     TouchPhase, UnderlineStyle, Window, fill, point, px, relative, size,
 };
 use ropey::Rope;
@@ -632,6 +632,11 @@ impl<M: InputModeKind> TextElement<M> {
             let alignment = last_layout.alignment_offset(line.longest_width);
             for (row, shaped) in line.wrapped_lines.iter().enumerate() {
                 let end = offset + shaped.len;
+                if !shaped.is_shaped() {
+                    offset = end;
+                    y += last_layout.line_height;
+                    continue;
+                }
                 let start_ix = range.start.max(offset);
                 let end_ix = range.end.min(end);
                 let is_last = row + 1 == line.wrapped_lines.len();
@@ -756,18 +761,18 @@ impl<M: InputModeKind> TextElement<M> {
         state: &InputBaseState<M>,
         line_height: Pixels,
         input_height: Pixels,
-    ) -> (Range<usize>, Vec<usize>, Pixels) {
+    ) -> (Range<usize>, Vec<usize>, Pixels, Range<usize>) {
         // Add extra rows to avoid showing empty space when scroll to bottom.
         let extra_rows = 1;
         if state.is_single_line() {
-            return (0..1, vec![0], px(0.));
+            return (0..1, vec![0], px(0.), 0..1);
         }
 
         let total_lines = state.display_map.wrap_row_count();
         let display_count = state.display_map.display_row_count();
         let buffer_line_count = state.display_map.buffer_line_count();
         if display_count == 0 || buffer_line_count == 0 {
-            return (0..0, Vec::new(), px(0.));
+            return (0..0, Vec::new(), px(0.), 0..0);
         }
 
         let mut scroll_top = if let Some(deferred_scroll_offset) = state.deferred_scroll_offset {
@@ -791,6 +796,8 @@ impl<M: InputModeKind> TextElement<M> {
             ((f32::from(viewport_top) / line_height_f).floor() as usize).min(display_count - 1);
         let last_display =
             ((f32::from(viewport_bottom) / line_height_f).ceil() as usize).min(display_count - 1);
+        let visible_display_rows =
+            first_display.saturating_sub(2)..(last_display + 3).min(display_count);
 
         let start_line = state.display_map.display_row_to_buffer_line(first_display);
         let end_line = state.display_map.display_row_to_buffer_line(last_display);
@@ -814,7 +821,12 @@ impl<M: InputModeKind> TextElement<M> {
             }
         }
 
-        (visible_range, visible_buffer_lines, visible_top)
+        (
+            visible_range,
+            visible_buffer_lines,
+            visible_top,
+            visible_display_rows,
+        )
     }
 
     fn token_element(
@@ -1044,7 +1056,7 @@ impl<M: InputModeKind> TextElement<M> {
                     .iter()
                     .any(|span| !cache.widths.contains_key(span.token()))
         });
-        let (visible, _, _) = self.calculate_visible_range(state, line_height, viewport);
+        let (visible, _, _, _) = self.calculate_visible_range(state, line_height, viewport);
         let start = state.text.line_start_offset(visible.start);
         let end = state.text.line_end_offset(visible.end.saturating_sub(1));
         let spans = state.token_spans();
@@ -1361,10 +1373,13 @@ impl<M: InputModeKind> TextElement<M> {
         state: &InputBaseState<M>,
         display_text: &Rope,
         last_layout: &LastLayout,
+        visible_display_rows: &Range<usize>,
         font_size: Pixels,
         runs: &[TextRun],
         window: &mut Window,
     ) -> Vec<LineLayout> {
+        use crate::input::display_map::InputLine;
+
         let is_single_line = state.is_single_line();
         if state.tokens_visible() {
             return Self::layout_token_lines(state, last_layout, font_size, runs, window);
@@ -1409,52 +1424,72 @@ impl<M: InputModeKind> TextElement<M> {
 
         let mut lines = Vec::with_capacity(last_layout.visible_buffer_lines.len());
         let mut run_offset = 0;
+        let mut display_row = last_layout
+            .visible_buffer_lines
+            .first()
+            .map_or(0, |&row| state.display_map.buffer_line_to_display_row(row));
 
-        for &buffer_line in last_layout.visible_buffer_lines.iter() {
-            let line_text: String = display_text.slice_line(buffer_line).into();
+        for (vi, &buffer_line) in last_layout.visible_buffer_lines.iter().enumerate() {
+            let line_slice = display_text.slice_line(buffer_line);
+            let line_len = line_slice.len();
+            let line_byte_start = last_layout.visible_line_byte_offsets[vi];
             let line_item = state
                 .display_map
                 .line(buffer_line)
                 .expect("line should exists in wrapper");
 
-            debug_assert_eq!(line_item.len(), line_text.len());
+            debug_assert_eq!(line_item.len(), line_len);
 
-            let mut wrapped_lines: SmallVec<[ShapedLine; 1]> = SmallVec::with_capacity(1);
+            let mut wrapped_lines: SmallVec<[InputLine; 1]> =
+                SmallVec::with_capacity(line_item.wrapped_lines.len());
             let mut line_has_background = false;
 
-            for range in &line_item.wrapped_lines {
-                let line_runs = runs_for_range(runs, run_offset, &range);
+            for (sub_ix, range) in line_item.wrapped_lines.iter().enumerate() {
+                let sub_start = line_byte_start + range.start;
+                let sub_end = line_byte_start + range.end;
+                let has_cursor = state.selections.iter().any(|sel| {
+                    let c = sel.cursor_offset();
+                    c >= sub_start && c <= sub_end
+                });
+                let needs_shape = visible_display_rows.contains(&display_row)
+                    || has_cursor
+                    || (sub_ix == 0 && line_item.indent > 0);
+                if needs_shape {
+                    let line_runs = runs_for_range(runs, run_offset, range);
+                    let sub_line: SharedString = line_slice.slice(range.clone()).to_string().into();
+                    let line_runs =
+                        align_runs_to_char_boundaries(&sub_line, &line_runs).unwrap_or(line_runs);
+                    let shaped_line = window
+                        .text_system()
+                        .shape_line(sub_line, font_size, &line_runs, None);
 
-                let sub_line: SharedString = line_text[range.clone()].to_string().into();
-                let line_runs =
-                    align_runs_to_char_boundaries(&sub_line, &line_runs).unwrap_or(line_runs);
-                let shaped_line = window
-                    .text_system()
-                    .shape_line(sub_line, font_size, &line_runs, None);
-
-                line_has_background |= has_background(&line_runs);
-                wrapped_lines.push(shaped_line);
+                    line_has_background |= has_background(&line_runs);
+                    wrapped_lines.push(InputLine::from(shaped_line));
+                } else {
+                    wrapped_lines.push(InputLine::unshaped(range.len()));
+                }
+                display_row += 1;
             }
 
             let wrap_indent = if line_item.indent > 0 && wrapped_lines.len() > 1 {
-                let indent_byte_len = line_text
-                    .char_indices()
-                    .nth(line_item.indent as usize)
-                    .map(|(ix, _)| ix)
-                    .unwrap_or(line_text.len());
+                let indent_byte_len = line_slice
+                    .chars()
+                    .take(line_item.indent as usize)
+                    .map(char::len_utf8)
+                    .sum();
                 wrapped_lines[0].x_for_index(indent_byte_len)
             } else {
                 px(0.)
             };
 
             let line_layout = LineLayout::new()
-                .lines(wrapped_lines)
+                .inline_lines(wrapped_lines)
                 .wrap_indent(wrap_indent)
                 .with_background(line_has_background);
             lines.push(line_layout);
 
             // +1 for the `\n`
-            run_offset += line_text.len() + 1;
+            run_offset += line_len + 1;
         }
 
         lines
@@ -1628,13 +1663,29 @@ impl<M: InputModeKind> Element for TextElement<M> {
             window.text_system().layout_width(font_id, text_size, ' ')
         };
 
+        let mut bounds = bounds;
+        let (wrap_width, wrapping_indent) = {
+            let state = self.state.read(cx);
+            let wrap_width = if state.is_multi_line() && state.soft_wrap {
+                Some(bounds.size.width - RIGHT_MARGIN)
+            } else {
+                None
+            };
+            (wrap_width, state.wrapping_indent)
+        };
+
         self.state.update(cx, |state, cx| {
-            state.display_map.set_font(font, text_size, cx);
-            state.display_map.ensure_text_prepared(&state.text, cx);
+            state.display_map.prepare_layout(
+                &state.text,
+                font,
+                text_size,
+                wrap_width,
+                wrapping_indent,
+                cx,
+            );
         });
 
         let state = self.state.read(cx);
-        let multi_line = state.is_multi_line();
         let text = state.text.clone();
         let is_empty = text.len() == 0;
         let placeholder = self.placeholder.clone();
@@ -1659,33 +1710,6 @@ impl<M: InputModeKind> Element for TextElement<M> {
 
         let line_number_width = px(0.);
 
-        let mut bounds = bounds;
-        let wrap_width = if multi_line && state.soft_wrap {
-            Some(bounds.size.width - RIGHT_MARGIN)
-        } else {
-            None
-        };
-
-        let wrapping_indent = state.wrapping_indent;
-        let wrap_width_changed = state
-            .last_layout
-            .as_ref()
-            .map(|l| l.wrap_width != wrap_width)
-            .unwrap_or(true);
-
-        let wrapping_indent_changed = state
-            .last_layout
-            .as_ref()
-            .map(|l| l.wrapping_indent != wrapping_indent)
-            .unwrap_or(true);
-
-        if wrap_width_changed || wrapping_indent_changed {
-            self.state.update(cx, |state, cx| {
-                state.display_map.on_layout_changed(wrap_width, cx);
-                state.display_map.set_wrapping_indent(wrapping_indent, cx);
-            });
-        }
-
         let line_height = window.line_height();
         let token_elements = self.measure_tokens(
             (bounds.size.width - RIGHT_MARGIN).max(px(1.)),
@@ -1696,7 +1720,7 @@ impl<M: InputModeKind> Element for TextElement<M> {
         );
         let state = self.state.read(cx);
 
-        let (visible_range, visible_buffer_lines, visible_top) =
+        let (visible_range, visible_buffer_lines, visible_top, visible_display_rows) =
             self.calculate_visible_range(&state, line_height, bounds.size.height);
         let visible_start_offset = state.text.line_start_offset(visible_range.start);
         let visible_end_offset = state
@@ -1731,7 +1755,6 @@ impl<M: InputModeKind> Element for TextElement<M> {
             visible_range_offset,
             line_height,
             wrap_width,
-            wrapping_indent,
             line_number_width,
             space_width,
             lines: Rc::new(vec![]),
@@ -1772,6 +1795,7 @@ impl<M: InputModeKind> Element for TextElement<M> {
             &state,
             &display_text,
             &last_layout,
+            &visible_display_rows,
             text_size,
             &runs,
             window,

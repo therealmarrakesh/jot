@@ -20,6 +20,7 @@ pub(crate) struct InputLine {
 enum Content {
     Text(ShapedLine),
     Inline(Vec<InlineFragment>),
+    Unshaped,
 }
 impl From<ShapedLine> for InputLine {
     fn from(line: ShapedLine) -> Self {
@@ -31,6 +32,16 @@ impl From<ShapedLine> for InputLine {
     }
 }
 impl InputLine {
+    pub(crate) fn unshaped(len: usize) -> Self {
+        Self {
+            len,
+            width: px(0.),
+            content: Content::Unshaped,
+        }
+    }
+    pub(crate) fn is_shaped(&self) -> bool {
+        !matches!(self.content, Content::Unshaped)
+    }
     pub(crate) fn inline(text: SharedString, fragments: Vec<InlineFragment>) -> Self {
         let width = fragments.last().map_or(px(0.), |f| f.x + f.width);
         Self {
@@ -42,6 +53,7 @@ impl InputLine {
     pub(crate) fn x_for_index(&self, ix: usize) -> Pixels {
         match &self.content {
             Content::Text(line) => line.x_for_index(ix),
+            Content::Unshaped => px(0.),
             Content::Inline(fragments) => {
                 for f in fragments {
                     if ix < f.range.end {
@@ -59,6 +71,7 @@ impl InputLine {
     pub(crate) fn closest_index_for_x(&self, x: Pixels) -> usize {
         match &self.content {
             Content::Text(line) => line.closest_index_for_x(x),
+            Content::Unshaped => 0,
             Content::Inline(fragments) => {
                 for f in fragments {
                     if x <= f.x + f.width {
@@ -79,6 +92,7 @@ impl InputLine {
     pub(crate) fn index_for_x(&self, x: Pixels) -> Option<usize> {
         match &self.content {
             Content::Text(line) => line.index_for_x(x),
+            Content::Unshaped => None,
             Content::Inline(_) => {
                 (x >= px(0.) && x <= self.width).then(|| self.closest_index_for_x(x))
             }
@@ -128,6 +142,7 @@ impl InputLine {
         };
         match &self.content {
             Content::Text(line) => paint(line, pos, align, width, window, cx),
+            Content::Unshaped => {}
             Content::Inline(fragments) => {
                 let remaining = (width.unwrap_or(self.width) - self.width).max(px(0.));
                 let offset = match align {

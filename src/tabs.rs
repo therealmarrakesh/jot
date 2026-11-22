@@ -372,13 +372,13 @@ impl Jot {
         let word_wrap = cx.global::<ViewSettings>().word_wrap;
         let (path, text, format) = match content {
             Some((path, loaded)) => (Some(path), loaded.text, loaded.format),
-            None => (None, String::new(), document::Format::default()),
+            None => (None, Rope::new(), document::Format::default()),
         };
         let editor = cx.new(|cx| {
             let mut state = TextareaState::new(window, cx)
                 .soft_wrap(word_wrap)
                 .viewport_wheel_step()
-                .default_value(text);
+                .default_rope(text);
             state.set_editor_paddings(EDITOR_PADDINGS);
             state
         });

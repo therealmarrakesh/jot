@@ -80,6 +80,19 @@ impl DisplayMap {
         self.wrap_map.set_font(font, font_size, cx);
     }
 
+    pub fn prepare_layout(
+        &mut self,
+        text: &Rope,
+        font: Font,
+        font_size: Pixels,
+        wrap_width: Option<Pixels>,
+        wrapping_indent: WrappingIndent,
+        cx: &mut App,
+    ) -> bool {
+        self.wrap_map
+            .prepare_layout(text, font, font_size, wrap_width, wrapping_indent, cx)
+    }
+
     pub fn ensure_text_prepared(&mut self, text: &Rope, cx: &mut App) {
         self.wrap_map.ensure_text_prepared(text, cx);
     }

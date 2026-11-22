@@ -1142,6 +1142,12 @@ impl<M: InputModeKind> InputBaseState<M> {
         self
     }
 
+    /// Set the default text directly from a pre-built [`Rope`].
+    pub fn default_rope(mut self, value: Rope) -> Self {
+        self.text = value;
+        self
+    }
+
     /// Return the value of the input field as an owned string.
     ///
     /// The string is materialized on each call. See [`Self::text`] for the

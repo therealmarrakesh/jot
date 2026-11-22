@@ -262,15 +262,16 @@ impl Jot {
         let editor = self.tabs[ix].data.editor.clone();
         let id = editor.entity_id();
         let snapshot = editor.update(cx, |editor, _| editor.begin_save());
-        let text = editor.read(cx).text().to_string();
+        let text = editor.read(cx).text().clone();
         let path = std::path::absolute(&path).unwrap_or(path);
         cx.spawn_in(window, async move |this, cx| {
-            let encoded = cx
+            let check_text = text.clone();
+            let lossy = match cx
                 .background_executor()
-                .spawn(async move { document::encode(text, format) })
-                .await;
-            let encoded = match encoded {
-                Ok(encoded) => encoded,
+                .spawn(async move { document::is_lossy(&check_text, format) })
+                .await
+            {
+                Ok(lossy) => lossy,
                 Err(error) => {
                     this.update_in(cx, |this, window, cx| {
                         this.show_save_error(&path, &error, window, cx);
@@ -279,7 +280,7 @@ impl Jot {
                     return false;
                 }
             };
-            if encoded.lossy {
+            if lossy {
                 let Ok(answer) = this.update_in(cx, |this, window, cx| {
                     this.prompt(
                         APP_NAME,
@@ -305,10 +306,9 @@ impl Jot {
                 }
             }
             let write_path = path.clone();
-            let bytes = encoded.bytes;
             let result = cx
                 .background_executor()
-                .spawn(async move { document::write(&write_path, &bytes) })
+                .spawn(async move { document::write_rope(&write_path, &text, format) })
                 .await;
             this.update_in(cx, |this, window, cx| match result {
                 Ok(()) => {

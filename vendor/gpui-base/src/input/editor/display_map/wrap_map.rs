@@ -133,6 +133,20 @@ impl WrapMap {
         self.wrapper.set_font(font, font_size, cx);
     }
 
+    /// Configure font, wrap width, and indent and prepare text in a single pass.
+    pub(super) fn prepare_layout(
+        &mut self,
+        text: &Rope,
+        font: Font,
+        font_size: Pixels,
+        wrap_width: Option<Pixels>,
+        wrapping_indent: WrappingIndent,
+        cx: &mut App,
+    ) -> bool {
+        self.wrapper
+            .prepare_layout(text, font, font_size, wrap_width, wrapping_indent, cx)
+    }
+
     /// Ensure text is prepared (initializes wrapper if needed)
     pub(super) fn ensure_text_prepared(&mut self, text: &Rope, cx: &mut App) -> bool {
         self.wrapper.prepare_if_need(text, cx)

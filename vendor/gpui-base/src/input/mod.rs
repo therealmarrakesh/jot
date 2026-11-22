@@ -62,7 +62,7 @@ pub use kind::{InputMode, InputModeKind, MultiLineMode, TextareaMode};
 pub use mask_pattern::MaskPattern;
 pub use native::{NativeMenu, NativeMenuItem};
 pub use rope_ext::{Point, Position, RopeExt, RopeLines};
-pub use ropey::Rope;
+pub use ropey::{Rope, RopeBuilder};
 pub use state::*;
 pub use textarea::{Textarea, TextareaState};
 pub(crate) use token_presentation::InlineTokenPresentation;

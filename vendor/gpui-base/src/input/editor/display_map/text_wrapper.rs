@@ -61,7 +61,14 @@ const UNSHAPED_RANGES: [RangeInclusive<u32>; 17] = [
     HALFWIDTH_AND_FULLWIDTH_FORMS,
 ];
 
+fn is_printable_ascii(bytes: &[u8]) -> bool {
+    bytes.iter().all(|&b| (0x20..=0x7e).contains(&b))
+}
+
 fn wraps_by_char_widths(text: &str) -> bool {
+    if is_printable_ascii(text.as_bytes()) {
+        return true;
+    }
     text.chars()
         .all(|c| UNSHAPED_RANGES.iter().any(|range| range.contains(&(c as u32))))
 }
@@ -267,6 +274,7 @@ pub(crate) struct TextWrapper {
     pub(crate) lines: SumTree<LineItem>,
 
     inline_metrics: Rc<[(Range<usize>, Pixels)]>,
+    ascii_max_width: Option<Pixels>,
     _initialized: bool,
 }
 
@@ -281,6 +289,7 @@ impl TextWrapper {
             wrapping_indent: WrappingIndent::default(),
             lines: SumTree::new(&()),
             inline_metrics: Rc::from([]),
+            ascii_max_width: None,
             _initialized: false,
         }
     }
@@ -380,7 +389,45 @@ impl TextWrapper {
 
         self.font = font;
         self.font_size = font_size;
+        self.ascii_max_width = None;
         self.update_all(&self.text.clone(), cx);
+    }
+
+    pub(crate) fn prepare_layout(
+        &mut self,
+        text: &Rope,
+        font: Font,
+        font_size: Pixels,
+        wrap_width: Option<Pixels>,
+        wrapping_indent: WrappingIndent,
+        cx: &mut App,
+    ) -> bool {
+        let font_changed = !self.font.eq(&font) || self.font_size != font_size;
+        let wrap_changed = self.wrap_width != wrap_width;
+        let indent_changed = self.wrapping_indent != wrapping_indent;
+        if font_changed {
+            self.ascii_max_width = None;
+        }
+        self.font = font;
+        self.font_size = font_size;
+        self.wrap_width = wrap_width;
+        self.wrapping_indent = wrapping_indent;
+
+        if !self._initialized {
+            self._initialized = true;
+            self.update_all(text, cx);
+            return true;
+        }
+        // When wrapping is off before and after, font/indent changes cannot change
+        // any line's wrap boundaries, so avoid rebuilding the SumTree.
+        if wrap_width.is_none() && !wrap_changed {
+            return false;
+        }
+        if font_changed || wrap_changed || indent_changed {
+            self.update_all(text, cx);
+            return true;
+        }
+        false
     }
 
     pub(crate) fn prepare_if_need(&mut self, text: &Rope, cx: &mut App) -> bool {
@@ -393,14 +440,6 @@ impl TextWrapper {
     }
 
     /// Update the text wrapper and recalculate the wrapped lines.
-    ///
-    /// If the `text` is the same as the current text, do nothing.
-    ///
-    /// - `changed_text`: The text [`Rope`] that has changed.
-    /// - `range`: The `selected_range` before change.
-    /// - `new_text`: The inserted text.
-    /// - `force`: Whether to force the update, if false, the update will be skipped if the text is the same.
-    /// - `cx`: The application context.
     pub(crate) fn update(
         &mut self,
         changed_text: &Rope,
@@ -408,11 +447,30 @@ impl TextWrapper {
         new_text: &Rope,
         cx: &mut App,
     ) {
-        let mut line_wrapper = cx
-            .text_system()
-            .line_wrapper(self.font.clone(), self.font_size);
+        let Some(wrap_width) = self.wrap_width else {
+            self._update(changed_text, range, new_text, 0, &mut |_, _, _| Vec::new());
+            return;
+        };
+
+        let text_system_ref = cx.text_system();
+        let mut line_wrapper = text_system_ref.line_wrapper(self.font.clone(), self.font_size);
+        let ascii_fit_len = if self.inline_metrics.is_empty() {
+            let max_ascii_width = *self.ascii_max_width.get_or_insert_with(|| {
+                let font_id = text_system_ref.resolve_font(&self.font);
+                (0x20u8..=0x7e)
+                    .map(|b| text_system_ref.layout_width(font_id, self.font_size, char::from(b)))
+                    .fold(px(0.), Pixels::max)
+            });
+            if max_ascii_width > px(0.) {
+                (wrap_width / max_ascii_width).floor().max(0.) as usize
+            } else {
+                0
+            }
+        } else {
+            0
+        };
         let metrics = self.inline_metrics.clone();
-        let text_system = gpui::WindowTextSystem::new(cx.text_system().clone());
+        let text_system = gpui::WindowTextSystem::new(text_system_ref.clone());
         let font = self.font.clone();
         let font_size = self.font_size;
         let wrapping_indent = self.wrapping_indent;
@@ -420,6 +478,7 @@ impl TextWrapper {
             changed_text,
             range,
             new_text,
+            ascii_fit_len,
             &mut |line_str, wrap_width, line_start| {
                 let mut fragments = Vec::new();
                 let mut offset = 0;
@@ -568,6 +627,7 @@ impl TextWrapper {
         changed_text: &Rope,
         range: &Range<usize>,
         new_text: &Rope,
+        ascii_fit_len: usize,
         wrap_line: &mut F,
     ) where
         F: FnMut(&str, Pixels, usize) -> Vec<gpui::Boundary>,
@@ -585,65 +645,81 @@ impl TextWrapper {
             .offset_to_point(range.start + new_text.len())
             .row;
 
-        let mut new_lines = Vec::with_capacity(new_end_row.saturating_sub(new_start_row) + 1);
+        let line_count = new_end_row.saturating_sub(new_start_row) + 1;
+        let mut new_lines = Vec::with_capacity(line_count);
         let wrap_width = self.wrap_width;
+        let mut line_start = changed_text.line_start_offset(new_start_row);
+        let total_rows = changed_text.lines_len();
+        let mut lines_iter =
+            changed_text.lines_at(new_start_row.min(total_rows), ropey::LineType::LF);
 
-        // line not contains `\n`.
-        for row in new_start_row..=new_end_row {
-            let line = changed_text.slice_line(row);
+        // line does not contain `\n`.
+        for _row in new_start_row..=new_end_row {
+            let (raw_len, line) = if let Some(raw) = lines_iter.next() {
+                let raw_len = raw.len();
+                let trimmed = if raw_len > 0 && raw.byte(raw_len - 1) == b'\n' {
+                    raw.slice(..raw_len - 1)
+                } else {
+                    raw
+                };
+                (raw_len, trimmed)
+            } else {
+                (0, changed_text.slice(0..0))
+            };
+            let line_len = line.len();
             let mut wrapped_lines = SmallVec::<[Range<usize>; 1]>::new();
             let mut prev_boundary_ix = 0;
             let mut indent_chars = 0;
 
-            // If wrap_width is Pixels::MAX, skip wrapping to disable word wrap
-            if let Some(wrap_width) = wrap_width {
-                // Borrowed for lines within a single rope chunk.
-                let line_str: Cow<str> = line.into();
-                match self.wrapping_indent {
-                    WrappingIndent::Same => {
-                        // Here only have wrapped line, if there is no wrap meet, the `line_wraps`
-                        // result will empty.
-                        for boundary in
-                            wrap_line(&line_str, wrap_width, changed_text.line_start_offset(row))
-                        {
-                            wrapped_lines.push(prev_boundary_ix..boundary.ix);
-                            prev_boundary_ix = boundary.ix;
-                            indent_chars = boundary.next_indent;
+            if let Some(wrap_width) = wrap_width
+                && line_len > 0
+            {
+                let fits_fast = ascii_fit_len > 0
+                    && line_len <= ascii_fit_len
+                    && line.chunks().all(|chunk| is_printable_ascii(chunk.as_bytes()));
+                if !fits_fast {
+                    // Borrowed for lines within a single rope chunk.
+                    let line_str: Cow<str> = line.into();
+                    match self.wrapping_indent {
+                        WrappingIndent::Same => {
+                            for boundary in wrap_line(&line_str, wrap_width, line_start) {
+                                wrapped_lines.push(prev_boundary_ix..boundary.ix);
+                                prev_boundary_ix = boundary.ix;
+                                indent_chars = boundary.next_indent;
+                            }
                         }
-                    }
-                    WrappingIndent::None => {
-                        // The first visual line keeps the line's leading indentation, so it is
-                        // wrapped as is.
-                        let boundaries =
-                            wrap_line(&line_str, wrap_width, changed_text.line_start_offset(row));
-                        if let Some(first_ix) = boundaries.first().map(|b| b.ix) {
-                            wrapped_lines.push(prev_boundary_ix..first_ix);
-                            prev_boundary_ix = first_ix;
+                        WrappingIndent::None => {
+                            let boundaries = wrap_line(&line_str, wrap_width, line_start);
+                            if let Some(first_ix) = boundaries.first().map(|b| b.ix) {
+                                wrapped_lines.push(prev_boundary_ix..first_ix);
+                                prev_boundary_ix = first_ix;
 
-                            for boundary in wrap_line(
-                                &line_str[first_ix..],
-                                wrap_width,
-                                changed_text.line_start_offset(row) + first_ix,
-                            ) {
-                                let ix = first_ix + boundary.ix;
-                                wrapped_lines.push(prev_boundary_ix..ix);
-                                prev_boundary_ix = ix;
+                                for boundary in wrap_line(
+                                    &line_str[first_ix..],
+                                    wrap_width,
+                                    line_start + first_ix,
+                                ) {
+                                    let ix = first_ix + boundary.ix;
+                                    wrapped_lines.push(prev_boundary_ix..ix);
+                                    prev_boundary_ix = ix;
+                                }
                             }
                         }
                     }
                 }
             }
 
-            // Reset of the line
-            if prev_boundary_ix < line.len() || prev_boundary_ix == 0 {
-                wrapped_lines.push(prev_boundary_ix..line.len());
+            // Rest of the line
+            if prev_boundary_ix < line_len || prev_boundary_ix == 0 {
+                wrapped_lines.push(prev_boundary_ix..line_len);
             }
 
             new_lines.push(LineItem {
-                len: line.len(),
+                len: line_len,
                 indent: indent_chars,
                 wrapped_lines,
             });
+            line_start += raw_len;
         }
 
         if self.lines.is_empty() {

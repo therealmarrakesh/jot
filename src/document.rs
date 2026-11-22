@@ -1,6 +1,7 @@
+use gpui_base::input::{Rope, RopeBuilder};
 use std::ffi::OsString;
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, BufWriter, Read, Seek, SeekFrom, Write};
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 use std::ptr::{null, null_mut};
@@ -17,11 +18,12 @@ use windows_sys::Win32::UI::Shell::{FOLDERID_Documents, KF_FLAG_DEFAULT, SHGetKn
 const UTF8_BOM: &[u8] = b"\xef\xbb\xbf";
 const UTF16_LE_BOM: &[u8] = b"\xff\xfe";
 const UTF16_BE_BOM: &[u8] = b"\xfe\xff";
+const IO_CHUNK: usize = 64 * 1024;
+const ANSI_WIDE_CHUNK: usize = 32 * 1024;
 const TEMP_ATTEMPTS: usize = 100;
 const TEMP_SUFFIX: &str = ".jot-save";
 const BACKUP_SUFFIX: &str = ".jot-backup";
 const READ_ONLY: &str = "This file is read-only.";
-const TOO_LARGE_FOR_ANSI: &str = "This text is too large to save as ANSI.";
 const NOTICES: &str = include_str!("../assets/THIRD-PARTY-NOTICES.txt");
 const NOTICES_FILE: &str = "THIRD-PARTY-NOTICES.txt";
 
@@ -43,42 +45,97 @@ impl LineEnding {
             Self::Cr => "Macintosh (CR)",
         }
     }
-
-    fn split(text: String) -> (String, Self) {
-        let line_ending = match text.find(['\r', '\n']) {
-            Some(ix) if text[ix..].starts_with("\r\n") => Self::Crlf,
-            Some(ix) if text[ix..].starts_with('\r') => Self::Cr,
-            Some(_) => Self::Lf,
-            None => Self::Crlf,
-        };
-        (normalize_line_endings(text), line_ending)
-    }
 }
 
-fn normalize_line_endings(text: String) -> String {
-    let bytes = text.as_bytes();
-    if !bytes.contains(&b'\r') {
-        return text;
-    }
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut start = 0;
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'\r' {
-            out.extend_from_slice(&bytes[start..i]);
-            out.push(b'\n');
-            i += if bytes.get(i + 1) == Some(&b'\n') {
-                2
-            } else {
-                1
-            };
-            start = i;
-        } else {
-            i += 1;
+struct LineNormalizer {
+    builder: RopeBuilder,
+    line_ending: Option<LineEnding>,
+    pending_cr: bool,
+    scratch: String,
+}
+
+impl LineNormalizer {
+    fn new() -> Self {
+        Self {
+            builder: RopeBuilder::new(),
+            line_ending: None,
+            pending_cr: false,
+            scratch: String::new(),
         }
     }
-    out.extend_from_slice(&bytes[start..]);
-    String::from_utf8(out).expect("replacing ASCII CR/CRLF with LF preserves UTF-8")
+
+    fn push(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        let bytes = text.as_bytes();
+        if !self.pending_cr && !bytes.contains(&b'\r') {
+            if self.line_ending.is_none() && bytes.contains(&b'\n') {
+                self.line_ending = Some(LineEnding::Lf);
+            }
+            self.builder.append(text);
+            return;
+        }
+        self.scratch.clear();
+        let mut i = 0;
+        let mut start = 0;
+        if self.pending_cr {
+            self.pending_cr = false;
+            if bytes[0] == b'\n' {
+                self.line_ending.get_or_insert(LineEnding::Crlf);
+                self.scratch.push('\n');
+                i = 1;
+                start = 1;
+            } else {
+                self.line_ending.get_or_insert(LineEnding::Cr);
+                self.scratch.push('\n');
+            }
+        }
+        while i < bytes.len() {
+            match bytes[i] {
+                b'\n' => {
+                    self.line_ending.get_or_insert(LineEnding::Lf);
+                    i += 1;
+                }
+                b'\r' => {
+                    self.scratch.push_str(&text[start..i]);
+                    if i + 1 == bytes.len() {
+                        self.pending_cr = true;
+                        start = bytes.len();
+                        break;
+                    } else if bytes[i + 1] == b'\n' {
+                        self.line_ending.get_or_insert(LineEnding::Crlf);
+                        self.scratch.push('\n');
+                        i += 2;
+                        start = i;
+                    } else {
+                        self.line_ending.get_or_insert(LineEnding::Cr);
+                        self.scratch.push('\n');
+                        i += 1;
+                        start = i;
+                    }
+                }
+                _ => i += 1,
+            }
+        }
+        if start < bytes.len() {
+            self.scratch.push_str(&text[start..]);
+        }
+        if !self.scratch.is_empty() {
+            self.builder.append(&self.scratch);
+        }
+    }
+
+    fn finish(mut self) -> (Rope, LineEnding) {
+        if self.pending_cr {
+            self.line_ending.get_or_insert(LineEnding::Cr);
+            self.builder.append("\n");
+        }
+        (
+            self.builder.finish(),
+            self.line_ending.unwrap_or(LineEnding::Crlf),
+        )
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -109,69 +166,6 @@ impl Encoding {
             Self::Ansi => "ANSI",
         }
     }
-
-    fn detect(bytes: &[u8]) -> (Self, usize) {
-        [
-            (Self::Utf8Bom, UTF8_BOM),
-            (Self::Utf16Le, UTF16_LE_BOM),
-            (Self::Utf16Be, UTF16_BE_BOM),
-        ]
-        .into_iter()
-        .find_map(|(encoding, bom)| bytes.starts_with(bom).then_some((encoding, bom.len())))
-        .unwrap_or_else(|| match std::str::from_utf8(bytes) {
-            Ok(_) => (Self::Utf8, 0),
-            Err(_) => (Self::Ansi, 0),
-        })
-    }
-
-    fn decode(self, mut bytes: Vec<u8>, bom: usize) -> Option<String> {
-        let decode_utf16 = |body: &[u8], unit: fn([u8; 2]) -> u16| -> Option<String> {
-            let (pairs, rest) = body.as_chunks::<2>();
-            if !rest.is_empty() {
-                return None;
-            }
-            let mut out = String::with_capacity(pairs.len());
-            for ch in char::decode_utf16(pairs.iter().map(|&pair| unit(pair))) {
-                out.push(ch.ok()?);
-            }
-            Some(out)
-        };
-        match self {
-            Self::Utf8 => String::from_utf8(bytes).ok(),
-            Self::Utf8Bom => {
-                std::str::from_utf8(&bytes[bom..]).ok()?;
-                bytes.drain(..bom);
-                String::from_utf8(bytes).ok()
-            }
-            Self::Utf16Le => decode_utf16(&bytes[bom..], u16::from_le_bytes),
-            Self::Utf16Be => decode_utf16(&bytes[bom..], u16::from_be_bytes),
-            Self::Ansi => ansi_decode(&bytes[bom..]),
-        }
-    }
-
-    fn encode(self, text: String) -> io::Result<Encoded> {
-        let units = |bom: &[u8], unit: fn(u16) -> [u8; 2]| Encoded {
-            bytes: bom
-                .iter()
-                .copied()
-                .chain(text.encode_utf16().flat_map(unit))
-                .collect(),
-            lossy: false,
-        };
-        match self {
-            Self::Utf8 => Ok(Encoded {
-                bytes: text.into_bytes(),
-                lossy: false,
-            }),
-            Self::Utf8Bom => Ok(Encoded {
-                bytes: [UTF8_BOM, text.as_bytes()].concat(),
-                lossy: false,
-            }),
-            Self::Utf16Le => Ok(units(UTF16_LE_BOM, u16::to_le_bytes)),
-            Self::Utf16Be => Ok(units(UTF16_BE_BOM, u16::to_be_bytes)),
-            Self::Ansi => ansi_encode(&text),
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -181,7 +175,7 @@ pub(crate) struct Format {
 }
 
 pub(crate) struct Loaded {
-    pub(crate) text: String,
+    pub(crate) text: Rope,
     pub(crate) format: Format,
 }
 
@@ -191,16 +185,172 @@ pub(crate) enum LoadError {
     Undecodable,
 }
 
-pub(crate) struct Encoded {
-    pub(crate) bytes: Vec<u8>,
-    pub(crate) lossy: bool,
+pub(crate) fn load(path: &Path) -> Result<Loaded, LoadError> {
+    let mut file = fs::File::open(path).map_err(LoadError::Io)?;
+    load_reader(&mut file, IO_CHUNK)
 }
 
-pub(crate) fn load(path: &Path) -> Result<Loaded, LoadError> {
-    let bytes = fs::read(path).map_err(LoadError::Io)?;
-    let (encoding, bom) = Encoding::detect(&bytes);
-    let text = encoding.decode(bytes, bom).ok_or(LoadError::Undecodable)?;
-    let (text, line_ending) = LineEnding::split(text);
+fn load_reader<R: Read + Seek>(reader: &mut R, chunk_size: usize) -> Result<Loaded, LoadError> {
+    let chunk_size = chunk_size.max(4);
+    let mut head = [0u8; 3];
+    let mut head_len = 0;
+    while head_len < head.len() {
+        let n = reader.read(&mut head[head_len..]).map_err(LoadError::Io)?;
+        if n == 0 {
+            break;
+        }
+        head_len += n;
+    }
+    let head_slice = &head[..head_len];
+    let (bom_encoding, initial) = if head_slice.starts_with(UTF8_BOM) {
+        (Some(Encoding::Utf8Bom), &head_slice[UTF8_BOM.len()..])
+    } else if head_slice.starts_with(UTF16_LE_BOM) {
+        (Some(Encoding::Utf16Le), &head_slice[UTF16_LE_BOM.len()..])
+    } else if head_slice.starts_with(UTF16_BE_BOM) {
+        (Some(Encoding::Utf16Be), &head_slice[UTF16_BE_BOM.len()..])
+    } else {
+        (None, head_slice)
+    };
+
+    match bom_encoding {
+        Some(Encoding::Utf16Le) => {
+            stream_utf16(reader, initial, chunk_size, u16::from_le_bytes, Encoding::Utf16Le)
+        }
+        Some(Encoding::Utf16Be) => {
+            stream_utf16(reader, initial, chunk_size, u16::from_be_bytes, Encoding::Utf16Be)
+        }
+        Some(Encoding::Utf8Bom) => stream_utf8(reader, initial, chunk_size, true),
+        None => match stream_utf8(reader, initial, chunk_size, false) {
+            Ok(loaded) => Ok(loaded),
+            Err(LoadError::Undecodable) => {
+                reader.seek(SeekFrom::Start(0)).map_err(LoadError::Io)?;
+                let mut bytes = Vec::new();
+                reader.read_to_end(&mut bytes).map_err(LoadError::Io)?;
+                let decoded = ansi_decode(&bytes).ok_or(LoadError::Undecodable)?;
+                let mut normalizer = LineNormalizer::new();
+                normalizer.push(&decoded);
+                let (text, line_ending) = normalizer.finish();
+                Ok(Loaded {
+                    text,
+                    format: Format {
+                        line_ending,
+                        encoding: Encoding::Ansi,
+                    },
+                })
+            }
+            Err(error) => Err(error),
+        },
+        Some(Encoding::Utf8 | Encoding::Ansi) => unreachable!(),
+    }
+}
+
+fn stream_utf8<R: Read>(
+    reader: &mut R,
+    initial: &[u8],
+    chunk_size: usize,
+    has_bom: bool,
+) -> Result<Loaded, LoadError> {
+    let mut normalizer = LineNormalizer::new();
+    let mut buf = vec![0u8; chunk_size + 4];
+    let mut carry = initial.len();
+    buf[..carry].copy_from_slice(initial);
+
+    loop {
+        let read = reader.read(&mut buf[carry..]).map_err(LoadError::Io)?;
+        let filled = carry + read;
+        let eof = read == 0;
+        if filled == 0 {
+            break;
+        }
+        match std::str::from_utf8(&buf[..filled]) {
+            Ok(valid) => {
+                normalizer.push(valid);
+                carry = 0;
+            }
+            Err(error) => {
+                let valid = error.valid_up_to();
+                if valid > 0 {
+                    let prefix = std::str::from_utf8(&buf[..valid]).expect("valid UTF-8 prefix");
+                    normalizer.push(prefix);
+                }
+                if error.error_len().is_some() || eof {
+                    return Err(LoadError::Undecodable);
+                }
+                let remaining = filled - valid;
+                buf.copy_within(valid..filled, 0);
+                carry = remaining;
+            }
+        }
+        if eof {
+            break;
+        }
+    }
+
+    let (text, line_ending) = normalizer.finish();
+    Ok(Loaded {
+        text,
+        format: Format {
+            line_ending,
+            encoding: if has_bom {
+                Encoding::Utf8Bom
+            } else {
+                Encoding::Utf8
+            },
+        },
+    })
+}
+
+fn stream_utf16<R: Read>(
+    reader: &mut R,
+    initial: &[u8],
+    chunk_size: usize,
+    unit: fn([u8; 2]) -> u16,
+    encoding: Encoding,
+) -> Result<Loaded, LoadError> {
+    let mut normalizer = LineNormalizer::new();
+    let mut buf = vec![0u8; chunk_size + 4];
+    let mut carry = initial.len();
+    buf[..carry].copy_from_slice(initial);
+    let mut decoded = String::with_capacity(chunk_size);
+
+    loop {
+        let read = reader.read(&mut buf[carry..]).map_err(LoadError::Io)?;
+        let filled = carry + read;
+        let eof = read == 0;
+        if filled == 0 {
+            break;
+        }
+        if eof && !filled.is_multiple_of(2) {
+            return Err(LoadError::Undecodable);
+        }
+        let mut decode_end = filled & !1;
+        if !eof && decode_end >= 2 {
+            let last = unit([buf[decode_end - 2], buf[decode_end - 1]]);
+            if (0xD800..=0xDBFF).contains(&last) {
+                decode_end -= 2;
+            }
+        }
+        if decode_end > 0 {
+            decoded.clear();
+            let (pairs, _) = buf[..decode_end].as_chunks::<2>();
+            for ch in char::decode_utf16(pairs.iter().map(|&pair| unit(pair))) {
+                decoded.push(ch.map_err(|_| LoadError::Undecodable)?);
+            }
+            normalizer.push(&decoded);
+            let remaining = filled - decode_end;
+            buf.copy_within(decode_end..filled, 0);
+            carry = remaining;
+        } else if eof {
+            break;
+        } else {
+            carry = filled;
+        }
+        if eof {
+            break;
+        }
+    }
+
+    let (text, line_ending) = normalizer.finish();
     Ok(Loaded {
         text,
         format: Format {
@@ -210,16 +360,156 @@ pub(crate) fn load(path: &Path) -> Result<Loaded, LoadError> {
     })
 }
 
-pub(crate) fn encode(text: String, format: Format) -> io::Result<Encoded> {
-    let body = match format.line_ending {
-        LineEnding::Crlf => text.replace('\n', "\r\n"),
-        LineEnding::Cr => text.replace('\n', "\r"),
-        LineEnding::Lf => text,
+fn write_with_line_ending(
+    chunk: &str,
+    line_ending: LineEnding,
+    mut emit: impl FnMut(&str) -> io::Result<()>,
+) -> io::Result<()> {
+    let replacement = match line_ending {
+        LineEnding::Crlf => "\r\n",
+        LineEnding::Cr => "\r",
+        LineEnding::Lf => return emit(chunk),
     };
-    format.encoding.encode(body)
+    let mut rest = chunk;
+    while let Some(ix) = rest.find('\n') {
+        if ix > 0 {
+            emit(&rest[..ix])?;
+        }
+        emit(replacement)?;
+        rest = &rest[ix + 1..];
+    }
+    if !rest.is_empty() {
+        emit(rest)?;
+    }
+    Ok(())
 }
 
-pub(crate) fn write(path: &Path, bytes: &[u8]) -> io::Result<()> {
+pub(crate) fn is_lossy(rope: &Rope, format: Format) -> io::Result<bool> {
+    if format.encoding != Encoding::Ansi {
+        return Ok(false);
+    }
+    let page = unsafe { GetACP() };
+    if page == CP_UTF8 {
+        return Ok(false);
+    }
+    let mut wide = Vec::with_capacity(ANSI_WIDE_CHUNK);
+    for chunk in rope.chunks() {
+        for unit in chunk.encode_utf16() {
+            wide.push(unit);
+            if wide.len() >= ANSI_WIDE_CHUNK {
+                if ansi_wide_lossy(page, &wide)? {
+                    return Ok(true);
+                }
+                wide.clear();
+            }
+        }
+    }
+    if !wide.is_empty() && ansi_wide_lossy(page, &wide)? {
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+fn stream_encode<W: Write>(rope: &Rope, format: Format, out: &mut W) -> io::Result<()> {
+    match format.encoding {
+        Encoding::Utf8 => {
+            for chunk in rope.chunks() {
+                write_with_line_ending(chunk, format.line_ending, |part| {
+                    out.write_all(part.as_bytes())
+                })?;
+            }
+        }
+        Encoding::Utf8Bom => {
+            out.write_all(UTF8_BOM)?;
+            for chunk in rope.chunks() {
+                write_with_line_ending(chunk, format.line_ending, |part| {
+                    out.write_all(part.as_bytes())
+                })?;
+            }
+        }
+        Encoding::Utf16Le => stream_encode_utf16(
+            rope,
+            format.line_ending,
+            UTF16_LE_BOM,
+            u16::to_le_bytes,
+            out,
+        )?,
+        Encoding::Utf16Be => stream_encode_utf16(
+            rope,
+            format.line_ending,
+            UTF16_BE_BOM,
+            u16::to_be_bytes,
+            out,
+        )?,
+        Encoding::Ansi => stream_encode_ansi(rope, format.line_ending, out)?,
+    }
+    Ok(())
+}
+
+fn stream_encode_utf16<W: Write>(
+    rope: &Rope,
+    line_ending: LineEnding,
+    bom: &[u8],
+    to_bytes: fn(u16) -> [u8; 2],
+    out: &mut W,
+) -> io::Result<()> {
+    out.write_all(bom)?;
+    let mut buf = Vec::with_capacity(8 * 1024);
+    for chunk in rope.chunks() {
+        write_with_line_ending(chunk, line_ending, |part| {
+            for unit in part.encode_utf16() {
+                buf.extend_from_slice(&to_bytes(unit));
+                if buf.len() >= 8 * 1024 {
+                    out.write_all(&buf)?;
+                    buf.clear();
+                }
+            }
+            Ok(())
+        })?;
+    }
+    if !buf.is_empty() {
+        out.write_all(&buf)?;
+    }
+    Ok(())
+}
+
+fn stream_encode_ansi<W: Write>(
+    rope: &Rope,
+    line_ending: LineEnding,
+    out: &mut W,
+) -> io::Result<()> {
+    let page = unsafe { GetACP() };
+    if page == CP_UTF8 {
+        for chunk in rope.chunks() {
+            write_with_line_ending(chunk, line_ending, |part| out.write_all(part.as_bytes()))?;
+        }
+        return Ok(());
+    }
+    let mut wide = Vec::with_capacity(ANSI_WIDE_CHUNK);
+    let mut bytes = Vec::new();
+    for chunk in rope.chunks() {
+        write_with_line_ending(chunk, line_ending, |part| {
+            for ch in part.chars() {
+                let mut units = [0u16; 2];
+                let encoded = ch.encode_utf16(&mut units);
+                if wide.len() + encoded.len() > ANSI_WIDE_CHUNK {
+                    encode_ansi_wide(page, &wide, &mut bytes)?;
+                    out.write_all(&bytes)?;
+                    wide.clear();
+                }
+                wide.extend_from_slice(encoded);
+            }
+            Ok(())
+        })?;
+    }
+    if !wide.is_empty() {
+        encode_ansi_wide(page, &wide, &mut bytes)?;
+        out.write_all(&bytes)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn write_rope(path: &Path, rope: &Rope, format: Format) -> io::Result<()> {
     let target = resolve(path)?;
     let existing = match fs::metadata(&target) {
         Ok(metadata) if metadata.permissions().readonly() => {
@@ -229,9 +519,14 @@ pub(crate) fn write(path: &Path, bytes: &[u8]) -> io::Result<()> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => false,
         Err(error) => return Err(error),
     };
-    let (temp, mut file) = create_temp(&target)?;
-    let written = file.write_all(bytes).and_then(|()| file.sync_all());
-    drop(file);
+    let (temp, file) = create_temp(&target)?;
+    let written = {
+        let mut writer = BufWriter::with_capacity(IO_CHUNK, file);
+        stream_encode(rope, format, &mut writer)
+            .and_then(|()| writer.flush())
+            .and_then(|()| writer.into_inner().map_err(|e| e.into_error()))
+            .and_then(|file| file.sync_all())
+    };
     if let Err(error) = written {
         fs::remove_file(&temp).ok();
         return Err(error);
@@ -342,28 +637,36 @@ fn ansi_decode(bytes: &[u8]) -> Option<String> {
     Some(String::from_utf16_lossy(&wide))
 }
 
-fn ansi_encode(text: &str) -> io::Result<Encoded> {
-    let page = unsafe { GetACP() };
-    if page == CP_UTF8 {
-        return Ok(Encoded {
-            bytes: text.as_bytes().to_vec(),
-            lossy: false,
-        });
+fn ansi_wide_lossy(page: u32, wide: &[u16]) -> io::Result<bool> {
+    if wide.is_empty() {
+        return Ok(false);
     }
-    let wide: Vec<u16> = text.encode_utf16().collect();
-    let Ok(input) = i32::try_from(wide.len()) else {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            TOO_LARGE_FOR_ANSI,
-        ));
-    };
-    if input == 0 {
-        return Ok(Encoded {
-            bytes: Vec::new(),
-            lossy: false,
-        });
-    }
+    let input = i32::try_from(wide.len()).expect("chunk fits in i32");
     let mut used_default = 0;
+    let written = unsafe {
+        WideCharToMultiByte(
+            page,
+            WC_NO_BEST_FIT_CHARS,
+            wide.as_ptr(),
+            input,
+            null_mut(),
+            0,
+            null(),
+            &mut used_default,
+        )
+    };
+    if written == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(used_default != 0)
+}
+
+fn encode_ansi_wide(page: u32, wide: &[u16], out: &mut Vec<u8>) -> io::Result<()> {
+    out.clear();
+    if wide.is_empty() {
+        return Ok(());
+    }
+    let input = i32::try_from(wide.len()).expect("chunk fits in i32");
     let length = unsafe {
         WideCharToMultiByte(
             page,
@@ -379,27 +682,24 @@ fn ansi_encode(text: &str) -> io::Result<Encoded> {
     if length == 0 {
         return Err(io::Error::last_os_error());
     }
-    let mut bytes = vec![0u8; usize::try_from(length).unwrap_or(0)];
+    out.resize(usize::try_from(length).unwrap_or(0), 0);
     let written = unsafe {
         WideCharToMultiByte(
             page,
             WC_NO_BEST_FIT_CHARS,
             wide.as_ptr(),
             input,
-            bytes.as_mut_ptr(),
+            out.as_mut_ptr(),
             length,
             null(),
-            &mut used_default,
+            null_mut(),
         )
     };
     if written == 0 {
         return Err(io::Error::last_os_error());
     }
-    bytes.truncate(usize::try_from(written).unwrap_or(0));
-    Ok(Encoded {
-        bytes,
-        lossy: used_default != 0,
-    })
+    out.truncate(usize::try_from(written).unwrap_or(0));
+    Ok(())
 }
 
 pub(crate) fn same_path(a: &Path, b: &Path) -> bool {
@@ -469,28 +769,61 @@ fn sibling(path: &Path, attempt: usize, suffix: &str) -> PathBuf {
 mod tests {
     use super::*;
 
+    fn load_bytes(bytes: &[u8], chunk_size: usize) -> Result<Loaded, LoadError> {
+        let mut cursor = io::Cursor::new(bytes);
+        load_reader(&mut cursor, chunk_size)
+    }
+
     #[test]
     fn detects_boms_and_utf8_vs_ansi() {
-        assert_eq!(Encoding::detect(b"hello"), (Encoding::Utf8, 0));
-        assert_eq!(Encoding::detect(b"\xef\xbb\xbfhello"), (Encoding::Utf8Bom, 3));
-        assert_eq!(Encoding::detect(b"\xff\xfeh\0"), (Encoding::Utf16Le, 2));
-        assert_eq!(Encoding::detect(b"\xfe\xff\0h"), (Encoding::Utf16Be, 2));
-        assert_eq!(Encoding::detect(&[0x80, 0xFF]), (Encoding::Ansi, 0));
+        assert_eq!(load_bytes(b"hello", 4).unwrap().format.encoding, Encoding::Utf8);
+        assert_eq!(
+            load_bytes(b"\xef\xbb\xbfhello", 4).unwrap().format.encoding,
+            Encoding::Utf8Bom
+        );
+        assert_eq!(
+            load_bytes(b"\xff\xfeh\0", 4).unwrap().format.encoding,
+            Encoding::Utf16Le
+        );
+        assert_eq!(
+            load_bytes(b"\xfe\xff\0h", 4).unwrap().format.encoding,
+            Encoding::Utf16Be
+        );
+        // Late invalid UTF-8 byte falls back to ANSI cleanly across chunks.
+        let mut ansi = vec![b'a'; 20];
+        ansi.extend_from_slice(&[0x80, 0xFF]);
+        assert_eq!(load_bytes(&ansi, 5).unwrap().format.encoding, Encoding::Ansi);
     }
 
     #[test]
-    fn splits_and_normalizes_line_endings() {
-        assert_eq!(LineEnding::split("plain".into()), ("plain".into(), LineEnding::Crlf));
-        assert_eq!(LineEnding::split("a\r\nb\r\n".into()), ("a\nb\n".into(), LineEnding::Crlf));
-        assert_eq!(LineEnding::split("a\nb\n".into()), ("a\nb\n".into(), LineEnding::Lf));
-        assert_eq!(LineEnding::split("a\rb\r".into()), ("a\nb\n".into(), LineEnding::Cr));
-        assert_eq!(LineEnding::split("a\r\nb\rc\nd".into()), ("a\nb\nc\nd".into(), LineEnding::Crlf));
-        assert_eq!(LineEnding::split("a\r\r\nb\r".into()), ("a\n\nb\n".into(), LineEnding::Cr));
+    fn splits_and_normalizes_line_endings_across_chunk_boundaries() {
+        for chunk in [4, 5, 7, 64] {
+            let plain = load_bytes(b"plain", chunk).unwrap();
+            assert_eq!(plain.text.to_string(), "plain");
+            assert_eq!(plain.format.line_ending, LineEnding::Crlf);
+
+            let crlf = load_bytes(b"a\r\nb\r\n", chunk).unwrap();
+            assert_eq!(crlf.text.to_string(), "a\nb\n");
+            assert_eq!(crlf.format.line_ending, LineEnding::Crlf);
+
+            let lf = load_bytes(b"a\nb\n", chunk).unwrap();
+            assert_eq!(lf.text.to_string(), "a\nb\n");
+            assert_eq!(lf.format.line_ending, LineEnding::Lf);
+
+            let cr = load_bytes(b"a\rb\r", chunk).unwrap();
+            assert_eq!(cr.text.to_string(), "a\nb\n");
+            assert_eq!(cr.format.line_ending, LineEnding::Cr);
+
+            let mixed = load_bytes(b"a\r\r\nb\r", chunk).unwrap();
+            assert_eq!(mixed.text.to_string(), "a\n\nb\n");
+            assert_eq!(mixed.format.line_ending, LineEnding::Cr);
+        }
     }
 
     #[test]
-    fn encodes_and_decodes_unicode_formats_round_trip() {
-        let sample = "hello\nworld — 日本語\n";
+    fn streaming_encode_and_decode_round_trip_including_surrogates() {
+        let sample = "hello\nworld — 日本語 😀\nend";
+        let rope = Rope::from(sample);
         for encoding in [
             Encoding::Utf8,
             Encoding::Utf8Bom,
@@ -502,18 +835,20 @@ mod tests {
                     line_ending,
                     encoding,
                 };
-                let encoded = encode(sample.into(), format).unwrap();
-                assert!(!encoded.lossy);
-                let (detected, bom) = Encoding::detect(&encoded.bytes);
-                assert_eq!(detected, encoding);
-                let decoded = detected.decode(encoded.bytes, bom).unwrap();
-                let (normalized, detected_ending) = LineEnding::split(decoded);
-                assert_eq!(normalized, sample);
-                assert_eq!(detected_ending, line_ending);
+                assert!(!is_lossy(&rope, format).unwrap());
+                let mut bytes = Vec::new();
+                stream_encode(&rope, format, &mut bytes).unwrap();
+                // Torture-test tiny chunk sizes splitting multi-byte UTF-8, CRLF, and UTF-16 surrogates.
+                for chunk in [4, 5, 7, 64] {
+                    let loaded = load_bytes(&bytes, chunk).unwrap();
+                    assert_eq!(loaded.text.to_string(), sample);
+                    assert_eq!(loaded.format, format);
+                }
             }
         }
-        // Reject odd-length UTF-16 payload.
-        assert!(Encoding::Utf16Le.decode(vec![0xff, 0xfe, b'a'], 2).is_none());
+        // Reject odd-length UTF-16 payload and invalid UTF-8-with-BOM.
+        assert!(load_bytes(&[0xff, 0xfe, b'a'], 4).is_err());
+        assert!(load_bytes(&[0xef, 0xbb, 0xbf, 0xff], 4).is_err());
     }
 
     #[test]
@@ -542,28 +877,67 @@ mod tests {
             line_ending: LineEnding::Lf,
             encoding: Encoding::Utf8Bom,
         };
-        let encoded = encode("first\nline".into(), format).unwrap();
-        write(&file, &encoded.bytes).unwrap();
+        write_rope(&file, &Rope::from("first\nline"), format).unwrap();
         let loaded = load(&file).unwrap();
-        assert_eq!(loaded.text, "first\nline");
+        assert_eq!(loaded.text.to_string(), "first\nline");
         assert_eq!(loaded.format.encoding, Encoding::Utf8Bom);
         assert_eq!(loaded.format.line_ending, LineEnding::Lf);
 
         // Overwrite via ReplaceFileW path
-        let updated = encode("second\nline".into(), format).unwrap();
-        write(&file, &updated.bytes).unwrap();
+        write_rope(&file, &Rope::from("second\nline"), format).unwrap();
         let loaded = load(&file).unwrap();
-        assert_eq!(loaded.text, "second\nline");
+        assert_eq!(loaded.text.to_string(), "second\nline");
 
         // Read-only rejection
         let original = fs::metadata(&file).unwrap().permissions();
         let mut readonly = original.clone();
         readonly.set_readonly(true);
         fs::set_permissions(&file, readonly).unwrap();
-        let err = write(&file, b"blocked").unwrap_err();
+        let err = write_rope(&file, &Rope::from("blocked"), format).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
 
         fs::set_permissions(&file, original).unwrap();
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn multi_chunk_streaming_round_trip() {
+        let dir = std::env::temp_dir().join(format!("jot-doc-large-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("large.txt");
+
+        // Build a >200 KB Rope spanning many IO_CHUNK (64 KB) boundaries with ASCII + Unicode + emoji.
+        let mut builder = RopeBuilder::new();
+        for i in 0..4000 {
+            builder.append(&format!("line {i:04}: alpha beta — 日本語 😀\n"));
+        }
+        let original = builder.finish();
+        assert!(original.len() > IO_CHUNK * 2);
+
+        for format in [
+            Format {
+                line_ending: LineEnding::Crlf,
+                encoding: Encoding::Utf8,
+            },
+            Format {
+                line_ending: LineEnding::Lf,
+                encoding: Encoding::Utf8Bom,
+            },
+            Format {
+                line_ending: LineEnding::Crlf,
+                encoding: Encoding::Utf16Le,
+            },
+            Format {
+                line_ending: LineEnding::Cr,
+                encoding: Encoding::Utf16Be,
+            },
+        ] {
+            write_rope(&file, &original, format).unwrap();
+            let loaded = load(&file).unwrap();
+            assert_eq!(loaded.format, format);
+            assert_eq!(loaded.text, original);
+        }
+
         fs::remove_dir_all(&dir).ok();
     }
 }
