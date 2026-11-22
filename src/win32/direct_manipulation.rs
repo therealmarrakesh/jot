@@ -125,7 +125,7 @@ impl Drop for DirectManipulationHandler {
     }
 }
 
-#[windows_core::implement(IDirectManipulationViewportEventHandler)]
+#[windows::core::implement(IDirectManipulationViewportEventHandler)]
 struct DirectManipulationEventHandler {
     window: HWND,
     scale_factor: Rc<Cell<f32>>,
@@ -177,10 +177,10 @@ impl DirectManipulationEventHandler {
 impl IDirectManipulationViewportEventHandler_Impl for DirectManipulationEventHandler_Impl {
     fn OnViewportStatusChanged(
         &self,
-        viewport: windows_core::Ref<'_, IDirectManipulationViewport>,
+        viewport: windows::core::Ref<'_, IDirectManipulationViewport>,
         current: DIRECTMANIPULATION_STATUS,
         previous: DIRECTMANIPULATION_STATUS,
-    ) -> windows_core::Result<()> {
+    ) -> windows::core::Result<()> {
         if current == previous {
             return Ok(());
         }
@@ -220,16 +220,16 @@ impl IDirectManipulationViewportEventHandler_Impl for DirectManipulationEventHan
 
     fn OnViewportUpdated(
         &self,
-        _viewport: windows_core::Ref<'_, IDirectManipulationViewport>,
-    ) -> windows_core::Result<()> {
+        _viewport: windows::core::Ref<'_, IDirectManipulationViewport>,
+    ) -> windows::core::Result<()> {
         Ok(())
     }
 
     fn OnContentUpdated(
         &self,
-        _viewport: windows_core::Ref<'_, IDirectManipulationViewport>,
-        content: windows_core::Ref<'_, IDirectManipulationContent>,
-    ) -> windows_core::Result<()> {
+        _viewport: windows::core::Ref<'_, IDirectManipulationViewport>,
+        content: windows::core::Ref<'_, IDirectManipulationContent>,
+    ) -> windows::core::Result<()> {
         let content = content.as_ref().ok_or(E_POINTER)?;
 
         // Get the 6-element content transform: [scale, 0, 0, scale, tx, ty]

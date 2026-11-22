@@ -11,8 +11,6 @@ fn main() {
     println!("cargo:rerun-if-changed=Cargo.toml");
 
     compile_resources();
-
-    #[cfg(not(debug_assertions))]
     shader_compilation::compile_shaders();
 }
 
@@ -102,7 +100,6 @@ fn latest_sdk_binary_in(kits_bin: &Path, arch: &str, binary: &str) -> Option<Pat
     None
 }
 
-#[cfg(not(debug_assertions))]
 mod shader_compilation {
     use super::find_windows_sdk_binary;
     use std::{
