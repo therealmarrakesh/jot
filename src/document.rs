@@ -153,6 +153,7 @@ pub(crate) struct Loaded {
     pub(crate) format: Format,
 }
 
+#[derive(Debug)]
 pub(crate) enum LoadError {
     Io(io::Error),
     Undecodable,
@@ -370,6 +371,21 @@ fn ansi_encode(text: &str) -> io::Result<Encoded> {
     })
 }
 
+pub(crate) fn same_path(a: &Path, b: &Path) -> bool {
+    if let (Ok(ca), Ok(cb)) = (fs::canonicalize(a), fs::canonicalize(b)) {
+        return path_key(&ca) == path_key(&cb);
+    }
+    let na = std::path::absolute(a).unwrap_or_else(|_| a.to_path_buf());
+    let nb = std::path::absolute(b).unwrap_or_else(|_| b.to_path_buf());
+    path_key(&na) == path_key(&nb)
+}
+
+fn path_key(path: &Path) -> String {
+    let raw = path.to_string_lossy();
+    let stripped = raw.strip_prefix(r"\\?\").unwrap_or(&raw);
+    stripped.replace('/', "\\").to_lowercase()
+}
+
 pub(crate) fn file_name(path: Option<&Path>) -> Option<String> {
     path.and_then(Path::file_name)
         .map(|name| name.to_string_lossy().into_owned())
@@ -416,4 +432,104 @@ fn sibling(path: &Path, attempt: usize, suffix: &str) -> PathBuf {
     }
     name.push(suffix);
     path.with_file_name(name)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detects_boms_and_utf8_vs_ansi() {
+        assert_eq!(Encoding::detect(b"hello"), (Encoding::Utf8, 0));
+        assert_eq!(Encoding::detect(b"\xef\xbb\xbfhello"), (Encoding::Utf8Bom, 3));
+        assert_eq!(Encoding::detect(b"\xff\xfeh\0"), (Encoding::Utf16Le, 2));
+        assert_eq!(Encoding::detect(b"\xfe\xff\0h"), (Encoding::Utf16Be, 2));
+        assert_eq!(Encoding::detect(&[0x80, 0xFF]), (Encoding::Ansi, 0));
+    }
+
+    #[test]
+    fn splits_and_normalizes_line_endings() {
+        assert_eq!(LineEnding::split("plain".into()), ("plain".into(), LineEnding::Crlf));
+        assert_eq!(LineEnding::split("a\r\nb\r\n".into()), ("a\nb\n".into(), LineEnding::Crlf));
+        assert_eq!(LineEnding::split("a\nb\n".into()), ("a\nb\n".into(), LineEnding::Lf));
+        assert_eq!(LineEnding::split("a\rb\r".into()), ("a\nb\n".into(), LineEnding::Cr));
+        assert_eq!(LineEnding::split("a\r\nb\rc\nd".into()), ("a\nb\nc\nd".into(), LineEnding::Crlf));
+    }
+
+    #[test]
+    fn encodes_and_decodes_unicode_formats_round_trip() {
+        let sample = "hello\nworld — 日本語\n";
+        for encoding in [
+            Encoding::Utf8,
+            Encoding::Utf8Bom,
+            Encoding::Utf16Le,
+            Encoding::Utf16Be,
+        ] {
+            for line_ending in [LineEnding::Crlf, LineEnding::Lf, LineEnding::Cr] {
+                let format = Format {
+                    line_ending,
+                    encoding,
+                };
+                let encoded = encode(sample.into(), format).unwrap();
+                assert!(!encoded.lossy);
+                let (detected, bom) = Encoding::detect(&encoded.bytes);
+                assert_eq!(detected, encoding);
+                let decoded = detected.decode(encoded.bytes[bom..].to_vec()).unwrap();
+                let (normalized, detected_ending) = LineEnding::split(decoded);
+                assert_eq!(normalized, sample);
+                assert_eq!(detected_ending, line_ending);
+            }
+        }
+    }
+
+    #[test]
+    fn same_path_ignores_windows_casing_and_separators() {
+        assert!(same_path(
+            Path::new(r"C:\Notes\Todo.txt"),
+            Path::new(r"c:/notes/todo.txt"),
+        ));
+        assert_eq!(
+            path_key(Path::new(r"\\?\C:\Notes\Todo.txt")),
+            path_key(Path::new(r"c:\notes\todo.txt")),
+        );
+        assert!(!same_path(
+            Path::new(r"C:\Notes\Todo.txt"),
+            Path::new(r"C:\Notes\Other.txt"),
+        ));
+    }
+
+    #[test]
+    fn load_and_atomic_write_round_trip_and_respect_readonly() {
+        let dir = std::env::temp_dir().join(format!("jot-doc-test-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("sample.txt");
+
+        let format = Format {
+            line_ending: LineEnding::Lf,
+            encoding: Encoding::Utf8Bom,
+        };
+        let encoded = encode("first\nline".into(), format).unwrap();
+        write(&file, &encoded.bytes).unwrap();
+        let loaded = load(&file).unwrap();
+        assert_eq!(loaded.text, "first\nline");
+        assert_eq!(loaded.format.encoding, Encoding::Utf8Bom);
+        assert_eq!(loaded.format.line_ending, LineEnding::Lf);
+
+        // Overwrite via ReplaceFileW path
+        let updated = encode("second\nline".into(), format).unwrap();
+        write(&file, &updated.bytes).unwrap();
+        let loaded = load(&file).unwrap();
+        assert_eq!(loaded.text, "second\nline");
+
+        // Read-only rejection
+        let original = fs::metadata(&file).unwrap().permissions();
+        let mut readonly = original.clone();
+        readonly.set_readonly(true);
+        fs::set_permissions(&file, readonly).unwrap();
+        let err = write(&file, b"blocked").unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+
+        fs::set_permissions(&file, original).unwrap();
+        fs::remove_dir_all(&dir).ok();
+    }
 }

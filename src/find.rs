@@ -284,6 +284,11 @@ impl FindBar {
         self.visible && !self.closing
     }
 
+    pub(crate) fn clear_notice(&mut self) {
+        self.notice = None;
+        self.notice_timer = Task::ready(());
+    }
+
     fn card_size(&self, window: &Window) -> (f32, f32) {
         let rows = if self.replace { 2. } else { 1. };
         let height =
@@ -430,14 +435,12 @@ impl Jot {
             return;
         }
         let replacement = self.find.replacement.read(cx).value().to_string();
-        let before = ranges.iter().take_while(|range| range.end <= cursor);
-        let removed: usize = before.clone().map(|range| range.len()).sum();
-        let added = before.count() * replacement.len();
+        let next_cursor = cursor_after_replace_all(cursor, &ranges, replacement.len());
         let edits = merge_edits(&text, ranges, &replacement);
         editor.update(cx, |editor, cx| {
             editor.replace_ranges(&edits, window, cx);
             let text = editor.text();
-            let cursor = text.floor_char_boundary((cursor - removed + added).min(text.len()));
+            let cursor = text.floor_char_boundary(next_cursor.min(text.len()));
             editor.set_selected_range(cursor..cursor, cx);
         });
         self.refocus_find(window, cx);
@@ -854,6 +857,26 @@ fn icon_button(
     )
 }
 
+fn cursor_after_replace_all(
+    cursor: usize,
+    ranges: &[Range<usize>],
+    replacement_len: usize,
+) -> usize {
+    let mut offset = cursor;
+    for range in ranges {
+        if range.end <= cursor {
+            offset = offset - range.len() + replacement_len;
+        } else if range.start < cursor {
+            let inside = cursor - range.start;
+            offset = offset - inside + inside.min(replacement_len);
+            break;
+        } else {
+            break;
+        }
+    }
+    offset
+}
+
 fn merge_edits(
     text: &Rope,
     ranges: Vec<Range<usize>>,
@@ -873,4 +896,95 @@ fn merge_edits(
         }
     }
     edits
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn chunked_matcher(query: &str, match_case: bool, block: usize) -> Matcher {
+        let mut matcher = Matcher::new(query, match_case).unwrap();
+        matcher.block = block;
+        matcher
+    }
+
+    #[::core::prelude::v1::test]
+    fn chunked_search_matches_across_block_boundaries() {
+        let text = Rope::from("alpha beta alpha gamma alpha");
+        let matcher = chunked_matcher("alpha", true, 4);
+        let mut buffer = Vec::new();
+
+        assert_eq!(matcher.all(&text, &mut buffer), vec![0..5, 11..16, 23..28]);
+        assert_eq!(
+            matcher.search(&text, 0..0, true, false, &mut buffer),
+            Some((0..5, false))
+        );
+        assert_eq!(
+            matcher.search(&text, 23..28, true, true, &mut buffer),
+            Some((0..5, true))
+        );
+        assert_eq!(
+            matcher.search(&text, 23..28, true, false, &mut buffer),
+            None
+        );
+        assert_eq!(
+            matcher.search(&text, 11..16, false, false, &mut buffer),
+            Some((0..5, false))
+        );
+        assert_eq!(
+            matcher.search(&text, 0..5, false, true, &mut buffer),
+            Some((23..28, true))
+        );
+    }
+
+    #[::core::prelude::v1::test]
+    fn case_insensitive_unicode_folding_matches_across_chunk_boundary() {
+        // Kelvin sign U+212A (3 UTF-8 bytes) folds to ASCII 'k' (1 byte).
+        let text = Rope::from("abc\u{212A}def");
+        let matcher = chunked_matcher("k", false, 2);
+        let mut buffer = Vec::new();
+
+        assert_eq!(matcher.all(&text, &mut buffer), vec![3..6]);
+        assert_eq!(matcher.next(&text, 0, usize::MAX, &mut buffer), Some(3..6));
+        assert_eq!(matcher.previous(&text, text.len(), 0, &mut buffer), Some(3..6));
+    }
+
+    #[::core::prelude::v1::test]
+    fn previous_finds_rightmost_overlapping_match() {
+        let text = Rope::from("aaaa");
+        let matcher = chunked_matcher("aa", true, 2);
+        let mut buffer = Vec::new();
+
+        assert_eq!(matcher.previous(&text, 2, 0, &mut buffer), Some(1..3));
+        assert_eq!(matcher.previous(&text, 1, 0, &mut buffer), Some(0..2));
+        assert_eq!(matcher.previous(&text, 0, 0, &mut buffer), None);
+    }
+
+    #[::core::prelude::v1::test]
+    fn cursor_after_replace_all_handles_inside_and_around_matches() {
+        let ranges = vec![0..3, 8..11]; // "foo bar foo"
+        assert_eq!(cursor_after_replace_all(0, &ranges, 1), 0);
+        assert_eq!(cursor_after_replace_all(2, &ranges, 1), 1);
+        assert_eq!(cursor_after_replace_all(2, &ranges, 0), 0);
+        assert_eq!(cursor_after_replace_all(2, &ranges, 5), 2);
+        assert_eq!(cursor_after_replace_all(3, &ranges, 1), 1);
+        assert_eq!(cursor_after_replace_all(5, &ranges, 1), 3);
+        assert_eq!(cursor_after_replace_all(10, &ranges, 1), 7);
+        assert_eq!(cursor_after_replace_all(10, &ranges, 0), 5);
+        assert_eq!(cursor_after_replace_all(11, &ranges, 1), 7);
+    }
+
+    #[::core::prelude::v1::test]
+    fn merge_edits_combines_nearby_and_splits_distant_ranges() {
+        let gap = ".".repeat(MERGE_GAP + 10);
+        let source = format!("aa bb{gap}aa");
+        let text = Rope::from(source.as_str());
+        let second = 5 + gap.len();
+        let edits = merge_edits(&text, vec![0..2, 3..5, second..second + 2], "X");
+
+        assert_eq!(
+            edits,
+            vec![(0..5, "X X".to_string()), (second..second + 2, "X".to_string())]
+        );
+    }
 }

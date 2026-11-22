@@ -626,3 +626,71 @@ fn show(snap: Snap, cx: &mut App) {
         owner: snap.owner,
     });
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{WindowHandle, WindowId};
+
+    fn win(id: u64) -> AnyWindowHandle {
+        WindowHandle::<TooltipView>::new(WindowId::from(id)).into()
+    }
+
+    fn snap(window: AnyWindowHandle, id: &'static str, text: &'static str) -> Snap {
+        Snap {
+            key: Key {
+                window,
+                id: ElementId::Name(id.into()),
+            },
+            text: text.into(),
+            owner: RECT {
+                left: 0,
+                top: 0,
+                right: 20,
+                bottom: 20,
+            },
+            entered: POINT { x: 10, y: 10 },
+        }
+    }
+
+    #[::core::prelude::v1::test]
+    fn tooltip_state_machine_transitions() {
+        let w1 = win(1);
+        let w2 = win(2);
+        let mut epoch = 0;
+
+        // Idle -> Waiting on first owner hover.
+        let s = transition_state(State::Idle, Report::Owner(snap(w1, "a", "One")), &mut epoch);
+        assert_eq!(epoch, 1);
+        assert!(matches!(s, State::Waiting { epoch: 1, .. }));
+
+        // Stale timer is ignored; matching timer promotes to Showing.
+        let s = transition_state(s, Report::Timer(99), &mut epoch);
+        assert!(matches!(s, State::Waiting { epoch: 1, .. }));
+        let s = transition_state(s, Report::Timer(1), &mut epoch);
+        assert!(matches!(s, State::Showing { .. }));
+
+        // Dismiss suppresses the current owner until another owner or leave.
+        let s = transition_state(s, Report::Dismiss, &mut epoch);
+        assert!(matches!(s, State::Suppressed { .. }));
+        let s = transition_state(s, Report::Owner(snap(w1, "a", "One")), &mut epoch);
+        assert!(matches!(s, State::Suppressed { .. }));
+
+        // Leaving the window resets to Idle; NoneIn for another window does not.
+        let s = transition_state(s, Report::NoneIn(w2), &mut epoch);
+        assert!(matches!(s, State::Suppressed { .. }));
+        let s = transition_state(s, Report::NoneIn(w1), &mut epoch);
+        assert!(matches!(s, State::Idle));
+
+        // Hovering a second owner replaces waiting with a new epoch.
+        let s = transition_state(s, Report::Owner(snap(w1, "a", "One")), &mut epoch);
+        assert_eq!(epoch, 2);
+        let s = transition_state(s, Report::Owner(snap(w1, "b", "Two")), &mut epoch);
+        assert_eq!(epoch, 3);
+        assert!(matches!(s, State::Waiting { epoch: 3, .. }));
+
+        // Suppressing the active window moves Waiting -> Suppressed.
+        let s = transition_state(s, Report::Suppress(w1), &mut epoch);
+        assert!(matches!(s, State::Suppressed { .. }));
+    }
+}

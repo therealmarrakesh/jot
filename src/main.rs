@@ -493,10 +493,17 @@ impl Jot {
         let find = find::FindBar::new(window, cx);
 
         let access_keys = {
+            let jot = cx.weak_entity();
             let menu_bar = menu_bar.downgrade();
             let handle = window.window_handle();
             cx.intercept_keystrokes(move |event, window, cx| {
                 if window.window_handle() != handle {
+                    return;
+                }
+                if jot
+                    .read_with(cx, |jot, _| jot.dialogs.is_open())
+                    .unwrap_or(false)
+                {
                     return;
                 }
                 if menu_bar
@@ -609,6 +616,10 @@ impl Jot {
     fn activate_tab(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         self.active = ix;
         self.reveal_tab(ix);
+        self.find.clear_notice();
+        if self.find.is_open() && !self.has_text(cx) {
+            self.close_find(window, cx);
+        }
         self.active_editor().focus_handle(cx).focus(window, cx);
         self.sync_selection_focus(cx);
         self.refresh_title(window);

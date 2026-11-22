@@ -76,11 +76,12 @@ impl Jot {
 
     pub(crate) fn open_path(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         let path = std::path::absolute(&path).unwrap_or(path);
-        if let Some(ix) = self
-            .tabs
-            .iter()
-            .position(|tab| tab.data.path.as_deref() == Some(path.as_path()))
-        {
+        if let Some(ix) = self.tabs.iter().position(|tab| {
+            tab.data
+                .path
+                .as_deref()
+                .is_some_and(|existing| document::same_path(existing, &path))
+        }) {
             self.activate_tab(ix, window, cx);
             return;
         }
@@ -259,9 +260,11 @@ impl Jot {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        let path = std::path::absolute(&path).unwrap_or(path);
         match document::write(&path, bytes) {
             Ok(()) => {
                 let tab = &mut self.tabs[ix];
+                tab.data.editor.update(cx, |editor, _| editor.mark_saved());
                 tab.data.path = Some(path);
                 tab.data.format = format;
                 tab.data.dirty = false;

@@ -655,7 +655,7 @@ impl MenuBar {
         cx: &mut Context<Self>,
     ) -> bool {
         let modifiers = keystroke.modifiers;
-        if keystroke.key == "alt" && !modifiers.modified() {
+        if matches!(keystroke.key.as_str(), "alt" | "f10") && !modifiers.modified() {
             self.toggle_access(window, cx);
             return true;
         }
@@ -692,13 +692,18 @@ impl MenuBar {
     fn toggle_access(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.access {
             self.exit_access(cx);
+            if self.live_open().is_none() {
+                self.leave_bar(window, cx);
+            }
             return;
         }
         match self.live_open() {
             Some(open) if open.kind.is_none() => return,
             Some(_) => {}
             None => {
-                self.bar_focus = Some(MenuKind::File);
+                if self.bar_focus.is_none() {
+                    self.bar_focus = Some(MenuKind::File);
+                }
                 self.focus.focus(window, cx);
             }
         }

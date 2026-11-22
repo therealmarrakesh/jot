@@ -665,6 +665,14 @@ impl<M: InputModeKind> InputBaseState<M> {
         self.undo_manager.has_undos()
     }
 
+    pub fn mark_saved(&mut self) {
+        self.undo_manager.mark_saved();
+    }
+
+    pub fn is_clean(&self) -> bool {
+        self.undo_manager.is_clean()
+    }
+
     pub fn context_menu_capabilities(&self) -> InputContextMenuCapabilities {
         InputContextMenuCapabilities::new()
             .disabled(self.disabled)

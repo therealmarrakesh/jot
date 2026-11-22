@@ -406,7 +406,12 @@ impl Jot {
             if let InputEvent::Change = event
                 && let Some(tab) = this.tabs.iter_mut().find(|tab| tab.data.editor == editor)
             {
-                let dirty = tab.data.path.is_some() || editor.read(cx).text().len() > 0;
+                let editor = editor.read(cx);
+                let dirty = if tab.data.path.is_some() {
+                    !editor.is_clean()
+                } else {
+                    !editor.is_clean() && editor.text().len() > 0
+                };
                 if tab.data.dirty != dirty {
                     tab.data.dirty = dirty;
                     cx.notify();
@@ -1000,5 +1005,54 @@ impl Jot {
             .when(buttons, |this| this.child(self.scroll_button(true, cx)))
             .child(self.new_tab_button(cx));
         measure::measured(strip, move |bounds, _, _| area.set(bounds))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[::core::prelude::v1::test]
+    fn slot_index_rounds_at_tab_midpoint_and_clamps() {
+        assert_eq!(slot_index(0., 100., 3), 0);
+        assert_eq!(slot_index(49., 100., 3), 0);
+        assert_eq!(slot_index(51., 100., 3), 1);
+        assert_eq!(slot_index(150., 100., 3), 1);
+        assert_eq!(slot_index(151., 100., 3), 2);
+        assert_eq!(slot_index(999., 100., 3), 3);
+        assert_eq!(slot_index(-50., 100., 3), 0);
+    }
+
+    #[::core::prelude::v1::test]
+    fn visible_clips_covered_tab_edges() {
+        assert_eq!(visible(0., 100., None), (0., 100.));
+        assert_eq!(visible(0., 100., Some((120., 200.))), (0., 100.));
+        assert_eq!(visible(0., 100., Some((0., 40.))), (40., 100.));
+        assert_eq!(visible(0., 100., Some((60., 140.))), (0., 60.));
+        assert_eq!(visible(0., 100., Some((-10., 120.))), (100., 100.));
+    }
+
+    #[::core::prelude::v1::test]
+    fn strip_measure_and_reveal_handle_fit_and_overflow() {
+        let mut strip = TabStrip::new();
+        strip.column = 600.;
+        strip.measure(2);
+        assert_eq!(strip.width, TAB_WIDTH);
+        assert!(!strip.overflow);
+        assert!(!strip.buttons);
+
+        // Many tabs trigger overflow and scroll buttons.
+        strip.measure(10);
+        assert!(strip.overflow);
+        assert!(strip.buttons);
+        assert_eq!(strip.width, TAB_MIN_WIDTH);
+
+        strip.extent = 10. * strip.width;
+        strip.reveal(9. * strip.width, 10. * strip.width);
+        assert!(strip.scroll > 0.);
+        assert!(strip.scroll <= strip.max_scroll());
+
+        strip.reveal(0., strip.width);
+        assert_eq!(strip.scroll, 0.);
     }
 }

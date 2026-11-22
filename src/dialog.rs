@@ -123,6 +123,10 @@ impl Dialogs {
         }
     }
 
+    pub(crate) fn is_open(&self) -> bool {
+        self.active().is_some()
+    }
+
     fn active(&self) -> Option<&OpenDialog> {
         self.open.iter().rev().find(|dialog| !dialog.closing)
     }

@@ -29,6 +29,8 @@ struct UndoTransaction {
     selections_before: Option<Vec<CursorSelection>>,
     /// The cursors as they stood after it, restored on redo.
     selections_after: Option<Vec<CursorSelection>>,
+    version_before: u64,
+    version_after: u64,
 }
 
 /// A batch of changes being collected between `begin_transaction` and the
@@ -65,6 +67,9 @@ pub(crate) struct UndoManager {
     pending: Option<PendingTransaction>,
     pending_intent: Option<EditIntent>,
     coalescing_boundary: bool,
+    next_version: u64,
+    current_version: u64,
+    saved_version: Option<u64>,
 }
 
 impl UndoManager {
@@ -77,6 +82,9 @@ impl UndoManager {
             pending: None,
             pending_intent: None,
             coalescing_boundary: false,
+            next_version: 1,
+            current_version: 0,
+            saved_version: Some(0),
         }
     }
 
@@ -182,6 +190,10 @@ impl UndoManager {
                 .undo_transactions
                 .last_mut()
                 .expect("coalescing requires a previous transaction");
+            let version = self.next_version;
+            self.next_version += 1;
+            previous.version_after = version;
+            self.current_version = version;
             previous.last_batch_len = changes.len();
             previous.recorded_changes += changes.len();
             // Adjacent single-cursor keystrokes form one contiguous insertion.
@@ -204,6 +216,10 @@ impl UndoManager {
         if self.undo_transactions.len() >= MAX_UNDO_TRANSACTIONS {
             self.undo_transactions.remove(0);
         }
+        let version_before = self.current_version;
+        let version_after = self.next_version;
+        self.next_version += 1;
+        self.current_version = version_after;
         self.undo_transactions.push(UndoTransaction {
             intent,
             last_batch_len: changes.len(),
@@ -211,6 +227,8 @@ impl UndoManager {
             changes,
             selections_before: None,
             selections_after: None,
+            version_before,
+            version_after,
         });
         self.coalescing_boundary = intent == EditIntent::Atomic;
     }
@@ -289,11 +307,29 @@ impl UndoManager {
         self.pending = None;
         self.pending_intent = None;
         self.coalescing_boundary = false;
+        self.next_version = 1;
+        self.current_version = 0;
+        self.saved_version = Some(0);
+    }
+
+    pub(super) fn mark_saved(&mut self) {
+        self.commit_all_transactions();
+        self.coalescing_boundary = true;
+        self.saved_version = Some(self.current_version);
+    }
+
+    pub(super) fn is_clean(&self) -> bool {
+        self.saved_version == Some(self.current_version)
+            && self
+                .pending
+                .as_ref()
+                .is_none_or(|pending| pending.changes.is_empty())
     }
 
     pub(super) fn undo(&mut self) -> Option<Replay> {
         self.commit_all_transactions();
         let transaction = self.undo_transactions.pop()?;
+        self.current_version = transaction.version_before;
         let replay = Replay {
             changes: transaction.changes.iter().rev().cloned().collect(),
             selections: transaction.selections_before.clone(),
@@ -306,6 +342,7 @@ impl UndoManager {
     pub(super) fn redo(&mut self) -> Option<Replay> {
         self.commit_all_transactions();
         let transaction = self.redo_transactions.pop()?;
+        self.current_version = transaction.version_after;
         let replay = Replay {
             changes: transaction.changes.clone(),
             selections: transaction.selections_after.clone(),
@@ -547,5 +584,42 @@ mod tests {
             [typing_change(0, &"a".repeat(MAX_CHANGES_PER_TRANSACTION))]
         );
         assert!(manager.undo().is_none());
+    }
+
+    #[test]
+    fn clean_state_tracks_undo_redo_and_save_boundaries() {
+        let mut manager = UndoManager::new();
+        assert!(manager.is_clean());
+
+        // Typing makes it dirty; undoing back to initial state makes it clean.
+        manager.record_transaction(typing_change(0, "a"), EditIntent::Typing);
+        assert!(!manager.is_clean());
+        assert!(manager.undo().is_some());
+        assert!(manager.is_clean());
+        assert!(manager.redo().is_some());
+        assert!(!manager.is_clean());
+
+        // Saving marks current version clean and breaks coalescing so further
+        // typing undoes back to the saved point rather than before it.
+        manager.mark_saved();
+        assert!(manager.is_clean());
+        manager.record_transaction(typing_change(1, "b"), EditIntent::Typing);
+        assert!(!manager.is_clean());
+        let replay = manager.undo().unwrap();
+        assert_eq!(replay.changes, [typing_change(1, "b")]);
+        assert!(manager.is_clean());
+
+        // Undoing past the save point is dirty; redoing back to it is clean.
+        assert!(manager.undo().is_some());
+        assert!(!manager.is_clean());
+        assert!(manager.redo().is_some());
+        assert!(manager.is_clean());
+
+        // Branching history after undoing past save never falsely matches save.
+        assert!(manager.undo().is_some());
+        manager.record_transaction(typing_change(0, "x"), EditIntent::Typing);
+        assert!(!manager.is_clean());
+        assert!(manager.undo().is_some());
+        assert!(!manager.is_clean());
     }
 }
