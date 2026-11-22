@@ -408,7 +408,8 @@ fn cycle(
 
 fn menu_show_delay() -> Duration {
     Duration::from_millis(
-        system_u32(SPI_GETMENUSHOWDELAY).map_or(DEFAULT_MENU_SHOW_DELAY_MS, u64::from),
+        gpui::system_parameters_u32(SPI_GETMENUSHOWDELAY.0)
+            .map_or(DEFAULT_MENU_SHOW_DELAY_MS, u64::from),
     )
 }
 
@@ -1758,8 +1759,8 @@ fn shortcut_text(
     window: &Window,
 ) -> Option<SharedString> {
     let binding = window.highest_precedence_binding_for_action_in(action, focus)?;
-    let keystroke = binding.keystrokes().first()?;
-    let modifiers = keystroke.modifiers();
+    let keystroke = binding.keystroke();
+    let modifiers = keystroke.modifiers;
     let mut parts: Vec<String> = Vec::new();
     if modifiers.control {
         parts.push("Ctrl".into());
@@ -1770,7 +1771,7 @@ fn shortcut_text(
     if modifiers.alt {
         parts.push("Alt".into());
     }
-    parts.push(match keystroke.key() {
+    parts.push(match keystroke.key.as_str() {
         "delete" => "Del".into(),
         "=" | "+" => "Plus".into(),
         "-" => "Minus".into(),

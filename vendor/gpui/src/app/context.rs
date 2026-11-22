@@ -1,8 +1,7 @@
 use crate::{
     AnyView, AnyWindowHandle, AppContext, AsyncApp, DispatchPhase, Effect, EntityId, EventEmitter,
-    FocusHandle, FocusOutEvent, Focusable, Global, KeystrokeObserver, Priority, Reservation,
-    SubscriberSet, Subscription, Task, WeakEntity, WeakFocusHandle, Window, WindowHandle,
-    WindowVisibility,
+    FocusHandle, FocusOutEvent, Focusable, Global, KeystrokeObserver, Reservation, SubscriberSet,
+    Subscription, Task, WeakEntity, WeakFocusHandle, Window, WindowHandle, WindowVisibility,
 };
 use crate::anyhow::Result;
 use crate::futures::FutureExt;
@@ -505,24 +504,6 @@ impl<'a, T: 'static> Context<'a, T> {
         )
     }
 
-    /// Register a callback to be invoked when the window's pending input changes.
-    pub fn observe_pending_input(
-        &self,
-        window: &mut Window,
-        mut callback: impl FnMut(&mut T, &mut Window, &mut Context<T>) + 'static,
-    ) -> Subscription {
-        let view = self.weak_entity();
-        let (subscription, activate) = window.pending_input_observers.insert(
-            (),
-            Box::new(move |window, cx| {
-                view.update(cx, |view, cx| callback(view, window, cx))
-                    .is_ok()
-            }),
-        );
-        activate();
-        subscription
-    }
-
     /// Register a listener to be called when the given focus handle receives focus.
     /// Returns a subscription and persists until the subscription is dropped.
     pub fn on_focus(
@@ -662,26 +643,6 @@ impl<'a, T: 'static> Context<'a, T> {
     {
         let view = self.weak_entity();
         window.spawn(self, async move |cx| f(view, cx).await)
-    }
-
-    /// Schedule a future to be run asynchronously with the given priority.
-    /// The given callback is invoked with a [`WeakEntity<V>`] to avoid leaking the entity for a long-running process.
-    /// It's also given an [`AsyncWindowContext`], which can be used to access the state of the entity across await points.
-    /// The returned future will be polled on the main thread.
-    #[track_caller]
-    #[inline(always)]
-    pub fn spawn_in_with_priority<AsyncFn, R>(
-        &self,
-        priority: Priority,
-        window: &Window,
-        f: AsyncFn,
-    ) -> Task<R>
-    where
-        R: 'static,
-        AsyncFn: AsyncFnOnce(WeakEntity<T>, &mut AsyncWindowContext) -> R + 'static,
-    {
-        let view = self.weak_entity();
-        window.spawn_with_priority(priority, self, async move |cx| f(view, cx).await)
     }
 
     /// Register a callback to be invoked when the given global state changes.

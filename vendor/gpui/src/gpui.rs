@@ -12,7 +12,6 @@ pub mod anyhow;
 mod app;
 
 mod arena;
-pub mod async_task;
 mod bounds_tree;
 pub mod collections;
 mod color;
@@ -23,9 +22,6 @@ pub mod futures;
 #[macro_use]
 pub mod gpui_util;
 pub mod log;
-mod platform_scheduler;
-pub(crate) use platform_scheduler::PlatformScheduler;
-pub mod scheduler;
 mod shared_string;
 pub mod slotmap;
 pub mod smallvec;
@@ -37,8 +33,6 @@ mod key_dispatch;
 mod keymap;
 mod platform;
 pub mod prelude;
-#[expect(missing_docs)]
-pub mod queue;
 mod refineable;
 mod scene;
 mod style;
@@ -114,9 +108,9 @@ use key_dispatch::*;
 pub use keymap::*;
 pub use platform::*;
 pub use platform::win32::{
-    SaveChoice, SavePathOptions, WindowsPlatform, prompt_for_save_path, set_window_min_size,
+    SaveChoice, SavePathOptions, WindowsDisplay, WindowsPlatform, prompt_for_save_path,
+    set_window_min_size, system_parameters_u32,
 };
-pub use queue::{PriorityQueueReceiver, PriorityQueueSender};
 pub use refineable::*;
 pub use scene::*;
 use std::{any::Any, future::Future};
@@ -126,7 +120,6 @@ pub use subscription::*;
 use taffy::TaffyLayoutEngine;
 pub use taffy::{AvailableSpace, LayoutId};
 pub use text_system::*;
-pub use util::{FutureExt, Timeout};
 pub use view::*;
 pub use window::*;
 

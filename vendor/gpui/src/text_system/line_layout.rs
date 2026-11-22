@@ -1,7 +1,8 @@
-use crate::{FontId, GlyphId, Pixels, PlatformTextSystem, Point, SharedString, Size, point, px};
 use crate::collections::FxHashMap;
-use crate::sync::{Mutex, RwLock};
+use crate::platform::win32::DirectWriteTextSystem;
 use crate::smallvec::SmallVec;
+use crate::sync::{Mutex, RwLock};
+use crate::{FontId, GlyphId, Pixels, Point, SharedString, Size, point, px};
 use std::{
     borrow::Borrow,
     hash::{Hash, Hasher},
@@ -458,7 +459,7 @@ impl WrappedLineLayout {
 pub(crate) struct LineLayoutCache {
     previous_frame: Mutex<FrameCache>,
     current_frame: RwLock<FrameCache>,
-    platform_text_system: Arc<dyn PlatformTextSystem>,
+    platform_text_system: Arc<DirectWriteTextSystem>,
     /// Advances when [`TextSystem::add_fonts`] successfully changes the font database.
     font_generation: Arc<AtomicUsize>,
     /// Records the generation represented by both frame caches.
@@ -495,7 +496,7 @@ pub(crate) struct LineLayoutIndex {
 
 impl LineLayoutCache {
     pub fn new(
-        platform_text_system: Arc<dyn PlatformTextSystem>,
+        platform_text_system: Arc<DirectWriteTextSystem>,
         font_generation: Arc<AtomicUsize>,
     ) -> Self {
         let cached_font_generation = font_generation.load(Ordering::Acquire);

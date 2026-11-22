@@ -1,15 +1,7 @@
-use crate::{BackgroundExecutor, Task};
-use std::{
-    future::Future,
-    pin::Pin,
-    sync::atomic::{AtomicUsize, Ordering::SeqCst},
-    task,
-    time::Duration,
-};
+use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
 
 /// A helper trait for building complex objects with imperative conditionals in a fluent style.
 pub trait FluentBuilder {
-    /// Imperatively modify self with the given closure.
     fn map<U>(self, f: impl FnOnce(Self) -> U) -> U
     where
         Self: Sized,
@@ -17,7 +9,6 @@ pub trait FluentBuilder {
         f(self)
     }
 
-    /// Conditionally modify self with the given closure.
     fn when(self, condition: bool, then: impl FnOnce(Self) -> Self) -> Self
     where
         Self: Sized,
@@ -25,7 +16,6 @@ pub trait FluentBuilder {
         self.map(|this| if condition { then(this) } else { this })
     }
 
-    /// Conditionally modify self with the given closure.
     fn when_else(
         self,
         condition: bool,
@@ -38,7 +28,6 @@ pub trait FluentBuilder {
         self.map(|this| if condition { then(this) } else { else_fn(this) })
     }
 
-    /// Conditionally unwrap and modify self with the given closure, if the given option is Some.
     fn when_some<T>(self, option: Option<T>, then: impl FnOnce(Self, T) -> Self) -> Self
     where
         Self: Sized,
@@ -51,7 +40,7 @@ pub trait FluentBuilder {
             }
         })
     }
-    /// Conditionally unwrap and modify self with the given closure, if the given option is None.
+
     fn when_none<T>(self, option: &Option<T>, then: impl FnOnce(Self) -> Self) -> Self
     where
         Self: Sized,
@@ -60,64 +49,7 @@ pub trait FluentBuilder {
     }
 }
 
-/// Extensions for Future types that provide additional combinators and utilities.
-pub trait FutureExt {
-    /// Requires a Future to complete before the specified duration has elapsed.
-    /// Similar to tokio::timeout.
-    fn with_timeout(self, timeout: Duration, executor: &BackgroundExecutor) -> WithTimeout<Self>
-    where
-        Self: Sized;
-}
-
-impl<T: Future> FutureExt for T {
-    fn with_timeout(self, timeout: Duration, executor: &BackgroundExecutor) -> WithTimeout<Self>
-    where
-        Self: Sized,
-    {
-        WithTimeout {
-            future: self,
-            timer: executor.timer(timeout),
-        }
-    }
-}
-
-pub struct WithTimeout<T> {
-    future: T,
-    timer: Task<()>,
-}
-
-/// Error returned by with_timeout when the timeout duration elapsed before the future resolved
-#[derive(Debug)]
-pub struct Timeout;
-
-impl std::fmt::Display for Timeout {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("Timed out before future resolved")
-    }
-}
-
-impl std::error::Error for Timeout {}
-
-impl<T: Future> Future for WithTimeout<T> {
-    type Output = Result<T::Output, Timeout>;
-
-    fn poll(self: Pin<&mut Self>, cx: &mut task::Context) -> task::Poll<Self::Output> {
-        let this = unsafe { self.get_unchecked_mut() };
-        let future = unsafe { Pin::new_unchecked(&mut this.future) };
-        let timer = Pin::new(&mut this.timer);
-
-        if let task::Poll::Ready(output) = future.poll(cx) {
-            task::Poll::Ready(Ok(output))
-        } else if timer.poll(cx).is_ready() {
-            task::Poll::Ready(Err(Timeout))
-        } else {
-            task::Poll::Pending
-        }
-    }
-}
-
 /// Increment the given atomic counter if it is not zero.
-/// Return the new value of the counter.
 pub(crate) fn atomic_incr_if_not_zero(counter: &AtomicUsize) -> usize {
     let mut loaded = counter.load(SeqCst);
     loop {

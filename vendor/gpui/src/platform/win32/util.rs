@@ -8,7 +8,7 @@ use windows::{
         System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW},
         UI::WindowsAndMessaging::*,
     },
-    core::{BOOL, w},
+    core::{BOOL, PCWSTR, w},
 };
 
 use crate::platform::win32::*;
@@ -55,6 +55,39 @@ impl HiLoWord for LPARAM {
     fn signed_loword(&self) -> i16 {
         (self.0 & 0xFFFF) as i16
     }
+}
+
+/// Queries a `u32` setting via `SystemParametersInfoW`.
+pub fn system_parameters_u32(action: u32) -> Option<u32> {
+    let mut value = 0u32;
+    unsafe {
+        SystemParametersInfoW(
+            SYSTEM_PARAMETERS_INFO_ACTION(action),
+            0,
+            Some((&raw mut value).cast()),
+            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+        )
+    }
+    .is_ok()
+    .then_some(value)
+}
+
+/// Queries a `REG_DWORD` value under `HKEY_CURRENT_USER`.
+pub(crate) fn reg_get_dword(subkey: PCWSTR, value: PCWSTR) -> Option<u32> {
+    let mut out = 0u32;
+    let mut size = std::mem::size_of::<u32>() as u32;
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            subkey,
+            value,
+            RRF_RT_REG_DWORD,
+            None,
+            Some((&raw mut out).cast()),
+            Some(&mut size),
+        )
+    };
+    (status.0 == 0).then_some(out)
 }
 
 pub(crate) unsafe fn get_window_long(hwnd: HWND, nindex: WINDOW_LONG_PTR_INDEX) -> isize {
@@ -123,7 +156,7 @@ pub(crate) fn load_cursor(style: CursorStyle) -> Option<HCURSOR> {
     )
 }
 
-/// This function is used to configure the dark mode for the window built-in title bar.
+/// Configures dark mode for the window's title bar / frame.
 pub(crate) fn configure_dwm_dark_mode(hwnd: HWND, appearance: WindowAppearance) {
     let dark_mode_enabled: BOOL = match appearance {
         WindowAppearance::Dark | WindowAppearance::VibrantDark => true.into(),
@@ -162,28 +195,17 @@ pub(crate) fn app_appearance() -> Result<WindowAppearance> {
         .unwrap_or_else(PoisonError::into_inner)
     {
         Some(appearance) => Ok(appearance),
-        None => system_appearance(),
+        None => Ok(system_appearance()),
     }
 }
 
 #[inline]
-fn system_appearance() -> Result<WindowAppearance> {
-    let mut apps_use_light_theme: u32 = 1;
-    let mut size = std::mem::size_of::<u32>() as u32;
-    let status = unsafe {
-        RegGetValueW(
-            HKEY_CURRENT_USER,
-            w!(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"),
-            w!("AppsUseLightTheme"),
-            RRF_RT_REG_DWORD,
-            None,
-            Some((&raw mut apps_use_light_theme).cast()),
-            Some(&mut size),
-        )
-    };
-    if status.0 == 0 && apps_use_light_theme == 0 {
-        Ok(WindowAppearance::Dark)
-    } else {
-        Ok(WindowAppearance::Light)
+fn system_appearance() -> WindowAppearance {
+    match reg_get_dword(
+        w!(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"),
+        w!("AppsUseLightTheme"),
+    ) {
+        Some(0) => WindowAppearance::Dark,
+        _ => WindowAppearance::Light,
     }
 }

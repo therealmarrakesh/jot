@@ -24,7 +24,6 @@ use crate::{
     Size, Style, StyleRefinement, Styled, Visibility, Window, WindowControlArea, point,
 };
 use crate::collections::HashMap;
-use crate::gpui_util::ResultExt;
 use crate::Refineable;
 use crate::smallvec::SmallVec;
 use std::{
@@ -472,14 +471,8 @@ pub trait InteractiveElement: Sized {
 
     /// Set the keymap context for this element. This will be used to determine
     /// which action to dispatch from the keymap.
-    fn key_context<C, E>(mut self, key_context: C) -> Self
-    where
-        C: TryInto<KeyContext, Error = E>,
-        E: std::fmt::Display,
-    {
-        if let Some(key_context) = key_context.try_into().log_err() {
-            self.interactivity().key_context = Some(key_context);
-        }
+    fn key_context(mut self, key_context: impl Into<KeyContext>) -> Self {
+        self.interactivity().key_context = Some(key_context.into());
         self
     }
 

@@ -11,10 +11,7 @@ use std::cell::Cell;
 use std::ops::Range;
 use std::rc::Rc;
 use unicode_segmentation::UnicodeSegmentation;
-use windows::Win32::UI::WindowsAndMessaging::{
-    SPI_GETWHEELSCROLLCHARS, SPI_GETWHEELSCROLLLINES, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
-    SystemParametersInfoW,
-};
+use windows::Win32::UI::WindowsAndMessaging::{SPI_GETWHEELSCROLLCHARS, SPI_GETWHEELSCROLLLINES};
 
 use super::rope_ext::Bias;
 use super::{
@@ -46,16 +43,7 @@ fn wheel_scroll_amount(horizontal: bool) -> u32 {
     } else {
         SPI_GETWHEELSCROLLLINES
     };
-    let mut amount = DEFAULT_WHEEL_SCROLL;
-    let _ = unsafe {
-        SystemParametersInfoW(
-            action,
-            0,
-            Some((&raw mut amount).cast()),
-            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
-        )
-    };
-    amount
+    gpui::system_parameters_u32(action.0).unwrap_or(DEFAULT_WHEEL_SCROLL)
 }
 
 #[derive(Clone, PartialEq, Eq)]

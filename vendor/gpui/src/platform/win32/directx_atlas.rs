@@ -1,3 +1,7 @@
+use std::borrow::Cow;
+use std::collections::hash_map::Entry;
+
+use gpui::collections::FxHashMap;
 use gpui::sync::Mutex;
 use windows::Win32::Graphics::{
     Direct3D11::{
@@ -8,8 +12,8 @@ use windows::Win32::Graphics::{
 };
 
 use gpui::{
-    AtlasBackend, AtlasKey, AtlasState, AtlasTextureId, AtlasTextureKind, AtlasTextureList,
-    AtlasTile, Bounds, DevicePixels, PlatformAtlas, Point, Size, TileId,
+    AtlasKey, AtlasTextureId, AtlasTextureKind, AtlasTextureList, AtlasTile, Bounds, DevicePixels,
+    Point, Size, TileId,
 };
 
 struct Shelf {
@@ -53,7 +57,6 @@ impl ShelfAtlasAllocator {
             return None;
         }
 
-        // First fit an existing shelf with a reasonably tight height bucket.
         let mut best: Option<(usize, usize, i32)> = None;
         for (shelf_ix, shelf) in self.shelves.iter().enumerate() {
             if shelf.height < h || shelf.height > h.saturating_mul(2).saturating_add(8) {
@@ -85,7 +88,6 @@ impl ShelfAtlasAllocator {
             }
             (shelf_ix, span_x, shelf.y)
         } else {
-            // Open a new shelf.
             let shelf_h = ((h + 3) & !3).min(self.height - self.next_y);
             if shelf_h < h {
                 return None;
@@ -139,7 +141,6 @@ impl ShelfAtlasAllocator {
             .partition_point(|&(span_x, _)| span_x < slot.x);
         shelf.free_spans.insert(pos, (slot.x, slot.width));
 
-        // Coalesce with right neighbor.
         if pos + 1 < shelf.free_spans.len() {
             let (lx, lw) = shelf.free_spans[pos];
             let (rx, rw) = shelf.free_spans[pos + 1];
@@ -148,7 +149,6 @@ impl ShelfAtlasAllocator {
                 shelf.free_spans.remove(pos + 1);
             }
         }
-        // Coalesce with left neighbor.
         if pos > 0 {
             let (lx, lw) = shelf.free_spans[pos - 1];
             let (rx, rw) = shelf.free_spans[pos];
@@ -160,9 +160,10 @@ impl ShelfAtlasAllocator {
     }
 }
 
-pub(crate) struct DirectXAtlas(Mutex<AtlasState<DirectXAtlasTextures>>);
+pub(crate) struct DirectXAtlas(Mutex<DirectXAtlasInner>);
 
-struct DirectXAtlasTextures {
+struct DirectXAtlasInner {
+    tiles_by_key: FxHashMap<AtlasKey, AtlasTile>,
     device: ID3D11Device,
     device_context: ID3D11DeviceContext,
     monochrome_textures: AtlasTextureList<DirectXAtlasTexture>,
@@ -180,24 +181,52 @@ struct DirectXAtlasTexture {
 
 impl DirectXAtlas {
     pub(crate) fn new(device: &ID3D11Device, device_context: &ID3D11DeviceContext) -> Self {
-        DirectXAtlas(Mutex::new(AtlasState::new(DirectXAtlasTextures {
+        DirectXAtlas(Mutex::new(DirectXAtlasInner {
+            tiles_by_key: FxHashMap::default(),
             device: device.clone(),
             device_context: device_context.clone(),
             monochrome_textures: Default::default(),
             polychrome_textures: Default::default(),
-        })))
+        }))
     }
 
-    /// Returns the view backing `id`, or `None` once every tile in it has been
-    /// removed. A scene can still reference such a texture when a cached view
-    /// replays a paint from before the image was dropped, so callers must skip
-    /// those sprites rather than assume the texture exists.
+    pub(crate) fn get_or_insert_with<'a>(
+        &self,
+        key: AtlasKey,
+        mut build: impl FnMut() -> crate::anyhow::Result<Option<(Size<DevicePixels>, Cow<'a, [u8]>)>>,
+    ) -> crate::anyhow::Result<Option<AtlasTile>> {
+        let mut inner = self.0.lock();
+        if let Some(&tile) = inner.tiles_by_key.get(&key) {
+            return Ok(Some(tile));
+        }
+        let Some((size, bytes)) = build()? else {
+            return Ok(None);
+        };
+        let tile = inner.insert(key.texture_kind(), size, &bytes)?;
+        match inner.tiles_by_key.entry(key) {
+            Entry::Occupied(mut entry) => {
+                entry.insert(tile);
+            }
+            Entry::Vacant(entry) => {
+                entry.insert(tile);
+            }
+        }
+        Ok(Some(tile))
+    }
+
+    pub(crate) fn remove(&self, key: &AtlasKey) {
+        let mut inner = self.0.lock();
+        if let Some(tile) = inner.tiles_by_key.remove(key) {
+            inner.remove_tile(tile);
+        }
+    }
+
     pub(crate) fn get_texture_view(
         &self,
         id: AtlasTextureId,
     ) -> Option<[Option<ID3D11ShaderResourceView>; 1]> {
         let lock = self.0.lock();
-        let texture = lock.backend.texture(id)?;
+        let texture = lock.texture(id)?;
         Some(texture.view.clone())
     }
 
@@ -207,32 +236,15 @@ impl DirectXAtlas {
         device_context: &ID3D11DeviceContext,
     ) {
         let mut lock = self.0.lock();
-        lock.clear(|textures| {
-            textures.device = device.clone();
-            textures.device_context = device_context.clone();
-            textures.monochrome_textures = AtlasTextureList::default();
-            textures.polychrome_textures = AtlasTextureList::default();
-        });
+        lock.tiles_by_key.clear();
+        lock.device = device.clone();
+        lock.device_context = device_context.clone();
+        lock.monochrome_textures = AtlasTextureList::default();
+        lock.polychrome_textures = AtlasTextureList::default();
     }
 }
 
-impl PlatformAtlas for DirectXAtlas {
-    fn get_or_insert_with<'a>(
-        &self,
-        key: AtlasKey,
-        build: &mut dyn FnMut() -> crate::anyhow::Result<
-            Option<(Size<DevicePixels>, std::borrow::Cow<'a, [u8]>)>,
-        >,
-    ) -> crate::anyhow::Result<Option<AtlasTile>> {
-        self.0.lock().get_or_insert_with(key, build)
-    }
-
-    fn remove(&self, key: &AtlasKey) {
-        self.0.lock().remove(key);
-    }
-}
-
-impl AtlasBackend for DirectXAtlasTextures {
+impl DirectXAtlasInner {
     fn insert(
         &mut self,
         kind: AtlasTextureKind,
@@ -249,9 +261,8 @@ impl AtlasBackend for DirectXAtlasTextures {
         Ok(tile)
     }
 
-    fn remove(&mut self, tile: AtlasTile) {
+    fn remove_tile(&mut self, tile: AtlasTile) {
         let id = tile.texture_id;
-
         let textures = match id.kind {
             AtlasTextureKind::Monochrome => &mut self.monochrome_textures,
             AtlasTextureKind::Polychrome => &mut self.polychrome_textures,
@@ -271,9 +282,7 @@ impl AtlasBackend for DirectXAtlasTextures {
             }
         }
     }
-}
 
-impl DirectXAtlasTextures {
     fn allocate(
         &mut self,
         size: Size<DevicePixels>,
@@ -307,28 +316,15 @@ impl DirectXAtlasTextures {
             width: DevicePixels(1024),
             height: DevicePixels(1024),
         };
-        // Max texture size for DirectX. See:
-        // https://learn.microsoft.com/en-us/windows/win32/direct3d11/overviews-direct3d-11-resources-limits
         const MAX_ATLAS_SIZE: Size<DevicePixels> = Size {
             width: DevicePixels(16384),
             height: DevicePixels(16384),
         };
         let size = min_size.min(&MAX_ATLAS_SIZE).max(&DEFAULT_ATLAS_SIZE);
-        let pixel_format;
-        let bind_flag;
-        let bytes_per_pixel;
-        match kind {
-            AtlasTextureKind::Monochrome => {
-                pixel_format = DXGI_FORMAT_R8_UNORM;
-                bind_flag = D3D11_BIND_SHADER_RESOURCE;
-                bytes_per_pixel = 1;
-            }
-            AtlasTextureKind::Polychrome => {
-                pixel_format = DXGI_FORMAT_B8G8R8A8_UNORM;
-                bind_flag = D3D11_BIND_SHADER_RESOURCE;
-                bytes_per_pixel = 4;
-            }
-        }
+        let (pixel_format, bytes_per_pixel) = match kind {
+            AtlasTextureKind::Monochrome => (DXGI_FORMAT_R8_UNORM, 1),
+            AtlasTextureKind::Polychrome => (DXGI_FORMAT_B8G8R8A8_UNORM, 4),
+        };
         let texture_desc = D3D11_TEXTURE2D_DESC {
             Width: size.width.0 as u32,
             Height: size.height.0 as u32,
@@ -340,14 +336,12 @@ impl DirectXAtlasTextures {
                 Quality: 0,
             },
             Usage: D3D11_USAGE_DEFAULT,
-            BindFlags: bind_flag.0 as u32,
+            BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
             CPUAccessFlags: 0,
             MiscFlags: 0,
         };
         let mut texture: Option<ID3D11Texture2D> = None;
         unsafe {
-            // This only returns None if the device is lost, which we will recreate later.
-            // So it's ok to return None here.
             self.device
                 .CreateTexture2D(&texture_desc, None, Some(&mut texture))
                 .ok()?;
@@ -414,11 +408,6 @@ impl DirectXAtlasTexture {
         bounds: Bounds<DevicePixels>,
         bytes: &[u8],
     ) {
-        // `UpdateSubresource` reads `row_pitch * height` bytes from `bytes` based on the
-        // `D3D11_BOX` below. If the caller hands us a slice shorter than that, the driver would
-        // over-read past the end of the source buffer (potentially by multiple megabytes), so bail
-        // out instead. This is a first-insert path rather than a per-frame one, so the check is
-        // effectively free.
         let row_bytes = bounds.size.width.to_bytes(self.bytes_per_pixel as u8) as usize;
         let expected = row_bytes * bounds.size.height.0.max(0) as usize;
         if bytes.len() < expected {

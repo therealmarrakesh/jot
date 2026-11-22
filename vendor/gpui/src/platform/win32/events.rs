@@ -27,7 +27,6 @@ pub(crate) const WM_GPUI_CURSOR_STYLE_CHANGED: u32 = WM_USER + 1;
 pub(crate) const WM_GPUI_CLOSE_ONE_WINDOW: u32 = WM_USER + 2;
 pub(crate) const WM_GPUI_TASK_DISPATCHED_ON_MAIN_THREAD: u32 = WM_USER + 3;
 pub(crate) const WM_GPUI_FORCE_UPDATE_WINDOW: u32 = WM_USER + 5;
-pub(crate) const WM_GPUI_KEYBOARD_LAYOUT_CHANGED: u32 = WM_USER + 6;
 pub(crate) const WM_GPUI_GPU_DEVICE_LOST: u32 = WM_USER + 7;
 pub(crate) const WM_GPUI_KEYDOWN: u32 = WM_USER + 8;
 pub(crate) const WM_GPUI_DISPLAYS_CHANGED: u32 = WM_USER + 10;
@@ -96,7 +95,9 @@ impl WindowsWindowInner {
             // whichever window was active before the click. If that handler consumes the
             // press, `DefWindowProc` never sees it, so the window is never activated at all.
             // So, let's eagerly activate the window.
-            WM_MOUSEACTIVATE => Some(MA_ACTIVATE as isize),
+            WM_MOUSEACTIVATE => {
+                Some(if self.is_overlay { MA_NOACTIVATE } else { MA_ACTIVATE } as isize)
+            }
             WM_ACTIVATE => self.handle_activate_msg(wparam),
             WM_CREATE => self.handle_create_msg(handle),
             WM_MOVE => self.handle_move_msg(handle, lparam),
@@ -158,7 +159,6 @@ impl WindowsWindowInner {
             WM_IME_COMPOSITION => self.handle_ime_composition(handle, lparam),
             WM_SETCURSOR => self.handle_set_cursor(handle, lparam),
             WM_SETTINGCHANGE => self.handle_system_settings_changed(handle, wparam, lparam),
-            WM_INPUTLANGCHANGE => self.handle_input_language_changed(),
             WM_SHOWWINDOW => self.handle_window_visibility_changed(handle, wparam),
             WM_GPUI_CURSOR_STYLE_CHANGED => self.handle_cursor_changed(lparam),
             WM_GPUI_FORCE_UPDATE_WINDOW => self.draw_window(handle, true),
@@ -309,8 +309,7 @@ impl WindowsWindowInner {
 
     fn handle_timer_msg(&self, handle: HWND, wparam: WPARAM) -> Option<isize> {
         if wparam.0 == SIZE_MOVE_LOOP_TIMER_ID {
-            let mut runnables = self.main_receiver.clone().try_iter();
-            while let Some(Ok(runnable)) = runnables.next() {
+            while let Some(runnable) = self.main_queue.try_pop() {
                 WindowsDispatcher::execute_runnable(runnable);
             }
             self.handle_paint_msg(handle)
@@ -332,14 +331,6 @@ impl WindowsWindowInner {
 
     fn handle_destroy_msg(&self, handle: HWND) -> Option<isize> {
         let callback = { self.state.callbacks.close.take() };
-        // Re-enable parent window if this was a modal dialog
-        if let Some(parent_hwnd) = self.parent_hwnd {
-            unsafe {
-                let _ = EnableWindow(parent_hwnd, true);
-                let _ = SetForegroundWindow(parent_hwnd);
-            }
-        }
-
         if let Some(callback) = callback {
             callback();
         }
@@ -1236,22 +1227,9 @@ impl WindowsWindowInner {
 
             callback();
             self.state.callbacks.appearance_changed.set(Some(callback));
-            if flipped {
+            if flipped && !self.is_overlay {
                 configure_dwm_dark_mode(handle, new_appearance);
             }
-        }
-        Some(0)
-    }
-
-    fn handle_input_language_changed(&self) -> Option<isize> {
-        unsafe {
-            PostMessageW(
-                Some(self.platform_window_handle),
-                WM_GPUI_KEYBOARD_LAYOUT_CHANGED,
-                WPARAM(self.validation_number),
-                LPARAM(0),
-            )
-            .log_err();
         }
         Some(0)
     }
@@ -1352,15 +1330,9 @@ impl WindowsWindowInner {
             // will rebuild the scene with fresh atlas textures.
             self.state.renderer.borrow_mut().mark_drawable();
         }
-        let (signal_at, signal_source) = self.state.frame_signal.take().map_or(
-            (None, FrameRequestSource::NativeCallback),
-            |(at, source)| (Some(at), source),
-        );
         request_frame(RequestFrameOptions {
             require_presentation: false,
             force_render,
-            signal_at,
-            signal_source,
         });
 
         self.state.callbacks.request_frame.set(Some(request_frame));

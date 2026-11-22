@@ -226,16 +226,16 @@ impl DirectWriteTextSystem {
     }
 }
 
-impl PlatformTextSystem for DirectWriteTextSystem {
-    fn add_fonts(&self, fonts: Vec<Cow<'static, [u8]>>) -> Result<()> {
+impl DirectWriteTextSystem {
+    pub(crate) fn add_fonts(&self, fonts: Vec<Cow<'static, [u8]>>) -> Result<()> {
         self.state.write().add_fonts(&self.components, fonts)
     }
 
-    fn all_font_names(&self) -> Vec<String> {
+    pub(crate) fn all_font_names(&self) -> Vec<String> {
         self.state.read().all_font_names(&self.components)
     }
 
-    fn font_id(&self, font: &Font) -> Result<FontId> {
+    pub(crate) fn font_id(&self, font: &Font) -> Result<FontId> {
         if let Some(font_id) = self.state.read().font_to_font_id.get(font) {
             return Ok(*font_id);
         }
@@ -247,30 +247,30 @@ impl PlatformTextSystem for DirectWriteTextSystem {
             .with_context(|| format!("Failed to select font: {:?}", font))
     }
 
-    fn font_metrics(&self, font_id: FontId) -> FontMetrics {
+    pub(crate) fn font_metrics(&self, font_id: FontId) -> FontMetrics {
         self.state.read().font_metrics(font_id)
     }
 
-    fn typographic_bounds(&self, font_id: FontId, glyph_id: GlyphId) -> Result<Bounds<f32>> {
+    pub(crate) fn typographic_bounds(&self, font_id: FontId, glyph_id: GlyphId) -> Result<Bounds<f32>> {
         self.state.read().get_typographic_bounds(font_id, glyph_id)
     }
 
-    fn advance(&self, font_id: FontId, glyph_id: GlyphId) -> crate::anyhow::Result<Size<f32>> {
+    pub(crate) fn advance(&self, font_id: FontId, glyph_id: GlyphId) -> crate::anyhow::Result<Size<f32>> {
         self.state.read().get_advance(font_id, glyph_id)
     }
 
-    fn glyph_for_char(&self, font_id: FontId, ch: char) -> Option<GlyphId> {
+    pub(crate) fn glyph_for_char(&self, font_id: FontId, ch: char) -> Option<GlyphId> {
         self.state.read().glyph_for_char(font_id, ch)
     }
 
-    fn glyph_raster_bounds(
+    pub(crate) fn glyph_raster_bounds(
         &self,
         params: &RenderGlyphParams,
     ) -> crate::anyhow::Result<Bounds<DevicePixels>> {
         self.state.read().raster_bounds(&self.components, params)
     }
 
-    fn rasterize_glyph(
+    pub(crate) fn rasterize_glyph(
         &self,
         params: &RenderGlyphParams,
         raster_bounds: Bounds<DevicePixels>,
@@ -280,7 +280,7 @@ impl PlatformTextSystem for DirectWriteTextSystem {
             .rasterize_glyph(&self.components, params, raster_bounds)
     }
 
-    fn layout_line(&self, text: &str, font_size: Pixels, runs: &[FontRun]) -> LineLayout {
+    pub(crate) fn layout_line(&self, text: &str, font_size: Pixels, runs: &[FontRun]) -> LineLayout {
         self.state
             .write()
             .layout_line(&self.components, text, font_size, runs)

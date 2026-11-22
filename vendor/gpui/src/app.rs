@@ -1,4 +1,3 @@
-use crate::scheduler::Instant;
 use std::{
     any::{TypeId, type_name},
     cell::{BorrowMutError, Ref, RefCell, RefMut},
@@ -8,29 +7,28 @@ use std::{
     path::{Path, PathBuf},
     rc::{Rc, Weak},
     sync::{Arc, atomic::Ordering::SeqCst},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use crate::anyhow::{Context as _, Result, anyhow};
 use crate::futures::{FutureExt, StdFuture as Future, channel::oneshot, future::LocalBoxFuture};
-use crate::sync::RwLock;
 use crate::slotmap::SlotMap;
+use crate::sync::RwLock;
 
 pub use async_context::*;
 use crate::collections::{FxHashMap, FxHashSet, HashMap, TypeIdHashMap, TypeIdHashSet, VecDeque};
-pub use context::*;
-pub use entity_map::*;
 use crate::gpui_util::{ResultExt, debug_panic};
 use crate::smallvec::SmallVec;
+pub use context::*;
+pub use entity_map::*;
 
 use crate::{
-    Action, ActionRegistry, Any, AnyView, AnyWindowHandle, AppContext, Arena, ArenaBox,
-    BackgroundExecutor, Bounds, ClipboardItem, DispatchPhase, DisplayChanges, DisplayEvent,
-    DisplayId, EventEmitter, ExternalPaths, FocusHandle, FocusMap, ForegroundExecutor, Global,
-    KeyBinding, KeyContext, Keymap, Keystroke, LayoutId, MissingGlyph, PathPromptOptions, Pixels,
-    Platform, PlatformDisplay, PlatformKeyboardLayout, PlatformKeyboardMapper, Priority, Render,
-    Reservation, SubscriberSet, Subscription, Task, TextSystem, Window, WindowAppearance,
-    WindowHandle, WindowId, WindowInvalidator,
+    Action, Any, AnyView, AnyWindowHandle, AppContext, Arena, ArenaBox, BackgroundExecutor, Bounds,
+    ClipboardItem, DispatchPhase, DisplayChanges, DisplayEvent, DisplayId, EventEmitter,
+    ExternalPaths, FocusHandle, FocusMap, ForegroundExecutor, Global, KeyBinding, KeyContext,
+    Keymap, Keystroke, LayoutId, PathPromptOptions, Pixels, Render, Reservation, SubscriberSet,
+    Subscription, Task, TextSystem, Window, WindowAppearance, WindowHandle, WindowId,
+    WindowInvalidator, WindowsDisplay, WindowsPlatform,
 };
 
 mod async_context;
@@ -137,8 +135,8 @@ pub struct Application(Rc<AppCell>);
 /// Represents an application before it is fully launched. Once your app is
 /// configured, you'll start the app with `App::run`.
 impl Application {
-    /// Builds an app with a caller-provided platform implementation.
-    pub fn with_platform(platform: Rc<dyn Platform>) -> Self {
+    /// Builds an app with the given Windows platform instance.
+    pub fn with_platform(platform: Rc<WindowsPlatform>) -> Self {
         Self(App::new_app(platform))
     }
 
@@ -202,7 +200,7 @@ impl DisplayState {
     }
 }
 
-fn read_displays(platform: &dyn Platform) -> HashMap<DisplayId, DisplayState> {
+fn read_displays(platform: &WindowsPlatform) -> HashMap<DisplayId, DisplayState> {
     platform
         .displays()
         .into_iter()
@@ -235,70 +233,12 @@ fn display_events(
     removed.chain(added_or_changed).collect()
 }
 type Listener = Box<dyn FnMut(&dyn Any, &mut App) -> bool + 'static>;
-type MissingGlyphCallback = Box<dyn FnMut(&[MissingGlyph], &mut App) + 'static>;
 pub(crate) type KeystrokeObserver =
     Box<dyn FnMut(&KeystrokeEvent, &mut Window, &mut App) -> bool + 'static>;
 type QuitHandler = Box<dyn FnOnce(&mut App) -> LocalBoxFuture<'static, ()> + 'static>;
 type WindowClosedHandler = Box<dyn FnMut(&mut App, WindowId)>;
 type ReleaseListener = Box<dyn FnOnce(&mut dyn Any, &mut App) + 'static>;
 type NewEntityListener = Box<dyn FnMut(AnyEntity, &mut Option<&mut Window>, &mut App) + 'static>;
-
-struct MissingGlyphCallbackEntry {
-    registration: Rc<()>,
-    callback: Option<MissingGlyphCallback>,
-}
-
-#[derive(Default)]
-struct MissingGlyphCallbackSlot {
-    entry: RefCell<Option<MissingGlyphCallbackEntry>>,
-}
-
-impl MissingGlyphCallbackSlot {
-    fn replace(&self, callback: MissingGlyphCallback) -> Rc<()> {
-        let registration = Rc::new(());
-        self.entry.borrow_mut().replace(MissingGlyphCallbackEntry {
-            registration: registration.clone(),
-            callback: Some(callback),
-        });
-        registration
-    }
-
-    fn invoke(&self, missing_glyphs: &[MissingGlyph], cx: &mut App) {
-        let Some((registration, mut callback)) =
-            self.entry.borrow_mut().as_mut().and_then(|entry| {
-                entry
-                    .callback
-                    .take()
-                    .map(|callback| (entry.registration.clone(), callback))
-            })
-        else {
-            return;
-        };
-        callback(missing_glyphs, cx);
-
-        let mut entry = self.entry.borrow_mut();
-        let is_current = entry
-            .as_ref()
-            .is_some_and(|entry| Rc::ptr_eq(&entry.registration, &registration));
-        if is_current {
-            let Some(entry) = entry.as_mut() else {
-                return;
-            };
-            entry.callback = Some(callback);
-        }
-    }
-
-    fn remove(&self, registration: &Rc<()>) -> bool {
-        let mut entry = self.entry.borrow_mut();
-        let is_current = entry
-            .as_ref()
-            .is_some_and(|entry| Rc::ptr_eq(&entry.registration, registration));
-        if is_current {
-            entry.take();
-        }
-        is_current
-    }
-}
 
 /// Defines when the application should automatically quit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -333,10 +273,9 @@ pub enum CursorHideMode {
 /// You need a reference to an `App` to access the state of a [Entity].
 pub struct App {
     pub(crate) this: Weak<AppCell>,
-    pub(crate) platform: Rc<dyn Platform>,
+    pub(crate) platform: Rc<WindowsPlatform>,
     text_system: Arc<TextSystem>,
 
-    pub(crate) actions: Rc<ActionRegistry>,
     pub(crate) active_file_drop: Option<ExternalPaths>,
     pub(crate) background_executor: BackgroundExecutor,
     pub(crate) foreground_executor: ForegroundExecutor,
@@ -346,8 +285,6 @@ pub struct App {
     pub(crate) window_handles: FxHashMap<WindowId, AnyWindowHandle>,
     pub(crate) focus_handles: Arc<FocusMap>,
     pub(crate) keymap: Rc<RefCell<Keymap>>,
-    pub(crate) keyboard_layout: Box<dyn PlatformKeyboardLayout>,
-    pub(crate) keyboard_mapper: Rc<dyn PlatformKeyboardMapper>,
     pub(crate) global_action_listeners:
         TypeIdHashMap<Vec<Rc<dyn Fn(&dyn Any, DispatchPhase, &mut Self)>>>,
     pending_effects: VecDeque<Effect>,
@@ -356,8 +293,6 @@ pub struct App {
     pub(crate) event_listeners: SubscriberSet<EntityId, (TypeId, Listener)>,
     pub(crate) keystroke_observers: SubscriberSet<(), KeystrokeObserver>,
     pub(crate) keystroke_interceptors: SubscriberSet<(), KeystrokeObserver>,
-    pub(crate) keyboard_layout_observers: SubscriberSet<(), Handler>,
-    missing_glyph_callback: Rc<MissingGlyphCallbackSlot>,
     pub(crate) display_observers: SubscriberSet<(), DisplayHandler>,
     displays: HashMap<DisplayId, DisplayState>,
     pub(crate) release_listeners: SubscriberSet<EntityId, ReleaseListener>,
@@ -390,7 +325,7 @@ pub struct App {
 
 impl App {
     #[allow(clippy::new_ret_no_self)]
-    pub(crate) fn new_app(platform: Rc<dyn Platform>) -> Rc<AppCell> {
+    pub(crate) fn new_app(platform: Rc<WindowsPlatform>) -> Rc<AppCell> {
         let background_executor = platform.background_executor();
         let foreground_executor = platform.foreground_executor();
         assert!(
@@ -401,15 +336,12 @@ impl App {
 
         let text_system = Arc::new(TextSystem::new(platform.text_system()));
         let entities = EntityMap::new();
-        let keyboard_layout = platform.keyboard_layout();
-        let keyboard_mapper = platform.keyboard_mapper();
 
         let app = Rc::new_cyclic(|this| AppCell {
             app: RefCell::new(App {
                 this: this.clone(),
                 platform: platform.clone(),
                 text_system,
-                actions: Rc::new(ActionRegistry::default()),
                 pending_updates: 0,
                 active_file_drop: None,
                 background_executor,
@@ -422,8 +354,6 @@ impl App {
                 window_handles: FxHashMap::default(),
                 focus_handles: Arc::new(RwLock::new(SlotMap::with_key())),
                 keymap: Rc::new(RefCell::new(Keymap::default())),
-                keyboard_layout,
-                keyboard_mapper,
                 global_action_listeners: Default::default(),
                 pending_effects: VecDeque::new(),
                 pending_notifications: FxHashSet::default(),
@@ -436,8 +366,6 @@ impl App {
                 release_listeners: SubscriberSet::new(),
                 keystroke_observers: SubscriberSet::new(),
                 keystroke_interceptors: SubscriberSet::new(),
-                keyboard_layout_observers: SubscriberSet::new(),
-                missing_glyph_callback: Rc::default(),
                 display_observers: SubscriberSet::new(),
                 displays: read_displays(platform.as_ref()),
                 global_observers: SubscriberSet::new(),
@@ -454,20 +382,6 @@ impl App {
                 event_arena: Arena::new(1024 * 1024),
             }),
         });
-
-        platform.on_keyboard_layout_change(Box::new({
-            let app = Rc::downgrade(&app);
-            move || {
-                if let Some(app) = app.upgrade() {
-                    let cx = &mut app.borrow_mut();
-                    cx.keyboard_layout = cx.platform.keyboard_layout();
-                    cx.keyboard_mapper = cx.platform.keyboard_mapper();
-                    cx.keyboard_layout_observers
-                        .clone()
-                        .retain(&(), move |callback| (callback)(cx));
-                }
-            }
-        }));
 
         platform.on_displays_changed(Box::new({
             let app = Rc::downgrade(&app);
@@ -520,32 +434,6 @@ impl App {
         }
 
         self.quitting = false;
-    }
-
-    /// Get the id of the current keyboard layout
-    pub fn keyboard_layout(&self) -> &dyn PlatformKeyboardLayout {
-        self.keyboard_layout.as_ref()
-    }
-
-    /// Get the current keyboard mapper.
-    pub fn keyboard_mapper(&self) -> &Rc<dyn PlatformKeyboardMapper> {
-        &self.keyboard_mapper
-    }
-
-    /// Invokes a handler when the current keyboard layout changes
-    pub fn on_keyboard_layout_change<F>(&self, mut callback: F) -> Subscription
-    where
-        F: 'static + FnMut(&mut App),
-    {
-        let (subscription, activate) = self.keyboard_layout_observers.insert(
-            (),
-            Box::new(move |cx| {
-                callback(cx);
-                true
-            }),
-        );
-        activate();
-        subscription
     }
 
     /// Gracefully quit the application via the platform's standard routine.
@@ -815,21 +703,20 @@ impl App {
     }
 
     /// Returns the list of currently active displays.
-    pub fn displays(&self) -> Vec<Rc<dyn PlatformDisplay>> {
+    pub fn displays(&self) -> Vec<WindowsDisplay> {
         self.platform.displays()
     }
 
     /// Returns the primary display that will be used for new windows.
-    pub fn primary_display(&self) -> Option<Rc<dyn PlatformDisplay>> {
+    pub fn primary_display(&self) -> Option<WindowsDisplay> {
         self.platform.primary_display()
     }
 
     /// Returns the display with the given ID, if one exists.
-    pub fn find_display(&self, id: DisplayId) -> Option<Rc<dyn PlatformDisplay>> {
+    pub fn find_display(&self, id: DisplayId) -> Option<WindowsDisplay> {
         self.displays()
-            .iter()
+            .into_iter()
             .find(|display| display.id() == id)
-            .cloned()
     }
 
     pub(crate) fn displays_changed(&mut self) {
@@ -986,20 +873,9 @@ impl App {
                         self.apply_entity_created_effect(entity, tid, window);
                     }
                 }
-            } else {
-                if self.pending_effects.is_empty() {
-                    for window in self.windows.values().filter_map(|window| window.as_deref()) {
-                        if window.invalidator.is_dirty()
-                            || window.needs_present.get()
-                            || !window.next_frame_callbacks.borrow().is_empty()
-                        {
-                            window.platform_window.schedule_frame();
-                        }
-                    }
-
-                    self.event_arena.clear();
-                    break;
-                }
+            } else if self.pending_effects.is_empty() {
+                self.event_arena.clear();
+                break;
             }
         }
     }
@@ -1171,12 +1047,6 @@ impl App {
         &self.background_executor
     }
 
-    /// Whether this app runs on the deterministic test scheduler. See
-    /// [`BackgroundExecutor::is_test`].
-    pub fn is_test(&self) -> bool {
-        self.background_executor.is_test()
-    }
-
     /// Obtains a reference to the executor, which can be used to spawn futures.
     pub fn foreground_executor(&self) -> &ForegroundExecutor {
         if self.quitting {
@@ -1200,24 +1070,6 @@ impl App {
             .spawn(async move { f(&mut cx).await }.boxed_local())
     }
 
-    /// Spawns the future returned by the given function on the main thread with
-    /// the given priority. The closure will be invoked with [AsyncApp], which
-    /// allows the application state to be accessed across await points.
-    pub fn spawn_with_priority<AsyncFn, R>(&self, priority: Priority, f: AsyncFn) -> Task<R>
-    where
-        AsyncFn: AsyncFnOnce(&mut AsyncApp) -> R + 'static,
-        R: 'static,
-    {
-        if self.quitting {
-            debug_panic!("Can't spawn on main thread after on_app_quit")
-        };
-
-        let mut cx = self.to_async();
-
-        self.foreground_executor
-            .spawn_with_priority(priority, async move { f(&mut cx).await }.boxed_local())
-    }
-
     /// Schedules the given function to be run at the end of the current effect cycle, allowing entities
     /// that are currently on the stack to be returned to the app.
     pub fn defer(&mut self, f: impl FnOnce(&mut App) + 'static) {
@@ -1229,42 +1081,6 @@ impl App {
     /// Accessor for the text system.
     pub fn text_system(&self) -> &Arc<TextSystem> {
         &self.text_system
-    }
-
-    /// Invokes a callback with grapheme clusters that exhausted font fallback.
-    ///
-    /// Registering a callback replaces the previous callback and enables missing-glyph
-    /// detection. The callback runs on the foreground executor after shaping has
-    /// released its internal locks. Dropping its subscription disables detection until
-    /// another callback is registered.
-    ///
-    /// Reports are queued without blocking shaping, then deduplicated before delivery.
-    /// The bounded queue can drop reports on overflow. Dropped reports may be reported
-    /// again when the text is reshaped; no retry is scheduled automatically.
-    pub fn on_missing_glyphs(
-        &self,
-        callback: impl FnMut(&[MissingGlyph], &mut App) + 'static,
-    ) -> Subscription {
-        let registration = self.missing_glyph_callback.replace(Box::new(callback));
-
-        if let Some(mut receiver) = self.text_system.take_missing_glyph_receiver() {
-            let callback = self.missing_glyph_callback.clone();
-            self.spawn(async move |cx| {
-                while let Ok(missing_glyphs) = receiver.recv().await {
-                    cx.update(|cx| callback.invoke(&missing_glyphs, cx));
-                }
-            })
-            .detach();
-        }
-        self.text_system.enable_missing_glyph_reporting();
-
-        let callback = self.missing_glyph_callback.clone();
-        let text_system = self.text_system.clone();
-        Subscription::new(move || {
-            if callback.remove(&registration) {
-                text_system.disable_missing_glyph_reporting();
-            }
-        })
     }
 
     /// Check whether a global of the given type has been assigned.
@@ -1538,13 +1354,6 @@ impl App {
         self.propagate_event = true;
     }
 
-    /// Returns key bindings that invoke the given action on the currently focused element, without
-    /// checking context. Bindings are returned in the order they were added. For display, the last
-    /// binding should take precedence.
-    pub fn all_bindings_for_input(&self, input: &[Keystroke]) -> Vec<KeyBinding> {
-        RefCell::borrow(&self.keymap).all_bindings_for_input(input)
-    }
-
     /// Register a callback to be invoked when the application is about to quit.
     /// It is not possible to cancel the quit event at this point.
     pub fn on_app_quit<Fut>(
@@ -1574,16 +1383,6 @@ impl App {
         let (subscription, activate) = self.window_closed_observers.insert((), Box::new(on_closed));
         activate();
         subscription
-    }
-
-    pub(crate) fn clear_pending_keystrokes(&mut self) {
-        for window in self.windows() {
-            window
-                .update(self, |_, window, cx| {
-                    window.clear_pending_keystrokes(cx);
-                })
-                .ok();
-        }
     }
 
     /// Checks if the given action is bound in the current context, as defined by the app's current focus,

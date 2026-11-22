@@ -9,20 +9,16 @@ use std::{
 };
 
 use crate::anyhow::{Context as _, Result, anyhow};
+use crate::executor::MainTaskQueue;
+use crate::smallvec::SmallVec;
 use gpui::futures::channel::oneshot::Receiver;
 use gpui::gpui_util::ResultExt;
 use gpui::sync::RwLock;
-use crate::smallvec::SmallVec;
 use windows::{
     Win32::{
         Foundation::*,
         Graphics::{Direct3D11::ID3D11Device, Gdi::*},
-        System::{
-            Com::*,
-            LibraryLoader::*,
-            Ole::*,
-            Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW},
-        },
+        System::{Com::*, LibraryLoader::*, Ole::*},
         UI::{Input::KeyboardAndMouse::*, Shell::*, WindowsAndMessaging::*},
     },
     core::*,
@@ -31,25 +27,13 @@ use windows::{
 use crate::platform::win32::*;
 use gpui::*;
 
-struct TrackedWindow {
-    handle: SafeHwnd,
-    frame_signal: Arc<PlatformFrameSignal>,
-}
-
-impl TrackedWindow {
-    fn as_raw(&self) -> HWND {
-        self.handle.as_raw()
-    }
-}
-
 pub struct WindowsPlatform {
     inner: Rc<WindowsPlatformInner>,
-    raw_window_handles: Arc<RwLock<SmallVec<[TrackedWindow; 4]>>>,
+    raw_window_handles: Arc<RwLock<SmallVec<[SafeHwnd; 4]>>>,
     vsync_stop: RefCell<Option<Arc<AtomicBool>>>,
     icon: HICON,
     background_executor: BackgroundExecutor,
     foreground_executor: ForegroundExecutor,
-    text_system: Arc<dyn PlatformTextSystem>,
     direct_write_text_system: Arc<DirectWriteTextSystem>,
     drop_target_helper: IDropTargetHelper,
     invalidate_devices: Arc<AtomicBool>,
@@ -59,9 +43,9 @@ pub struct WindowsPlatform {
 
 struct WindowsPlatformInner {
     state: WindowsPlatformState,
-    raw_window_handles: std::sync::Weak<RwLock<SmallVec<[TrackedWindow; 4]>>>,
+    raw_window_handles: std::sync::Weak<RwLock<SmallVec<[SafeHwnd; 4]>>>,
     validation_number: usize,
-    main_receiver: PriorityQueueReceiver<RunnableVariant>,
+    main_queue: MainTaskQueue,
     dispatcher: Arc<WindowsDispatcher>,
 }
 
@@ -76,7 +60,6 @@ pub(crate) struct WindowsPlatformState {
 #[derive(Default)]
 struct PlatformCallbacks {
     quit: Cell<Option<Box<dyn FnMut() -> bool>>>,
-    keyboard_layout_change: Cell<Option<Box<dyn FnMut()>>>,
     displays_changed: Cell<Option<Box<dyn FnMut()>>>,
 }
 
@@ -103,9 +86,8 @@ impl WindowsPlatform {
         let direct_write_text_system = Arc::new(
             DirectWriteTextSystem::new(None).context("Error creating DirectWriteTextSystem")?,
         );
-        let text_system: Arc<dyn PlatformTextSystem> = direct_write_text_system.clone();
 
-        let (main_sender, main_receiver) = PriorityQueueReceiver::new();
+        let main_queue = MainTaskQueue::new();
         let validation_number = {
             use std::hash::{BuildHasher as _, Hasher as _};
             let mut h = std::collections::hash_map::RandomState::new().build_hasher();
@@ -119,8 +101,7 @@ impl WindowsPlatform {
             inner: None,
             raw_window_handles: Arc::downgrade(&raw_window_handles),
             validation_number,
-            main_sender: Some(main_sender),
-            main_receiver: Some(main_receiver),
+            main_queue: Some(main_queue),
             directx_devices: None,
             dispatcher: None,
         };
@@ -169,7 +150,6 @@ impl WindowsPlatform {
             icon,
             background_executor,
             foreground_executor,
-            text_system,
             direct_write_text_system,
             disable_direct_composition,
             drop_target_helper,
@@ -203,7 +183,7 @@ impl WindowsPlatform {
             cursor_visible: self.inner.state.cursor_visible.clone(),
             drop_target_helper: self.drop_target_helper.clone(),
             validation_number: self.inner.validation_number,
-            main_receiver: self.inner.main_receiver.clone(),
+            main_queue: self.inner.main_queue.clone(),
             platform_window_handle: self.handle,
             disable_direct_composition: self.disable_direct_composition,
             directx_devices: self.inner.state.directx_devices.borrow().clone().unwrap(),
@@ -251,8 +231,7 @@ impl WindowsPlatform {
             .spawn(move || {
                 let vsync_provider = VSyncProvider::new();
                 loop {
-                    let signal_source = vsync_provider.wait_for_vsync();
-                    let signal_at = PlatformFrameSignal::capture(gpui::scheduler::Instant::now);
+                    vsync_provider.wait_for_vsync();
                     if stop.load(Ordering::Acquire) {
                         break;
                     }
@@ -274,16 +253,6 @@ impl WindowsPlatform {
                     };
                     for hwnd in all_windows.read().iter() {
                         unsafe {
-                            if let Some(signal_at) = signal_at {
-                                if IsWindowVisible(hwnd.as_raw()).as_bool()
-                                    && !IsIconic(hwnd.as_raw()).as_bool()
-                                {
-                                    hwnd.frame_signal.record(signal_at, signal_source);
-                                } else {
-                                    // Hidden windows may not consume WM_PAINT until shown again.
-                                    hwnd.frame_signal.take();
-                                }
-                            }
                             RedrawWindow(Some(hwnd.as_raw()), None, None, RDW_INVALIDATE)
                                 .ok()
                                 .log_err();
@@ -293,58 +262,20 @@ impl WindowsPlatform {
             })
             .unwrap();
     }
-}
 
-fn translate_accelerator(msg: &MSG) -> Option<()> {
-    if msg.message != WM_KEYDOWN && msg.message != WM_SYSKEYDOWN {
-        return None;
-    }
-
-    let result = unsafe {
-        SendMessageW(
-            msg.hwnd,
-            WM_GPUI_KEYDOWN,
-            Some(msg.wParam),
-            Some(msg.lParam),
-        )
-    };
-    (result.0 == 0).then_some(())
-}
-
-impl Platform for WindowsPlatform {
-    fn background_executor(&self) -> BackgroundExecutor {
+    pub(crate) fn background_executor(&self) -> BackgroundExecutor {
         self.background_executor.clone()
     }
 
-    fn foreground_executor(&self) -> ForegroundExecutor {
+    pub(crate) fn foreground_executor(&self) -> ForegroundExecutor {
         self.foreground_executor.clone()
     }
 
-    fn text_system(&self) -> Arc<dyn PlatformTextSystem> {
-        self.text_system.clone()
+    pub(crate) fn text_system(&self) -> Arc<DirectWriteTextSystem> {
+        self.direct_write_text_system.clone()
     }
 
-    fn keyboard_layout(&self) -> Box<dyn PlatformKeyboardLayout> {
-        Box::new(
-            WindowsKeyboardLayout::new()
-                .log_err()
-                .unwrap_or(WindowsKeyboardLayout::unknown()),
-        )
-    }
-
-    fn keyboard_mapper(&self) -> Rc<dyn PlatformKeyboardMapper> {
-        Rc::new(WindowsKeyboardMapper::new())
-    }
-
-    fn on_keyboard_layout_change(&self, callback: Box<dyn FnMut()>) {
-        self.inner
-            .state
-            .callbacks
-            .keyboard_layout_change
-            .set(Some(callback));
-    }
-
-    fn run(&self, on_finish_launching: Box<dyn 'static + FnOnce()>) {
+    pub(crate) fn run(&self, on_finish_launching: Box<dyn 'static + FnOnce()>) {
         self.attach_gpu()
             .unwrap_or_else(|error| panic!("failed to initialize DirectX: {error:#}"));
         on_finish_launching();
@@ -367,23 +298,23 @@ impl Platform for WindowsPlatform {
         );
     }
 
-    fn quit(&self) {
+    pub(crate) fn quit(&self) {
         self.foreground_executor()
             .spawn(async { unsafe { PostQuitMessage(0) } })
             .detach();
     }
 
-    fn activate(&self, _ignoring_other_apps: bool) {}
+    pub(crate) fn activate(&self, _ignoring_other_apps: bool) {}
 
-    fn displays(&self) -> Vec<Rc<dyn PlatformDisplay>> {
+    pub(crate) fn displays(&self) -> Vec<WindowsDisplay> {
         WindowsDisplay::displays()
     }
 
-    fn primary_display(&self) -> Option<Rc<dyn PlatformDisplay>> {
-        WindowsDisplay::primary_monitor().map(|display| Rc::new(display) as Rc<dyn PlatformDisplay>)
+    pub(crate) fn primary_display(&self) -> Option<WindowsDisplay> {
+        WindowsDisplay::primary_monitor()
     }
 
-    fn on_displays_changed(&self, callback: Box<dyn FnMut()>) {
+    pub(crate) fn on_displays_changed(&self, callback: Box<dyn FnMut()>) {
         self.inner
             .state
             .callbacks
@@ -391,37 +322,34 @@ impl Platform for WindowsPlatform {
             .set(Some(callback));
     }
 
-    fn active_window(&self) -> Option<AnyWindowHandle> {
+    pub(crate) fn active_window(&self) -> Option<AnyWindowHandle> {
         let active_window_hwnd = unsafe { GetActiveWindow() };
         self.window_from_hwnd(active_window_hwnd)
             .map(|inner| inner.handle)
     }
 
-    fn open_window(
+    pub(crate) fn open_window(
         &self,
         handle: AnyWindowHandle,
         options: WindowParams,
-    ) -> Result<Box<dyn PlatformWindow>> {
+    ) -> Result<WindowsWindow> {
         let window = WindowsWindow::new(handle, options, self.generate_creation_info())?;
         let handle = window.get_raw_handle();
-        self.raw_window_handles.write().push(TrackedWindow {
-            handle: handle.into(),
-            frame_signal: window.state.frame_signal.clone(),
-        });
+        self.raw_window_handles.write().push(handle.into());
 
-        Ok(Box::new(window))
+        Ok(window)
     }
 
-    fn window_appearance(&self) -> WindowAppearance {
+    pub(crate) fn window_appearance(&self) -> WindowAppearance {
         app_appearance().log_err().unwrap_or_default()
     }
 
-    fn set_window_appearance(&self, appearance: Option<WindowAppearance>) {
+    pub(crate) fn set_window_appearance(&self, appearance: Option<WindowAppearance>) {
         set_appearance_override(appearance);
         self.post_message(WM_GPUI_APPEARANCE_CHANGED, WPARAM(0), LPARAM(0));
     }
 
-    fn prompt_for_paths(
+    pub(crate) fn prompt_for_paths(
         &self,
         options: PathPromptOptions,
     ) -> Receiver<Result<Option<Vec<PathBuf>>>> {
@@ -434,7 +362,7 @@ impl Platform for WindowsPlatform {
         })
     }
 
-    fn prompt_for_new_path(
+    pub(crate) fn prompt_for_new_path(
         &self,
         directory: &Path,
         suggested_name: Option<&str>,
@@ -455,11 +383,11 @@ impl Platform for WindowsPlatform {
         })
     }
 
-    fn on_quit(&self, callback: Box<dyn FnMut() -> bool>) {
+    pub(crate) fn on_quit(&self, callback: Box<dyn FnMut() -> bool>) {
         self.inner.state.callbacks.quit.set(Some(callback));
     }
 
-    fn set_cursor_style(&self, style: CursorStyle) {
+    pub(crate) fn set_cursor_style(&self, style: CursorStyle) {
         let hcursor = load_cursor(style);
         if self.inner.state.current_cursor.get().map(|c| c.0) != hcursor.map(|c| c.0) {
             self.post_message(
@@ -471,7 +399,7 @@ impl Platform for WindowsPlatform {
         }
     }
 
-    fn hide_cursor_until_mouse_moves(&self) {
+    pub(crate) fn hide_cursor_until_mouse_moves(&self) {
         if !self
             .inner
             .state
@@ -492,25 +420,41 @@ impl Platform for WindowsPlatform {
         }
     }
 
-    fn is_cursor_visible(&self) -> bool {
+    pub(crate) fn is_cursor_visible(&self) -> bool {
         self.inner.state.cursor_visible.load(Ordering::Relaxed)
     }
 
-    fn should_auto_hide_scrollbars(&self) -> bool {
-        should_auto_hide_scrollbars().log_err().unwrap_or(false)
+    pub(crate) fn should_auto_hide_scrollbars(&self) -> bool {
+        should_auto_hide_scrollbars()
     }
 
-    fn write_to_clipboard(&self, item: ClipboardItem) {
+    pub(crate) fn write_to_clipboard(&self, item: ClipboardItem) {
         write_to_clipboard(item);
     }
 
-    fn read_from_clipboard(&self) -> Option<ClipboardItem> {
+    pub(crate) fn read_from_clipboard(&self) -> Option<ClipboardItem> {
         read_from_clipboard()
     }
 }
 
+fn translate_accelerator(msg: &MSG) -> Option<()> {
+    if msg.message != WM_KEYDOWN && msg.message != WM_SYSKEYDOWN {
+        return None;
+    }
+
+    let result = unsafe {
+        SendMessageW(
+            msg.hwnd,
+            WM_GPUI_KEYDOWN,
+            Some(msg.wParam),
+            Some(msg.lParam),
+        )
+    };
+    (result.0 == 0).then_some(())
+}
+
 impl WindowsPlatformInner {
-    fn new(context: &mut PlatformWindowCreateContext) -> Result<Rc<Self>> {
+    fn new(context: &mut PlatformWindowCreateContext, main_queue: MainTaskQueue) -> Result<Rc<Self>> {
         let state = WindowsPlatformState::new(context.directx_devices.take());
         Ok(Rc::new(Self {
             state,
@@ -521,10 +465,7 @@ impl WindowsPlatformInner {
                 .context("missing dispatcher")?
                 .clone(),
             validation_number: context.validation_number,
-            main_receiver: context
-                .main_receiver
-                .take()
-                .context("missing main receiver")?,
+            main_queue,
         }))
     }
 
@@ -551,7 +492,6 @@ impl WindowsPlatformInner {
         let handled = match msg {
             WM_GPUI_CLOSE_ONE_WINDOW
             | WM_GPUI_TASK_DISPATCHED_ON_MAIN_THREAD
-            | WM_GPUI_KEYBOARD_LAYOUT_CHANGED
             | WM_GPUI_DISPLAYS_CHANGED
             | WM_GPUI_GPU_DEVICE_LOST => self.handle_gpui_events(msg, wparam, lparam),
             WM_DISPLAYCHANGE => self.handle_display_change(handle),
@@ -577,7 +517,6 @@ impl WindowsPlatformInner {
                 Some(0)
             }
             WM_GPUI_TASK_DISPATCHED_ON_MAIN_THREAD => self.run_foreground_task(),
-            WM_GPUI_KEYBOARD_LAYOUT_CHANGED => self.handle_keyboard_layout_change(),
             WM_GPUI_DISPLAYS_CHANGED => self.handle_displays_changed(),
             WM_GPUI_GPU_DEVICE_LOST => self.handle_device_lost(lparam),
             _ => unreachable!(),
@@ -683,35 +622,25 @@ impl WindowsPlatformInner {
                     }
                     break 'tasks;
                 }
-                let mut main_receiver = self.main_receiver.clone();
-                match main_receiver.try_pop() {
-                    Ok(Some(runnable)) => WindowsDispatcher::execute_runnable(runnable),
-                    _ => break 'timeout_loop,
+                match self.main_queue.try_pop() {
+                    Some(runnable) => WindowsDispatcher::execute_runnable(runnable),
+                    None => break 'timeout_loop,
                 }
             }
 
             // Someone could enqueue a Runnable here. The flag is still true, so they will not PostMessage.
             // We need to check for those Runnables after we clear the flag.
             self.dispatcher.wake_posted.store(false, Ordering::Release);
-            let mut main_receiver = self.main_receiver.clone();
-            match main_receiver.try_pop() {
-                Ok(Some(runnable)) => {
+            match self.main_queue.try_pop() {
+                Some(runnable) => {
                     self.dispatcher.wake_posted.store(true, Ordering::Release);
 
                     WindowsDispatcher::execute_runnable(runnable);
                 }
-                _ => break 'tasks,
+                None => break 'tasks,
             }
         }
 
-        Some(0)
-    }
-
-    fn handle_keyboard_layout_change(&self) -> Option<isize> {
-        self.with_callback(
-            |callbacks| &callbacks.keyboard_layout_change,
-            |callback| callback(),
-        );
         Some(0)
     }
 
@@ -729,6 +658,7 @@ impl WindowsPlatformInner {
 
 impl Drop for WindowsPlatform {
     fn drop(&mut self) {
+        self.inner.main_queue.close();
         if let Some(stop) = self.vsync_stop.borrow_mut().take() {
             stop.store(true, Ordering::Release);
         }
@@ -748,7 +678,7 @@ pub(crate) struct WindowCreationInfo {
     pub(crate) cursor_visible: Arc<AtomicBool>,
     pub(crate) drop_target_helper: IDropTargetHelper,
     pub(crate) validation_number: usize,
-    pub(crate) main_receiver: PriorityQueueReceiver<RunnableVariant>,
+    pub(crate) main_queue: MainTaskQueue,
     pub(crate) platform_window_handle: HWND,
     pub(crate) disable_direct_composition: bool,
     pub(crate) directx_devices: DirectXDevices,
@@ -761,10 +691,9 @@ pub(crate) struct WindowCreationInfo {
 
 struct PlatformWindowCreateContext {
     inner: Option<Result<Rc<WindowsPlatformInner>>>,
-    raw_window_handles: std::sync::Weak<RwLock<SmallVec<[TrackedWindow; 4]>>>,
+    raw_window_handles: std::sync::Weak<RwLock<SmallVec<[SafeHwnd; 4]>>>,
     validation_number: usize,
-    main_sender: Option<PriorityQueueSender<RunnableVariant>>,
-    main_receiver: Option<PriorityQueueReceiver<RunnableVariant>>,
+    main_queue: Option<MainTaskQueue>,
     directx_devices: Option<DirectXDevices>,
     dispatcher: Option<Arc<WindowsDispatcher>>,
 }
@@ -979,21 +908,12 @@ fn load_icon() -> Result<HICON> {
 }
 
 #[inline]
-fn should_auto_hide_scrollbars() -> Result<bool> {
-    let mut dynamic_scrollbars: u32 = 1;
-    let mut size = std::mem::size_of::<u32>() as u32;
-    let status = unsafe {
-        RegGetValueW(
-            HKEY_CURRENT_USER,
-            w!(r"Control Panel\Accessibility"),
-            w!("DynamicScrollbars"),
-            RRF_RT_REG_DWORD,
-            None,
-            Some((&raw mut dynamic_scrollbars).cast()),
-            Some(&mut size),
-        )
-    };
-    Ok(status.0 != 0 || dynamic_scrollbars != 0)
+fn should_auto_hide_scrollbars() -> bool {
+    reg_get_dword(
+        w!(r"Control Panel\Accessibility"),
+        w!("DynamicScrollbars"),
+    )
+    .is_none_or(|v| v != 0)
 }
 
 fn check_device_lost(device: &ID3D11Device) -> bool {
@@ -1011,7 +931,7 @@ fn handle_gpu_device_lost(
     directx_devices: &mut DirectXDevices,
     platform_window: HWND,
     validation_number: usize,
-    all_windows: &std::sync::Weak<RwLock<SmallVec<[TrackedWindow; 4]>>>,
+    all_windows: &std::sync::Weak<RwLock<SmallVec<[SafeHwnd; 4]>>>,
     text_system: &std::sync::Weak<DirectWriteTextSystem>,
 ) -> Result<()> {
     // Here we wait a bit to ensure the system has time to recover from the device lost state.
@@ -1084,17 +1004,17 @@ unsafe extern "system" fn window_procedure(
         let creation_context = params.lpCreateParams as *mut PlatformWindowCreateContext;
         let creation_context = unsafe { &mut *creation_context };
 
-        let Some(main_sender) = creation_context.main_sender.take() else {
-            creation_context.inner = Some(Err(anyhow!("missing main sender")));
+        let Some(main_queue) = creation_context.main_queue.take() else {
+            creation_context.inner = Some(Err(anyhow!("missing main queue")));
             return LRESULT(0);
         };
         creation_context.dispatcher = Some(Arc::new(WindowsDispatcher::new(
-            main_sender,
+            main_queue.clone(),
             hwnd,
             creation_context.validation_number,
         )));
 
-        return match WindowsPlatformInner::new(creation_context) {
+        return match WindowsPlatformInner::new(creation_context, main_queue) {
             Ok(inner) => {
                 let weak = Box::new(Rc::downgrade(&inner));
                 unsafe { set_window_long(hwnd, GWLP_USERDATA, Box::into_raw(weak) as isize) };

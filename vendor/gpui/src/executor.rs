@@ -1,80 +1,387 @@
-use crate::{App, PlatformDispatcher, PlatformScheduler};
-use crate::futures::channel::mpsc;
-use crate::futures::prelude::*;
-use crate::gpui_util::{TryFutureExt, TryFutureExtBacktrace};
-use crate::scheduler::{self, Instant, Scheduler};
-use std::{future::Future, marker::PhantomData, mem, pin::Pin, rc::Rc, sync::Arc, time::Duration};
-
-pub use crate::scheduler::{
-    FallibleTask, LocalExecutor as SchedulerLocalExecutor, Priority, Task,
+use std::{
+    collections::VecDeque,
+    fmt,
+    future::Future,
+    marker::PhantomData,
+    mem::ManuallyDrop,
+    panic::Location,
+    pin::Pin,
+    ptr::NonNull,
+    rc::Rc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    task::{Context, Poll, Wake, Waker},
+    thread::{self, ThreadId},
+    time::{Duration, Instant},
 };
 
-/// A pointer to the executor that is currently running,
-/// for spawning background tasks.
+use crate::platform::win32::WindowsDispatcher;
+use crate::sync::Mutex;
+
 #[derive(Clone)]
-pub struct BackgroundExecutor {
-    inner: scheduler::BackgroundExecutor,
-    dispatcher: Arc<dyn PlatformDispatcher>,
+pub(crate) struct MainTaskQueue {
+    inner: Arc<MainTaskQueueInner>,
 }
 
-/// A pointer to the executor that is currently running,
-/// for spawning tasks on the main thread.
-#[derive(Clone)]
-pub struct ForegroundExecutor {
-    inner: scheduler::LocalExecutor,
-    dispatcher: Arc<dyn PlatformDispatcher>,
-    not_send: PhantomData<Rc<()>>,
+struct MainTaskQueueInner {
+    queue: Mutex<VecDeque<Runnable>>,
+    closed: AtomicBool,
 }
 
-/// Extension trait for `Task<Result<T, E>>` that adds `detach_and_log_err` with an `&App` context.
-///
-/// This trait is automatically implemented for all `Task<Result<T, E>>` types.
-pub trait TaskExt<T, E> {
-    /// Run the task to completion in the background and log any errors that occur.
-    fn detach_and_log_err(self, cx: &App);
-    /// Like [`Self::detach_and_log_err`], but uses `{:?}` formatting on failure so `crate::anyhow::Error`
-    /// values emit their full backtrace. Prefer `detach_and_log_err` unless a backtrace is wanted.
-    fn detach_and_log_err_with_backtrace(self, cx: &App);
-}
-
-impl<T, E> TaskExt<T, E> for Task<Result<T, E>>
-where
-    T: 'static,
-    E: 'static + std::fmt::Display + std::fmt::Debug,
-{
-    #[track_caller]
-    fn detach_and_log_err(self, cx: &App) {
-        let location = core::panic::Location::caller();
-        cx.foreground_executor()
-            .spawn(self.log_tracked_err(*location))
-            .detach();
-    }
-
-    #[track_caller]
-    fn detach_and_log_err_with_backtrace(self, cx: &App) {
-        let location = *core::panic::Location::caller();
-        cx.foreground_executor()
-            .spawn(self.log_tracked_err_with_backtrace(location))
-            .detach();
-    }
-}
-
-impl BackgroundExecutor {
-    /// Creates a new BackgroundExecutor from the given PlatformDispatcher.
-    pub fn new(dispatcher: Arc<dyn PlatformDispatcher>) -> Self {
-        let scheduler: Arc<dyn Scheduler> = Arc::new(PlatformScheduler::new(dispatcher.clone()));
-
+impl MainTaskQueue {
+    pub(crate) fn new() -> Self {
         Self {
-            inner: scheduler::BackgroundExecutor::new(scheduler),
-            dispatcher,
+            inner: Arc::new(MainTaskQueueInner {
+                queue: Mutex::new(VecDeque::new()),
+                closed: AtomicBool::new(false),
+            }),
         }
     }
 
-    /// Returns the underlying scheduler::BackgroundExecutor.
-    ///
-    /// This is used by Ex to pass the executor to thread/worktree code.
-    pub fn scheduler_executor(&self) -> scheduler::BackgroundExecutor {
-        self.inner.clone()
+    pub(crate) fn push(&self, runnable: Runnable) -> Result<(), Runnable> {
+        let mut queue = self.inner.queue.lock();
+        if self.inner.closed.load(Ordering::Acquire) {
+            return Err(runnable);
+        }
+        queue.push_back(runnable);
+        Ok(())
+    }
+
+    pub(crate) fn try_pop(&self) -> Option<Runnable> {
+        self.inner.queue.lock().pop_front()
+    }
+
+    pub(crate) fn close(&self) {
+        self.inner.closed.store(true, Ordering::Release);
+        let drained: Vec<Runnable> = self.inner.queue.lock().drain(..).collect();
+        drop(drained);
+    }
+}
+
+struct TaskCore {
+    poll_fn: Option<Box<dyn FnMut(&mut Context<'_>) -> bool + Send>>,
+    scheduled: bool,
+    running: bool,
+    closed: bool,
+    detached: bool,
+    finished: bool,
+    awaiter: Option<Waker>,
+}
+
+struct TaskHeader {
+    core: Mutex<TaskCore>,
+    schedule: Box<dyn Fn(Runnable) + Send + Sync>,
+}
+
+impl TaskHeader {
+    fn schedule_runnable(self: &Arc<Self>) {
+        let should_enqueue = {
+            let mut core = self.core.lock();
+            if core.closed || core.finished || core.scheduled {
+                false
+            } else {
+                core.scheduled = true;
+                !core.running
+            }
+        };
+        if should_enqueue {
+            (self.schedule)(Runnable {
+                header: self.clone(),
+            });
+        }
+    }
+}
+
+impl Wake for TaskHeader {
+    fn wake(self: Arc<Self>) {
+        self.schedule_runnable();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.schedule_runnable();
+    }
+}
+
+pub(crate) struct Runnable {
+    header: Arc<TaskHeader>,
+}
+
+impl fmt::Debug for Runnable {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Runnable").finish_non_exhaustive()
+    }
+}
+
+impl Runnable {
+    pub(crate) fn into_raw(self) -> NonNull<()> {
+        let ptr = Arc::into_raw(self.header) as *mut ();
+        unsafe { NonNull::new_unchecked(ptr) }
+    }
+
+    /// # Safety
+    /// `ptr` must have been produced by [`Runnable::into_raw`].
+    pub(crate) unsafe fn from_raw(ptr: NonNull<()>) -> Self {
+        Self {
+            header: unsafe { Arc::from_raw(ptr.as_ptr() as *const TaskHeader) },
+        }
+    }
+
+    pub(crate) fn schedule(self) {
+        let header = self.header.clone();
+        (header.schedule)(self);
+    }
+
+    pub(crate) fn run(self) -> bool {
+        let mut poll_fn = {
+            let mut core = self.header.core.lock();
+            core.scheduled = false;
+            if core.closed || core.finished {
+                let old = core.poll_fn.take();
+                drop(core);
+                drop(old);
+                return false;
+            }
+            let Some(poll_fn) = core.poll_fn.take() else {
+                return false;
+            };
+            core.running = true;
+            poll_fn
+        };
+
+        let waker = Waker::from(self.header.clone());
+        let mut cx = Context::from_waker(&waker);
+        let ready = poll_fn(&mut cx);
+
+        let (reschedule, awaiter, to_drop) = {
+            let mut core = self.header.core.lock();
+            core.running = false;
+            if ready {
+                core.finished = true;
+                (false, core.awaiter.take(), Some(poll_fn))
+            } else if core.closed {
+                (false, core.awaiter.take(), Some(poll_fn))
+            } else {
+                core.poll_fn = Some(poll_fn);
+                (core.scheduled, None, None)
+            }
+        };
+
+        drop(to_drop);
+        if let Some(awaiter) = awaiter {
+            awaiter.wake();
+        }
+        if reschedule {
+            let header = self.header.clone();
+            (header.schedule)(Runnable {
+                header: self.header,
+            });
+            true
+        } else {
+            false
+        }
+    }
+}
+
+struct SpawnedTask<T> {
+    header: Arc<TaskHeader>,
+    output: Arc<Mutex<Option<T>>>,
+    detached: bool,
+}
+
+impl<T> Drop for SpawnedTask<T> {
+    fn drop(&mut self) {
+        if !self.detached {
+            let to_drop = {
+                let mut core = self.header.core.lock();
+                if !core.detached {
+                    core.closed = true;
+                    if !core.running {
+                        core.poll_fn.take()
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            };
+            drop(to_drop);
+        }
+    }
+}
+
+/// A handle to a spawned asynchronous task. Dropping a `Task` cancels it unless [`Task::detach`] is called.
+#[must_use]
+pub struct Task<T>(TaskState<T>);
+
+enum TaskState<T> {
+    Ready(Option<T>),
+    Spawned(SpawnedTask<T>),
+}
+
+impl<T> Unpin for Task<T> {}
+
+impl<T> Task<T> {
+    /// Creates a task that immediately resolves to `val`.
+    pub fn ready(val: T) -> Self {
+        Self(TaskState::Ready(Some(val)))
+    }
+
+    /// Returns whether the task has completed.
+    pub fn is_ready(&self) -> bool {
+        match &self.0 {
+            TaskState::Ready(_) => true,
+            TaskState::Spawned(task) => task.header.core.lock().finished,
+        }
+    }
+
+    /// Detaches the task so it keeps running after this handle is dropped.
+    pub fn detach(self) {
+        if let Task(TaskState::Spawned(mut task)) = self {
+            task.detached = true;
+            task.header.core.lock().detached = true;
+        }
+    }
+}
+
+impl<T> Future for Task<T> {
+    type Output = T;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<T> {
+        let this = self.get_mut();
+        match &mut this.0 {
+            TaskState::Ready(val) => Poll::Ready(val.take().expect("Task polled after completion")),
+            TaskState::Spawned(task) => {
+                if let Some(val) = task.output.lock().take() {
+                    return Poll::Ready(val);
+                }
+                let mut core = task.header.core.lock();
+                if let Some(val) = task.output.lock().take() {
+                    return Poll::Ready(val);
+                }
+                if core.closed {
+                    panic!("polled a cancelled task");
+                }
+                core.awaiter = Some(cx.waker().clone());
+                Poll::Pending
+            }
+        }
+    }
+}
+
+impl<T> fmt::Debug for Task<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.0 {
+            TaskState::Ready(_) => f.debug_tuple("Task::Ready").finish(),
+            TaskState::Spawned(_) => f.debug_tuple("Task::Spawned").finish(),
+        }
+    }
+}
+
+/// # Safety
+/// Caller must ensure non-`Send` futures and outputs are only polled and dropped on their originating thread.
+unsafe fn spawn_unchecked<Fut>(
+    future: Fut,
+    schedule: impl Fn(Runnable) + Send + Sync + 'static,
+) -> (Runnable, Task<Fut::Output>)
+where
+    Fut: Future + 'static,
+    Fut::Output: 'static,
+{
+    struct AssertSend<T>(T);
+    unsafe impl<T> Send for AssertSend<T> {}
+
+    let output: Arc<Mutex<Option<Fut::Output>>> = Arc::new(Mutex::new(None));
+    let output_slot = AssertSend(output.clone());
+    let mut pinned = AssertSend(Box::pin(future));
+
+    let poll_fn = Box::new(move |cx: &mut Context<'_>| {
+        let output_slot = &output_slot;
+        let pinned = &mut pinned;
+        match pinned.0.as_mut().poll(cx) {
+            Poll::Ready(val) => {
+                *output_slot.0.lock() = Some(val);
+                true
+            }
+            Poll::Pending => false,
+        }
+    });
+
+    let header = Arc::new(TaskHeader {
+        core: Mutex::new(TaskCore {
+            poll_fn: Some(poll_fn),
+            scheduled: true,
+            running: false,
+            closed: false,
+            detached: false,
+            finished: false,
+            awaiter: None,
+        }),
+        schedule: Box::new(schedule),
+    });
+
+    let runnable = Runnable {
+        header: header.clone(),
+    };
+    let task = Task(TaskState::Spawned(SpawnedTask {
+        header,
+        output,
+        detached: false,
+    }));
+    (runnable, task)
+}
+
+#[inline]
+fn current_thread_id() -> ThreadId {
+    std::thread_local! {
+        static ID: ThreadId = thread::current().id();
+    }
+    ID.try_with(|id| *id)
+        .unwrap_or_else(|_| thread::current().id())
+}
+
+struct ThreadCheckedFuture<F> {
+    id: ThreadId,
+    inner: ManuallyDrop<F>,
+    location: &'static Location<'static>,
+}
+
+impl<F> Drop for ThreadCheckedFuture<F> {
+    fn drop(&mut self) {
+        assert_eq!(
+            self.id,
+            current_thread_id(),
+            "local task dropped by a thread that didn't spawn it. Task spawned at {}",
+            self.location
+        );
+        unsafe { ManuallyDrop::drop(&mut self.inner) };
+    }
+}
+
+impl<F: Future> Future for ThreadCheckedFuture<F> {
+    type Output = F::Output;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = unsafe { self.get_unchecked_mut() };
+        assert!(
+            this.id == current_thread_id(),
+            "local task polled by a thread that didn't spawn it. Task spawned at {}",
+            this.location
+        );
+        unsafe { Pin::new_unchecked(&mut *this.inner).poll(cx) }
+    }
+}
+
+/// Executor for spawning tasks onto the Windows thread pool.
+#[derive(Clone)]
+pub struct BackgroundExecutor {
+    dispatcher: Arc<WindowsDispatcher>,
+}
+
+impl BackgroundExecutor {
+    pub(crate) fn new(dispatcher: Arc<WindowsDispatcher>) -> Self {
+        Self { dispatcher }
     }
 
     /// Enqueues the given future to be run to completion on a background thread.
@@ -83,234 +390,122 @@ impl BackgroundExecutor {
     where
         R: Send + 'static,
     {
-        self.spawn_with_priority(Priority::default(), future.boxed())
+        let dispatcher = Arc::downgrade(&self.dispatcher);
+        let (runnable, task) = unsafe {
+            spawn_unchecked(future, move |runnable| {
+                if let Some(dispatcher) = dispatcher.upgrade() {
+                    dispatcher.dispatch(runnable);
+                }
+            })
+        };
+        runnable.schedule();
+        task
     }
 
-    /// Enqueues the given future to be run to completion on a background thread with the given priority.
-    #[track_caller]
-    pub fn spawn_with_priority<R>(
-        &self,
-        priority: Priority,
-        future: impl Future<Output = R> + Send + 'static,
-    ) -> Task<R>
-    where
-        R: Send + 'static,
-    {
-        self.inner.spawn_with_priority(priority, future)
-    }
-
-    /// Runs background tasks that may borrow from their environment and waits for all of them to complete.
-    ///
-    /// Dropping the returned future cancels its tasks and synchronously waits for their futures to
-    /// be destroyed before returning.
-    pub async fn scoped<'scope, F>(&self, scheduler: F)
-    where
-        F: FnOnce(&mut Scope<'scope>),
-    {
-        let mut scope = Scope::new(self.clone(), Priority::default());
-        (scheduler)(&mut scope);
-        let spawned = mem::take(&mut scope.futures)
-            .into_iter()
-            .map(|f| self.spawn_with_priority(scope.priority, f))
-            .collect::<Vec<_>>();
-        for task in spawned {
-            task.await;
-        }
-    }
-
-    pub async fn scoped_priority<'scope, F>(&self, priority: Priority, scheduler: F)
-    where
-        F: FnOnce(&mut Scope<'scope>),
-    {
-        let mut scope = Scope::new(self.clone(), priority);
-        (scheduler)(&mut scope);
-        let spawned = mem::take(&mut scope.futures)
-            .into_iter()
-            .map(|f| self.spawn_with_priority(scope.priority, f))
-            .collect::<Vec<_>>();
-        for task in spawned {
-            task.await;
-        }
-    }
-
-    /// Get the current time.
+    /// Returns the current instant.
     pub fn now(&self) -> Instant {
-        self.inner.scheduler().clock().now()
+        Instant::now()
     }
 
-    /// Returns a task that will complete after the given duration.
+    /// Returns a task that completes after the given duration.
     #[track_caller]
     pub fn timer(&self, duration: Duration) -> Task<()> {
         if duration.is_zero() {
             return Task::ready(());
         }
-        self.spawn(self.inner.scheduler().timer(duration))
+        let dispatcher = self.dispatcher.clone();
+        let (runnable, task) = unsafe {
+            spawn_unchecked(async {}, move |runnable| {
+                dispatcher.dispatch_after(duration, runnable);
+            })
+        };
+        runnable.schedule();
+        task
     }
 
-    /// How many CPUs are available to the dispatcher.
+    /// Returns the number of available CPU threads.
     pub fn num_cpus(&self) -> usize {
-        std::thread::available_parallelism().map_or(1, |n| n.get())
+        thread::available_parallelism().map_or(1, |n| n.get())
     }
 
-    /// Whether we're on the main thread.
+    /// Returns whether the current thread is the main UI thread.
     pub fn is_main_thread(&self) -> bool {
         self.dispatcher.is_main_thread()
     }
+}
 
-    /// Whether this executor runs on the deterministic test scheduler.
-    pub fn is_test(&self) -> bool {
-        self.inner.is_test()
-    }
-
-    #[doc(hidden)]
-    pub fn dispatcher(&self) -> &Arc<dyn PlatformDispatcher> {
-        &self.dispatcher
-    }
+/// Executor for spawning tasks onto the main UI thread.
+#[derive(Clone)]
+pub struct ForegroundExecutor {
+    dispatcher: Arc<WindowsDispatcher>,
+    not_send: PhantomData<Rc<()>>,
 }
 
 impl ForegroundExecutor {
-    /// Creates a new ForegroundExecutor from the given PlatformDispatcher.
-    pub fn new(dispatcher: Arc<dyn PlatformDispatcher>) -> Self {
-        let platform_scheduler = Arc::new(PlatformScheduler::new(dispatcher.clone()));
-        let inner = platform_scheduler.foreground_executor();
+    pub(crate) fn new(dispatcher: Arc<WindowsDispatcher>) -> Self {
         Self {
-            inner,
             dispatcher,
             not_send: PhantomData,
         }
     }
 
-    /// Enqueues the given Task to run on the main thread.
+    /// Enqueues the given future to run on the main thread.
     #[track_caller]
     pub fn spawn<R>(&self, future: impl Future<Output = R> + 'static) -> Task<R>
     where
         R: 'static,
     {
-        self.inner.spawn(future.boxed_local())
-    }
-
-    /// Enqueues the given Task to run on the main thread with the given priority.
-    #[track_caller]
-    pub fn spawn_with_priority<R>(
-        &self,
-        _priority: Priority,
-        future: impl Future<Output = R> + 'static,
-    ) -> Task<R>
-    where
-        R: 'static,
-    {
-        self.inner.spawn(future)
-    }
-
-    #[track_caller]
-    pub fn spawn_when_idle<R>(
-        &self,
-        timeout: Option<Duration>,
-        future: impl Future<Output = R> + 'static,
-    ) -> Task<R>
-    where
-        R: 'static,
-    {
-        let dispatcher = self.dispatcher.clone();
-        self.inner
-            .spawn_with_dispatch(future.boxed_local(), move |runnable| {
-                dispatcher.dispatch_on_main_thread_when_idle(runnable, timeout);
+        let location = Location::caller();
+        let checked = ThreadCheckedFuture {
+            id: current_thread_id(),
+            inner: ManuallyDrop::new(future),
+            location,
+        };
+        let dispatcher = Arc::downgrade(&self.dispatcher);
+        let (runnable, task) = unsafe {
+            spawn_unchecked(checked, move |runnable| {
+                if let Some(dispatcher) = dispatcher.upgrade() {
+                    dispatcher.dispatch_on_main_thread(runnable);
+                }
             })
+        };
+        runnable.schedule();
+        task
     }
 
-    pub fn idle_time_remaining(&self) -> Option<Duration> {
-        self.dispatcher.idle_time_remaining()
-    }
-
-    /// Block the current thread until the given future resolves.
-    pub fn block_on<R>(&self, future: impl Future<Output = R>) -> R {
-        self.inner.block_on(future)
-    }
-
-    /// Block the current thread until the given future resolves or the timeout elapses.
+    /// Blocks the current thread until the given future resolves or the timeout elapses.
     pub fn block_with_timeout<R, Fut: Future<Output = R>>(
         &self,
         duration: Duration,
         future: Fut,
-    ) -> Result<R, impl Future<Output = R> + use<R, Fut>> {
-        self.inner.block_with_timeout(duration, future)
-    }
-
-    #[doc(hidden)]
-    pub fn dispatcher(&self) -> &Arc<dyn PlatformDispatcher> {
-        &self.dispatcher
-    }
-
-    #[doc(hidden)]
-    pub fn scheduler_executor(&self) -> SchedulerLocalExecutor {
-        self.inner.clone()
-    }
-}
-
-/// Scope manages a set of tasks that are enqueued and waited on together. See [`BackgroundExecutor::scoped`].
-pub struct Scope<'a> {
-    executor: BackgroundExecutor,
-    priority: Priority,
-    futures: Vec<Pin<Box<dyn Future<Output = ()> + Send + 'static>>>,
-    tx: Option<mpsc::Sender<()>>,
-    rx: mpsc::Receiver<()>,
-    lifetime: PhantomData<&'a ()>,
-}
-
-impl<'a> Scope<'a> {
-    fn new(executor: BackgroundExecutor, priority: Priority) -> Self {
-        let (tx, rx) = mpsc::channel(1);
-        Self {
-            executor,
-            priority,
-            tx: Some(tx),
-            rx,
-            futures: Default::default(),
-            lifetime: PhantomData,
+    ) -> Result<R, Pin<Box<Fut>>> {
+        struct ThreadWaker(thread::Thread);
+        impl Wake for ThreadWaker {
+            fn wake(self: Arc<Self>) {
+                self.0.unpark();
+            }
+            fn wake_by_ref(self: &Arc<Self>) {
+                self.0.unpark();
+            }
         }
-    }
 
-    /// How many CPUs are available to the dispatcher.
-    pub fn num_cpus(&self) -> usize {
-        self.executor.num_cpus()
-    }
+        let mut future = Box::pin(future);
+        let deadline = Instant::now() + duration;
+        let waker = Waker::from(Arc::new(ThreadWaker(thread::current())));
+        let mut cx = Context::from_waker(&waker);
 
-    /// Spawn a future into this scope.
-    #[track_caller]
-    pub fn spawn<F>(&mut self, f: F)
-    where
-        F: Future<Output = ()> + Send + 'a,
-    {
-        let tx = self.tx.clone().unwrap();
+        if let Poll::Ready(value) = future.as_mut().poll(&mut cx) {
+            return Ok(value);
+        }
 
-        // SAFETY: The 'a lifetime is guaranteed to outlive any of these futures because
-        // dropping this `Scope` blocks until all of the futures have resolved.
-        let f = unsafe {
-            mem::transmute::<
-                Pin<Box<dyn Future<Output = ()> + Send + 'a>>,
-                Pin<Box<dyn Future<Output = ()> + Send + 'static>>,
-            >(Box::pin(async move {
-                f.await;
-                drop(tx);
-            }))
-        };
-        self.futures.push(f);
-    }
-}
-
-impl Drop for Scope<'_> {
-    fn drop(&mut self) {
-        self.tx.take().unwrap();
-
-        // Wait until the channel is closed, which means that all of the spawned
-        // futures have resolved.
-        let future = async {
-            self.rx.next().await;
-        };
-        let mut future = std::pin::pin!(future);
-        self.executor
-            .inner
-            .scheduler()
-            .block(None, future.as_mut(), None);
+        loop {
+            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                return Err(future);
+            };
+            thread::park_timeout(remaining);
+            if let Poll::Ready(value) = future.as_mut().poll(&mut cx) {
+                return Ok(value);
+            }
+        }
     }
 }

@@ -467,7 +467,8 @@ fn modifiers_changed(modifiers: &Modifiers, cx: &mut App) {
 }
 
 fn show_delay(reshow: bool) -> Duration {
-    let hover = system_u32(SPI_GETMOUSEHOVERTIME).unwrap_or(DEFAULT_HOVER_TIME) as f32;
+    let hover =
+        gpui::system_parameters_u32(SPI_GETMOUSEHOVERTIME.0).unwrap_or(DEFAULT_HOVER_TIME) as f32;
     let factor = if reshow {
         RESHOW_DELAY_FACTOR
     } else {

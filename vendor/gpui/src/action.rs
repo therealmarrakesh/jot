@@ -1,6 +1,4 @@
-use crate::anyhow::{Result, anyhow};
-pub use no_action::{NoAction, Unbind, is_no_action, is_unbind};
-use std::any::{Any, TypeId};
+use std::any::Any;
 
 /// Implements [`Action`] for a type that implements `Clone + PartialEq + Send + 'static`.
 #[macro_export]
@@ -101,43 +99,5 @@ impl dyn Action {
     /// Type-erase Action type.
     pub fn as_any(&self) -> &dyn Any {
         self as &dyn Any
-    }
-}
-
-#[derive(Default)]
-pub(crate) struct ActionRegistry;
-
-impl ActionRegistry {
-    pub fn build_action_type(&self, type_id: &TypeId) -> Result<Box<dyn Action>> {
-        Err(anyhow!("dynamic action construction disabled for {type_id:?}"))
-    }
-}
-
-mod no_action {
-    use crate as gpui;
-
-    actions!(
-        zed,
-        [
-            /// Action with special handling which unbinds the keybinding this is associated with,
-            /// if it is the highest precedence match.
-            NoAction
-        ]
-    );
-
-    /// Action with special handling which unbinds later bindings for the same keystrokes when they
-    /// dispatch the named action, regardless of that action's context.
-    #[derive(Clone, Debug, PartialEq)]
-    pub struct Unbind(pub gpui::SharedString);
-    crate::impl_action!(zed, Unbind);
-
-    /// Returns whether or not this action represents a removed key binding.
-    pub fn is_no_action(action: &dyn gpui::Action) -> bool {
-        action.as_any().is::<NoAction>()
-    }
-
-    /// Returns whether or not this action represents an unbind marker.
-    pub fn is_unbind(action: &dyn gpui::Action) -> bool {
-        action.as_any().is::<Unbind>()
     }
 }

@@ -10,8 +10,9 @@ use std::{
 };
 
 use crate::anyhow::{Context as _, Result};
-use gpui::gpui_util::ResultExt;
+use crate::executor::MainTaskQueue;
 use crate::smallvec::SmallVec;
+use gpui::gpui_util::ResultExt;
 use windows::{
     Win32::{
         Foundation::*,
@@ -52,7 +53,6 @@ pub struct WindowsWindowState {
     pub restore_from_minimized: Cell<Option<Box<dyn FnMut(RequestFrameOptions)>>>,
 
     pub callbacks: Callbacks,
-    pub frame_signal: Arc<PlatformFrameSignal>,
     pub input_handler: Cell<Option<PlatformInputHandler>>,
     pub ime_enabled: Cell<bool>,
     pub pending_surrogate: Cell<Option<u16>>,
@@ -96,15 +96,15 @@ pub(crate) struct WindowsWindowInner {
     pub(crate) state: WindowsWindowState,
     system_settings: WindowsSystemSettings,
     pub(crate) handle: AnyWindowHandle,
+    pub(crate) is_overlay: bool,
     pub(crate) hide_title_bar: bool,
     pub(crate) is_movable: bool,
     pub(crate) is_resizable: bool,
     pub(crate) is_minimizable: bool,
     pub(crate) executor: ForegroundExecutor,
     pub(crate) validation_number: usize,
-    pub(crate) main_receiver: PriorityQueueReceiver<RunnableVariant>,
+    pub(crate) main_queue: MainTaskQueue,
     pub(crate) platform_window_handle: HWND,
-    pub(crate) parent_hwnd: Option<HWND>,
 }
 
 impl WindowsWindowState {
@@ -182,7 +182,6 @@ impl WindowsWindowState {
             min_size: Cell::new(min_size),
             in_size_move_loop: Cell::new(false),
             callbacks,
-            frame_signal: Arc::new(PlatformFrameSignal::new()),
             input_handler: Cell::new(input_handler),
             ime_enabled: Cell::new(true),
             pending_surrogate: Cell::new(pending_surrogate),
@@ -300,16 +299,16 @@ impl WindowsWindowInner {
             drop_target_helper: context.drop_target_helper.clone(),
             state,
             handle: context.handle,
+            is_overlay: context.is_overlay,
             hide_title_bar: context.hide_title_bar,
             is_movable: context.is_movable,
             is_resizable: context.is_resizable,
             is_minimizable: context.is_minimizable,
             executor: context.executor.clone(),
             validation_number: context.validation_number,
-            main_receiver: context.main_receiver.clone(),
+            main_queue: context.main_queue.clone(),
             platform_window_handle: context.platform_window_handle,
             system_settings: WindowsSystemSettings::new(),
-            parent_hwnd: context.parent_hwnd,
         }))
     }
 
@@ -425,6 +424,7 @@ pub(crate) struct Callbacks {
 struct WindowCreateContext {
     inner: Option<Result<Rc<WindowsWindowInner>>>,
     handle: AnyWindowHandle,
+    is_overlay: bool,
     hide_title_bar: bool,
     display: WindowsDisplay,
     is_movable: bool,
@@ -436,14 +436,13 @@ struct WindowCreateContext {
     cursor_visible: Arc<AtomicBool>,
     drop_target_helper: IDropTargetHelper,
     validation_number: usize,
-    main_receiver: PriorityQueueReceiver<RunnableVariant>,
+    main_queue: MainTaskQueue,
     platform_window_handle: HWND,
     appearance: WindowAppearance,
     disable_direct_composition: bool,
     directx_devices: DirectXDevices,
     invalidate_devices: Arc<AtomicBool>,
     draw_coordinator: Rc<DrawCoordinator>,
-    parent_hwnd: Option<HWND>,
 }
 
 impl WindowsWindow {
@@ -459,7 +458,7 @@ impl WindowsWindow {
             cursor_visible,
             drop_target_helper,
             validation_number,
-            main_receiver,
+            main_queue,
             platform_window_handle,
             disable_direct_composition,
             directx_devices,
@@ -467,20 +466,7 @@ impl WindowsWindow {
             draw_coordinator,
         } = creation_info;
         register_window_class(icon);
-        let parent_hwnd = if params.kind == WindowKind::Dialog {
-            let parent_window = unsafe { GetActiveWindow() };
-            if parent_window.is_invalid() {
-                None
-            } else {
-                // Disable the parent window to make this dialog modal
-                unsafe {
-                    EnableWindow(parent_window, false).as_bool();
-                };
-                Some(parent_window)
-            }
-        } else {
-            None
-        };
+        let is_overlay = params.kind == WindowKind::Overlay;
         let hide_title_bar = params
             .titlebar
             .as_ref()
@@ -495,26 +481,24 @@ impl WindowsWindow {
                 .unwrap_or(""),
         );
 
-        let (mut dwexstyle, dwstyle) = if params.kind == WindowKind::PopUp {
-            (WS_EX_TOOLWINDOW | WS_EX_TOPMOST, WINDOW_STYLE(0x0))
+        let (mut dwexstyle, dwstyle) = if is_overlay {
+            (
+                WS_EX_TOOLWINDOW
+                    | WS_EX_TOPMOST
+                    | WS_EX_LAYERED
+                    | WS_EX_TRANSPARENT
+                    | WS_EX_NOACTIVATE,
+                WS_POPUP,
+            )
         } else {
             let mut dwstyle = WS_SYSMENU;
-
             if params.is_resizable {
                 dwstyle |= WS_THICKFRAME | WS_MAXIMIZEBOX;
             }
-
             if params.is_minimizable {
                 dwstyle |= WS_MINIMIZEBOX;
             }
-            let dwexstyle = if params.kind == WindowKind::Dialog {
-                dwstyle |= WS_POPUP | WS_CAPTION;
-                WS_EX_DLGMODALFRAME
-            } else {
-                WS_EX_APPWINDOW
-            };
-
-            (dwexstyle, dwstyle)
+            (WS_EX_APPWINDOW, dwstyle)
         };
         if !disable_direct_composition {
             dwexstyle |= WS_EX_NOREDIRECTIONBITMAP;
@@ -532,6 +516,7 @@ impl WindowsWindow {
         let mut context = WindowCreateContext {
             inner: None,
             handle,
+            is_overlay,
             hide_title_bar,
             display,
             is_movable: params.is_movable,
@@ -543,14 +528,13 @@ impl WindowsWindow {
             cursor_visible,
             drop_target_helper,
             validation_number,
-            main_receiver,
+            main_queue,
             platform_window_handle,
             appearance,
             disable_direct_composition,
             directx_devices,
             invalidate_devices,
             draw_coordinator,
-            parent_hwnd,
         };
         let creation_result = unsafe {
             CreateWindowExW(
@@ -562,7 +546,7 @@ impl WindowsWindow {
                 CW_USEDEFAULT,
                 CW_USEDEFAULT,
                 CW_USEDEFAULT,
-                parent_hwnd,
+                None,
                 None,
                 Some(hinstance.into()),
                 Some(&context as *const _ as *const _),
@@ -575,9 +559,28 @@ impl WindowsWindow {
         let hwnd = creation_result?;
         let this = this.unwrap();
 
-        register_drag_drop(&this)?;
-        set_non_rude_hwnd(hwnd, true);
-        configure_dwm_dark_mode(hwnd, appearance);
+        if is_overlay {
+            let set_dwm = |attribute: DWMWINDOWATTRIBUTE, value: u32| {
+                let _ = unsafe {
+                    DwmSetWindowAttribute(
+                        hwnd,
+                        attribute,
+                        (&raw const value).cast(),
+                        std::mem::size_of::<u32>() as u32,
+                    )
+                };
+            };
+            set_dwm(DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND.0 as u32);
+            set_dwm(DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE);
+            set_dwm(DWMWA_TRANSITIONS_FORCEDISABLED, 1);
+            unsafe {
+                let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), 255, LWA_ALPHA);
+            }
+        } else {
+            register_drag_drop(&this)?;
+            set_non_rude_hwnd(hwnd, true);
+            configure_dwm_dark_mode(hwnd, appearance);
+        }
         this.state.border_offset.update(hwnd)?;
         let placement =
             retrieve_window_placement(hwnd, display, params.bounds, &this.state.border_offset)?;
@@ -602,10 +605,7 @@ impl Drop for WindowsWindow {
     fn drop(&mut self) {
         self.0.dialog_owner.close();
         unsafe { ShowWindowAsync(self.0.hwnd, SW_HIDE).ok().log_err() };
-        // `DestroyWindow` below sends `WM_SHOWWINDOW`; without a callback the
-        // resulting visibility report has nothing to notify.
         self.0.state.callbacks.visibility_change.take();
-        // clone this `Rc` to prevent early release of the pointer
         let this = self.0.clone();
         self.0
             .executor
@@ -613,7 +613,9 @@ impl Drop for WindowsWindow {
                 this.dialog_owner.when_idle().await;
                 let handle = this.hwnd;
                 unsafe {
-                    RevokeDragDrop(handle).log_err();
+                    if !this.is_overlay {
+                        RevokeDragDrop(handle).log_err();
+                    }
                     DestroyWindow(handle).log_err();
                 }
             })
@@ -621,32 +623,28 @@ impl Drop for WindowsWindow {
     }
 }
 
-impl PlatformWindow for WindowsWindow {
-    fn bounds(&self) -> Bounds<Pixels> {
+impl WindowsWindow {
+    pub(crate) fn bounds(&self) -> Bounds<Pixels> {
         self.state.bounds()
     }
 
-    fn raw_hwnd(&self) -> Option<isize> {
+    pub(crate) fn raw_hwnd(&self) -> Option<isize> {
         Some(self.0.hwnd.0 as isize)
     }
 
-    fn is_maximized(&self) -> bool {
+    pub(crate) fn is_maximized(&self) -> bool {
         self.state.is_maximized()
     }
 
-    fn window_bounds(&self) -> WindowBounds {
+    pub(crate) fn window_bounds(&self) -> WindowBounds {
         self.state.window_bounds()
     }
 
-    /// get the logical size of the app's drawable area.
-    ///
-    /// Currently, GPUI uses the logical size of the app to handle mouse interactions (such as
-    /// whether the mouse collides with other elements of GPUI).
-    fn content_size(&self) -> Size<Pixels> {
+    pub(crate) fn content_size(&self) -> Size<Pixels> {
         self.state.content_size()
     }
 
-    fn resize(&mut self, size: Size<Pixels>) {
+    pub(crate) fn resize(&mut self, size: Size<Pixels>) {
         let hwnd = self.0.hwnd;
         let bounds = gpui::bounds(self.bounds().origin, size).to_device_pixels(self.scale_factor());
         let rect = calculate_window_rect(bounds, &self.state.border_offset);
@@ -671,39 +669,39 @@ impl PlatformWindow for WindowsWindow {
             .detach();
     }
 
-    fn scale_factor(&self) -> f32 {
+    pub(crate) fn scale_factor(&self) -> f32 {
         self.state.scale_factor.get()
     }
 
-    fn appearance(&self) -> WindowAppearance {
+    pub(crate) fn appearance(&self) -> WindowAppearance {
         self.state.appearance.get()
     }
 
-    fn display(&self) -> Option<Rc<dyn PlatformDisplay>> {
-        Some(Rc::new(self.state.display.get()))
+    pub(crate) fn display(&self) -> Option<WindowsDisplay> {
+        Some(self.state.display.get())
     }
 
-    fn mouse_position(&self) -> Point<Pixels> {
+    pub(crate) fn mouse_position(&self) -> Point<Pixels> {
         self.0.state.pointer_position(self.0.hwnd)
     }
 
-    fn modifiers(&self) -> Modifiers {
+    pub(crate) fn modifiers(&self) -> Modifiers {
         current_modifiers()
     }
 
-    fn capslock(&self) -> Capslock {
+    pub(crate) fn capslock(&self) -> Capslock {
         current_capslock()
     }
 
-    fn set_input_handler(&mut self, input_handler: PlatformInputHandler) {
+    pub(crate) fn set_input_handler(&mut self, input_handler: PlatformInputHandler) {
         self.state.input_handler.set(Some(input_handler));
     }
 
-    fn take_input_handler(&mut self) -> Option<PlatformInputHandler> {
+    pub(crate) fn take_input_handler(&mut self) -> Option<PlatformInputHandler> {
         self.state.input_handler.take()
     }
 
-    fn activate(&self) {
+    pub(crate) fn activate(&self) {
         let hwnd = self.0.hwnd;
         let this = self.0.clone();
         self.0
@@ -712,7 +710,6 @@ impl PlatformWindow for WindowsWindow {
                 this.set_window_placement().log_err();
 
                 unsafe {
-                    // If the window is minimized, restore it.
                     if IsIconic(hwnd).as_bool() {
                         ShowWindowAsync(hwnd, SW_RESTORE).ok().log_err();
                     }
@@ -721,11 +718,6 @@ impl PlatformWindow for WindowsWindow {
                     SetFocus(Some(hwnd)).ok();
                 }
 
-                // premium ragebait by windows, this is needed because the window
-                // must have received an input event to be able to set itself to foreground
-                // so let's just simulate user input as that seems to be the most reliable way
-                // some more info: https://gist.github.com/Aetopia/1581b40f00cc0cadc93a0e8ccb65dc8c
-                // bonus: this bug also doesn't manifest if you have vs attached to the process
                 let inputs = [
                     INPUT {
                         r#type: INPUT_KEYBOARD,
@@ -749,15 +741,12 @@ impl PlatformWindow for WindowsWindow {
                     },
                 ];
                 unsafe { SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) };
-
-                // todo(windows)
-                // crate `windows 0.56` reports true as Err
                 unsafe { SetForegroundWindow(hwnd).as_bool() };
             })
             .detach();
     }
 
-    fn request_attention(&self) {
+    pub(crate) fn request_attention(&self) {
         if self.is_active() {
             return;
         }
@@ -778,34 +767,38 @@ impl PlatformWindow for WindowsWindow {
             .detach();
     }
 
-    fn is_active(&self) -> bool {
+    pub(crate) fn is_active(&self) -> bool {
         self.0.hwnd == unsafe { GetActiveWindow() }
     }
 
-    fn visibility(&self) -> WindowVisibility {
+    pub(crate) fn visibility(&self) -> WindowVisibility {
         self.0.visibility()
     }
 
-    fn is_hovered(&self) -> bool {
+    pub(crate) fn is_hovered(&self) -> bool {
         self.state.hovered.get()
     }
 
-    fn background_appearance(&self) -> WindowBackgroundAppearance {
+    pub(crate) fn background_appearance(&self) -> WindowBackgroundAppearance {
         self.state.background_appearance.get()
     }
 
-    fn set_title(&mut self, title: &str) {
+    pub(crate) fn set_title(&mut self, title: &str) {
         unsafe { SetWindowTextW(self.0.hwnd, &HSTRING::from(title)) }
             .inspect_err(|e| crate::log::error!("Set title failed: {e}"))
             .ok();
     }
 
-    fn set_background_appearance(&self, background_appearance: WindowBackgroundAppearance) {
+    pub(crate) fn set_background_appearance(
+        &self,
+        background_appearance: WindowBackgroundAppearance,
+    ) {
         self.state.background_appearance.set(background_appearance);
+        if self.0.is_overlay {
+            return;
+        }
         let hwnd = self.0.hwnd;
 
-        // using Dwm APIs for Mica and MicaAlt backdrops.
-        // others follow the set_window_composition_attribute approach
         match background_appearance {
             WindowBackgroundAppearance::Opaque => {
                 set_window_composition_attribute(hwnd, None, 0);
@@ -817,21 +810,19 @@ impl PlatformWindow for WindowsWindow {
                 set_window_composition_attribute(hwnd, Some((0, 0, 0, 0)), 4);
             }
             WindowBackgroundAppearance::MicaBackdrop => {
-                // DWMSBT_MAINWINDOW => MicaBase
                 dwm_set_window_composition_attribute(hwnd, 2);
             }
             WindowBackgroundAppearance::MicaAltBackdrop => {
-                // DWMSBT_TABBEDWINDOW => MicaAlt
                 dwm_set_window_composition_attribute(hwnd, 4);
             }
         }
     }
 
-    fn minimize(&self) {
+    pub(crate) fn minimize(&self) {
         unsafe { ShowWindowAsync(self.0.hwnd, SW_MINIMIZE).ok().log_err() };
     }
 
-    fn zoom(&self) {
+    pub(crate) fn zoom(&self) {
         unsafe {
             if IsWindowVisible(self.0.hwnd).as_bool() {
                 ShowWindowAsync(self.0.hwnd, SW_MAXIMIZE).ok().log_err();
@@ -842,7 +833,7 @@ impl PlatformWindow for WindowsWindow {
         }
     }
 
-    fn toggle_fullscreen(&self) {
+    pub(crate) fn toggle_fullscreen(&self) {
         if unsafe { IsWindowVisible(self.0.hwnd).as_bool() } {
             self.0.toggle_fullscreen();
         } else if let Some(mut status) = self.state.initial_placement.take() {
@@ -851,19 +842,22 @@ impl PlatformWindow for WindowsWindow {
         }
     }
 
-    fn is_fullscreen(&self) -> bool {
+    pub(crate) fn is_fullscreen(&self) -> bool {
         self.state.is_fullscreen()
     }
 
-    fn on_request_frame(&self, callback: Box<dyn FnMut(RequestFrameOptions)>) {
+    pub(crate) fn on_request_frame(&self, callback: Box<dyn FnMut(RequestFrameOptions)>) {
         self.state.callbacks.request_frame.set(Some(callback));
     }
 
-    fn on_input(&self, callback: Box<dyn FnMut(PlatformInput) -> DispatchEventResult>) {
+    pub(crate) fn on_input(
+        &self,
+        callback: Box<dyn FnMut(PlatformInput) -> DispatchEventResult>,
+    ) {
         self.state.callbacks.input.set(Some(callback));
     }
 
-    fn on_active_status_change(&self, callback: Box<dyn FnMut(bool)>) {
+    pub(crate) fn on_active_status_change(&self, callback: Box<dyn FnMut(bool)>) {
         self.0
             .state
             .callbacks
@@ -871,12 +865,12 @@ impl PlatformWindow for WindowsWindow {
             .set(Some(callback));
     }
 
-    fn on_visibility_change(&self, callback: Box<dyn FnMut(WindowVisibility)>) {
+    pub(crate) fn on_visibility_change(&self, callback: Box<dyn FnMut(WindowVisibility)>) {
         self.0.state.last_visibility.set(Some(self.0.visibility()));
         self.0.state.callbacks.visibility_change.set(Some(callback));
     }
 
-    fn on_hover_status_change(&self, callback: Box<dyn FnMut(bool)>) {
+    pub(crate) fn on_hover_status_change(&self, callback: Box<dyn FnMut(bool)>) {
         self.0
             .state
             .callbacks
@@ -884,27 +878,30 @@ impl PlatformWindow for WindowsWindow {
             .set(Some(callback));
     }
 
-    fn on_resize(&self, callback: Box<dyn FnMut(Size<Pixels>, f32)>) {
+    pub(crate) fn on_resize(&self, callback: Box<dyn FnMut(Size<Pixels>, f32)>) {
         self.state.callbacks.resize.set(Some(callback));
     }
 
-    fn on_display_changed(&self, callback: Box<dyn FnMut()>) {
+    pub(crate) fn on_display_changed(&self, callback: Box<dyn FnMut()>) {
         self.state.callbacks.display_changed.set(Some(callback));
     }
 
-    fn on_moved(&self, callback: Box<dyn FnMut()>) {
+    pub(crate) fn on_moved(&self, callback: Box<dyn FnMut()>) {
         self.state.callbacks.moved.set(Some(callback));
     }
 
-    fn on_should_close(&self, callback: Box<dyn FnMut() -> bool>) {
+    pub(crate) fn on_should_close(&self, callback: Box<dyn FnMut() -> bool>) {
         self.state.callbacks.should_close.set(Some(callback));
     }
 
-    fn on_close(&self, callback: Box<dyn FnOnce()>) {
+    pub(crate) fn on_close(&self, callback: Box<dyn FnOnce()>) {
         self.state.callbacks.close.set(Some(callback));
     }
 
-    fn on_hit_test_window_control(&self, callback: Box<dyn FnMut() -> Option<WindowControlArea>>) {
+    pub(crate) fn on_hit_test_window_control(
+        &self,
+        callback: Box<dyn FnMut() -> Option<WindowControlArea>>,
+    ) {
         self.0
             .state
             .callbacks
@@ -912,7 +909,7 @@ impl PlatformWindow for WindowsWindow {
             .set(Some(callback));
     }
 
-    fn on_appearance_changed(&self, callback: Box<dyn FnMut()>) {
+    pub(crate) fn on_appearance_changed(&self, callback: Box<dyn FnMut()>) {
         self.0
             .state
             .callbacks
@@ -920,7 +917,7 @@ impl PlatformWindow for WindowsWindow {
             .set(Some(callback));
     }
 
-    fn draw(&self, scene: &Scene) {
+    pub(crate) fn draw(&self, scene: &Scene) {
         self.state
             .renderer
             .borrow_mut()
@@ -928,15 +925,15 @@ impl PlatformWindow for WindowsWindow {
             .log_err();
     }
 
-    fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas> {
+    pub(crate) fn sprite_atlas(&self) -> Arc<DirectXAtlas> {
         self.state.renderer.borrow().sprite_atlas()
     }
 
-    fn get_raw_handle(&self) -> HWND {
+    pub(crate) fn get_raw_handle(&self) -> HWND {
         self.0.hwnd
     }
 
-    fn update_ime_position(&self, bounds: Bounds<Pixels>) {
+    pub(crate) fn update_ime_position(&self, bounds: Bounds<Pixels>) {
         let scale_factor = self.state.scale_factor.get();
         let caret_position = POINT {
             x: (bounds.origin.x.as_f32() * scale_factor) as i32,
@@ -947,8 +944,7 @@ impl PlatformWindow for WindowsWindow {
         self.0.update_ime_position(self.0.hwnd, caret_position);
     }
 
-    fn play_system_bell(&self) {
-        // MB_OK: The sound specified as the Windows Default Beep sound.
+    pub(crate) fn play_system_bell(&self) {
         let _ = unsafe { MessageBeep(MB_OK) };
     }
 }

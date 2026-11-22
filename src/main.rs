@@ -37,8 +37,7 @@ use windows::Win32::Globalization::{
 use windows::Win32::Graphics::Gdi::ClientToScreen;
 use windows::Win32::System::SystemInformation::GetLocalTime;
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetCursorPos, IsIconic, SYSTEM_PARAMETERS_INFO_ACTION, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
-    SW_RESTORE, SetForegroundWindow, ShowWindow, SystemParametersInfoW, USER_DEFAULT_SCREEN_DPI,
+    GetCursorPos, IsIconic, SW_RESTORE, SetForegroundWindow, ShowWindow, USER_DEFAULT_SCREEN_DPI,
 };
 
 const APP_NAME: &str = "Jot";
@@ -381,20 +380,6 @@ fn client_origin(hwnd: isize) -> POINT {
     let mut origin = POINT::default();
     let _ = unsafe { ClientToScreen(HWND(hwnd as _), &mut origin) };
     origin
-}
-
-fn system_u32(action: SYSTEM_PARAMETERS_INFO_ACTION) -> Option<u32> {
-    let mut value = 0u32;
-    unsafe {
-        SystemParametersInfoW(
-            action,
-            0,
-            Some((&raw mut value).cast()),
-            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
-        )
-    }
-    .is_ok()
-    .then_some(value)
 }
 
 fn time_date() -> String {

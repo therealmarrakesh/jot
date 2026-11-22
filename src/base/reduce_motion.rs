@@ -1,9 +1,7 @@
 //! Honors Windows' client-area animation preference.
 
 use gpui::{App, Global};
-use windows::Win32::UI::WindowsAndMessaging::{
-    SPI_GETCLIENTAREAANIMATION, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SystemParametersInfoW,
-};
+use windows::Win32::UI::WindowsAndMessaging::SPI_GETCLIENTAREAANIMATION;
 
 #[derive(Default)]
 struct SystemReduceMotion {
@@ -13,19 +11,10 @@ struct SystemReduceMotion {
 impl Global for SystemReduceMotion {}
 
 pub(crate) fn init(cx: &mut App) {
-    let mut animations_enabled = 0i32;
-    let ok = unsafe {
-        SystemParametersInfoW(
-            SPI_GETCLIENTAREAANIMATION,
-            0,
-            Some((&raw mut animations_enabled).cast()),
-            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
-        )
-    }
-    .is_ok();
-    let Some(reduce) = ok.then_some(animations_enabled == 0) else {
+    let Some(animations_enabled) = gpui::system_parameters_u32(SPI_GETCLIENTAREAANIMATION.0) else {
         return;
     };
+    let reduce = animations_enabled == 0;
     let applied = cx
         .try_global::<SystemReduceMotion>()
         .and_then(|state| state.applied);

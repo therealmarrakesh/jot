@@ -1,4 +1,3 @@
-
 mod clipboard;
 mod dialog;
 mod direct_manipulation;
@@ -23,7 +22,6 @@ pub(crate) use directx_atlas::*;
 pub(crate) use directx_devices::*;
 pub(crate) use directx_renderer::*;
 pub(crate) use dispatcher::*;
-pub(crate) use display::*;
 pub(crate) use events::*;
 pub(crate) use keyboard::*;
 pub(crate) use platform::*;
@@ -33,7 +31,9 @@ pub(crate) use vsync::*;
 pub(crate) use window::*;
 pub(crate) use wrapper::*;
 
+pub use display::WindowsDisplay;
 pub use platform::{SaveChoice, SavePathOptions, WindowsPlatform, prompt_for_save_path};
+pub use util::system_parameters_u32;
 pub use window::set_window_min_size;
 
 pub(crate) use windows::Win32::Foundation::HWND;

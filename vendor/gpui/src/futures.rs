@@ -1,4 +1,4 @@
-//! Minimal in-house replacement for the `futures` crate.
+//! Minimal in-house async channels, mutex, and future combinators.
 
 use std::{
     cell::UnsafeCell,
@@ -13,11 +13,7 @@ use std::{
 
 pub use std::future::Future as StdFuture;
 
-pub mod prelude {
-    pub use super::future::{FutureExt as _, StreamExt as _};
-}
-
-pub use future::{BoxFuture, Either, FutureExt, LocalBoxFuture, StreamExt};
+pub use future::{Either, FutureExt, LocalBoxFuture};
 
 pub mod channel {
     pub mod oneshot {
@@ -145,19 +141,6 @@ pub mod channel {
                     waker.wake();
                 }
             }
-
-            pub fn try_recv(&mut self) -> Result<Option<T>, Canceled> {
-                let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-                if let Some(val) = state.value.take() {
-                    self.done = true;
-                    Ok(Some(val))
-                } else if state.sender_dropped {
-                    self.done = true;
-                    Err(Canceled)
-                } else {
-                    Ok(None)
-                }
-            }
         }
 
         impl<T> Unpin for Receiver<T> {}
@@ -194,12 +177,8 @@ pub mod channel {
     pub mod mpsc {
         use super::super::*;
 
-        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-        pub struct RecvError;
-
         struct State<T> {
             queue: VecDeque<T>,
-            capacity: Option<usize>,
             senders: usize,
             receiver_dropped: bool,
             waker: Option<Waker>,
@@ -213,13 +192,9 @@ pub mod channel {
             state: Arc<Mutex<State<T>>>,
         }
 
-        pub type Sender<T> = UnboundedSender<T>;
-        pub type Receiver<T> = UnboundedReceiver<T>;
-
         pub fn unbounded<T>() -> (UnboundedSender<T>, UnboundedReceiver<T>) {
             let state = Arc::new(Mutex::new(State {
                 queue: VecDeque::new(),
-                capacity: None,
                 senders: 1,
                 receiver_dropped: false,
                 waker: None,
@@ -230,26 +205,6 @@ pub mod channel {
                 },
                 UnboundedReceiver { state },
             )
-        }
-
-        pub fn bounded<T>(capacity: usize) -> (Sender<T>, Receiver<T>) {
-            let state = Arc::new(Mutex::new(State {
-                queue: VecDeque::new(),
-                capacity: Some(capacity),
-                senders: 1,
-                receiver_dropped: false,
-                waker: None,
-            }));
-            (
-                UnboundedSender {
-                    state: state.clone(),
-                },
-                UnboundedReceiver { state },
-            )
-        }
-
-        pub fn channel<T>(_buffer: usize) -> (Sender<T>, Receiver<T>) {
-            unbounded()
         }
 
         impl<T> Clone for UnboundedSender<T> {
@@ -265,22 +220,10 @@ pub mod channel {
         }
 
         impl<T> UnboundedSender<T> {
-            pub fn is_closed(&self) -> bool {
-                self.state
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .receiver_dropped
-            }
-
-            pub fn try_send(&self, msg: T) -> Result<(), T> {
+            pub fn unbounded_send(&self, msg: T) -> Result<(), T> {
                 let waker = {
                     let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
                     if state.receiver_dropped {
-                        return Err(msg);
-                    }
-                    if let Some(cap) = state.capacity
-                        && state.queue.len() >= cap
-                    {
                         return Err(msg);
                     }
                     state.queue.push_back(msg);
@@ -290,10 +233,6 @@ pub mod channel {
                     waker.wake();
                 }
                 Ok(())
-            }
-
-            pub fn unbounded_send(&self, msg: T) -> Result<(), T> {
-                self.try_send(msg)
             }
         }
 
@@ -352,26 +291,6 @@ pub mod channel {
         impl<T> UnboundedReceiver<T> {
             pub fn next(&mut self) -> Next<'_, T> {
                 Next { receiver: self }
-            }
-
-            pub async fn recv(&mut self) -> Result<T, RecvError> {
-                self.next().await.ok_or(RecvError)
-            }
-
-            pub fn try_recv(&mut self) -> Result<T, RecvError> {
-                self.state
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .queue
-                    .pop_front()
-                    .ok_or(RecvError)
-            }
-
-            pub fn close(&mut self) {
-                self.state
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .receiver_dropped = true;
             }
         }
     }
@@ -493,7 +412,6 @@ pub mod lock {
 pub mod future {
     use super::*;
 
-    pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
     pub type LocalBoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -580,41 +498,14 @@ pub mod future {
         }
     }
 
-    pub fn pending<T>() -> std::future::Pending<T> {
-        std::future::pending()
-    }
-
     pub trait FutureExt: Future {
-        fn boxed<'a>(self) -> BoxFuture<'a, Self::Output>
-        where
-            Self: Sized + Send + 'a,
-        {
-            Box::pin(self)
-        }
-
         fn boxed_local<'a>(self) -> LocalBoxFuture<'a, Self::Output>
         where
             Self: Sized + 'a,
         {
             Box::pin(self)
         }
-
-        fn now_or_never(self) -> Option<Self::Output>
-        where
-            Self: Sized,
-        {
-            let waker = Waker::noop();
-            let mut cx = Context::from_waker(waker);
-            let mut fut = std::pin::pin!(self);
-            match fut.as_mut().poll(&mut cx) {
-                Poll::Ready(val) => Some(val),
-                Poll::Pending => None,
-            }
-        }
     }
 
     impl<F: Future + ?Sized> FutureExt for F {}
-
-    pub trait StreamExt {}
-    impl<T> StreamExt for super::channel::mpsc::UnboundedReceiver<T> {}
 }

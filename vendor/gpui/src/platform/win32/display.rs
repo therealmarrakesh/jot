@@ -1,7 +1,6 @@
-use gpui::gpui_util::ResultExt;
 use crate::smallvec::SmallVec;
-use std::rc::Rc;
 use gpui::Uuid;
+use gpui::gpui_util::ResultExt;
 use windows::{
     Win32::{
         Foundation::*,
@@ -16,13 +15,14 @@ use windows::{
 
 use crate::platform::win32::logical_point;
 use gpui::{
-    Bounds, DevicePixels, DisplayId, Pixels, PlatformDisplay, point, refresh_interval_from_hz, size,
+    Bounds, DEFAULT_WINDOW_SIZE, DevicePixels, DisplayId, Pixels, point, refresh_interval_from_hz,
+    size,
 };
 
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct WindowsDisplay {
-    pub handle: HMONITOR,
-    pub display_id: DisplayId,
+pub struct WindowsDisplay {
+    pub(crate) handle: HMONITOR,
+    pub(crate) display_id: DisplayId,
     scale_factor: f32,
     bounds: Bounds<Pixels>,
     visible_bounds: Bounds<Pixels>,
@@ -80,7 +80,6 @@ impl WindowsDisplay {
     }
 
     pub fn primary_monitor() -> Option<Self> {
-        // https://devblogs.microsoft.com/oldnewthing/20070809-00/?p=25643
         const POINT_ZERO: POINT = POINT { x: 0, y: 0 };
         let monitor = unsafe { MonitorFromPoint(POINT_ZERO, MONITOR_DEFAULTTOPRIMARY) };
         if monitor.is_invalid() {
@@ -93,13 +92,10 @@ impl WindowsDisplay {
         WindowsDisplay::new(Self::display_id_for_monitor(monitor))
     }
 
-    /// The DPI scale factor of this monitor, independent of whatever monitor
-    /// a not-yet-positioned window currently happens to be on.
     pub(crate) fn scale_factor(&self) -> f32 {
         self.scale_factor
     }
 
-    /// Check if the center point of given bounds is inside this monitor
     pub fn check_given_bounds(&self, bounds: Bounds<Pixels>) -> bool {
         let center = bounds.center();
         let center = POINT {
@@ -117,56 +113,55 @@ impl WindowsDisplay {
         }
     }
 
-    pub fn displays() -> Vec<Rc<dyn PlatformDisplay>> {
+    pub fn displays() -> Vec<WindowsDisplay> {
         available_monitors()
             .into_iter()
-            .filter_map(|handle| {
-                Some(
-                    Rc::new(WindowsDisplay::new(Self::display_id_for_monitor(handle))?)
-                        as Rc<dyn PlatformDisplay>,
-                )
-            })
+            .filter_map(|handle| WindowsDisplay::new(Self::display_id_for_monitor(handle)))
             .collect()
     }
 
     pub fn physical_bounds(&self) -> Bounds<DevicePixels> {
         self.physical_bounds
     }
-}
 
-impl PlatformDisplay for WindowsDisplay {
-    fn id(&self) -> DisplayId {
+    pub fn id(&self) -> DisplayId {
         self.display_id
     }
 
-    fn uuid(&self) -> crate::anyhow::Result<Uuid> {
+    pub fn uuid(&self) -> crate::anyhow::Result<Uuid> {
         Ok(self.uuid)
     }
 
-    fn bounds(&self) -> Bounds<Pixels> {
+    pub fn bounds(&self) -> Bounds<Pixels> {
         self.bounds
     }
 
-    fn visible_bounds(&self) -> Bounds<Pixels> {
+    pub fn visible_bounds(&self) -> Bounds<Pixels> {
         self.visible_bounds
     }
 
-    fn refresh_interval(&self) -> Option<std::time::Duration> {
+    pub fn default_bounds(&self) -> Bounds<Pixels> {
+        let bounds = self.bounds();
+        let center = bounds.center();
+        let clipped_window_size = DEFAULT_WINDOW_SIZE.min(&bounds.size);
+
+        let offset = clipped_window_size / 2.0;
+        let origin = point(center.x - offset.width, center.y - offset.height);
+        Bounds::new(origin, clipped_window_size)
+    }
+
+    pub fn refresh_interval(&self) -> Option<std::time::Duration> {
         get_monitor_info(self.handle)
             .log_err()
             .and_then(|info| refresh_interval_for_device(&info.szDevice))
     }
 }
 
-/// The refresh rate of the monitor's current mode. With variable refresh
-/// rate, the mode's rate is the maximum.
 fn refresh_interval_for_device(device_name: &[u16; 32]) -> Option<std::time::Duration> {
     let mut mode = DEVMODEW {
         dmSize: std::mem::size_of::<DEVMODEW>() as u16,
         ..Default::default()
     };
-    // SAFETY: `device_name` is the null-terminated `szDevice` from
-    // `GetMonitorInfoW`, and `mode.dmSize` is initialized.
     let found = unsafe {
         EnumDisplaySettingsW(
             PCWSTR(device_name.as_ptr()),
@@ -174,11 +169,7 @@ fn refresh_interval_for_device(device_name: &[u16; 32]) -> Option<std::time::Dur
             &mut mode,
         )
     };
-    if !found.as_bool() {
-        return None;
-    }
-    // 0 and 1 mean the hardware's default rate, which isn't reported.
-    if mode.dmDisplayFrequency <= 1 {
+    if !found.as_bool() || mode.dmDisplayFrequency <= 1 {
         return None;
     }
     refresh_interval_from_hz(f64::from(mode.dmDisplayFrequency))

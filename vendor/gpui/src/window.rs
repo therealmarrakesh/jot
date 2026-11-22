@@ -1,30 +1,28 @@
 use crate::{
-    Action, AnyElement, AnyView, App, AppContext, Arena,
-    AsyncWindowContext, AvailableSpace, Background, BorderStyle, Bounds, BoxShadow,
-    Capslock, Context, Corners, CursorHideMode, CursorStyle,
-    DispatchActionListener, DispatchNodeId, DispatchTree, DisplayId, Edges, Effect, Entity,
-    EntityId, EventEmitter, FileDropEvent, FontId, Global, GlobalElementId, GlyphId,
-    Hsla, InputHandler, InputPreference, IsZero, KeyBinding, KeyContext, KeyDownEvent, KeyEvent,
+    Action, AnyElement, AnyView, App, AppContext, Arena, AsyncWindowContext, AvailableSpace,
+    Background, BorderStyle, Bounds, BoxShadow, Capslock, Context, Corners, CursorHideMode,
+    CursorStyle, DispatchActionListener, DispatchNodeId, DispatchTree, DisplayId, Edges, Effect,
+    Entity, EntityId, EventEmitter, FileDropEvent, FontId, Global, GlobalElementId, GlyphId, Hsla,
+    InputHandler, InputPreference, IsZero, KeyBinding, KeyContext, KeyDownEvent, KeyEvent,
     Keystroke, KeystrokeEvent, LayoutId, LineLayoutIndex, Modifiers, ModifiersChangedEvent,
-    MonochromeSprite, MouseButton, MouseEvent, MouseMoveEvent, MouseUpEvent, Pixels,
-    PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow, Point,
-    PolychromeSprite, Priority, Quad, Render, RenderGlyphParams,
-    Replay, SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y, ScaledPixels, Scene, Shadow,
-    SharedString, Size, Style, SubscriberSet, Subscription, TaffyLayoutEngine, Task,
-    TextInputStateChange, TextStyle, TextStyleRefinement, UnderlineStyle,
-    WindowAppearance, WindowBackgroundAppearance, WindowBounds,
-    WindowOptions, WindowParams, WindowTextSystem, WindowVisibility, point, prelude::*, px,
-    size, transparent_black,
+    MonochromeSprite, MouseButton, MouseEvent, MouseMoveEvent, MouseUpEvent, Pixels, PlatformInput,
+    PlatformInputHandler, Point, PolychromeSprite, Quad, Render, RenderGlyphParams,
+    SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y, ScaledPixels, Scene, Shadow, SharedString, Size,
+    Style, SubscriberSet, Subscription, TaffyLayoutEngine, Task, TextStyle, TextStyleRefinement,
+    UnderlineStyle, WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowOptions,
+    WindowParams, WindowTextSystem, WindowVisibility, WindowsDisplay, point, prelude::*, px, size,
+    transparent_black,
 };
 
+use crate::Refineable;
+use crate::Uuid;
 use crate::anyhow::{Context as _, Result, anyhow};
 use crate::collections::{FxHashMap, FxHashSet};
 use crate::gpui_util::{ResultExt, measure};
-use crate::sync::RwLock;
-use crate::Refineable;
-use crate::scheduler::Instant;
+use crate::platform::win32::{DirectXAtlas, WindowsWindow};
 use crate::slotmap::SlotMap;
 use crate::smallvec::SmallVec;
+use crate::sync::RwLock;
 use std::{
     any::{Any, TypeId},
     borrow::Cow,
@@ -40,9 +38,8 @@ use std::{
         atomic::{AtomicUsize, Ordering::SeqCst},
     },
     thread::AccessError,
-    time::Duration,
+    time::{Duration, Instant},
 };
-use crate::Uuid;
 
 use crate::util::{
     atomic_incr_if_not_zero, ceil_to_device_pixel, floor_to_device_pixel, round_half_toward_zero,
@@ -95,7 +92,6 @@ struct WindowInvalidatorInner {
     pub draw_phase: DrawPhase,
     pub dirty_views: FxHashSet<EntityId>,
     pub update_count: usize,
-    pub platform_waker: Option<Rc<dyn Fn()>>,
 }
 
 #[derive(Clone)]
@@ -111,7 +107,6 @@ impl WindowInvalidator {
                 draw_phase: DrawPhase::None,
                 dirty_views: FxHashSet::default(),
                 update_count: 0,
-                platform_waker: None,
             })),
         }
     }
@@ -121,14 +116,9 @@ impl WindowInvalidator {
         inner.update_count += 1;
         inner.dirty_views.insert(entity);
         if inner.draw_phase == DrawPhase::None {
-            let became_dirty = !inner.dirty;
             inner.dirty = true;
-            let waker = became_dirty.then(|| inner.platform_waker.clone()).flatten();
             drop(inner);
             cx.push_effect(Effect::Notify { emitter: entity });
-            if let Some(waker) = waker {
-                waker();
-            }
             true
         } else {
             false
@@ -141,35 +131,9 @@ impl WindowInvalidator {
 
     pub fn set_dirty(&self, dirty: bool) {
         let mut inner = self.inner.borrow_mut();
-        let became_dirty = dirty && !inner.dirty;
         inner.dirty = dirty;
         if dirty {
             inner.update_count += 1;
-        }
-        let waker = became_dirty.then(|| inner.platform_waker.clone()).flatten();
-        drop(inner);
-        if let Some(waker) = waker {
-            waker();
-        }
-    }
-
-    pub fn set_platform_waker(&self, waker: Option<Rc<dyn Fn()>>) {
-        let mut inner = self.inner.borrow_mut();
-        inner.platform_waker = waker;
-        let waker = inner.dirty.then(|| inner.platform_waker.clone()).flatten();
-        drop(inner);
-        if let Some(waker) = waker {
-            waker();
-        }
-    }
-
-    /// Wakes the platform's frame-request source so a frame request is
-    /// delivered even if the platform stops requesting frames for idle
-    /// windows. No-op on platforms without a frame waker.
-    pub fn wake_platform(&self) {
-        let waker = self.inner.borrow().platform_waker.clone();
-        if let Some(waker) = waker {
-            waker();
         }
     }
 
@@ -1017,18 +981,14 @@ pub struct Window {
     pub(crate) handle: AnyWindowHandle,
     pub(crate) invalidator: WindowInvalidator,
     pub(crate) removed: bool,
-    pub(crate) platform_window: Box<dyn PlatformWindow>,
+    pub(crate) platform_window: WindowsWindow,
     pub(crate) display_id: Option<DisplayId>,
     pub(crate) display_observers: SubscriberSet<(), AnyObserver>,
     is_resizable: bool,
     is_minimizable: bool,
-    sprite_atlas: Arc<dyn PlatformAtlas>,
+    sprite_atlas: Arc<DirectXAtlas>,
     text_system: Arc<WindowTextSystem>,
     rem_size: Pixels,
-    /// The stack of override values for the window's rem size.
-    ///
-    /// This is used by `with_rem_size` to allow rendering an element tree with
-    /// a given rem size.
     rem_size_override_stack: SmallVec<[Pixels; 8]>,
     pub(crate) viewport_size: Size<Pixels>,
     layout_engine: Option<TaffyLayoutEngine>,
@@ -1040,7 +1000,6 @@ pub struct Window {
     pub(crate) element_opacity: f32,
     pub(crate) content_mask_stack: Vec<ContentMask<Pixels>>,
     pub(crate) requested_autoscroll: Option<Bounds<Pixels>>,
-    focused_text_input_active: bool,
     pub(crate) rendered_frame: Frame,
     pub(crate) next_frame: Frame,
     next_hitbox_id: HitboxId,
@@ -1064,22 +1023,14 @@ pub struct Window {
         SubscriberSet<(), Box<dyn FnMut(WindowVisibility, &mut Window, &mut App) -> bool>>,
     hovered: Rc<Cell<bool>>,
     pub(crate) needs_present: Rc<Cell<bool>>,
-    /// Tracks recent input event timestamps to determine if input is arriving at a high rate.
-    /// Used to selectively enable VRR optimization only when input rate exceeds 60fps.
     pub(crate) input_rate_tracker: Rc<RefCell<InputRateTracker>>,
     last_input_modality: InputModality,
     pub(crate) refreshing: bool,
     pub(crate) activation_observers: SubscriberSet<(), AnyObserver>,
     pub(crate) focus: Option<FocusId>,
     focus_enabled: bool,
-    /// Incremented every time focus moves. Used to invalidate a
-    /// pending keyboard activation state when focus changes.
     pub(crate) focus_generation: u64,
-    pending_input: Option<PendingInput>,
     pending_modifier: ModifierState,
-    pub(crate) pending_input_observers: SubscriberSet<(), AnyObserver>,
-    /// The hitbox that has captured the pointer, if any.
-    /// While captured, mouse events route to this hitbox regardless of hit testing.
     captured_hitbox: Option<HitboxId>,
 }
 
@@ -1140,141 +1091,6 @@ pub(crate) enum DrawPhase {
     Prepaint,
     Paint,
     Focus,
-}
-
-pub(crate) const PENDING_INPUT_TIMEOUT: Duration = Duration::from_secs(1);
-
-/// Pending input for a potential multi-stroke key binding.
-pub struct PendingInputStatus<'a> {
-    keystrokes: &'a [Keystroke],
-    timeout: Option<PendingInputTimeoutStatus>,
-}
-
-impl<'a> PendingInputStatus<'a> {
-    /// Returns the keystrokes entered so far.
-    pub fn keystrokes(&self) -> &'a [Keystroke] {
-        self.keystrokes
-    }
-
-    /// Returns the timeout state for flushing this input, if it needs a timeout.
-    pub fn timeout(&self) -> Option<PendingInputTimeoutStatus> {
-        self.timeout
-    }
-}
-
-/// The timeout state for pending input.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct PendingInputTimeoutStatus {
-    duration: Duration,
-    remaining: Duration,
-    started_at: Option<Instant>,
-    paused: bool,
-}
-
-impl PendingInputTimeoutStatus {
-    /// Returns the full timeout duration.
-    pub fn duration(&self) -> Duration {
-        self.duration
-    }
-
-    /// Returns the duration remaining before pending input is flushed.
-    pub fn remaining(&self, cx: &App) -> Duration {
-        self.started_at
-            .map(|started_at| {
-                self.remaining
-                    .saturating_sub(cx.background_executor().now() - started_at)
-            })
-            .unwrap_or(self.remaining)
-    }
-
-    /// Returns whether the timeout is paused.
-    pub fn is_paused(&self) -> bool {
-        self.paused
-    }
-}
-
-#[derive(Debug)]
-struct PendingInputTimeout {
-    duration: Duration,
-    remaining: Duration,
-    state: PendingInputTimeoutState,
-}
-
-#[derive(Debug)]
-enum PendingInputTimeoutState {
-    Running { started_at: Instant, task: Task<()> },
-    Paused { pause: PendingInputTimeoutPause },
-}
-
-#[derive(Debug)]
-struct PendingInputTimeoutPause {
-    owner_id: EntityId,
-    _release_subscription: Subscription,
-}
-
-impl PendingInputTimeout {
-    fn is_paused(&self) -> bool {
-        matches!(&self.state, PendingInputTimeoutState::Paused { .. })
-    }
-
-    fn pause(&mut self, pause: PendingInputTimeoutPause, now: Instant) -> bool {
-        match std::mem::replace(&mut self.state, PendingInputTimeoutState::Paused { pause }) {
-            PendingInputTimeoutState::Running { started_at, task } => {
-                self.remaining = self.remaining.saturating_sub(now - started_at);
-                drop(task);
-                true
-            }
-            previous_state @ PendingInputTimeoutState::Paused { .. } => {
-                self.state = previous_state;
-                false
-            }
-        }
-    }
-
-    fn pause_owner_id(&self) -> Option<EntityId> {
-        match &self.state {
-            PendingInputTimeoutState::Running { .. } => None,
-            PendingInputTimeoutState::Paused { pause } => Some(pause.owner_id),
-        }
-    }
-
-    fn resume(&mut self, owner_id: EntityId, started_at: Instant, task: Task<()>) -> bool {
-        match std::mem::replace(
-            &mut self.state,
-            PendingInputTimeoutState::Running { started_at, task },
-        ) {
-            PendingInputTimeoutState::Paused { pause } if pause.owner_id == owner_id => true,
-            previous_state => {
-                self.state = previous_state;
-                false
-            }
-        }
-    }
-
-    fn reset_duration(&mut self, duration: Duration) {
-        self.duration = duration;
-        self.remaining = duration;
-    }
-
-    fn status(&self) -> PendingInputTimeoutStatus {
-        let (started_at, paused) = match &self.state {
-            PendingInputTimeoutState::Running { started_at, .. } => (Some(*started_at), false),
-            PendingInputTimeoutState::Paused { .. } => (None, true),
-        };
-        PendingInputTimeoutStatus {
-            duration: self.duration,
-            remaining: self.remaining,
-            started_at,
-            paused,
-        }
-    }
-}
-
-#[derive(Default, Debug)]
-struct PendingInput {
-    keystrokes: SmallVec<[Keystroke; 1]>,
-    focus: Option<FocusId>,
-    timeout: Option<PendingInputTimeout>,
 }
 
 pub(crate) struct ElementStateBox {
@@ -1457,12 +1273,6 @@ impl Window {
                         && now.duration_since(last_frame) < min_interval
                     {
                         deferred_force_render |= force_render;
-                        handle
-                            .update(&mut cx, |_, window, _| {
-                                window.platform_window.schedule_frame();
-                            })
-                            .log_err();
-                        invalidator.wake_platform();
                         return;
                     }
                 }
@@ -1504,23 +1314,8 @@ impl Window {
                         .update(&mut cx, |_, window, _| window.present())
                         .log_err();
                 }
-
-                handle
-                    .update(&mut cx, |_, window, _| {
-                        if window.invalidator.is_dirty()
-                            || !window.next_frame_callbacks.borrow().is_empty()
-                        {
-                            window.platform_window.schedule_frame();
-                        }
-                    })
-                    .log_err();
-
-                if invalidator.is_dirty() || !next_frame_callbacks.borrow().is_empty() {
-                    invalidator.wake_platform();
-                }
             }
         }));
-        invalidator.set_platform_waker(platform_window.frame_waker());
         platform_window.on_resize(Box::new({
             let mut cx = cx.to_async();
             move |_, _| {
@@ -1644,9 +1439,8 @@ impl Window {
             content_mask_stack: Vec::new(),
             element_opacity: 1.0,
             requested_autoscroll: None,
-            focused_text_input_active: false,
-            rendered_frame: Frame::new(DispatchTree::new(cx.keymap.clone(), cx.actions.clone())),
-            next_frame: Frame::new(DispatchTree::new(cx.keymap.clone(), cx.actions.clone())),
+            rendered_frame: Frame::new(DispatchTree::new(cx.keymap.clone())),
+            next_frame: Frame::new(DispatchTree::new(cx.keymap.clone())),
             next_frame_callbacks,
             next_hitbox_id: HitboxId(0),
             dirty_views: FxHashSet::default(),
@@ -1674,9 +1468,7 @@ impl Window {
             focus: None,
             focus_enabled: true,
             focus_generation: 0,
-            pending_input: None,
             pending_modifier: ModifierState::default(),
-            pending_input_observers: SubscriberSet::new(),
             captured_hitbox: None,
         })
     }
@@ -1854,22 +1646,19 @@ impl Window {
     }
 
     /// Move focus to the element associated with the given [`FocusHandle`].
-    pub fn focus(&mut self, handle: &FocusHandle, cx: &mut App) {
+    pub fn focus(&mut self, handle: &FocusHandle, _cx: &mut App) {
         if !self.focus_enabled || self.focus == Some(handle.id) {
             return;
         }
 
         self.focus = Some(handle.id);
         self.focus_generation = self.focus_generation.wrapping_add(1);
-        self.clear_pending_keystrokes(cx);
 
         self.refresh();
     }
 
     /// Remove focus from all elements within this context's window.
-    pub fn blur(&mut self, cx: &mut App) {
-        self.clear_pending_keystrokes(cx);
-
+    pub fn blur(&mut self, _cx: &mut App) {
         if !self.focus_enabled {
             return;
         }
@@ -2081,10 +1870,6 @@ impl Window {
     /// Schedule the given closure to be run directly after the current frame is rendered.
     pub fn on_next_frame(&self, callback: impl FnOnce(&mut Window, &mut App) + 'static) {
         RefCell::borrow_mut(&self.next_frame_callbacks).push(Box::new(callback));
-        self.platform_window.schedule_frame();
-        // Next-frame callbacks create frame demand without dirtying the
-        // window, so the platform's frame source must be woken explicitly.
-        self.invalidator.wake_platform();
     }
 
     /// Schedule a frame to be drawn on the next animation frame.
@@ -2115,27 +1900,6 @@ impl Window {
     {
         let handle = self.handle;
         cx.spawn(async move |app| {
-            let mut async_window_cx = AsyncWindowContext::new_context(app.clone(), handle);
-            f(&mut async_window_cx).await
-        })
-    }
-
-    /// Spawn the future returned by the given closure on the application thread
-    /// pool, with the given priority. The closure is provided a handle to the
-    /// current window and an `AsyncWindowContext` for use within your future.
-    #[track_caller]
-    pub fn spawn_with_priority<AsyncFn, R>(
-        &self,
-        priority: Priority,
-        cx: &App,
-        f: AsyncFn,
-    ) -> Task<R>
-    where
-        R: 'static,
-        AsyncFn: AsyncFnOnce(&mut AsyncWindowContext) -> R + 'static,
-    {
-        let handle = self.handle;
-        cx.spawn_with_priority(priority, async move |app| {
             let mut async_window_cx = AsyncWindowContext::new_context(app.clone(), handle);
             f(&mut async_window_cx).await
         })
@@ -2289,7 +2053,7 @@ impl Window {
     }
 
     /// Determine the display on which the window is visible.
-    pub fn display(&self, cx: &App) -> Option<Rc<dyn PlatformDisplay>> {
+    pub fn display(&self, cx: &App) -> Option<WindowsDisplay> {
         cx.platform
             .displays()
             .into_iter()
@@ -2516,9 +2280,6 @@ impl Window {
     pub fn draw(&mut self, cx: &mut App) -> ArenaClearNeeded {
         let arena_scope = ElementArenaScope::enter(&cx.element_arena);
 
-        if self.platform_window.prepare_frame() {
-            self.refresh();
-        }
         self.invalidate_entities();
         cx.entities.clear_accessed();
         debug_assert!(self.rendered_entity_stack.is_empty());
@@ -2543,27 +2304,14 @@ impl Window {
         self.dirty_views.clear();
         self.next_frame.window_active = self.active.get();
 
-        let focused_text_input_active = if let Some(mut input_handler) = self
+        if let Some(input_handler) = self
             .next_frame
             .input_handlers
             .iter_mut()
             .rev()
             .find_map(|h| h.take())
         {
-            let accepts_text_input = input_handler.accepts_text_input(self, cx);
             self.platform_window.set_input_handler(input_handler);
-            accepts_text_input
-        } else {
-            false
-        };
-        if focused_text_input_active != self.focused_text_input_active {
-            self.focused_text_input_active = focused_text_input_active;
-            self.platform_window
-                .text_input_state_changed(if focused_text_input_active {
-                    TextInputStateChange::FocusGained
-                } else {
-                    TextInputStateChange::FocusLost
-                });
         }
 
         self.layout_engine.as_mut().unwrap().clear();
@@ -3539,7 +3287,6 @@ impl Window {
             (quantized_origin.y.fract() * SUBPIXEL_VARIANTS_Y as f32) as u8,
         );
         let integer_origin = quantized_origin.map(|c| ScaledPixels(c.trunc()));
-        let dilation = self.text_system().glyph_dilation_for_color(color);
         let params = RenderGlyphParams {
             font_id,
             glyph_id,
@@ -3547,14 +3294,14 @@ impl Window {
             subpixel_variant,
             scale_factor,
             is_emoji: false,
-            dilation,
+            dilation: 0,
         };
 
         let raster_bounds = self.text_system().raster_bounds(&params)?;
         if !raster_bounds.is_zero() {
             let tile = self
                 .sprite_atlas
-                .get_or_insert_with(params.clone().into(), &mut || {
+                .get_or_insert_with(params.clone().into(), || {
                     let (size, bytes) = self.text_system().rasterize_glyph(&params)?;
                     Ok(Some((size, Cow::Owned(bytes))))
                 })?
@@ -3611,7 +3358,7 @@ impl Window {
         if !raster_bounds.is_zero() {
             let tile = self
                 .sprite_atlas
-                .get_or_insert_with(params.clone().into(), &mut || {
+                .get_or_insert_with(params.clone().into(), || {
                     let (size, bytes) = self.text_system().rasterize_glyph(&params)?;
                     Ok(Some((size, Cow::Owned(bytes))))
                 })?
@@ -3980,14 +3727,7 @@ impl Window {
     /// binding for the action (last binding added to the keymap).
     pub fn keystroke_text_for(&self, action: &dyn Action) -> String {
         self.highest_precedence_binding_for_action(action)
-            .map(|binding| {
-                binding
-                    .keystrokes()
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            })
+            .map(|binding| binding.keystroke().to_string())
             .unwrap_or_else(|| action.name().to_string())
     }
 
@@ -4243,74 +3983,24 @@ impl Window {
             return;
         }
 
-        let mut currently_pending = self.pending_input.take().unwrap_or_default();
-        if currently_pending.focus.is_some() && currently_pending.focus != self.focus {
-            currently_pending = PendingInput::default();
-        }
+        let (bindings, context_stack) = self
+            .rendered_frame
+            .dispatch_tree
+            .dispatch_key(&keystroke, &dispatch_path);
 
-        let match_result = self.rendered_frame.dispatch_tree.dispatch_key(
-            currently_pending.keystrokes,
-            keystroke.clone(),
-            &dispatch_path,
-        );
-
-        if !match_result.to_replay.is_empty() {
-            self.replay_pending_input(match_result.to_replay, cx);
-            cx.propagate_event = true;
-        }
-
-        if !match_result.pending.is_empty() {
-            let previous_timeout = currently_pending.timeout.take();
-            currently_pending.keystrokes = match_result.pending;
-            currently_pending.focus = self.focus;
-
-            let text_input_requires_timeout = event
-                .downcast_ref::<KeyDownEvent>()
-                .filter(|key_down| key_down.keystroke.key_char.is_some())
-                .and_then(|_| self.platform_window.take_input_handler())
-                .map_or(false, |mut input_handler| {
-                    let accepts = input_handler.accepts_text_input(self, cx);
-                    self.platform_window.set_input_handler(input_handler);
-                    accepts
-                });
-
-            let needs_timeout = previous_timeout.is_some()
-                || match_result.pending_has_binding
-                || text_input_requires_timeout;
-            currently_pending.timeout = if needs_timeout {
-                match previous_timeout {
-                    Some(mut timeout) if timeout.is_paused() => {
-                        timeout.reset_duration(PENDING_INPUT_TIMEOUT);
-                        Some(timeout)
-                    }
-                    previous_timeout => {
-                        drop(previous_timeout);
-                        Some(self.new_pending_input_timeout(PENDING_INPUT_TIMEOUT, cx))
-                    }
-                }
-            } else {
-                None
-            };
-            self.pending_input = Some(currently_pending);
-            self.pending_input_changed(cx);
-            cx.propagate_event = false;
-            return;
-        }
-
-        // Interceptors or replayed actions may have changed whether the input handler accepts text.
+        // Interceptors may have changed whether the input handler accepts text.
         let input_preference = self.input_preference(event, cx);
         if input_preference == InputPreference::KeyBindings {
-            for binding in match_result.bindings {
+            for binding in bindings {
                 self.dispatch_action_on_node(node_id, binding.action.as_ref(), cx);
                 if !cx.propagate_event {
                     self.dispatch_keystroke_observers(
                         &keystroke,
                         input_preference,
                         Some(binding.action.as_ref()),
-                        match_result.context_stack,
+                        context_stack,
                         cx,
                     );
-                    self.pending_input_changed(cx);
                     return;
                 }
             }
@@ -4321,48 +4011,9 @@ impl Window {
             Some(&keystroke),
             input_preference,
             dispatch_path,
-            match_result.context_stack,
+            context_stack,
             cx,
         );
-        self.pending_input_changed(cx);
-    }
-
-    fn new_pending_input_timeout(&self, duration: Duration, cx: &App) -> PendingInputTimeout {
-        let (started_at, task) = self.start_pending_input_timeout(duration, cx);
-        PendingInputTimeout {
-            duration,
-            remaining: duration,
-            state: PendingInputTimeoutState::Running { started_at, task },
-        }
-    }
-
-    fn start_pending_input_timeout(&self, remaining: Duration, cx: &App) -> (Instant, Task<()>) {
-        let started_at = cx.background_executor().now();
-        let task = self.spawn(cx, async move |cx| {
-            cx.background_executor.timer(remaining).await;
-            cx.update(move |window, cx| {
-                let Some(currently_pending) = window
-                    .pending_input
-                    .take()
-                    .filter(|pending| pending.focus == window.focus)
-                else {
-                    return;
-                };
-
-                let node_id = window.focus_node_id_in_rendered_frame(window.focus);
-                let dispatch_path = window.rendered_frame.dispatch_tree.dispatch_path(node_id);
-
-                let to_replay = window
-                    .rendered_frame
-                    .dispatch_tree
-                    .flush_dispatch(currently_pending.keystrokes, &dispatch_path);
-
-                window.pending_input_changed(cx);
-                window.replay_pending_input(to_replay, cx)
-            })
-            .log_err();
-        });
-        (started_at, task)
     }
 
     fn finish_dispatch_key_event(
@@ -4389,25 +4040,6 @@ impl Window {
         }
     }
 
-    pub(crate) fn pending_input_changed(&mut self, cx: &mut App) {
-        self.pending_input_observers
-            .clone()
-            .retain(&(), |callback| callback(self, cx));
-    }
-
-    fn defer_pending_input_changed(&self, cx: &mut App) {
-        // Avoid re-entrant entity updates by deferring observer notifications to the end of the
-        // current effect cycle, and only for this window.
-        let window_handle = self.handle;
-        cx.defer(move |cx| {
-            window_handle
-                .update(cx, |_, window, cx| {
-                    window.pending_input_changed(cx);
-                })
-                .ok();
-        });
-    }
-
     fn dispatch_key_down_up_event(
         &mut self,
         event: &dyn Any,
@@ -4428,7 +4060,6 @@ impl Window {
 
         // Bubble phase
         for node_id in dispatch_path.iter().rev() {
-            // Handle low level key events
             let node = self.rendered_frame.dispatch_tree.node(*node_id);
             for key_listener in node.key_listeners.clone() {
                 key_listener(event, DispatchPhase::Bubble, self, cx);
@@ -4455,153 +4086,6 @@ impl Window {
                 if !cx.propagate_event {
                     return;
                 }
-            }
-        }
-    }
-
-    /// Determine whether a potential multi-stroke key binding is in progress on this window.
-    pub fn has_pending_keystrokes(&self) -> bool {
-        self.pending_input().is_some()
-    }
-
-    pub(crate) fn clear_pending_keystrokes(&mut self, cx: &mut App) {
-        if self.pending_input.take().is_some() {
-            self.defer_pending_input_changed(cx);
-        }
-    }
-
-    /// Returns pending input that can still complete a multi-stroke key binding. Input left over
-    /// from a previous focus can never complete one.
-    pub fn pending_input(&self) -> Option<PendingInputStatus<'_>> {
-        self.pending_input
-            .as_ref()
-            .filter(|pending_input| pending_input.focus == self.focus)
-            .map(|pending_input| PendingInputStatus {
-                keystrokes: pending_input.keystrokes.as_slice(),
-                timeout: pending_input
-                    .timeout
-                    .as_ref()
-                    .map(PendingInputTimeout::status),
-            })
-    }
-
-    /// Pauses or resumes the current pending input timeout on behalf of `owner`.
-    ///
-    /// A paused timeout resumes automatically if `owner` is released. Returns whether the timeout
-    /// state changed. A timeout paused by one owner cannot be resumed by another.
-    pub fn set_pending_input_timeout_paused<T: 'static>(
-        &mut self,
-        owner: &Entity<T>,
-        paused: bool,
-        cx: &mut App,
-    ) -> bool {
-        let owner_id = owner.entity_id();
-        if !paused {
-            return self.resume_pending_input_timeout(owner_id, cx);
-        }
-
-        let timeout = self
-            .pending_input
-            .as_ref()
-            .filter(|pending_input| pending_input.focus == self.focus)
-            .and_then(|pending_input| pending_input.timeout.as_ref());
-        let Some(timeout) = timeout else {
-            return false;
-        };
-        if timeout.is_paused() {
-            return false;
-        }
-
-        let release_subscription = self.observe_release(owner, cx, move |_, window, cx| {
-            window.resume_pending_input_timeout(owner_id, cx);
-        });
-        let now = cx.background_executor().now();
-        let changed = self
-            .pending_input
-            .as_mut()
-            .filter(|pending_input| pending_input.focus == self.focus)
-            .and_then(|pending_input| pending_input.timeout.as_mut())
-            .is_some_and(|timeout| {
-                timeout.pause(
-                    PendingInputTimeoutPause {
-                        owner_id,
-                        _release_subscription: release_subscription,
-                    },
-                    now,
-                )
-            });
-
-        if changed {
-            self.defer_pending_input_changed(cx);
-        }
-        changed
-    }
-
-    fn resume_pending_input_timeout(&mut self, owner_id: EntityId, cx: &mut App) -> bool {
-        let Some(remaining) = self
-            .pending_input
-            .as_ref()
-            .and_then(|pending_input| pending_input.timeout.as_ref())
-            .filter(|timeout| timeout.pause_owner_id() == Some(owner_id))
-            .map(|timeout| timeout.remaining)
-        else {
-            return false;
-        };
-
-        let (started_at, task) = self.start_pending_input_timeout(remaining, cx);
-        let changed = self
-            .pending_input
-            .as_mut()
-            .and_then(|pending_input| pending_input.timeout.as_mut())
-            .is_some_and(|timeout| timeout.resume(owner_id, started_at, task));
-
-        if changed {
-            self.defer_pending_input_changed(cx);
-        }
-        changed
-    }
-
-    /// Returns the currently pending input keystrokes that might result in a multi-stroke key binding.
-    pub fn pending_input_keystrokes(&self) -> Option<&[Keystroke]> {
-        self.pending_input()
-            .map(|pending_input| pending_input.keystrokes())
-    }
-
-    fn replay_pending_input(&mut self, replays: SmallVec<[Replay; 1]>, cx: &mut App) {
-        let node_id = self.focus_node_id_in_rendered_frame(self.focus);
-        let dispatch_path = self.rendered_frame.dispatch_tree.dispatch_path(node_id);
-
-        'replay: for replay in replays {
-            let event = KeyDownEvent {
-                keystroke: replay.keystroke.clone(),
-                is_held: false,
-                prefer_character_input: true,
-            };
-
-            cx.propagate_event = true;
-            for binding in replay.bindings {
-                self.dispatch_action_on_node(node_id, binding.action.as_ref(), cx);
-                if !cx.propagate_event {
-                    self.dispatch_keystroke_observers(
-                        &replay.keystroke,
-                        InputPreference::KeyBindings,
-                        Some(binding.action.as_ref()),
-                        Vec::default(),
-                        cx,
-                    );
-                    continue 'replay;
-                }
-            }
-
-            self.dispatch_key_down_up_event(&event, &dispatch_path, cx);
-            if !cx.propagate_event {
-                continue 'replay;
-            }
-            if let Some(input) = replay.keystroke.key_char.as_ref().cloned()
-                && let Some(mut input_handler) = self.platform_window.take_input_handler()
-            {
-                input_handler.dispatch_input(&input, self, cx);
-                self.platform_window.set_input_handler(input_handler)
             }
         }
     }
@@ -4794,21 +4278,6 @@ impl Window {
             .collect()
     }
 
-    /// Returns all available actions for the focused element.
-    pub fn available_actions(&self, cx: &App) -> Vec<Box<dyn Action>> {
-        let node_id = self.focus_node_id_in_rendered_frame(self.focus);
-        let mut actions = self.rendered_frame.dispatch_tree.available_actions(node_id);
-        for action_type in cx.global_action_listeners.keys() {
-            if let Err(ix) = actions.binary_search_by_key(action_type, |a| a.as_any().type_id()) {
-                let action = cx.actions.build_action_type(action_type).ok();
-                if let Some(action) = action {
-                    actions.insert(ix, action);
-                }
-            }
-        }
-        actions
-    }
-
     /// Returns key bindings that invoke an action on the currently focused element. Bindings are
     /// returned in the order they were added. For display, the last binding should take precedence.
     pub fn bindings_for_action(&self, action: &dyn Action) -> Vec<KeyBinding> {
@@ -4875,13 +4344,6 @@ impl Window {
         let dispatch_tree = &self.rendered_frame.dispatch_tree;
         let context_stack = self.context_stack_for_focus_handle(focus_handle)?;
         dispatch_tree.highest_precedence_binding_for_action(action, &context_stack)
-    }
-
-    /// Find the bindings that can follow the current input sequence for the current context stack.
-    pub fn possible_bindings_for_input(&self, input: &[Keystroke]) -> Vec<KeyBinding> {
-        self.rendered_frame
-            .dispatch_tree
-            .possible_next_bindings_for_input(input, &self.context_stack())
     }
 
     fn context_stack_for_focus_handle(
