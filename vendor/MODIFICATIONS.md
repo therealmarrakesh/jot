@@ -2,16 +2,6 @@
 
 The crates in this folder are copies of crates.io releases, licensed under the Apache License 2.0 (each crate's `LICENSE-APACHE`). The files below were changed for Jot. The registry extraction files (`.cargo-ok`, `.cargo_vcs_info.json`, `Cargo.lock`, `Cargo.toml.orig`) were also removed.
 
-## gpui-base 0.7.3
-
-- Trimmed to the modules Jot uses (`input`, `scrollbar`, `motion`, `reduce_motion`, `theme`, `theme_tokens`, `actions`, `geometry`, `global_state`, `auto_scroll`, `animation`, `text_boundary`) and dropped unused dependencies (`serde`, `schemars`, `lsp-types`, `regex`, `tracing`, `instant`, `web-time`, `smol`, `html5ever`, `markdown`, `chrono`, `windows 0.58`, etc.), switching Windows API calls to `windows-sys 0.60`.
-- `src/input/`: removed code-editor mode (`EditorMode`, syntax highlighting, folding, diagnostics, LSP, auto-close, smart indent, built-in search panel) and `NumberInput` stepping/regex validation; made `InputEditorStyle.caret` optional (`None` by default so Jot renders its own 1px caret) and resolved selection highlight directly from `colors.selection`.
-- `src/input/base/state.rs`: wheel scrolling by WinUI's notch size (using the system's lines and characters per notch) while letting `Ctrl+Wheel` bubble for zoom, re-binding an editor to a new window when its tab moves between windows, `default_rope` zero-copy initialization, undo availability and clean/saved-state queries (`can_undo`, `begin_save`, `mark_saved_version`, `is_clean`), atomic multi-range replace, and line-ending normalization on paste.
-- `src/input/base/undo_manager.rs`: undo availability and saved-version tracking (`has_undos`, `begin_save`, `mark_saved_version`, `is_clean`) are exposed outside tests, breaking coalescing on save.
-- `src/input/editor/display_map/text_wrapper.rs`, `display_map.rs`, `wrap_map.rs`: lines made only of characters from certain Unicode ranges wrap by character width without text shaping; unified `prepare_layout` avoids redundant full-file re-wraps on open/zoom/resize; sequential `lines_at` traversal with printable-ASCII fast-fit skips per-line shaping/wrapping for lines guaranteed to fit.
-- `src/input/editor/display_map/inline_line.rs`, `src/input/base/element.rs`: off-screen wrapped sub-lines of huge logical lines stay unshaped (`InputLine::unshaped`), avoiding whole-line copies and shaping off-screen rows on every frame.
-- `src/input/base/blink_cursor.rs`, `src/input/base/state.rs`: on Windows the caret blinks at the system's caret blink rate (never, when blinking is turned off) and stays visible for a full period after each move or edit. The caret starts visible, stops blinking while its window is inactive, and whether the caret shows can be queried (`show_cursor` is public).
-
 ## gpui-pre-windows 0.3.9
 
 - `src/directx_renderer.rs`: alpha blending composites correctly over transparent windows.

@@ -1,5 +1,5 @@
 use super::*;
-use gpui_base::{Sequence, Transition, TransitionId};
+use crate::base::{Sequence, Transition, TransitionId};
 
 const TAB_WIDTH: f32 = 240.;
 const TAB_MIN_WIDTH: f32 = 80.;
@@ -399,7 +399,7 @@ impl Jot {
         let jot = cx.weak_entity();
         data.editor.update(cx, |editor, cx| {
             editor.attach_window(window, cx);
-            editor.on_context_menu(Rc::new(move |_, _, position, window, cx| {
+            editor.on_context_menu(Rc::new(move |position, window, cx| {
                 jot.update(cx, |jot, cx| jot.open_context_menu(position, window, cx))
                     .ok();
             }));

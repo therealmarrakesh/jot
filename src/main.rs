@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod base;
 mod brush;
 mod dialog;
 mod document;
@@ -18,9 +19,9 @@ mod tooltip;
 use brush::{BrushTransitionExt as _, Brushes, PressedExt as _};
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
-use gpui_base::Easing;
-use gpui_base::actions::Cancel;
-use gpui_base::input::{
+use crate::base::Easing;
+use crate::base::actions::Cancel;
+use crate::base::input::{
     self, InputEvent, PrepaintCaretGeometry, Rope, RopeExt as _, Textarea, TextareaState,
 };
 use menu::MenuBar;
@@ -1117,7 +1118,7 @@ fn main() {
         gpui_windows::WindowsPlatform::new(false).expect("Failed to initialize Windows platform"),
     );
     Application::with_platform(platform).run(|cx| {
-        gpui_base::init(cx);
+        base::init(cx);
 
         cx.on_window_closed(|cx, window| {
             tooltip::window_closed(window, cx);

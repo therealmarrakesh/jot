@@ -1,5 +1,5 @@
 use super::*;
-use gpui_base::input::{Input, InputState};
+use crate::base::input::{Input, InputState};
 
 pub(crate) const CONTROL_HEIGHT: f32 = 32.;
 pub(crate) const CONTROL_RADIUS: f32 = 4.;

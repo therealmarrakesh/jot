@@ -1,5 +1,5 @@
 use super::*;
-use gpui_base::{Transition, transition};
+use crate::base::{Transition, transition};
 use std::collections::HashMap;
 use std::time::Instant;
 use windows_sys::Win32::Foundation::{POINT, RECT};

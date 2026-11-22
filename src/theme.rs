@@ -1,5 +1,5 @@
 use super::*;
-use gpui_base::{
+use crate::base::{
     ColorTokens, ScrollbarEntrance, ScrollbarMode, ScrollbarMotion, ScrollbarStyles,
     ScrollbarTheme, Theme, ThemeAppearance,
 };

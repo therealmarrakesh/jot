@@ -1,9 +1,9 @@
 use super::*;
 use field::{BODY_LINE, BODY_SIZE, text_field};
 use futures::channel::oneshot;
-use gpui_base::actions::{Cancel, Confirm};
-use gpui_base::input::{InputState, Position};
-use gpui_base::{MotionStatus, Presence, Transition, transition_with_status};
+use crate::base::actions::{Cancel, Confirm};
+use crate::base::input::{InputState, Position};
+use crate::base::{MotionStatus, Presence, Transition, transition_with_status};
 
 gpui::actions!(jot_dialog, [FocusNext, FocusPrev]);
 
