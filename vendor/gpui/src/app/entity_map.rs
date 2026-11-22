@@ -1,5 +1,5 @@
 use crate::{App, AppContext, GpuiBorrow, VisualContext, Window, seal::Sealed};
-use anyhow::{Context as _, Result};
+use crate::anyhow::{Context as _, Result};
 use crate::collections::FxHashSet;
 use crate::sync::RwLock;
 use crate::slotmap::{KeyData, SecondaryMap, SlotMap};

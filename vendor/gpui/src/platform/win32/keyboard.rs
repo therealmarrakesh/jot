@@ -1,4 +1,4 @@
-use anyhow::Result;
+use crate::anyhow::Result;
 use gpui::collections::HashMap;
 use windows::Win32::{
     System::Registry::{HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ, RegGetValueW},
@@ -51,7 +51,7 @@ impl PlatformKeyboardMapper for WindowsKeyboardMapper {
             return KeybindingKeystroke::from_keystroke(keystroke);
         };
         if shifted_key && keystroke.modifiers.shift {
-            log::warn!(
+            crate::log::warn!(
                 "Keystroke '{}' has both shift and a shifted key, this is likely a bug",
                 keystroke.key
             );
@@ -61,7 +61,7 @@ impl PlatformKeyboardMapper for WindowsKeyboardMapper {
         keystroke.modifiers.shift = false;
 
         let Some(key) = self.vkey_to_key.get(&vkey).cloned() else {
-            log::error!(
+            crate::log::error!(
                 "Failed to map key equivalent '{:?}' to a valid key",
                 keystroke
             );
@@ -70,7 +70,7 @@ impl PlatformKeyboardMapper for WindowsKeyboardMapper {
 
         keystroke.key = if shift {
             let Some(shifted_key) = self.vkey_to_shifted.get(&vkey).cloned() else {
-                log::error!(
+                crate::log::error!(
                     "Failed to map keystroke {:?} with virtual key '{:?}' to a shifted key",
                     keystroke,
                     vkey

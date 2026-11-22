@@ -70,7 +70,7 @@ impl Jot {
         self.open_paths(paths.paths().to_vec(), window, cx);
     }
 
-    fn find_open_tab(&self, path: &Path) -> Option<usize> {
+    pub(crate) fn find_open_tab(&self, path: &Path) -> Option<usize> {
         self.tabs.iter().position(|tab| {
             tab.data
                 .path

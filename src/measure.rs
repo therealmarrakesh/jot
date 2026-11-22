@@ -32,7 +32,6 @@ impl Element for Measured {
     fn request_layout(
         &mut self,
         _: Option<&GlobalElementId>,
-        _: Option<&InspectorElementId>,
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, ()) {
@@ -42,7 +41,6 @@ impl Element for Measured {
     fn prepaint(
         &mut self,
         _: Option<&GlobalElementId>,
-        _: Option<&InspectorElementId>,
         bounds: Bounds<Pixels>,
         _: &mut (),
         window: &mut Window,
@@ -57,7 +55,6 @@ impl Element for Measured {
     fn paint(
         &mut self,
         _: Option<&GlobalElementId>,
-        _: Option<&InspectorElementId>,
         _: Bounds<Pixels>,
         _: &mut (),
         _: &mut (),

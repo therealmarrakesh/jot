@@ -1,6 +1,6 @@
 use std::{borrow::Cow, sync::LazyLock};
 
-use anyhow::Result;
+use crate::anyhow::Result;
 use windows::Win32::{
     Foundation::{HANDLE, HGLOBAL},
     System::{
@@ -58,7 +58,7 @@ pub(crate) fn write_to_clipboard(item: ClipboardItem) {
     })();
 
     if let Err(e) = result {
-        log::error!("Failed to write to clipboard: {e}");
+        crate::log::error!("Failed to write to clipboard: {e}");
     }
 }
 
@@ -104,12 +104,12 @@ where
         let mut buffer = vec![0u16; filename_length + 1];
         let ret = unsafe { DragQueryFileW(hdrop, file_index, Some(buffer.as_mut_slice())) };
         if ret == 0 {
-            log::error!("unable to read file name of dragged file");
+            crate::log::error!("unable to read file name of dragged file");
             continue;
         }
         match String::from_utf16(&buffer[0..filename_length]) {
             Ok(file_name) => f(file_name),
-            Err(e) => log::error!("dragged file name is not UTF-16: {}", e),
+            Err(e) => crate::log::error!("dragged file name is not UTF-16: {}", e),
         }
     }
 }
@@ -118,7 +118,7 @@ fn set_clipboard_bytes<T>(data: &[T], format: u32) -> Result<()> {
     unsafe {
         let global = Owned::new(GlobalAlloc(GMEM_MOVEABLE, std::mem::size_of_val(data))?);
         let ptr = GlobalLock(*global);
-        anyhow::ensure!(!ptr.is_null(), "GlobalLock returned null");
+        crate::anyhow::ensure!(!ptr.is_null(), "GlobalLock returned null");
         std::ptr::copy_nonoverlapping(data.as_ptr(), ptr as _, data.len());
         GlobalUnlock(*global).ok();
         SetClipboardData(format, Some(HANDLE(global.0)))?;
@@ -193,7 +193,7 @@ fn log_unsupported_clipboard_formats() {
         let mut buffer = [0u16; 64];
         unsafe { GetClipboardFormatNameW(format, &mut buffer) };
         let format_name = String::from_utf16_lossy(&buffer);
-        log::warn!(
+        crate::log::warn!(
             "Try to paste with unsupported clipboard format: {}, {}.",
             format,
             format_name
@@ -208,7 +208,7 @@ impl ClipboardGuard {
         match unsafe { OpenClipboard(None) } {
             Ok(()) => Some(Self),
             Err(e) => {
-                log::error!("Failed to open clipboard: {e}");
+                crate::log::error!("Failed to open clipboard: {e}");
                 None
             }
         }
@@ -218,7 +218,7 @@ impl ClipboardGuard {
 impl Drop for ClipboardGuard {
     fn drop(&mut self) {
         if let Err(e) = unsafe { CloseClipboard() } {
-            log::error!("Failed to close clipboard: {e}");
+            crate::log::error!("Failed to close clipboard: {e}");
         }
     }
 }

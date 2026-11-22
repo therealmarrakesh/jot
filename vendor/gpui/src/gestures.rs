@@ -15,7 +15,7 @@ use std::mem;
 use std::time::Duration;
 
 use crate::scheduler::Instant;
-use smallvec::SmallVec;
+use crate::smallvec::SmallVec;
 
 use crate::{
     Axis, GestureEvent, InputEvent, IsZero, Modifiers, MouseButton, MouseDownEvent, MouseEvent,

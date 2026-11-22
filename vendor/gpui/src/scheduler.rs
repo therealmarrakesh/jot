@@ -1,5 +1,5 @@
 use crate::futures::channel::oneshot;
-use async_task::Runnable;
+use crate::async_task::Runnable;
 use std::{
     any::Any,
     future::Future,
@@ -357,7 +357,7 @@ impl BackgroundExecutor {
     {
         let schedule = self.schedule_with_priority(priority);
         let location = Location::caller();
-        let (runnable, task) = async_task::Builder::new()
+        let (runnable, task) = crate::async_task::Builder::new()
             .metadata(RunnableMeta {
                 location,
                 spawned: SpawnTime(Instant::now()),
@@ -382,7 +382,7 @@ impl BackgroundExecutor {
             }
         }));
 
-        let (runnable, task) = async_task::Builder::new()
+        let (runnable, task) = crate::async_task::Builder::new()
             .metadata(RunnableMeta {
                 location,
                 spawned: SpawnTime(Instant::now()),
@@ -445,7 +445,7 @@ pub struct Task<T>(TaskState<T>);
 
 enum TaskState<T> {
     Ready(Option<T>),
-    Spawned(async_task::Task<T, RunnableMeta>),
+    Spawned(crate::async_task::Task<T, RunnableMeta>),
     Downcast {
         inner: Box<Task<Box<dyn Any + Send + Sync>>>,
         marker: PhantomData<fn() -> T>,
@@ -568,7 +568,7 @@ impl<T> Task<T> {
         )
     }
 
-    pub fn from_async_task(task: async_task::Task<T, RunnableMeta>) -> Self {
+    pub fn from_async_task(task: crate::async_task::Task<T, RunnableMeta>) -> Self {
         Task(TaskState::Spawned(task))
     }
 
@@ -630,7 +630,7 @@ pub struct FallibleTask<T>(FallibleTaskState<T>);
 
 enum FallibleTaskState<T> {
     Ready(Option<T>),
-    Spawned(async_task::FallibleTask<T, RunnableMeta>),
+    Spawned(crate::async_task::FallibleTask<T, RunnableMeta>),
     Downcast {
         inner: Box<FallibleTask<Box<dyn Any + Send + Sync>>>,
         marker: PhantomData<fn() -> T>,
@@ -738,13 +738,13 @@ fn spawn_local_with_source_location<Fut, S>(
     schedule: S,
     metadata: RunnableMeta,
 ) -> (
-    async_task::Runnable<RunnableMeta>,
-    async_task::Task<Fut::Output, RunnableMeta>,
+    crate::async_task::Runnable<RunnableMeta>,
+    crate::async_task::Task<Fut::Output, RunnableMeta>,
 )
 where
     Fut: Future + 'static,
     Fut::Output: 'static,
-    S: async_task::Schedule<RunnableMeta> + Send + Sync + 'static,
+    S: crate::async_task::Schedule<RunnableMeta> + Send + Sync + 'static,
 {
     #[inline]
     fn thread_id() -> ThreadId {
@@ -789,12 +789,12 @@ where
 
     let location = metadata.location;
 
-    let future = move |_| Checked {
+    let future = move |_: &RunnableMeta| Checked {
         id: thread_id(),
         inner: ManuallyDrop::new(future),
         location,
     };
 
-    let builder = async_task::Builder::new().metadata(metadata);
+    let builder = crate::async_task::Builder::new().metadata(metadata);
     unsafe { builder.spawn_unchecked(future, schedule) }
 }

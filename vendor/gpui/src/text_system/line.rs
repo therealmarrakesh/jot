@@ -3,7 +3,7 @@ use crate::{
     SharedString, StrikethroughStyle, TextAlign, UnderlineStyle, Window, WrapBoundary,
     WrappedLineLayout, black, fill, point, px, size, underline_y_offset,
 };
-use smallvec::SmallVec;
+use crate::smallvec::SmallVec;
 use std::{ops::Range, sync::Arc};
 
 /// Pre-computed glyph data for efficient painting without per-glyph cache lookups.
@@ -1067,7 +1067,7 @@ mod tests {
                 len: text.len(),
             }),
             text: SharedString::new(text),
-            decoration_runs: SmallVec::from(decorations.to_vec()),
+            decoration_runs: crate::smallvec::from(decorations.to_vec()),
         }
     }
 
@@ -1711,7 +1711,7 @@ mod tests {
             }],
             None,
         );
-        line.decoration_runs = SmallVec::from(decorations.to_vec());
+        line.decoration_runs = crate::smallvec::from(decorations.to_vec());
         let layout = &line.layout;
         let mut runs = layout.runs.clone();
         let advance = if zero_advance { px(0.) } else { px(8.) };

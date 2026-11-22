@@ -6,7 +6,7 @@ pub use context::*;
 
 use crate::{Action, AsKeystroke, Keystroke, Unbind, is_no_action, is_unbind};
 use crate::collections::{HashSet, TypeIdHashMap};
-use smallvec::SmallVec;
+use crate::smallvec::SmallVec;
 
 /// An opaque identifier of which version of the keymap is currently active.
 /// The keymap's version is changed whenever bindings are added or removed.

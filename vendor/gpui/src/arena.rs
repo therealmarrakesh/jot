@@ -140,7 +140,7 @@ impl Arena {
         if self.scope_depth == 0 {
             self.force_clear();
         } else {
-            log::debug!(
+            crate::log::debug!(
                 "deferring arena clear; {} enclosing scope(s) still active",
                 self.scope_depth
             );
@@ -197,7 +197,7 @@ impl Arena {
         if self.current_chunk_index >= self.chunks.len() {
             self.chunks.push(Chunk::new(self.chunk_size));
             assert_eq!(self.current_chunk_index, self.chunks.len() - 1);
-            log::trace!(
+            crate::log::trace!(
                 "increased element arena capacity to {}kb",
                 self.capacity() / 1024,
             );

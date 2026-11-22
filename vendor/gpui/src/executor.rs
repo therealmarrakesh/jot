@@ -37,7 +37,7 @@ pub struct ForegroundExecutor {
 pub trait TaskExt<T, E> {
     /// Run the task to completion in the background and log any errors that occur.
     fn detach_and_log_err(self, cx: &App);
-    /// Like [`Self::detach_and_log_err`], but uses `{:?}` formatting on failure so `anyhow::Error`
+    /// Like [`Self::detach_and_log_err`], but uses `{:?}` formatting on failure so `crate::anyhow::Error`
     /// values emit their full backtrace. Prefer `detach_and_log_err` unless a backtrace is wanted.
     fn detach_and_log_err_with_backtrace(self, cx: &App);
 }
@@ -226,7 +226,7 @@ impl BackgroundExecutor {
             .allow_parking();
 
         if std::env::var("GPUI_RUN_UNTIL_PARKED_LOG").ok().as_deref() == Some("1") {
-            log::warn!("[gpui::executor] allow_parking: enabled");
+            crate::log::warn!("[gpui::executor] allow_parking: enabled");
         }
     }
 

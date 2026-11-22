@@ -138,7 +138,7 @@ impl TaffyLayoutEngine {
 
     // Used to understand performance
     #[allow(dead_code)]
-    fn count_all_children(&self, parent: LayoutId) -> anyhow::Result<u32> {
+    fn count_all_children(&self, parent: LayoutId) -> crate::anyhow::Result<u32> {
         let mut count = 0;
 
         for child in self.taffy.children(parent.0)? {
@@ -154,7 +154,7 @@ impl TaffyLayoutEngine {
 
     // Used to understand performance
     #[allow(dead_code)]
-    fn max_depth(&self, depth: u32, parent: LayoutId) -> anyhow::Result<u32> {
+    fn max_depth(&self, depth: u32, parent: LayoutId) -> crate::anyhow::Result<u32> {
         println!(
             "{parent:?} at depth {depth} has {} children",
             self.taffy.child_count(parent.0)
@@ -171,7 +171,7 @@ impl TaffyLayoutEngine {
 
     // Used to understand performance
     #[allow(dead_code)]
-    fn get_edges(&self, parent: LayoutId) -> anyhow::Result<Vec<(LayoutId, LayoutId)>> {
+    fn get_edges(&self, parent: LayoutId) -> crate::anyhow::Result<Vec<(LayoutId, LayoutId)>> {
         let mut edges = Vec::new();
 
         for child in self.taffy.children(parent.0)? {

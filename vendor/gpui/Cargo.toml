@@ -30,12 +30,6 @@ path = "src/gpui.rs"
 doctest = false
 
 [dependencies]
-anyhow = "1.0.86"
-async-task = "4.7"
-bitflags = "2.6.0"
-log = { version = "0.4", default-features = false, features = ["std"] }
-raw-window-handle = "0.6"
-smallvec = { version = "1.6", features = ["union", "const_new"] }
 taffy = { version = "0.13.0", default-features = false, features = ["std", "taffy_tree", "flexbox", "grid", "block_layout", "float_layout", "content_size"] }
 
 [target.'cfg(target_os = "windows")'.dependencies.windows]

@@ -258,7 +258,6 @@ impl Element for Host {
     fn request_layout(
         &mut self,
         _: Option<&GlobalElementId>,
-        _: Option<&InspectorElementId>,
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, ()) {
@@ -268,7 +267,6 @@ impl Element for Host {
     fn prepaint(
         &mut self,
         _: Option<&GlobalElementId>,
-        _: Option<&InspectorElementId>,
         _: Bounds<Pixels>,
         _: &mut (),
         window: &mut Window,
@@ -283,7 +281,6 @@ impl Element for Host {
     fn paint(
         &mut self,
         _: Option<&GlobalElementId>,
-        _: Option<&InspectorElementId>,
         _: Bounds<Pixels>,
         _: &mut (),
         _: &mut (),

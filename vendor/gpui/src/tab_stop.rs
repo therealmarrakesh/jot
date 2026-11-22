@@ -33,7 +33,7 @@ impl TabStopOperation {
 type TabIndex = isize;
 
 #[derive(Debug, Default, PartialEq, Eq, Clone, Ord, PartialOrd)]
-struct TabStopPath(smallvec::SmallVec<[TabIndex; 6]>);
+struct TabStopPath(crate::smallvec::SmallVec<[TabIndex; 6]>);
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 struct TabStopNode {

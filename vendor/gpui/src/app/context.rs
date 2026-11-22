@@ -4,7 +4,7 @@ use crate::{
     SubscriberSet, Subscription, Task, WeakEntity, WeakFocusHandle, Window, WindowHandle,
     WindowVisibility,
 };
-use anyhow::Result;
+use crate::anyhow::Result;
 use crate::futures::FutureExt;
 use crate::gpui_util::Deferred;
 use std::{

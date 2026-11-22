@@ -11,6 +11,8 @@ mod change;
 mod cursor;
 #[path = "editor/display_map/mod.rs"]
 mod display_map;
+#[cfg(test)]
+pub(crate) use display_map::{TextWrapper, WrapDisplayPoint};
 #[path = "base/element.rs"]
 mod element;
 #[path = "editor/indent.rs"]

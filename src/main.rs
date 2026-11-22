@@ -7,6 +7,7 @@ mod document;
 mod field;
 mod files;
 mod find;
+mod instance;
 mod keytips;
 mod measure;
 mod menu;
@@ -38,8 +39,8 @@ use windows::Win32::Globalization::{
 use windows::Win32::Graphics::Gdi::ClientToScreen;
 use windows::Win32::System::SystemInformation::GetLocalTime;
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetCursorPos, SYSTEM_PARAMETERS_INFO_ACTION, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
-    SystemParametersInfoW, USER_DEFAULT_SCREEN_DPI,
+    GetCursorPos, IsIconic, SYSTEM_PARAMETERS_INFO_ACTION, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
+    SW_RESTORE, SetForegroundWindow, ShowWindow, SystemParametersInfoW, USER_DEFAULT_SCREEN_DPI,
 };
 
 const APP_NAME: &str = "Jot";
@@ -370,10 +371,7 @@ fn round_half_up(value: f32) -> f32 {
 }
 
 fn window_hwnd(window: &Window) -> isize {
-    match raw_window_handle::HasWindowHandle::window_handle(window).map(|handle| handle.as_raw()) {
-        Ok(raw_window_handle::RawWindowHandle::Win32(handle)) => handle.hwnd.get(),
-        _ => 0,
-    }
+    window.raw_hwnd().unwrap_or(0)
 }
 
 fn cursor() -> POINT {
@@ -1114,12 +1112,97 @@ impl Render for Jot {
     }
 }
 
+fn bring_to_front(hwnd: isize) {
+    if hwnd == 0 {
+        return;
+    }
+    let handle = HWND(hwnd as _);
+    unsafe {
+        if IsIconic(handle).as_bool() {
+            let _ = ShowWindow(handle, SW_RESTORE);
+        }
+        let _ = SetForegroundWindow(handle);
+    }
+}
+
+fn open_handoff_paths(paths: Vec<PathBuf>, cx: &mut App) {
+    if paths.is_empty() {
+        return;
+    }
+    // If a single path is already open in any Jot window, focus that window & tab directly.
+    if paths.len() == 1 {
+        let target = std::path::absolute(&paths[0]).unwrap_or_else(|_| paths[0].clone());
+        for handle in cx.windows() {
+            let Some(window) = handle.downcast::<Jot>() else {
+                continue;
+            };
+            let existing = window
+                .read(cx)
+                .ok()
+                .and_then(|jot| jot.find_open_tab(&target).map(|ix| (ix, jot.hwnd)));
+            if let Some((ix, hwnd)) = existing {
+                let _ = window.update(cx, |jot, window, cx| {
+                    jot.activate_tab(ix, window, cx);
+                });
+                bring_to_front(hwnd);
+                return;
+            }
+        }
+    }
+
+    let target_window = cx
+        .active_window()
+        .and_then(|handle| handle.downcast::<Jot>())
+        .or_else(|| {
+            cx.windows()
+                .into_iter()
+                .rev()
+                .find_map(|handle| handle.downcast::<Jot>())
+        });
+
+    if let Some(window) = target_window {
+        let mut hwnd = 0;
+        let _ = window.update(cx, |jot, window, cx| {
+            hwnd = jot.hwnd;
+            jot.open_paths(paths, window, cx);
+        });
+        bring_to_front(hwnd);
+    } else {
+        let (window, _) = open_jot_window(None, None, cx);
+        let _ = window.update(cx, |jot, window, cx| {
+            jot.open_paths(paths, window, cx);
+        });
+    }
+}
+
 fn main() {
+    let (flags, mut paths): (Vec<_>, Vec<_>) = std::env::args_os()
+        .skip(1)
+        .map(PathBuf::from)
+        .partition(|arg| arg.as_os_str() == NOTICES_FLAG);
+    if !flags.is_empty() {
+        paths.extend(document::write_notices().ok());
+    }
+    if !paths.is_empty() && instance::try_handoff(&paths) {
+        return;
+    }
+
     let platform = Rc::new(
         gpui::WindowsPlatform::new(false).expect("Failed to initialize Windows platform"),
     );
-    Application::with_platform(platform).run(|cx| {
+    Application::with_platform(platform).run(move |cx| {
         base::init(cx);
+
+        let (handoff_tx, mut handoff_rx) = gpui::futures::channel::mpsc::unbounded::<Vec<PathBuf>>();
+        instance::start_listener(move |incoming| {
+            let _ = handoff_tx.unbounded_send(incoming);
+        });
+        cx.spawn(async move |cx| {
+            while let Some(incoming) = handoff_rx.next().await {
+                cx.update(|cx| open_handoff_paths(incoming, cx));
+            }
+        })
+        .detach();
 
         cx.on_window_closed(|cx, window| {
             tooltip::window_closed(window, cx);
@@ -1175,13 +1258,6 @@ fn main() {
         });
 
         let (window, _) = open_jot_window(None, None, cx);
-        let (flags, mut paths): (Vec<_>, Vec<_>) = std::env::args_os()
-            .skip(1)
-            .map(PathBuf::from)
-            .partition(|arg| arg.as_os_str() == NOTICES_FLAG);
-        if !flags.is_empty() {
-            paths.extend(document::write_notices().ok());
-        }
         if !paths.is_empty() {
             window
                 .update(cx, |jot, window, cx| {
@@ -1190,4 +1266,128 @@ fn main() {
                 .ok();
         }
     });
+}
+
+#[cfg(test)]
+mod large_file_smoke {
+    use super::*;
+    use crate::base::input::{TextWrapper, WrapDisplayPoint};
+    use std::io::Write as _;
+    use std::time::Instant;
+
+    fn run_profile(target_mb: usize) {
+        let dir = std::env::temp_dir().join(format!("jot-bench-{target_mb}mb-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("big.txt");
+
+        let target_bytes = target_mb * 1024 * 1024;
+        {
+            let mut w = std::io::BufWriter::with_capacity(256 * 1024, std::fs::File::create(&file).unwrap());
+            let mut written = 0usize;
+            let mut line_ix = 0usize;
+            while written < target_bytes {
+                let line = if line_ix.is_multiple_of(50) {
+                    format!("Line {line_ix:07}: long wrapped paragraph with repeated words alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi omicron pi rho sigma tau upsilon phi chi psi omega end.\r\n")
+                } else {
+                    format!("Line {line_ix:07}: standard 80-col plain text log entry for Jot benchmark.\r\n")
+                };
+                w.write_all(line.as_bytes()).unwrap();
+                written += line.len();
+                line_ix += 1;
+            }
+            w.write_all(b"FINAL_SENTINEL_NEEDLE_42\r\n").unwrap();
+            w.flush().unwrap();
+        }
+
+        let disk_len = std::fs::metadata(&file).unwrap().len();
+        println!("\n=== Large-File Smoke Profile ({target_mb} MB, {disk_len} bytes on disk) ===");
+
+        let t0 = Instant::now();
+        let loaded = document::load(&file).unwrap();
+        let load_ms = t0.elapsed().as_secs_f64() * 1000.0;
+        let line_count = loaded.text.len_lines(ropey::LineType::LF);
+        println!("load:                 {load_ms:8.2} ms  (rope {} bytes, {} lines)", loaded.text.len(), line_count);
+
+        // TextWrapper: no-wrap
+        let mut wrapper_nowrap = TextWrapper::new(font("Consolas"), px(14.0), None);
+        let t0 = Instant::now();
+        wrapper_nowrap.update_for_bench(&loaded.text, &(0..0), &loaded.text, 0, &mut |_, _, _| Vec::new());
+        let nowrap_ms = t0.elapsed().as_secs_f64() * 1000.0;
+        println!("wrap (no-wrap):       {nowrap_ms:8.2} ms  ({} display rows)", wrapper_nowrap.len());
+
+        // TextWrapper: word-wrap at 900px (~110 ASCII chars per row, ascii_fit_len = 110)
+        let mut wrapper_wrap = TextWrapper::new(font("Consolas"), px(14.0), Some(px(900.0)));
+        let t0 = Instant::now();
+        wrapper_wrap.update_for_bench(&loaded.text, &(0..0), &loaded.text, 110, &mut |line, _, _| {
+            let mut out = Vec::new();
+            let mut i = 110;
+            while i < line.len() {
+                let b = line.floor_char_boundary(i);
+                if b > 0 && b < line.len() {
+                    out.push(gpui::Boundary { ix: b, next_indent: 0 });
+                }
+                i += 110;
+            }
+            out
+        });
+        let wrap_ms = t0.elapsed().as_secs_f64() * 1000.0;
+        println!("wrap (word-wrap):     {wrap_ms:8.2} ms  ({} display rows)", wrapper_wrap.len());
+
+        // Incremental 1-line edit in the middle of the file
+        let mid = loaded.text.len() / 2;
+        let mut edited = loaded.text.clone();
+        edited.insert(mid, "X");
+        let insert_rope = crate::base::input::Rope::from("X");
+        let t0 = Instant::now();
+        wrapper_wrap.update_for_bench(&edited, &(mid..mid), &insert_rope, 110, &mut |_, _, _| Vec::new());
+        let edit_ms = t0.elapsed().as_secs_f64() * 1000.0;
+        println!("incremental edit:     {edit_ms:8.2} ms");
+
+        // Display point queries (scrolling to middle & end)
+        let t0 = Instant::now();
+        for i in 0..1000 {
+            let row = (i * (wrapper_wrap.len() / 1000)).min(wrapper_wrap.len().saturating_sub(1));
+            let off = wrapper_wrap.display_point_to_offset(WrapDisplayPoint::new(row, 0, 0));
+            let _ = wrapper_wrap.offset_to_display_point(off);
+        }
+        let query_ms = t0.elapsed().as_secs_f64() * 1000.0;
+        println!("1000 scroll queries:  {query_ms:8.2} ms");
+
+        // Find (case-sensitive & case-insensitive full scan to sentinel at end)
+        let mut buf = Vec::new();
+        let m_cs = find::Matcher::new("FINAL_SENTINEL_NEEDLE_42", true).unwrap();
+        let t0 = Instant::now();
+        let hit = m_cs.next(&loaded.text, 0, usize::MAX, &mut buf);
+        let find_cs_ms = t0.elapsed().as_secs_f64() * 1000.0;
+        assert!(hit.is_some());
+        println!("find next (case):     {find_cs_ms:8.2} ms");
+
+        let m_ci = find::Matcher::new("final_sentinel_needle_42", false).unwrap();
+        let t0 = Instant::now();
+        let hit_ci = m_ci.next(&loaded.text, 0, usize::MAX, &mut buf);
+        let find_ci_ms = t0.elapsed().as_secs_f64() * 1000.0;
+        assert_eq!(hit_ci, hit);
+        println!("find next (nocase):   {find_ci_ms:8.2} ms");
+
+        let m_all = find::Matcher::new("omicron", false).unwrap();
+        let t0 = Instant::now();
+        let all_hits = m_all.all(&loaded.text, &mut buf);
+        let find_all_ms = t0.elapsed().as_secs_f64() * 1000.0;
+        println!("find all (nocase):    {find_all_ms:8.2} ms  ({} matches)", all_hits.len());
+
+        // Streaming save (atomic ReplaceFileW)
+        let t0 = Instant::now();
+        document::write_rope(&file, &loaded.text, loaded.format).unwrap();
+        let save_ms = t0.elapsed().as_secs_f64() * 1000.0;
+        println!("save (streaming):     {save_ms:8.2} ms");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    #[ignore]
+    fn large_file_smoke_profile() {
+        run_profile(50);
+        run_profile(100);
+    }
 }

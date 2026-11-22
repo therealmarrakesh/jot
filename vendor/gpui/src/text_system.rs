@@ -14,11 +14,11 @@ use crate::{
     Bounds, DevicePixels, Hsla, Pixels, PlatformTextSystem, Point, Result, SharedString, Size,
     StrikethroughStyle, TextRenderingMode, UnderlineStyle, px,
 };
-use anyhow::{Context as _, anyhow};
+use crate::anyhow::{Context as _, anyhow};
 use crate::collections::{FxHashMap, FxHashSet};
 use core::fmt;
 use crate::sync::{Mutex, RwLock};
-use smallvec::{SmallVec, smallvec};
+use crate::smallvec::{SmallVec, smallvec};
 use std::{
     borrow::Cow,
     cmp,
@@ -762,7 +762,7 @@ impl WindowTextSystem {
             let mut run_start = line_start;
             while run_start < line_end {
                 let Some(run) = runs.peek_mut() else {
-                    log::warn!("`TextRun`s do not cover the entire to be shaped text");
+                    crate::log::warn!("`TextRun`s do not cover the entire to be shaped text");
                     break;
                 };
 
@@ -1234,15 +1234,6 @@ pub struct TextRun {
     pub underline: Option<UnderlineStyle>,
     /// The strikethrough style (if any)
     pub strikethrough: Option<StrikethroughStyle>,
-}
-
-#[cfg(all(target_os = "macos", test))]
-impl TextRun {
-    fn with_len(&self, len: usize) -> Self {
-        let mut this = self.clone();
-        this.len = len;
-        this
-    }
 }
 
 /// An identifier for a specific glyph, as returned by [`WindowTextSystem::layout_line`].

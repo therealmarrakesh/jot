@@ -54,7 +54,7 @@ use crate::{
     Keystroke, ModifiersChangedEvent, Window,
 };
 use crate::collections::FxHashMap;
-use smallvec::SmallVec;
+use crate::smallvec::SmallVec;
 use std::{
     any::{Any, TypeId},
     cell::RefCell,
@@ -625,7 +625,7 @@ mod tests {
         InspectorElementId, Keystroke, LayoutId, Style,
     };
     use core::panic;
-    use smallvec::SmallVec;
+    use crate::smallvec::SmallVec;
     use std::{
         cell::{Cell, RefCell},
         ops::Range,

@@ -1,4 +1,4 @@
-use anyhow::{Context as _, bail};
+use crate::anyhow::{Context as _, bail};
 use std::{
     fmt::{self, Display, Formatter},
     hash::{Hash, Hasher},
@@ -168,7 +168,7 @@ impl From<Hsla> for Rgba {
 }
 
 impl TryFrom<&'_ str> for Rgba {
-    type Error = anyhow::Error;
+    type Error = crate::anyhow::Error;
 
     fn try_from(value: &'_ str) -> Result<Self, Self::Error> {
         const RGB: usize = "rgb".len();

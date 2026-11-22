@@ -8,10 +8,12 @@
 extern crate self as gpui;
 #[macro_use]
 mod action;
+pub mod anyhow;
 mod app;
 
 mod arena;
 mod assets;
+pub mod async_task;
 mod bounds_tree;
 pub mod collections;
 mod color;
@@ -22,16 +24,17 @@ mod executor;
 pub mod futures;
 #[macro_use]
 pub mod gpui_util;
+pub mod log;
 mod platform_scheduler;
 pub(crate) use platform_scheduler::PlatformScheduler;
 pub mod scheduler;
 mod shared_string;
 pub mod slotmap;
+pub mod smallvec;
 mod geometry;
 mod gestures;
 mod global;
 mod input;
-mod inspector;
 mod interactive;
 mod key_dispatch;
 mod keymap;
@@ -54,7 +57,7 @@ mod window;
 
 #[doc(hidden)]
 pub mod private {
-    pub use anyhow;
+    pub use crate::anyhow;
 }
 
 /// Minimal 128-bit identifier (replaces the external `uuid` crate).
@@ -98,7 +101,7 @@ mod seal {
 }
 
 pub use action::*;
-pub use anyhow::Result;
+pub use crate::anyhow::Result;
 pub use app::*;
 pub(crate) use arena::*;
 pub use assets::*;
@@ -112,12 +115,10 @@ pub use global::*;
 pub use gpui_util::arc_cow::ArcCow;
 pub use shared_string::*;
 pub use input::*;
-pub use inspector::*;
 pub use interactive::*;
 use key_dispatch::*;
 pub use keymap::*;
 pub use platform::*;
-#[cfg(target_os = "windows")]
 pub use platform::win32::{
     SaveChoice, SavePathOptions, WindowsPlatform, prompt_for_save_path, set_window_min_size,
 };

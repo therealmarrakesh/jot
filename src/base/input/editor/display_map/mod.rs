@@ -7,6 +7,8 @@ mod wrap_map;
 
 pub use self::display_map::{DisplayMap, WrappingIndent};
 pub(crate) use self::text_wrapper::LineLayout;
+#[cfg(test)]
+pub(crate) use self::text_wrapper::{TextWrapper, WrapDisplayPoint};
 
 /// Position in the buffer (logical text).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

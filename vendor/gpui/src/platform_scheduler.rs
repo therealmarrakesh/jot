@@ -5,7 +5,7 @@ use crate::{
         spawn_dedicated_thread,
     },
 };
-use async_task::Runnable;
+use crate::async_task::Runnable;
 use crate::futures::channel::oneshot;
 use std::task::{Context, Poll};
 use std::{
@@ -114,7 +114,7 @@ impl Scheduler for PlatformScheduler {
         let dispatcher = self.dispatcher.clone();
 
         let location = std::panic::Location::caller();
-        let (runnable, _task) = async_task::Builder::new()
+        let (runnable, _task) = crate::async_task::Builder::new()
             .metadata(RunnableMeta {
                 location,
                 spawned: SpawnTime(Instant::now()),

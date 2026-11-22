@@ -1,6 +1,6 @@
 use std::sync::{Mutex, OnceLock, PoisonError};
 
-use anyhow::Context;
+use crate::anyhow::Context;
 use gpui::gpui_util::ResultExt;
 use windows::{
     Win32::{

@@ -160,10 +160,8 @@ pub mod arc_cow {
     }
 }
 
-#[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000_u32;
 
-#[cfg(target_os = "windows")]
 pub fn new_std_command(program: impl AsRef<OsStr>) -> std::process::Command {
     use std::os::windows::process::CommandExt;
 
@@ -172,12 +170,6 @@ pub fn new_std_command(program: impl AsRef<OsStr>) -> std::process::Command {
     command
 }
 
-#[cfg(not(target_os = "windows"))]
-pub fn new_std_command(program: impl AsRef<OsStr>) -> std::process::Command {
-    std::process::Command::new(program)
-}
-
-#[cfg(target_os = "windows")]
 pub fn get_powershell() -> Option<String> {
     fn find_in_path(exe: &str) -> Option<PathBuf> {
         let path_var = env::var_os("PATH")?;
@@ -233,7 +225,7 @@ macro_rules! debug_panic {
         if cfg!(debug_assertions) {
             panic!( $($fmt_arg)* );
         } else {
-            log::error!("{}", format_args!($($fmt_arg)*));
+            crate::log::error!("{}", format_args!($($fmt_arg)*));
         }
     };
 }
@@ -262,10 +254,10 @@ pub trait ResultExt<E> {
         E: fmt::Debug;
     fn debug_assert_ok(self, reason: &str) -> Self;
     fn warn_on_err(self) -> Option<Self::Ok>;
-    fn log_with_level(self, level: log::Level) -> Option<Self::Ok>;
-    fn anyhow(self) -> anyhow::Result<Self::Ok>
+    fn log_with_level(self, level: crate::log::Level) -> Option<Self::Ok>;
+    fn anyhow(self) -> crate::anyhow::Result<Self::Ok>
     where
-        E: Into<anyhow::Error>;
+        E: Into<crate::anyhow::Error>;
 }
 
 impl<T, E> ResultExt<E> for Result<T, E>
@@ -276,7 +268,7 @@ where
 
     #[track_caller]
     fn log_err(self) -> Option<T> {
-        self.log_with_level(log::Level::Error)
+        self.log_with_level(crate::log::Level::Error)
     }
 
     #[track_caller]
@@ -290,7 +282,7 @@ where
                 log_error_with_caller(
                     *Location::caller(),
                     format_args!("{:#}", DebugAsDisplay(&error)),
-                    log::Level::Error,
+                    crate::log::Level::Error,
                 );
                 None
             }
@@ -307,11 +299,11 @@ where
 
     #[track_caller]
     fn warn_on_err(self) -> Option<T> {
-        self.log_with_level(log::Level::Warn)
+        self.log_with_level(crate::log::Level::Warn)
     }
 
     #[track_caller]
-    fn log_with_level(self, level: log::Level) -> Option<T> {
+    fn log_with_level(self, level: crate::log::Level) -> Option<T> {
         match self {
             Ok(value) => Some(value),
             Err(error) => {
@@ -321,9 +313,9 @@ where
         }
     }
 
-    fn anyhow(self) -> anyhow::Result<T>
+    fn anyhow(self) -> crate::anyhow::Result<T>
     where
-        E: Into<anyhow::Error>,
+        E: Into<crate::anyhow::Error>,
     {
         self.map_err(Into::into)
     }
@@ -333,10 +325,10 @@ where
 fn log_error_with_caller(
     caller: core::panic::Location<'_>,
     arguments: fmt::Arguments<'_>,
-    level: log::Level,
+    level: crate::log::Level,
 ) {
-    log::logger().log(
-        &log::Record::builder()
+    crate::log::logger().log(
+        &crate::log::Record::builder()
             .target("gpui")
             .args(arguments)
             .file(Some(caller.file()))
@@ -392,16 +384,16 @@ where
 {
     #[track_caller]
     fn log_err(self) -> LogErrorFuture<Self> {
-        LogErrorFuture(self, log::Level::Error, *Location::caller())
+        LogErrorFuture(self, crate::log::Level::Error, *Location::caller())
     }
 
     fn log_tracked_err(self, location: core::panic::Location<'static>) -> LogErrorFuture<Self> {
-        LogErrorFuture(self, log::Level::Error, location)
+        LogErrorFuture(self, crate::log::Level::Error, location)
     }
 
     #[track_caller]
     fn warn_on_err(self) -> LogErrorFuture<Self> {
-        LogErrorFuture(self, log::Level::Warn, *Location::caller())
+        LogErrorFuture(self, crate::log::Level::Warn, *Location::caller())
     }
 
     fn unwrap(self) -> UnwrapFuture<Self> {
@@ -416,19 +408,19 @@ where
 {
     #[track_caller]
     fn log_err_with_backtrace(self) -> LogErrorWithBacktraceFuture<Self> {
-        LogErrorWithBacktraceFuture(self, log::Level::Error, *Location::caller())
+        LogErrorWithBacktraceFuture(self, crate::log::Level::Error, *Location::caller())
     }
 
     fn log_tracked_err_with_backtrace(
         self,
         location: core::panic::Location<'static>,
     ) -> LogErrorWithBacktraceFuture<Self> {
-        LogErrorWithBacktraceFuture(self, log::Level::Error, location)
+        LogErrorWithBacktraceFuture(self, crate::log::Level::Error, location)
     }
 }
 
 #[must_use]
-pub struct LogErrorFuture<F>(F, log::Level, core::panic::Location<'static>);
+pub struct LogErrorFuture<F>(F, crate::log::Level, core::panic::Location<'static>);
 
 impl<F, T, E> Future for LogErrorFuture<F>
 where
@@ -455,7 +447,7 @@ where
 }
 
 #[must_use]
-pub struct LogErrorWithBacktraceFuture<F>(F, log::Level, core::panic::Location<'static>);
+pub struct LogErrorWithBacktraceFuture<F>(F, crate::log::Level, core::panic::Location<'static>);
 
 impl<F, T, E> Future for LogErrorWithBacktraceFuture<F>
 where

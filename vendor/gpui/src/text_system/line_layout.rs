@@ -1,7 +1,7 @@
 use crate::{FontId, GlyphId, Pixels, PlatformTextSystem, Point, SharedString, Size, point, px};
 use crate::collections::FxHashMap;
 use crate::sync::{Mutex, RwLock};
-use smallvec::SmallVec;
+use crate::smallvec::SmallVec;
 use std::{
     borrow::Borrow,
     hash::{Hash, Hasher},

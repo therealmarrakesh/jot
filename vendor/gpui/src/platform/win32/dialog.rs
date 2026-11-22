@@ -7,7 +7,7 @@ use std::{
     },
 };
 
-use anyhow::{Context as _, Result, anyhow};
+use crate::anyhow::{Context as _, Result, anyhow};
 use gpui::futures::{
     channel::oneshot,
     future::{Either, select},

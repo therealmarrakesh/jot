@@ -4,7 +4,7 @@ use crate::{
     PromptButton, PromptLevel, Render, Reservation, Result, Subscription, Task, VisualContext,
     Window, WindowHandle,
 };
-use anyhow::{Context as _, bail};
+use crate::anyhow::{Context as _, bail};
 use crate::futures::channel::oneshot;
 use crate::futures::future::FutureExt;
 use std::{future::Future, rc::Weak};

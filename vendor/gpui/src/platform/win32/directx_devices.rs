@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use crate::anyhow::{Context, Result};
 use gpui::gpui_util::ResultExt;
 use windows::Win32::{
     Foundation::HMODULE,
@@ -54,13 +54,13 @@ impl DirectXDevices {
             get_adapter(&dxgi_factory, debug_layer_available).context("Getting DXGI adapter")?;
         match feature_level {
             D3D_FEATURE_LEVEL_11_1 => {
-                log::info!("Created device with Direct3D 11.1 feature level.")
+                crate::log::info!("Created device with Direct3D 11.1 feature level.")
             }
             D3D_FEATURE_LEVEL_11_0 => {
-                log::info!("Created device with Direct3D 11.0 feature level.")
+                crate::log::info!("Created device with Direct3D 11.0 feature level.")
             }
             D3D_FEATURE_LEVEL_10_1 => {
-                log::info!("Created device with Direct3D 10.1 feature level.")
+                crate::log::info!("Created device with Direct3D 10.1 feature level.")
             }
             _ => unreachable!(),
         }
@@ -96,7 +96,7 @@ fn get_dxgi_factory(debug_layer_available: bool) -> Result<IDXGIFactory6> {
         DXGI_CREATE_FACTORY_DEBUG
     } else {
         #[cfg(debug_assertions)]
-        log::warn!(
+        crate::log::warn!(
             "Failed to get DXGI debug interface. DirectX debugging features will be disabled."
         );
         DXGI_CREATE_FACTORY_FLAGS::default()
@@ -120,7 +120,7 @@ fn get_adapter(
             let gpu_name = String::from_utf16_lossy(&desc.Description)
                 .trim_matches(char::from(0))
                 .to_string();
-            log::info!("Using GPU: {}", gpu_name);
+            crate::log::info!("Using GPU: {}", gpu_name);
         }
         // Check to see whether the adapter supports Direct3D 11 and create
         // the device if it does.
@@ -189,7 +189,7 @@ fn get_device(
     {
         Ok(device)
     } else {
-        Err(anyhow::anyhow!(
+        Err(crate::anyhow::anyhow!(
             "Required feature StructuredBuffer is not supported by GPU/driver"
         ))
     }

@@ -2,7 +2,7 @@ use crate::{
     Bounds, Capslock, Context, Empty, IntoElement, Keystroke, LongPressEvent, Modifiers, Pixels,
     Point, Render, TouchDragEvent, Window, point, seal::Sealed,
 };
-use smallvec::SmallVec;
+use crate::smallvec::SmallVec;
 use std::{any::Any, fmt::Debug, ops::Deref, path::PathBuf};
 
 /// An event from a platform input source.

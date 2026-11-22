@@ -95,7 +95,7 @@ fn match_rest_folded(haystack: &str, start: usize, rest: &[char]) -> Option<usiz
     Some(end)
 }
 
-struct Matcher {
+pub(crate) struct Matcher {
     query: String,
     match_case: bool,
     folded: Vec<char>,
@@ -104,7 +104,7 @@ struct Matcher {
 }
 
 impl Matcher {
-    fn new(query: &str, match_case: bool) -> Option<Self> {
+    pub(crate) fn new(query: &str, match_case: bool) -> Option<Self> {
         if query.is_empty() {
             return None;
         }
@@ -195,7 +195,7 @@ impl Matcher {
         }
     }
 
-    fn next(
+    pub(crate) fn next(
         &self,
         text: &Rope,
         from: usize,
@@ -232,7 +232,7 @@ impl Matcher {
         }
     }
 
-    fn previous(
+    pub(crate) fn previous(
         &self,
         text: &Rope,
         before: usize,
@@ -273,7 +273,7 @@ impl Matcher {
         }
     }
 
-    fn all(&self, text: &Rope, buffer: &mut Vec<u8>) -> Vec<Range<usize>> {
+    pub(crate) fn all(&self, text: &Rope, buffer: &mut Vec<u8>) -> Vec<Range<usize>> {
         let len = text.len();
         let mut ranges = Vec::new();
         let mut pos = 0;

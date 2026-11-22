@@ -1,5 +1,5 @@
 use crate::SharedString;
-use anyhow::{Context as _, Result};
+use crate::anyhow::{Context as _, Result};
 use std::fmt;
 
 /// A datastructure for resolving whether an action should be dispatched
@@ -19,7 +19,7 @@ pub struct ContextEntry {
 }
 
 impl<'a> TryFrom<&'a str> for KeyContext {
-    type Error = anyhow::Error;
+    type Error = crate::anyhow::Error;
 
     fn try_from(value: &'a str) -> Result<Self> {
         Self::parse(value)
@@ -30,19 +30,7 @@ impl KeyContext {
     /// Initialize a new [`KeyContext`] that contains an `os` key set to either `macos`, `linux`, `windows` or `unknown`.
     pub fn new_with_defaults() -> Self {
         let mut context = Self::default();
-        #[cfg(target_os = "macos")]
-        context.set("os", "macos");
-        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-        context.set("os", "linux");
-        #[cfg(target_os = "windows")]
         context.set("os", "windows");
-        #[cfg(not(any(
-            target_os = "macos",
-            target_os = "linux",
-            target_os = "freebsd",
-            target_os = "windows"
-        )))]
-        context.set("os", "unknown");
         context
     }
 
@@ -250,7 +238,7 @@ impl KeyBindingContextPredicate {
         let source = skip_whitespace(source);
         let (predicate, rest) = Self::parse_expr(source, 0)?;
         if let Some(next) = rest.chars().next() {
-            anyhow::bail!("unexpected character '{next:?}'");
+            crate::anyhow::bail!("unexpected character '{next:?}'");
         } else {
             Ok(predicate)
         }
@@ -347,7 +335,7 @@ impl KeyBindingContextPredicate {
         }
     }
 
-    fn parse_expr(mut source: &str, min_precedence: u32) -> anyhow::Result<(Self, &str)> {
+    fn parse_expr(mut source: &str, min_precedence: u32) -> crate::anyhow::Result<(Self, &str)> {
         type Op = fn(
             KeyBindingContextPredicate,
             KeyBindingContextPredicate,
@@ -378,7 +366,7 @@ impl KeyBindingContextPredicate {
         Ok((predicate, source))
     }
 
-    fn parse_primary(mut source: &str) -> anyhow::Result<(Self, &str)> {
+    fn parse_primary(mut source: &str) -> crate::anyhow::Result<(Self, &str)> {
         let next = source.chars().next().context("unexpected end")?;
         match next {
             '(' => {
@@ -412,7 +400,7 @@ impl KeyBindingContextPredicate {
                     source,
                 ))
             }
-            _ => anyhow::bail!("unexpected character '{next:?}'"),
+            _ => crate::anyhow::bail!("unexpected character '{next:?}'"),
         }
     }
 
@@ -432,7 +420,7 @@ impl KeyBindingContextPredicate {
         if let (Self::Identifier(left), Self::Identifier(right)) = (self, other) {
             Ok(Self::Equal(left, right))
         } else {
-            anyhow::bail!("operands of == must be identifiers");
+            crate::anyhow::bail!("operands of == must be identifiers");
         }
     }
 
@@ -440,7 +428,7 @@ impl KeyBindingContextPredicate {
         if let (Self::Identifier(left), Self::Identifier(right)) = (self, other) {
             Ok(Self::NotEqual(left, right))
         } else {
-            anyhow::bail!("operands of != must be identifiers");
+            crate::anyhow::bail!("operands of != must be identifiers");
         }
     }
 

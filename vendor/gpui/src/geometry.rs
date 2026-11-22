@@ -2,7 +2,7 @@
 //! can be used to describe common units, concepts, and the relationships
 //! between them.
 
-use anyhow::{Context as _, anyhow};
+use crate::anyhow::{Context as _, anyhow};
 use core::fmt::Debug;
 use crate::refineable::{IsEmpty, Refineable};
 use std::ops::{AddAssign, DivAssign, Range, SubAssign};
@@ -3275,7 +3275,7 @@ impl<'a> std::iter::Sum<&'a Pixels> for Pixels {
 }
 
 impl TryFrom<&'_ str> for Pixels {
-    type Error = anyhow::Error;
+    type Error = crate::anyhow::Error;
 
     fn try_from(value: &'_ str) -> Result<Self, Self::Error> {
         value
@@ -3831,7 +3831,7 @@ impl Debug for Rems {
 }
 
 impl TryFrom<&'_ str> for Rems {
-    type Error = anyhow::Error;
+    type Error = crate::anyhow::Error;
 
     fn try_from(value: &'_ str) -> Result<Self, Self::Error> {
         value
@@ -3958,7 +3958,7 @@ impl Debug for AbsoluteLength {
 const EXPECTED_ABSOLUTE_LENGTH: &str = "number with 'px' or 'rem' suffix";
 
 impl TryFrom<&'_ str> for AbsoluteLength {
-    type Error = anyhow::Error;
+    type Error = crate::anyhow::Error;
 
     fn try_from(value: &'_ str) -> Result<Self, Self::Error> {
         if let Ok(pixels) = value.try_into() {
@@ -4054,7 +4054,7 @@ impl Display for DefiniteLength {
 const EXPECTED_DEFINITE_LENGTH: &str = "expected number with 'px', 'rem', or '%' suffix";
 
 impl TryFrom<&'_ str> for DefiniteLength {
-    type Error = anyhow::Error;
+    type Error = crate::anyhow::Error;
 
     fn try_from(value: &'_ str) -> Result<Self, Self::Error> {
         if let Some(percentage) = value.strip_suffix('%') {
@@ -4123,7 +4123,7 @@ impl Display for Length {
 const EXPECTED_LENGTH: &str = "expected 'auto' or number with 'px', 'rem', or '%' suffix";
 
 impl TryFrom<&'_ str> for Length {
-    type Error = anyhow::Error;
+    type Error = crate::anyhow::Error;
 
     fn try_from(value: &'_ str) -> Result<Self, Self::Error> {
         if value == "auto" {

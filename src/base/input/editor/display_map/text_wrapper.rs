@@ -6,7 +6,7 @@ use gpui::{
     App, Font, LineFragment, Pixels, Point, ShapedLine, Size, TextAlign, Window, point, px, size,
 };
 use ropey::Rope;
-use smallvec::SmallVec;
+use gpui::smallvec::SmallVec;
 use unicode_segmentation::UnicodeSegmentation as _;
 
 use crate::base::input::{Point as TreeSitterPoint, RopeExt, layout::LastLayout};
@@ -247,14 +247,12 @@ impl LineTree {
         Self::default()
     }
 
-    pub(crate) fn from_vec(mut items: Vec<LineItem>) -> Self {
+    pub(crate) fn from_vec(items: Vec<LineItem>) -> Self {
         let mut chunks = Vec::with_capacity(items.len().div_ceil(LINE_CHUNK_TARGET));
-        let mut rest = items.split_off(0);
-        while !rest.is_empty() {
-            let take = rest.len().min(LINE_CHUNK_TARGET);
-            let tail = rest.split_off(take);
-            chunks.push(LineChunk::new(rest));
-            rest = tail;
+        let mut iter = items.into_iter();
+        while iter.len() > 0 {
+            let chunk: Vec<LineItem> = iter.by_ref().take(LINE_CHUNK_TARGET).collect();
+            chunks.push(LineChunk::new(chunk));
         }
         let mut tree = Self {
             chunks,
@@ -364,12 +362,10 @@ impl LineTree {
         }
 
         let mut new_chunks = Vec::with_capacity(merged.len().div_ceil(LINE_CHUNK_TARGET));
-        let mut rest = merged;
-        while !rest.is_empty() {
-            let take = rest.len().min(LINE_CHUNK_TARGET);
-            let tail = rest.split_off(take);
-            new_chunks.push(LineChunk::new(rest));
-            rest = tail;
+        let mut iter = merged.into_iter();
+        while iter.len() > 0 {
+            let chunk: Vec<LineItem> = iter.by_ref().take(LINE_CHUNK_TARGET).collect();
+            new_chunks.push(LineChunk::new(chunk));
         }
 
         self.chunks.splice(start_chunk..replace_end, new_chunks);
@@ -620,6 +616,20 @@ impl TextWrapper {
         );
     }
 
+    #[cfg(test)]
+    pub(crate) fn update_for_bench<F>(
+        &mut self,
+        changed_text: &Rope,
+        range: &Range<usize>,
+        new_text: &Rope,
+        ascii_fit_len: usize,
+        wrap_line: &mut F,
+    ) where
+        F: FnMut(&str, Pixels, usize) -> Vec<gpui::Boundary>,
+    {
+        self._update(changed_text, range, new_text, ascii_fit_len, wrap_line);
+    }
+
     fn _update<F>(
         &mut self,
         changed_text: &Rope,
@@ -688,18 +698,26 @@ impl TextWrapper {
                         }
                         WrappingIndent::None => {
                             let boundaries = wrap_line(&line_str, wrap_width, line_start);
-                            if let Some(first_ix) = boundaries.first().map(|b| b.ix) {
-                                wrapped_lines.push(prev_boundary_ix..first_ix);
-                                prev_boundary_ix = first_ix;
+                            if let Some(first) = boundaries.first() {
+                                if first.next_indent > 0 {
+                                    let first_ix = first.ix;
+                                    wrapped_lines.push(prev_boundary_ix..first_ix);
+                                    prev_boundary_ix = first_ix;
 
-                                for boundary in wrap_line(
-                                    &line_str[first_ix..],
-                                    wrap_width,
-                                    line_start + first_ix,
-                                ) {
-                                    let ix = first_ix + boundary.ix;
-                                    wrapped_lines.push(prev_boundary_ix..ix);
-                                    prev_boundary_ix = ix;
+                                    for boundary in wrap_line(
+                                        &line_str[first_ix..],
+                                        wrap_width,
+                                        line_start + first_ix,
+                                    ) {
+                                        let ix = first_ix + boundary.ix;
+                                        wrapped_lines.push(prev_boundary_ix..ix);
+                                        prev_boundary_ix = ix;
+                                    }
+                                } else {
+                                    for boundary in boundaries {
+                                        wrapped_lines.push(prev_boundary_ix..boundary.ix);
+                                        prev_boundary_ix = boundary.ix;
+                                    }
                                 }
                             }
                         }
@@ -1459,17 +1477,17 @@ mod tests {
             LineItem {
                 len: 2,
                 indent: 0,
-                wrapped_lines: smallvec::smallvec![0..2],
+                wrapped_lines: gpui::smallvec::smallvec![0..2],
             },
             LineItem {
                 len: 4,
                 indent: 0,
-                wrapped_lines: smallvec::smallvec![0..2, 2..4],
+                wrapped_lines: gpui::smallvec::smallvec![0..2, 2..4],
             },
             LineItem {
                 len: 1,
                 indent: 0,
-                wrapped_lines: smallvec::smallvec![0..1],
+                wrapped_lines: gpui::smallvec::smallvec![0..1],
             },
         ]);
 
@@ -1537,7 +1555,7 @@ mod tests {
 
         let line1 = ShapedLine::default().with_len(100);
         let line2 = ShapedLine::default().with_len(50);
-        let wrapped_lines = smallvec::smallvec![line1, line2];
+        let wrapped_lines = gpui::smallvec::smallvec![line1, line2];
         line_layout.set_wrapped_lines(wrapped_lines);
         assert_eq!(line_layout.len(), 150);
         assert_eq!(line_layout.wrapped_lines.len(), 2);
@@ -1565,7 +1583,7 @@ mod tests {
     #[test]
     fn test_position_for_index_prefers_first_leading_empty_visual_line() {
         let mut line_layout = LineLayout::new();
-        line_layout.set_wrapped_lines(smallvec::smallvec![
+        line_layout.set_wrapped_lines(gpui::smallvec::smallvec![
             ShapedLine::default(),
             ShapedLine::default(),
             ShapedLine::default().with_len(3),
@@ -1581,7 +1599,7 @@ mod tests {
     fn clicking_past_a_wrapped_row_keeps_the_caret_on_that_row() {
         // One buffer line wrapped into two visual rows, splitting at byte 10.
         let mut line_layout = LineLayout::new();
-        line_layout.set_wrapped_lines(smallvec::smallvec![
+        line_layout.set_wrapped_lines(gpui::smallvec::smallvec![
             ShapedLine::default().with_len(10),
             ShapedLine::default().with_len(5),
         ]);
@@ -1626,12 +1644,12 @@ mod tests {
             LineItem {
                 len: Rope::from("first line").len(),
                 indent: 0,
-                wrapped_lines: smallvec::smallvec![0..10],
+                wrapped_lines: gpui::smallvec::smallvec![0..10],
             },
             LineItem {
                 len: Rope::from("this one wraps").len(),
                 indent: 0,
-                wrapped_lines: smallvec::smallvec![0..9, 9..14],
+                wrapped_lines: gpui::smallvec::smallvec![0..9, 9..14],
             },
         ]);
 
@@ -1679,25 +1697,25 @@ mod tests {
             LineItem {
                 len: Rope::from("Hello, 世界!\r").len(),
                 indent: 0,
-                wrapped_lines: smallvec::smallvec![0..15],
+                wrapped_lines: gpui::smallvec::smallvec![0..15],
             },
             // range: 16..36
             LineItem {
                 len: Rope::from("This is second line.\n").len(),
                 indent: 0,
-                wrapped_lines: smallvec::smallvec![0..10, 10..20],
+                wrapped_lines: gpui::smallvec::smallvec![0..10, 10..20],
             },
             // range: 37..56
             LineItem {
                 len: Rope::from("This is third line.\n").len(),
                 indent: 0,
-                wrapped_lines: smallvec::smallvec![0..9, 9..15, 15..20],
+                wrapped_lines: gpui::smallvec::smallvec![0..9, 9..15, 15..20],
             },
             // range: 57..79
             LineItem {
                 len: Rope::from("这里是第 4 行。").len(),
                 indent: 0,
-                wrapped_lines: smallvec::smallvec![0..22],
+                wrapped_lines: gpui::smallvec::smallvec![0..22],
             },
         ]);
 
@@ -1832,7 +1850,7 @@ mod tests {
     #[test]
     fn test_wrap_indent_offsets_continuation_lines() {
         let mut line_layout = LineLayout::new();
-        line_layout.set_wrapped_lines(smallvec::smallvec![
+        line_layout.set_wrapped_lines(gpui::smallvec::smallvec![
             ShapedLine::default().with_len(5),
             ShapedLine::default().with_len(10),
         ]);

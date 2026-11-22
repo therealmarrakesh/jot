@@ -11,7 +11,7 @@ use gpui::{
     UnderlineStyle, Window, fill, point, px, relative, size,
 };
 use ropey::Rope;
-use smallvec::SmallVec;
+use gpui::smallvec::SmallVec;
 use std::{ops::Range, rc::Rc};
 
 use crate::base::{
@@ -137,7 +137,6 @@ impl<M: InputModeKind> Element for EditorScrollbar<M> {
     fn request_layout(
         &mut self,
         _: Option<&GlobalElementId>,
-        _: Option<&gpui::InspectorElementId>,
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
@@ -152,7 +151,6 @@ impl<M: InputModeKind> Element for EditorScrollbar<M> {
     fn prepaint(
         &mut self,
         _: Option<&GlobalElementId>,
-        _: Option<&gpui::InspectorElementId>,
         _: Bounds<Pixels>,
         _: &mut Self::RequestLayoutState,
         window: &mut Window,
@@ -189,7 +187,6 @@ impl<M: InputModeKind> Element for EditorScrollbar<M> {
     fn paint(
         &mut self,
         _: Option<&GlobalElementId>,
-        _: Option<&gpui::InspectorElementId>,
         _: Bounds<Pixels>,
         _: &mut Self::RequestLayoutState,
         prepaint: &mut Self::PrepaintState,
@@ -709,7 +706,7 @@ impl<M: InputModeKind> TextElement<M> {
                 .shape_line(text, font_size, line_runs, None);
 
             let line_layout = LineLayout::new()
-                .lines(smallvec::smallvec![shaped_line])
+                .lines(gpui::smallvec::smallvec![shaped_line])
                 .with_background(has_background(line_runs));
             return vec![line_layout];
         }
@@ -868,7 +865,6 @@ impl<M: InputModeKind> Element for TextElement<M> {
     fn request_layout(
         &mut self,
         _id: Option<&GlobalElementId>,
-        _: Option<&gpui::InspectorElementId>,
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
@@ -893,7 +889,6 @@ impl<M: InputModeKind> Element for TextElement<M> {
     fn prepaint(
         &mut self,
         _id: Option<&GlobalElementId>,
-        _: Option<&gpui::InspectorElementId>,
         bounds: Bounds<Pixels>,
         _request_layout: &mut Self::RequestLayoutState,
         window: &mut Window,
@@ -1133,7 +1128,6 @@ impl<M: InputModeKind> Element for TextElement<M> {
     fn paint(
         &mut self,
         _id: Option<&GlobalElementId>,
-        _: Option<&gpui::InspectorElementId>,
         input_bounds: Bounds<Pixels>,
         _request_layout: &mut Self::RequestLayoutState,
         prepaint: &mut Self::PrepaintState,

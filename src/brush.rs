@@ -117,17 +117,15 @@ impl Element for BrushTransition {
     fn request_layout(
         &mut self,
         id: Option<&GlobalElementId>,
-        inspector_id: Option<&InspectorElementId>,
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
-        self.element.request_layout(id, inspector_id, window, cx)
+        self.element.request_layout(id, window, cx)
     }
 
     fn prepaint(
         &mut self,
         id: Option<&GlobalElementId>,
-        inspector_id: Option<&InspectorElementId>,
         bounds: Bounds<Pixels>,
         request_layout: &mut Self::RequestLayoutState,
         window: &mut Window,
@@ -170,14 +168,13 @@ impl Element for BrushTransition {
         }
         let prepaint = self
             .element
-            .prepaint(id, inspector_id, bounds, request_layout, window, cx);
+            .prepaint(id, bounds, request_layout, window, cx);
         (pressed, prepaint)
     }
 
     fn paint(
         &mut self,
         id: Option<&GlobalElementId>,
-        inspector_id: Option<&InspectorElementId>,
         bounds: Bounds<Pixels>,
         request_layout: &mut Self::RequestLayoutState,
         (pressed, hitbox): &mut Self::PrepaintState,
@@ -216,7 +213,7 @@ impl Element for BrushTransition {
             });
         }
         self.element
-            .paint(id, inspector_id, bounds, request_layout, hitbox, window, cx)
+            .paint(id, bounds, request_layout, hitbox, window, cx)
     }
 }
 

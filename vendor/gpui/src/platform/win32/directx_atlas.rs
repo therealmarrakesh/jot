@@ -223,10 +223,10 @@ impl PlatformAtlas for DirectXAtlas {
     fn get_or_insert_with<'a>(
         &self,
         key: AtlasKey,
-        build: &mut dyn FnMut() -> anyhow::Result<
+        build: &mut dyn FnMut() -> crate::anyhow::Result<
             Option<(Size<DevicePixels>, std::borrow::Cow<'a, [u8]>)>,
         >,
-    ) -> anyhow::Result<Option<AtlasTile>> {
+    ) -> crate::anyhow::Result<Option<AtlasTile>> {
         self.0.lock().get_or_insert_with(key, build)
     }
 
@@ -241,13 +241,13 @@ impl AtlasBackend for DirectXAtlasTextures {
         kind: AtlasTextureKind,
         size: Size<DevicePixels>,
         bytes: &[u8],
-    ) -> anyhow::Result<AtlasTile> {
+    ) -> crate::anyhow::Result<AtlasTile> {
         let tile = self
             .allocate(size, kind)
-            .ok_or_else(|| anyhow::anyhow!("failed to allocate"))?;
+            .ok_or_else(|| crate::anyhow::anyhow!("failed to allocate"))?;
         let texture = self
             .texture(tile.texture_id)
-            .ok_or_else(|| anyhow::anyhow!("allocated tile refers to a missing texture"))?;
+            .ok_or_else(|| crate::anyhow::anyhow!("allocated tile refers to a missing texture"))?;
         texture.upload(&self.device_context, tile.bounds, bytes);
         Ok(tile)
     }
@@ -434,7 +434,7 @@ impl DirectXAtlasTexture {
         let row_bytes = bounds.size.width.to_bytes(self.bytes_per_pixel as u8) as usize;
         let expected = row_bytes * bounds.size.height.0.max(0) as usize;
         if bytes.len() < expected {
-            log::error!(
+            crate::log::error!(
                 "DirectXAtlasTexture::upload: source slice is {} bytes but the {}x{} region \
                  requires {} bytes; skipping upload to avoid a driver over-read",
                 bytes.len(),

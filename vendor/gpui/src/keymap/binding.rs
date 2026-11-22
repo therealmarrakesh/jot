@@ -4,7 +4,7 @@ use crate::{
     Action, AsKeystroke, DummyKeyboardMapper, InvalidKeystrokeError, KeyBindingContextPredicate,
     KeybindingKeystroke, Keystroke, PlatformKeyboardMapper, SharedString,
 };
-use smallvec::SmallVec;
+use crate::smallvec::SmallVec;
 
 /// A keybinding and its associated metadata, from the keymap.
 pub struct KeyBinding {

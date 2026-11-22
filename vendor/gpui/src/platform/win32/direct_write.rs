@@ -4,7 +4,7 @@ use std::{
     mem::ManuallyDrop,
 };
 
-use anyhow::{Context, Result};
+use crate::anyhow::{Context, Result};
 use gpui::collections::HashMap;
 use gpui::gpui_util::ResultExt;
 use gpui::sync::RwLock;
@@ -262,7 +262,7 @@ impl PlatformTextSystem for DirectWriteTextSystem {
         self.state.read().get_typographic_bounds(font_id, glyph_id)
     }
 
-    fn advance(&self, font_id: FontId, glyph_id: GlyphId) -> anyhow::Result<Size<f32>> {
+    fn advance(&self, font_id: FontId, glyph_id: GlyphId) -> crate::anyhow::Result<Size<f32>> {
         self.state.read().get_advance(font_id, glyph_id)
     }
 
@@ -273,7 +273,7 @@ impl PlatformTextSystem for DirectWriteTextSystem {
     fn glyph_raster_bounds(
         &self,
         params: &RenderGlyphParams,
-    ) -> anyhow::Result<Bounds<DevicePixels>> {
+    ) -> crate::anyhow::Result<Bounds<DevicePixels>> {
         self.state.read().raster_bounds(&self.components, params)
     }
 
@@ -281,7 +281,7 @@ impl PlatformTextSystem for DirectWriteTextSystem {
         &self,
         params: &RenderGlyphParams,
         raster_bounds: Bounds<DevicePixels>,
-    ) -> anyhow::Result<(Size<DevicePixels>, Vec<u8>)> {
+    ) -> crate::anyhow::Result<(Size<DevicePixels>, Vec<u8>)> {
         self.state
             .read()
             .rasterize_glyph(&self.components, params, raster_bounds)
@@ -801,7 +801,7 @@ impl DirectWriteState {
         glyph_bounds: Bounds<DevicePixels>,
     ) -> Result<(Size<DevicePixels>, Vec<u8>)> {
         if glyph_bounds.size.width.0 == 0 || glyph_bounds.size.height.0 == 0 {
-            anyhow::bail!("glyph bounds are empty");
+            crate::anyhow::bail!("glyph bounds are empty");
         }
 
         let bitmap_data = if params.is_emoji {
@@ -1868,7 +1868,7 @@ fn get_name(string: IDWriteLocalizedStrings, locale: &HSTRING) -> Result<String>
                 &mut exists as _,
             )?
         };
-        anyhow::ensure!(exists.as_bool(), "No localised string for {locale}");
+        crate::anyhow::ensure!(exists.as_bool(), "No localised string for {locale}");
     }
 
     let name_length = unsafe { string.GetStringLength(locale_name_index) }? as usize;
@@ -1916,7 +1916,7 @@ fn get_system_ui_font_name() -> SharedString {
             let font_name = String::from_utf16_lossy(&info.lfFaceName);
             font_name.trim_matches(char::from(0)).to_owned().into()
         };
-        log::info!("Use {} as UI font.", font_family);
+        crate::log::info!("Use {} as UI font.", font_family);
         font_family
     }
 }
@@ -1966,7 +1966,7 @@ mod tests {
     use super::{DirectWriteState, DirectWriteTextSystem, GPUState, GlyphLayerTexture};
     use crate::platform::win32::direct_write::ClusterAnalyzer;
     use crate::platform::win32::directx_devices::DirectXDevices;
-    use anyhow::Result;
+    use crate::anyhow::Result;
     use gpui::{
         DevicePixels, Font, PlatformTextSystem, RenderGlyphParams, Rgba, bounds, point, px, size,
     };
@@ -2029,7 +2029,7 @@ mod tests {
         let mut params_list = Vec::new();
         for ch in ['🫠', '🥹', '🧗', '🏋', '🚀', '🥺'] {
             let Some(glyph_id) = text_system.glyph_for_char(font_id, ch) else {
-                log::info!("no glyph found for {ch}");
+                crate::log::info!("no glyph found for {ch}");
                 continue;
             };
             let params = RenderGlyphParams {
@@ -2044,7 +2044,7 @@ mod tests {
             };
             let raster_bounds = text_system.glyph_raster_bounds(&params)?;
             if raster_bounds.size.width.0 == 0 || raster_bounds.size.height.0 == 0 {
-                log::info!("raster bounds are empty for {ch}");
+                crate::log::info!("raster bounds are empty for {ch}");
                 continue;
             }
             params_list.push((params, raster_bounds));

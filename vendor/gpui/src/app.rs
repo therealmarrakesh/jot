@@ -12,7 +12,7 @@ use std::{
     time::Duration,
 };
 
-use anyhow::{Context as _, Result, anyhow};
+use crate::anyhow::{Context as _, Result, anyhow};
 use crate::futures::{FutureExt, StdFuture as Future, channel::oneshot, future::LocalBoxFuture};
 use crate::sync::RwLock;
 use crate::slotmap::SlotMap;
@@ -22,10 +22,8 @@ use crate::collections::{FxHashMap, FxHashSet, HashMap, TypeIdHashMap, TypeIdHas
 pub use context::*;
 pub use entity_map::*;
 use crate::gpui_util::{ResultExt, debug_panic};
-use smallvec::SmallVec;
+use crate::smallvec::SmallVec;
 
-#[cfg(any(feature = "inspector", debug_assertions))]
-use crate::InspectorElementRegistry;
 use crate::{
     Action, ActionRegistry, ActivationPolicy, ActivityGuard, Any, AnyView,
     AnyWindowHandle, AppContext, Arena, ArenaBox, AssetSource, BackgroundExecutor, Bounds,
@@ -850,10 +848,6 @@ pub struct App {
         FxHashMap<EntityId, FxHashMap<WindowId, WindowInvalidator>>,
     pub(crate) tracked_entities: FxHashMap<WindowId, FxHashSet<EntityId>>,
     pub(crate) current_window_by_entity: FxHashMap<EntityId, WindowId>,
-    #[cfg(any(feature = "inspector", debug_assertions))]
-    pub(crate) inspector_renderer: Option<crate::InspectorRenderer>,
-    #[cfg(any(feature = "inspector", debug_assertions))]
-    pub(crate) inspector_element_registry: InspectorElementRegistry,
     #[cfg(any(test, feature = "test-support", debug_assertions))]
     pub(crate) name: Option<&'static str>,
     pub(crate) text_rendering_mode: Rc<Cell<TextRenderingMode>>,
@@ -948,10 +942,6 @@ impl App {
                 layout_id_buffer: Default::default(),
                 propagate_event: true,
                 prompt_builder: Some(PromptBuilder::Default),
-                #[cfg(any(feature = "inspector", debug_assertions))]
-                inspector_renderer: None,
-                #[cfg(any(feature = "inspector", debug_assertions))]
-                inspector_element_registry: InspectorElementRegistry::default(),
                 quit_mode: QuitMode::default(),
                 quitting: false,
                 cursor_hide_mode: CursorHideMode::default(),
@@ -1119,7 +1109,7 @@ impl App {
             .block_with_timeout(SHUTDOWN_TIMEOUT, futures)
             .is_err()
         {
-            log::error!("timed out waiting on app_will_quit");
+            crate::log::error!("timed out waiting on app_will_quit");
         }
         #[cfg(target_family = "wasm")]
         self.foreground_executor.spawn(futures).detach();
@@ -1171,9 +1161,9 @@ impl App {
     /// first), if the platform doesn't allow the mode or can't switch at all, if any window is
     /// open (a window belongs to the display server that opened it), or if the display server
     /// can't be reached.
-    pub fn request_windowing(&self, request: WindowingRequest) -> Task<anyhow::Result<()>> {
+    pub fn request_windowing(&self, request: WindowingRequest) -> Task<crate::anyhow::Result<()>> {
         if !self.windows.is_empty() {
-            return Task::ready(Err(anyhow::anyhow!(
+            return Task::ready(Err(crate::anyhow::anyhow!(
                 "cannot switch windowing modes while windows are open"
             )));
         }
@@ -1427,7 +1417,7 @@ impl App {
         &mut self,
         options: crate::WindowOptions,
         build_root_view: impl FnOnce(&mut Window, &mut App) -> Entity<V>,
-    ) -> anyhow::Result<WindowHandle<V>> {
+    ) -> crate::anyhow::Result<WindowHandle<V>> {
         self.update(|cx| {
             let id = cx.windows.insert(None);
             let handle = WindowHandle::new(id);
@@ -1675,40 +1665,6 @@ impl App {
     /// Writes data to the platform clipboard.
     pub fn write_to_clipboard(&self, item: ClipboardItem) {
         self.platform.write_to_clipboard(item)
-    }
-
-    /// Reads data from the primary selection buffer.
-    /// Only available on Linux.
-    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-    pub fn read_from_primary(&self) -> Option<ClipboardItem> {
-        self.platform.read_from_primary()
-    }
-
-    /// Writes data to the primary selection buffer.
-    /// Only available on Linux.
-    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-    pub fn write_to_primary(&self, item: ClipboardItem) {
-        self.platform.write_to_primary(item)
-    }
-
-    /// Reads data from macOS's "Find" pasteboard.
-    ///
-    /// Used to share the current search string between apps.
-    ///
-    /// https://developer.apple.com/documentation/appkit/nspasteboard/name-swift.struct/find
-    #[cfg(target_os = "macos")]
-    pub fn read_from_find_pasteboard(&self) -> Option<ClipboardItem> {
-        self.platform.read_from_find_pasteboard()
-    }
-
-    /// Writes data to macOS's "Find" pasteboard.
-    ///
-    /// Used to share the current search string between apps.
-    ///
-    /// https://developer.apple.com/documentation/appkit/nspasteboard/name-swift.struct/find
-    #[cfg(target_os = "macos")]
-    pub fn write_to_find_pasteboard(&self, item: ClipboardItem) {
-        self.platform.write_to_find_pasteboard(item)
     }
 
     /// Writes credentials to the platform keychain.
@@ -2868,23 +2824,6 @@ impl App {
         self.platform.can_select_mixed_files_and_dirs()
     }
 
-    /// Sets the renderer for the inspector.
-    #[cfg(any(feature = "inspector", debug_assertions))]
-    pub fn set_inspector_renderer(&mut self, f: crate::InspectorRenderer) {
-        self.inspector_renderer = Some(f);
-    }
-
-    /// Registers a renderer specific to an inspector state.
-    #[cfg(any(feature = "inspector", debug_assertions))]
-    pub fn register_inspector_element<T: 'static, R: crate::IntoElement, F>(
-        &mut self,
-        factory: impl 'static + Fn(&mut Window, &mut App) -> F,
-    ) where
-        F: 'static + FnMut(crate::InspectorElementId, &T, &mut Window, &mut App) -> R,
-    {
-        self.inspector_element_registry.register(factory);
-    }
-
     /// Initializes gpui's default colors for the application.
     ///
     /// These colors can be accessed through `cx.default_colors()`.
@@ -2936,7 +2875,7 @@ impl App {
                     let quit_on_empty = match cx.quit_mode {
                         QuitMode::Explicit => false,
                         QuitMode::LastWindowClosed => true,
-                        QuitMode::Default => cfg!(not(target_os = "macos")),
+                        QuitMode::Default => true,
                     };
 
                     if quit_on_empty && cx.windows.is_empty() {

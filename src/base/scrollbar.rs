@@ -13,7 +13,7 @@ use crate::base::{
 };
 use gpui::{
     Anchor, App, Axis, Background, BorderStyle, Bounds, ContentMask, CursorStyle, Edges, Element,
-    ElementId, EntityId, GlobalElementId, Hitbox, HitboxBehavior, Hsla, InspectorElementId,
+    ElementId, EntityId, GlobalElementId, Hitbox, HitboxBehavior, Hsla,
     IntoElement, LayoutId, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point,
     Position, ScrollHandle, ScrollWheelEvent, Size, Style, TouchDragEvent, TouchPhase, Window,
     fill, point, prelude::FluentBuilder, px, relative, size,
@@ -1220,7 +1220,6 @@ impl Element for Scrollbar {
     fn request_layout(
         &mut self,
         _: Option<&GlobalElementId>,
-        _: Option<&InspectorElementId>,
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
@@ -1237,7 +1236,6 @@ impl Element for Scrollbar {
     fn prepaint(
         &mut self,
         _: Option<&GlobalElementId>,
-        _: Option<&InspectorElementId>,
         bounds: Bounds<Pixels>,
         _: &mut Self::RequestLayoutState,
         window: &mut Window,
@@ -1520,7 +1518,6 @@ impl Element for Scrollbar {
     fn paint(
         &mut self,
         _: Option<&GlobalElementId>,
-        _: Option<&InspectorElementId>,
         _: Bounds<Pixels>,
         _: &mut Self::RequestLayoutState,
         prepaint: &mut Self::PrepaintState,

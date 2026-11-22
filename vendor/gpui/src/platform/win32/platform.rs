@@ -10,11 +10,11 @@ use std::{
     },
 };
 
-use anyhow::{Context as _, Result, anyhow};
+use crate::anyhow::{Context as _, Result, anyhow};
 use gpui::futures::channel::oneshot::Receiver;
 use gpui::gpui_util::{ResultExt, get_powershell, new_std_command};
 use gpui::sync::RwLock;
-use smallvec::SmallVec;
+use crate::smallvec::SmallVec;
 use windows::{
     Win32::{
         Foundation::*,
@@ -343,7 +343,7 @@ impl WindowsPlatform {
             return;
         };
         if let Err(error) = check_can_show_windows(&environment) {
-            log::info!("starting headless: {error:#}");
+            crate::log::info!("starting headless: {error:#}");
             return;
         }
         self.attach_gpu()
@@ -626,7 +626,7 @@ impl Platform for WindowsPlatform {
         // re-enters message handling possibly resulting in another mutable
         // borrow of the `AppCell` ending up with a double borrow panic
         let Some(powershell) = get_powershell() else {
-            log::error!("failed to restart: PowerShell is unavailable");
+            crate::log::error!("failed to restart: PowerShell is unavailable");
             return;
         };
         self.foreground_executor
@@ -647,7 +647,7 @@ impl Platform for WindowsPlatform {
 
                 match restart_process {
                     Ok(_) => unsafe { PostQuitMessage(0) },
-                    Err(e) => log::error!("failed to spawn restart script: {:?}", e),
+                    Err(e) => crate::log::error!("failed to spawn restart script: {:?}", e),
                 }
             })
             .detach();
@@ -841,7 +841,7 @@ impl Platform for WindowsPlatform {
                 windows::core::PCWSTR(identifier_utf16.as_ptr()),
             )
         } {
-            log::warn!("failed to set the process AppUserModelID: {error}");
+            crate::log::warn!("failed to set the process AppUserModelID: {error}");
         }
     }
 
@@ -895,7 +895,7 @@ impl Platform for WindowsPlatform {
 
     // todo(windows)
     fn path_for_auxiliary_executable(&self, _name: &str) -> Result<PathBuf> {
-        anyhow::bail!("not yet implemented");
+        crate::anyhow::bail!("not yet implemented");
     }
 
     fn set_cursor_style(&self, style: CursorStyle) {
@@ -959,7 +959,7 @@ impl Platform for WindowsPlatform {
         Task::ready(Ok(()))
     }
 
-    fn register_url_scheme(&self, _: &str) -> Task<anyhow::Result<()>> {
+    fn register_url_scheme(&self, _: &str) -> Task<crate::anyhow::Result<()>> {
         Task::ready(Err(anyhow!("register_url_scheme unimplemented")))
     }
 
@@ -1035,7 +1035,7 @@ impl WindowsPlatformInner {
 
     fn handle_gpui_events(&self, message: u32, wparam: WPARAM, lparam: LPARAM) -> Option<isize> {
         if wparam.0 != self.validation_number {
-            log::error!("Wrong validation number while processing message: {message}");
+            crate::log::error!("Wrong validation number while processing message: {message}");
             return None;
         }
         match message {
@@ -1081,7 +1081,7 @@ impl WindowsPlatformInner {
             |callbacks| &callbacks.quit,
             |callback| shutdown_completed = callback(),
         );
-        log::logger().flush();
+        crate::log::logger().flush();
         if shutdown_completed {
             std::process::exit(0);
         }
@@ -1095,7 +1095,7 @@ impl WindowsPlatformInner {
 
     fn close_one_window(&self, target_window: HWND) -> bool {
         let Some(all_windows) = self.raw_window_handles.upgrade() else {
-            log::error!("Failed to upgrade raw window handles");
+            crate::log::error!("Failed to upgrade raw window handles");
             return false;
         };
         let mut lock = all_windows.write();
@@ -1116,7 +1116,7 @@ impl WindowsPlatformInner {
         'tasks: loop {
             'timeout_loop: loop {
                 if start.elapsed().as_millis() >= MAIN_TASK_TIMEOUT {
-                    log::debug!("foreground task timeout reached");
+                    crate::log::debug!("foreground task timeout reached");
                     // we spent our budget on gpui tasks, we likely have a lot of work queued so drain system events first to stay responsive
                     // then quit out of foreground work to allow us to process other gpui events first before returning back to foreground task work
                     // if we don't we might not for example process window quit events
@@ -1272,7 +1272,7 @@ fn open_target(target: impl AsRef<OsStr>) -> Result<()> {
         )
     };
     if ret.0 as isize <= 32 {
-        Err(anyhow::anyhow!(
+        Err(crate::anyhow::anyhow!(
             "Unable to open target: {}",
             std::io::Error::last_os_error()
         ))
@@ -1317,7 +1317,7 @@ fn open_target_in_explorer(target: &Path) -> Result<()> {
             // seems to work as a fallback (although it won't select the file).
             open_target(dir).context("Opening target parent folder")
         } else {
-            Err(anyhow::anyhow!("Can not open target path: {}", err))
+            Err(crate::anyhow::anyhow!("Can not open target path: {}", err))
         }
     })
 }
@@ -1554,7 +1554,7 @@ fn check_device_lost(device: &ID3D11Device) -> bool {
     match device_state {
         Ok(_) => false,
         Err(err) => {
-            log::error!("DirectX device lost detected: {:?}", err);
+            crate::log::error!("DirectX device lost detected: {:?}", err);
             true
         }
     }
@@ -1617,7 +1617,7 @@ fn handle_gpu_device_lost(
     *directx_devices = try_to_recover_from_device_lost(|| {
         DirectXDevices::new().context("Failed to recreate new DirectX devices after device lost")
     })?;
-    log::info!("DirectX devices successfully recreated.");
+    crate::log::info!("DirectX devices successfully recreated.");
 
     let lparam = LPARAM(directx_devices as *const _ as _);
     unsafe {

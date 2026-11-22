@@ -1,11 +1,11 @@
 use crate::{
     AnyElement, AnyEntity, AnyWeakEntity, App, AvailableSpace, Bounds, ContentMask, Context,
-    Element, ElementId, Entity, EntityId, GlobalElementId, InspectorElementId, IntoElement,
-    LayoutId, PaintIndex, Pixels, PrepaintStateIndex, Render, RenderOnce, Size, Style,
-    StyleRefinement, TextStyle, WeakEntity,
+    Element, ElementId, Entity, EntityId, GlobalElementId, IntoElement, LayoutId, PaintIndex,
+    Pixels, PrepaintStateIndex, Render, RenderOnce, Size, Style, StyleRefinement, TextStyle,
+    WeakEntity,
 };
 use crate::{Empty, Window};
-use anyhow::Result;
+use crate::anyhow::Result;
 use crate::collections::FxHashSet;
 use crate::Refineable;
 use std::mem;
@@ -337,7 +337,6 @@ impl<V: View> Element for ViewElement<V> {
     fn request_layout(
         &mut self,
         _id: Option<&GlobalElementId>,
-        _inspector_id: Option<&InspectorElementId>,
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
@@ -375,7 +374,6 @@ impl<V: View> Element for ViewElement<V> {
     fn prepaint(
         &mut self,
         global_id: Option<&GlobalElementId>,
-        _inspector_id: Option<&InspectorElementId>,
         bounds: Bounds<Pixels>,
         element: &mut Self::RequestLayoutState,
         window: &mut Window,
@@ -416,7 +414,6 @@ impl<V: View> Element for ViewElement<V> {
     fn paint(
         &mut self,
         global_id: Option<&GlobalElementId>,
-        _inspector_id: Option<&InspectorElementId>,
         _bounds: Bounds<Pixels>,
         _request_layout: &mut Self::RequestLayoutState,
         element: &mut Self::PrepaintState,
@@ -465,20 +462,17 @@ fn request_layout_view(
     cx: &mut App,
     render: &mut dyn FnMut(&mut Window, &mut App) -> AnyElement,
 ) -> (LayoutId, Option<AnyElement>) {
-    window.with_rendered_view(entity_id, |window| {
-        let caching_disabled = window.is_inspector_picking(cx);
-        match cached_style {
-            Some(style) if !caching_disabled => {
-                let mut root_style = Style::default();
-                root_style.refine(style);
-                let layout_id = window.request_layout(root_style, None, cx);
-                (layout_id, None)
-            }
-            _ => {
-                let mut element = render(window, cx);
-                let layout_id = element.request_layout(window, cx);
-                (layout_id, Some(element))
-            }
+    window.with_rendered_view(entity_id, |window| match cached_style {
+        Some(style) => {
+            let mut root_style = Style::default();
+            root_style.refine(style);
+            let layout_id = window.request_layout(root_style, None, cx);
+            (layout_id, None)
+        }
+        None => {
+            let mut element = render(window, cx);
+            let layout_id = element.request_layout(window, cx);
+            (layout_id, Some(element))
         }
     })
 }
@@ -590,8 +584,7 @@ fn paint_view(
     cx: &mut App,
 ) {
     window.with_rendered_view(entity_id, |window| {
-        let caching_disabled = window.is_inspector_picking(cx);
-        if cached && !caching_disabled {
+        if cached {
             window.with_element_state::<ViewElementState, _>(
                 global_id.unwrap(),
                 |element_state, window| {

@@ -10,13 +10,11 @@ path = "src/main.rs"
 
 [dependencies]
 gpui = { path = "vendor/gpui" }
-raw-window-handle = "0.6"
 ropey = { version = "=2.0.0-beta.1", features = [
     "metric_chars",
     "metric_lines_lf",
     "metric_utf16",
 ] }
-smallvec = "1"
 unicode-linebreak = "0.1"
 unicode-segmentation = "1.12.0"
 windows = { version = "0.62", features = [
@@ -29,6 +27,7 @@ windows = { version = "0.62", features = [
     "Win32_System_Com",
     "Win32_System_DataExchange",
     "Win32_System_Ole",
+    "Win32_System_Pipes",
     "Win32_System_Registry",
     "Win32_System_SystemInformation",
     "Win32_UI_Controls",

@@ -3,7 +3,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::{Context, Result};
+use crate::anyhow::{Context, Result};
 use gpui::FrameRequestSource;
 use gpui::gpui_util::ResultExt;
 use windows::Win32::{
@@ -50,7 +50,7 @@ impl VSyncProvider {
         // operation for the first call after the vsync thread becomes non-idle,
         // but it shouldn't happen often.
         if !wait_succeeded || elapsed < VSYNC_INTERVAL_THRESHOLD {
-            log::trace!("VSyncProvider::wait_for_vsync() took less time than expected");
+            crate::log::trace!("VSyncProvider::wait_for_vsync() took less time than expected");
             std::thread::sleep(self.interval);
             FrameRequestSource::LocalSchedule
         } else {

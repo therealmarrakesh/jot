@@ -1,5 +1,5 @@
 use gpui::gpui_util::ResultExt;
-use smallvec::SmallVec;
+use crate::smallvec::SmallVec;
 use std::rc::Rc;
 use gpui::Uuid;
 use windows::{
@@ -84,7 +84,7 @@ impl WindowsDisplay {
         const POINT_ZERO: POINT = POINT { x: 0, y: 0 };
         let monitor = unsafe { MonitorFromPoint(POINT_ZERO, MONITOR_DEFAULTTOPRIMARY) };
         if monitor.is_invalid() {
-            log::error!(
+            crate::log::error!(
                 "can not find the primary monitor: {}",
                 std::io::Error::last_os_error()
             );
@@ -139,7 +139,7 @@ impl PlatformDisplay for WindowsDisplay {
         self.display_id
     }
 
-    fn uuid(&self) -> anyhow::Result<Uuid> {
+    fn uuid(&self) -> crate::anyhow::Result<Uuid> {
         Ok(self.uuid)
     }
 
@@ -210,7 +210,7 @@ unsafe extern "system" fn monitor_enum_proc(
     BOOL(1)
 }
 
-fn get_monitor_info(hmonitor: HMONITOR) -> anyhow::Result<MONITORINFOEXW> {
+fn get_monitor_info(hmonitor: HMONITOR) -> crate::anyhow::Result<MONITORINFOEXW> {
     let mut monitor_info: MONITORINFOEXW = unsafe { std::mem::zeroed() };
     monitor_info.monitorInfo.cbSize = std::mem::size_of::<MONITORINFOEXW>() as u32;
     let status = unsafe {
@@ -222,7 +222,7 @@ fn get_monitor_info(hmonitor: HMONITOR) -> anyhow::Result<MONITORINFOEXW> {
     if status.as_bool() {
         Ok(monitor_info)
     } else {
-        Err(anyhow::anyhow!(std::io::Error::last_os_error()))
+        Err(crate::anyhow::anyhow!(std::io::Error::last_os_error()))
     }
 }
 

@@ -2,7 +2,6 @@
 
 use std::{
     cell::{Cell, RefCell},
-    num::NonZeroIsize,
     path::PathBuf,
     rc::{Rc, Weak},
     str::FromStr,
@@ -10,11 +9,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::{Context as _, Result};
+use crate::anyhow::{Context as _, Result};
 use gpui::futures::channel::oneshot::{self, Receiver};
 use gpui::gpui_util::ResultExt;
-use raw_window_handle as rwh;
-use smallvec::SmallVec;
+use crate::smallvec::SmallVec;
 use windows::{
     Win32::{
         Foundation::*,
@@ -601,22 +599,6 @@ impl WindowsWindow {
     }
 }
 
-impl rwh::HasWindowHandle for WindowsWindow {
-    fn window_handle(&self) -> std::result::Result<rwh::WindowHandle<'_>, rwh::HandleError> {
-        let raw = rwh::Win32WindowHandle::new(unsafe {
-            NonZeroIsize::new_unchecked(self.0.hwnd.0 as isize)
-        })
-        .into();
-        Ok(unsafe { rwh::WindowHandle::borrow_raw(raw) })
-    }
-}
-
-impl rwh::HasDisplayHandle for WindowsWindow {
-    fn display_handle(&self) -> std::result::Result<rwh::DisplayHandle<'_>, rwh::HandleError> {
-        Ok(rwh::DisplayHandle::windows())
-    }
-}
-
 impl Drop for WindowsWindow {
     fn drop(&mut self) {
         self.0.dialog_owner.close();
@@ -643,6 +625,10 @@ impl Drop for WindowsWindow {
 impl PlatformWindow for WindowsWindow {
     fn bounds(&self) -> Bounds<Pixels> {
         self.state.bounds()
+    }
+
+    fn raw_hwnd(&self) -> Option<isize> {
+        Some(self.0.hwnd.0 as isize)
     }
 
     fn is_maximized(&self) -> bool {
@@ -909,7 +895,7 @@ impl PlatformWindow for WindowsWindow {
 
     fn set_title(&mut self, title: &str) {
         unsafe { SetWindowTextW(self.0.hwnd, &HSTRING::from(title)) }
-            .inspect_err(|e| log::error!("Set title failed: {e}"))
+            .inspect_err(|e| crate::log::error!("Set title failed: {e}"))
             .ok();
     }
 
@@ -1318,7 +1304,7 @@ pub(crate) struct WindowBorderOffset {
 }
 
 impl WindowBorderOffset {
-    pub(crate) fn update(&self, hwnd: HWND) -> anyhow::Result<()> {
+    pub(crate) fn update(&self, hwnd: HWND) -> crate::anyhow::Result<()> {
         let window_rect = unsafe {
             let mut rect = std::mem::zeroed();
             GetWindowRect(hwnd, &mut rect)?;
