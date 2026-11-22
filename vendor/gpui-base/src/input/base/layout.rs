@@ -1,14 +1,8 @@
 use std::{ops::Range, rc::Rc};
 
-use gpui::{Bounds, Half, Pixels, ShapedLine, TextAlign, px};
+use gpui::{Bounds, Half, Pixels, TextAlign, px};
 
 use super::{WrappingIndent, display_map::LineLayout};
-
-#[derive(Clone, Default)]
-pub(crate) struct WhitespaceIndicators {
-    pub(crate) space: ShapedLine,
-    pub(crate) tab: ShapedLine,
-}
 
 #[derive(Clone)]
 pub(super) struct LastLayout {

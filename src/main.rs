@@ -16,15 +16,13 @@ mod theme;
 mod tooltip;
 
 use brush::{BrushTransitionExt as _, Brushes, PressedExt as _};
-use gpui_kit::Edges;
-use gpui_kit::base::Easing;
-use gpui_kit::base::actions::Cancel;
-use gpui_kit::component::input::{
+use gpui::prelude::FluentBuilder as _;
+use gpui::*;
+use gpui_base::Easing;
+use gpui_base::actions::Cancel;
+use gpui_base::input::{
     self, InputEvent, PrepaintCaretGeometry, Rope, RopeExt as _, Textarea, TextareaState,
 };
-use gpui_kit::component::*;
-use gpui_kit::prelude::FluentBuilder as _;
-use gpui_kit::*;
 use menu::MenuBar;
 use std::cell::Cell;
 use std::ops::Range;
@@ -82,8 +80,16 @@ const SUN_GLYPH: &str = "\u{E706}";
 
 const EDITOR_FONT_SIZE: f32 = 11. * 96. / 72.;
 const EDITOR_LINE_HEIGHT: f32 = 20.;
-const EDITOR_PADDING_LEFT: f32 = 6.;
-const EDITOR_PADDING_TOP: f32 = 7.;
+const EDITOR_PADDING_LEFT: f32 = 18.;
+const EDITOR_PADDING_RIGHT: f32 = 12.;
+const EDITOR_PADDING_TOP: f32 = 11.;
+const EDITOR_PADDING_BOTTOM: f32 = 11.;
+pub(crate) const EDITOR_PADDINGS: Edges<Pixels> = Edges {
+    top: px(EDITOR_PADDING_TOP),
+    right: px(EDITOR_PADDING_RIGHT),
+    bottom: px(EDITOR_PADDING_BOTTOM),
+    left: px(EDITOR_PADDING_LEFT),
+};
 const CARET_WIDTH: f32 = 1.;
 const CARET_HEIGHT: f32 = 18.;
 const ZOOM_STEP: f32 = 0.1;
@@ -216,7 +222,8 @@ fn caption_buttons(window: &Window, p: Palette) -> impl IntoElement {
     };
 
     div()
-        .v_flex()
+        .flex()
+        .flex_col()
         .flex_none()
         .h_full()
         .child(
@@ -229,7 +236,7 @@ fn caption_buttons(window: &Window, p: Palette) -> impl IntoElement {
         .child(div().flex_1().window_control_area(WindowControlArea::Drag))
 }
 
-gpui_kit::actions!(
+gpui::actions!(
     jot,
     [
         NewTab,
@@ -292,7 +299,7 @@ fn key_bindings() -> Vec<KeyBinding> {
     ]
 }
 
-fn window_options(window_size: Option<gpui_kit::Size<Pixels>>, cx: &App) -> WindowOptions {
+fn window_options(window_size: Option<Size<Pixels>>, cx: &App) -> WindowOptions {
     let screen = cx
         .primary_display()
         .map_or(size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT)), |display| {
@@ -321,13 +328,18 @@ fn window_options(window_size: Option<gpui_kit::Size<Pixels>>, cx: &App) -> Wind
 
 fn open_jot_window(
     initial: Option<TabData>,
-    window_size: Option<gpui_kit::Size<Pixels>>,
+    window_size: Option<Size<Pixels>>,
     cx: &mut App,
-) -> (AnyWindowHandle, Entity<Jot>) {
-    gpui_kit::open_window(window_options(window_size, cx), cx, |window, cx| {
-        cx.new(|cx| Jot::new(initial, window, cx))
-    })
-    .expect("Failed to open window")
+) -> (WindowHandle<Jot>, Entity<Jot>) {
+    let mut created = None;
+    let handle = cx
+        .open_window(window_options(window_size, cx), |window, cx| {
+            let view = cx.new(|cx| Jot::new(initial, window, cx));
+            created = Some(view.clone());
+            view
+        })
+        .expect("Failed to open window");
+    (handle, created.expect("Failed to create Jot view"))
 }
 
 fn round_half_up(value: f32) -> f32 {
@@ -423,7 +435,7 @@ pub(crate) fn text_width(window: &Window, text: &str, family: &'static str, size
     let run = TextRun {
         len: text.len(),
         font: font(family),
-        color: gpui_kit::black(),
+        color: black(),
         background_color: None,
         underline: None,
         strikethrough: None,
@@ -557,8 +569,7 @@ impl Jot {
     }
 
     fn editor_min_height(&self) -> f32 {
-        let inset = EDITOR_PADDING_TOP + gpui_kit::component::Size::default().input_py().as_f32();
-        2. * inset + self.line_height()
+        EDITOR_PADDING_TOP + EDITOR_PADDING_BOTTOM + self.line_height()
     }
 
     fn min_size_probe(&self, status_bar: bool, cx: &App) -> impl IntoElement + use<> {
@@ -708,7 +719,8 @@ impl Jot {
             )
             .child(
                 div()
-                    .v_flex()
+                    .flex()
+                    .flex_col()
                     .flex_none()
                     .child(
                         div()
@@ -796,14 +808,11 @@ impl Jot {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let p = palette(cx);
-        let this = cx.weak_entity();
         div()
             .id("editor-area")
             .relative()
             .flex_1()
             .min_h(px(self.editor_min_height()))
-            .pl(px(EDITOR_PADDING_LEFT))
-            .pt(px(EDITOR_PADDING_TOP))
             .bg(rgb(p.editor))
             .child(
                 div()
@@ -811,20 +820,13 @@ impl Jot {
                     .size_full()
                     .overflow_hidden()
                     .child(
-                        Textarea::new(self.active_editor())
-                            .context_menu(move |menu, window, cx| {
-                                let position = window.mouse_position();
-                                this.update(cx, |jot, cx| {
-                                    jot.open_context_menu(position, window, cx)
-                                })
-                                .ok();
-                                menu
-                            })
-                            .appearance(false)
-                            .h_full()
+                        div()
+                            .size_full()
                             .font_family("Consolas")
                             .text_size(px(EDITOR_FONT_SIZE * self.zoom()))
-                            .line_height(px(self.line_height())),
+                            .line_height(px(self.line_height()))
+                            .text_color(rgba(p.text_primary))
+                            .child(Textarea::new(self.active_editor())),
                     )
                     .child(self.caret(window, cx)),
             )
@@ -936,7 +938,8 @@ impl Render for Jot {
             .child(
                 div()
                     .key_context(CONTEXT)
-                    .v_flex()
+                    .flex()
+                    .flex_col()
                     .size_full()
                     .child(self.title_bar(&strip, window, cx))
                     .child(self.render_menu_bar(p))
@@ -950,8 +953,11 @@ impl Render for Jot {
 }
 
 fn main() {
-    gpui_kit::application().run(|cx| {
-        gpui_kit::init(cx);
+    let platform = Rc::new(
+        gpui_windows::WindowsPlatform::new(false).expect("Failed to initialize Windows platform"),
+    );
+    Application::with_platform(platform).run(|cx| {
+        gpui_base::init(cx);
 
         cx.on_window_closed(|cx, window| {
             tooltip::window_closed(window, cx);
@@ -959,7 +965,7 @@ fn main() {
             if cx
                 .windows()
                 .into_iter()
-                .all(|window| window.downcast::<gpui_kit::base::Root>().is_none())
+                .all(|window| window.downcast::<Jot>().is_none())
             {
                 cx.quit();
             }
@@ -1006,7 +1012,7 @@ fn main() {
             cx.update_global::<ViewSettings, _>(|view, _| view.word_wrap = !view.word_wrap);
         });
 
-        let (window, jot) = open_jot_window(None, None, cx);
+        let (window, _) = open_jot_window(None, None, cx);
         let (flags, mut paths): (Vec<_>, Vec<_>) = std::env::args_os()
             .skip(1)
             .map(PathBuf::from)
@@ -1016,12 +1022,10 @@ fn main() {
         }
         if !paths.is_empty() {
             window
-                .update(cx, |_, window, cx| {
-                    jot.update(cx, |jot, cx| {
-                        for path in paths {
-                            jot.open_path(path, window, cx);
-                        }
-                    })
+                .update(cx, |jot, window, cx| {
+                    for path in paths {
+                        jot.open_path(path, window, cx);
+                    }
                 })
                 .ok();
         }

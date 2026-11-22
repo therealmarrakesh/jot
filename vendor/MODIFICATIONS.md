@@ -4,6 +4,8 @@ The crates in this folder are copies of crates.io releases, licensed under the A
 
 ## gpui-base 0.7.3
 
+- Trimmed to the modules Jot uses (`input`, `scrollbar`, `motion`, `reduce_motion`, `theme`, `theme_tokens`, `actions`, `geometry`, `global_state`, `auto_scroll`, `animation`, `text_boundary`) and dropped unused dependencies (`serde`, `schemars`, `lsp-types`, `regex`, `tracing`, `instant`, `web-time`, `smol`, `html5ever`, `markdown`, `chrono`, `windows 0.58`, etc.), switching Windows API calls to `windows-sys 0.60`.
+- `src/input/`: removed code-editor mode (`EditorMode`, syntax highlighting, folding, diagnostics, LSP, auto-close, smart indent, built-in search panel) and `NumberInput` stepping/regex validation; made `InputEditorStyle.caret` optional (`None` by default so Jot renders its own 1px caret) and resolved selection highlight directly from `colors.selection`.
 - `src/input/base/state.rs`: wheel scrolling by WinUI's notch size (using the system's lines and characters per notch), re-binding an editor to a new window when its tab moves between windows, an undo availability query, atomic multi-range replace, and line-ending normalization on paste.
 - `src/input/base/undo_manager.rs`: undo availability is exposed outside tests.
 - `src/input/editor/display_map/text_wrapper.rs`: lines made only of characters from certain Unicode ranges wrap by character width without text shaping.

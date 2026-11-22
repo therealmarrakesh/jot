@@ -1,6 +1,10 @@
-use std::{cell::Cell, ops::Deref, panic::Location, rc::Rc};
-
-use instant::{Duration, Instant};
+use std::{
+    cell::Cell,
+    ops::Deref,
+    panic::Location,
+    rc::Rc,
+    time::{Duration, Instant},
+};
 
 use crate::{
     AxisExt,
@@ -10,13 +14,11 @@ use crate::{
 use gpui::{
     Anchor, App, Axis, Background, BorderStyle, Bounds, ContentMask, CursorStyle, Edges, Element,
     ElementId, EntityId, GlobalElementId, Hitbox, HitboxBehavior, Hsla, InspectorElementId,
-    IntoElement, IsZero, LayoutId, ListState, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    IntoElement, LayoutId, ListState, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
     PaintQuad, Pixels, Point, Position, ScrollHandle, ScrollWheelEvent, Size, Style,
     TouchDragEvent, TouchPhase, UniformListScrollHandle, Window, fill, point,
     prelude::FluentBuilder, px, relative, size,
 };
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
 
 /// The width of the scrollbar (THUMB_ACTIVE_INSET * 2 + THUMB_ACTIVE_WIDTH)
 const WIDTH: Pixels = px(4. * 2. + 8.);
@@ -44,7 +46,7 @@ fn clamp_thumb_radius(radius: Pixels, bounds: Bounds<Pixels>) -> Pixels {
 }
 
 /// Scrollbar show mode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Hash, Default, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum ScrollbarMode {
     /// Show scrollbar when scrolling, will fade out after idle.
     #[default]
@@ -1585,11 +1587,7 @@ impl Element for Scrollbar {
             |window| {
                 for state in prepaint.states.iter() {
                     let axis = state.axis;
-                    let mut radius = state.radius;
-                    if theme.tokens.radius.md.is_zero() {
-                        radius = px(0.);
-                    }
-                    radius = clamp_thumb_radius(radius, state.thumb_fill_bounds);
+                    let radius = clamp_thumb_radius(state.radius, state.thumb_fill_bounds);
                     let bounds = state.bounds;
                     let thumb_bounds = state.thumb_bounds;
                     let geometry = state.geometry;

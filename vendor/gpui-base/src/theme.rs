@@ -1,12 +1,9 @@
 use gpui::{App, Global};
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
 
-use crate::{PlotMotion, ScrollbarMode, ScrollbarMotion, ScrollbarStyles, SemanticThemeTokens};
+use crate::{ScrollbarMode, ScrollbarMotion, ScrollbarStyles, SemanticThemeTokens};
 
 /// Application-wide defaults for Base behavior modules.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "lowercase")]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ThemeAppearance {
     #[default]
     Light,
@@ -18,8 +15,6 @@ pub struct Theme {
     pub appearance: ThemeAppearance,
     pub tokens: SemanticThemeTokens,
     pub scrollbar: ScrollbarTheme,
-    pub resizable: ResizableTheme,
-    pub plot: PlotTheme,
 }
 
 impl Global for Theme {}
@@ -50,9 +45,6 @@ impl ActiveTheme for App {
 }
 
 /// Global defaults used by [`crate::Scrollbar`].
-///
-/// `motion` defaults to motionless. Styled layers project their own timing;
-/// Base never installs a fade or slide of its own.
 #[derive(Clone, Default)]
 pub struct ScrollbarTheme {
     mode: ScrollbarMode,
@@ -90,68 +82,5 @@ impl ScrollbarTheme {
 
     pub fn styles(&self) -> &ScrollbarStyles {
         &self.styles
-    }
-}
-
-/// Global defaults used by [`crate::plot`].
-///
-/// `motion` defaults to motionless. Styled layers project their own timing;
-/// Base never installs a fade or glide of its own.
-#[derive(Clone, Default)]
-pub struct PlotTheme {
-    motion: PlotMotion,
-}
-
-impl PlotTheme {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn with_motion(mut self, motion: PlotMotion) -> Self {
-        self.motion = motion;
-        self
-    }
-
-    pub fn motion(&self) -> &PlotMotion {
-        &self.motion
-    }
-}
-
-/// Global visual defaults used by resizable panel handles.
-///
-/// `None` means *unset*, not invisible: a handle with nothing projected onto it
-/// resolves from the active [`SemanticThemeTokens`] -- `border` at rest, `ring`
-/// while dragging -- which are the tokens those two states already mean
-/// everywhere else.
-///
-/// These were plain colors, so the Base default was `Hsla::default()`: fully
-/// transparent. That reads as a deliberate choice next to a styled façade,
-/// which projects its own values and never sees it, and as a missing divider
-/// to anything that does not -- and a consumer with no façade has no way to
-/// project anything. Making them optional keeps the projection exactly as it
-/// was while giving the unprojected case an answer.
-#[derive(Clone, Copy, Default)]
-pub struct ResizableTheme {
-    pub handle: Option<gpui::Hsla>,
-    pub active_handle: Option<gpui::Hsla>,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn scrollbar_theme_supports_builder_construction() {
-        let mode = ScrollbarMode::Hover;
-        let motion = ScrollbarMotion::default().with_enter(std::time::Duration::from_millis(120));
-        let styles = ScrollbarStyles::default();
-        let theme = ScrollbarTheme::new()
-            .with_mode(mode)
-            .with_motion(motion)
-            .with_styles(styles);
-
-        assert_eq!(theme.mode(), mode);
-        assert_eq!(theme.motion(), motion);
-        let _ = theme.styles();
     }
 }

@@ -1,5 +1,5 @@
 use super::*;
-use gpui_kit::component::input::{Input, InputState};
+use gpui_base::input::{Input, InputState};
 
 pub(crate) const CONTROL_HEIGHT: f32 = 32.;
 pub(crate) const CONTROL_RADIUS: f32 = 4.;
@@ -253,16 +253,17 @@ pub(crate) fn text_field(
         })
         .pb(px(1.))
         .child(
-            Input::new(input)
-                .appearance(false)
+            div()
                 .h_full()
-                .py(px(0.))
+                .flex()
+                .items_center()
                 .pl(u(FIELD_PADDING - 1.))
                 .pr(u(trailing))
                 .font_family(TEXT_FONT)
                 .text_size(u(BODY_SIZE))
                 .line_height(u(BODY_LINE + 2.))
-                .text_color(rgba(p.text_primary)),
+                .text_color(rgba(p.text_primary))
+                .child(Input::new(input)),
         )
         .child(field_caret(input, window, cx))
         .child(bottom_edge(

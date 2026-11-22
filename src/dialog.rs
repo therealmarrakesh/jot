@@ -1,11 +1,11 @@
 use super::*;
 use field::{BODY_LINE, BODY_SIZE, text_field};
 use futures::channel::oneshot;
-use gpui_kit::base::FocusTrapElement as _;
-use gpui_kit::base::actions::{Cancel, Confirm};
-use gpui_kit::base::input::Position;
-use gpui_kit::base::{MotionStatus, Presence, Transition, transition_with_status};
-use gpui_kit::component::input::InputState;
+use gpui_base::actions::{Cancel, Confirm};
+use gpui_base::input::{InputState, Position};
+use gpui_base::{MotionStatus, Presence, Transition, transition_with_status};
+
+gpui::actions!(jot_dialog, [FocusNext, FocusPrev]);
 
 const CONTEXT: &str = "JotDialog";
 const TITLE_FONT: &str = "Segoe UI Variable Display";
@@ -34,6 +34,8 @@ pub(crate) fn key_bindings() -> Vec<KeyBinding> {
     vec![
         KeyBinding::new("enter", Confirm { secondary: false }, Some(CONTEXT)),
         KeyBinding::new("escape", Cancel, Some(CONTEXT)),
+        KeyBinding::new("tab", FocusNext, Some(CONTEXT)),
+        KeyBinding::new("shift-tab", FocusPrev, Some(CONTEXT)),
     ]
 }
 
@@ -201,6 +203,36 @@ impl Jot {
         self.press_dialog_button(last, window, cx);
     }
 
+    fn focus_next_dialog(&mut self, _: &FocusNext, window: &mut Window, cx: &mut Context<Self>) {
+        self.step_dialog_focus(1, window, cx);
+    }
+
+    fn focus_prev_dialog(&mut self, _: &FocusPrev, window: &mut Window, cx: &mut Context<Self>) {
+        self.step_dialog_focus(-1, window, cx);
+    }
+
+    fn step_dialog_focus(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(dialog) = self.dialogs.active() else {
+            return;
+        };
+        let mut ring = Vec::with_capacity(dialog.buttons.len() + 1);
+        if matches!(dialog.kind, DialogKind::GoTo) {
+            ring.push(self.dialogs.line.focus_handle(cx));
+        }
+        ring.extend(dialog.buttons.iter().cloned());
+        if ring.is_empty() {
+            return;
+        }
+        let current = ring.iter().position(|handle| handle.is_focused(window));
+        let next = match current {
+            Some(ix) => (ix as isize + delta).rem_euclid(ring.len() as isize) as usize,
+            None if delta > 0 => 0,
+            None => ring.len() - 1,
+        };
+        ring[next].focus(window, cx);
+        cx.notify();
+    }
+
     fn press_dialog_button(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(dialog) = self.dialogs.active() else {
             return;
@@ -278,7 +310,9 @@ impl Jot {
         self.dialogs
             .open
             .retain_mut(|dialog| !dialog.sample(window, cx));
-        let serial = self.dialogs.open.last()?.serial;
+        if self.dialogs.open.is_empty() {
+            return None;
+        }
         let accent = rgb(palette(cx).accent);
         let layers: Vec<_> = self
             .dialogs
@@ -290,14 +324,16 @@ impl Jot {
             div()
                 .id("dialogs")
                 .key_context(CONTEXT)
+                .track_focus(&self.dialogs.focus)
                 .absolute()
                 .top_0()
                 .left_0()
                 .size_full()
                 .on_action(cx.listener(Self::confirm_dialog))
                 .on_action(cx.listener(Self::cancel_dialog))
-                .children(layers)
-                .focus_trap(("jot-dialog-trap", serial), &self.dialogs.focus),
+                .on_action(cx.listener(Self::focus_next_dialog))
+                .on_action(cx.listener(Self::focus_prev_dialog))
+                .children(layers),
         )
     }
 

@@ -1,5 +1,5 @@
 use super::*;
-use gpui_kit::base::{Interpolate, Transition, transition};
+use gpui_base::{Interpolate, Transition, transition};
 
 const FADE_DURATION: Duration = Duration::from_millis(83);
 

@@ -1,7 +1,7 @@
 use super::*;
 use field::{BODY_SIZE, CONTROL_HEIGHT, CONTROL_RADIUS, OVERLAY_RADIUS, text_field};
-use gpui_kit::base::{MotionStatus, Presence, Transition, transition_with_status};
-use gpui_kit::component::input::InputState;
+use gpui_base::input::InputState;
+use gpui_base::{MotionStatus, Presence, Transition, transition_with_status};
 use menu::Entry;
 use regex::bytes::{Regex, RegexBuilder};
 

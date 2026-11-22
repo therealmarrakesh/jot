@@ -1,4 +1,8 @@
 use super::*;
+use gpui_base::{
+    ColorTokens, ScrollbarEntrance, ScrollbarMode, ScrollbarMotion, ScrollbarStyles,
+    ScrollbarTheme, Theme, ThemeAppearance,
+};
 use windows_sys::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_BINARY, RegGetValueW};
 
 #[derive(Clone, Copy)]
@@ -220,19 +224,48 @@ pub(crate) fn theme_shadow(dark: bool, z: f32, scale: f32) -> Vec<BoxShadow> {
 }
 
 pub(crate) fn apply(appearance: WindowAppearance, cx: &mut App) {
-    let mode = ThemeMode::from(appearance);
-    let mut palette = if mode.is_dark() { DARK } else { LIGHT };
+    let dark = matches!(
+        appearance,
+        WindowAppearance::Dark | WindowAppearance::VibrantDark
+    );
+    let mut palette = if dark { DARK } else { LIGHT };
     if let Some(accent) = system_accent(palette.dark) {
         palette.accent = accent;
     }
-    let placeholder = Hsla::from(rgba(palette.text_secondary));
     cx.set_global(palette);
-    Theme::change(mode, None, cx);
-    Theme::update(cx, |theme| {
-        theme.background = transparent_black();
-        theme.caret = hsla(0., 0., 0., f32::EPSILON);
-        theme.muted_foreground = placeholder;
-    });
+    let mut colors = if dark {
+        ColorTokens::dark()
+    } else {
+        ColorTokens::light()
+    };
+    colors.background = transparent_black();
+    colors.foreground = rgba(palette.text_primary).into();
+    colors.muted_foreground = rgba(palette.text_secondary).into();
+    let thumb = Hsla::from(rgba(palette.text_tertiary));
+    let thumb_hover = Hsla::from(rgba(palette.text_secondary));
+    let thumb_active = Hsla::from(rgba(palette.text_primary));
+    let theme = Theme::global_mut(cx);
+    theme.appearance = if dark {
+        ThemeAppearance::Dark
+    } else {
+        ThemeAppearance::Light
+    };
+    theme.tokens.colors = colors;
+    theme.scrollbar = ScrollbarTheme::new()
+        .with_mode(ScrollbarMode::Scrolling)
+        .with_motion(
+            ScrollbarMotion::default()
+                .with_enter(Duration::from_millis(120))
+                .with_exit(Duration::from_millis(200))
+                .with_expand(Duration::from_millis(120))
+                .with_entrance(ScrollbarEntrance::Fade),
+        )
+        .with_styles(
+            ScrollbarStyles::default()
+                .thumb(|s| s.bg(thumb).width(px(6.)).inset(px(3.)).radius(px(3.)))
+                .thumb_hover(|s| s.bg(thumb_hover).width(px(8.)).inset(px(3.)).radius(px(4.)))
+                .thumb_active(|s| s.bg(thumb_active).width(px(8.)).inset(px(3.)).radius(px(4.))),
+        );
 }
 
 fn system_accent(dark: bool) -> Option<u32> {

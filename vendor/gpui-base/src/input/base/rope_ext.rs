@@ -16,18 +16,18 @@ impl Point {
     }
 }
 
-/// Parser-independent description of an incremental text replacement.
-#[derive(Debug, Clone, Copy)]
-pub struct InputEdit {
-    pub start_byte: usize,
-    pub old_end_byte: usize,
-    pub new_end_byte: usize,
-    pub start_position: Point,
-    pub old_end_position: Point,
-    pub new_end_position: Point,
+/// Zero-based line and UTF-16 character position within a text buffer.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Position {
+    pub line: u32,
+    pub character: u32,
 }
 
-use lsp_types::Position;
+impl Position {
+    pub fn new(line: u32, character: u32) -> Self {
+        Self { line, character }
+    }
+}
 
 /// An iterator over the lines of a `Rope`.
 pub struct RopeLines<'a> {

@@ -1,5 +1,4 @@
 use super::*;
-use gpui_kit::base::Root;
 use std::time::Instant;
 use tabs::{CAPTION_WIDTH, STRIP_LEFT, STRIP_TOP, TAB_HEIGHT, window_listeners};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, POINT, RECT};
@@ -27,7 +26,7 @@ const MOVE_LOOP_START_TIMEOUT: Duration = Duration::from_millis(500);
 
 #[derive(Clone, Copy)]
 pub(crate) struct Owner {
-    window: WindowHandle<Root>,
+    window: WindowHandle<Jot>,
     hwnd: isize,
 }
 
@@ -56,13 +55,9 @@ impl Global for TabDrag {}
 
 pub(crate) fn owner(window: &Window) -> Option<Owner> {
     Some(Owner {
-        window: window.window_handle().downcast::<Root>()?,
+        window: window.window_handle().downcast::<Jot>()?,
         hwnd: window_hwnd(window),
     })
-}
-
-fn jot(window: WindowHandle<Root>, cx: &App) -> Option<Entity<Jot>> {
-    window.read(cx).ok()?.view().clone().downcast::<Jot>().ok()
 }
 
 fn with_jot<R>(
@@ -70,20 +65,13 @@ fn with_jot<R>(
     cx: &mut App,
     f: impl FnOnce(&mut Jot, &mut Window, &mut Context<Jot>) -> R,
 ) -> Option<R> {
-    owner
-        .window
-        .update(cx, |root, window, cx| {
-            let jot = root.view().clone().downcast::<Jot>().ok()?;
-            Some(jot.update(cx, |jot, cx| f(jot, window, cx)))
-        })
-        .ok()
-        .flatten()
+    owner.window.update(cx, |jot, window, cx| f(jot, window, cx)).ok()
 }
 
 fn jot_windows(cx: &App) -> impl Iterator<Item = Owner> + '_ {
     cx.windows().into_iter().filter_map(move |handle| {
-        let window = handle.downcast::<Root>()?;
-        let hwnd = jot(window, cx)?.read(cx).hwnd;
+        let window = handle.downcast::<Jot>()?;
+        let hwnd = window.read(cx).ok()?.hwnd;
         Some(Owner { window, hwnd })
     })
 }
@@ -283,10 +271,7 @@ fn detach(drag: &mut TabDrag, alone: bool, point: POINT, cx: &mut App) {
         .flatten() else {
             return;
         };
-        let (handle, jot) = open_jot_window(Some(data), Some(size), cx);
-        let Some(window) = handle.downcast::<Root>() else {
-            return;
-        };
+        let (window, jot) = open_jot_window(Some(data), Some(size), cx);
         drag.owner = Owner {
             window,
             hwnd: jot.read(cx).hwnd,
@@ -308,7 +293,7 @@ fn run_move_loop(drag: &mut TabDrag, point: POINT, cx: &mut App) {
     place(
         drag.owner.hwnd,
         point,
-        gpui_kit::point(STRIP_LEFT + drag.grab.x, STRIP_TOP + drag.grab.y),
+        self::point(STRIP_LEFT + drag.grab.x, STRIP_TOP + drag.grab.y),
     );
     start_move_loop(drag, point, cx);
 }
@@ -411,7 +396,7 @@ fn scale(hwnd: isize) -> f32 {
 fn local(hwnd: isize, point: POINT) -> Point<f32> {
     let origin = client_origin(hwnd);
     let scale = scale(hwnd);
-    gpui_kit::point(
+    self::point(
         (point.x - origin.x) as f32 / scale,
         (point.y - origin.y) as f32 / scale,
     )

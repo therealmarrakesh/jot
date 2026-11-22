@@ -1,6 +1,6 @@
 use super::*;
-use gpui_kit::base::actions::{Cancel, Confirm, SelectDown, SelectLeft, SelectRight, SelectUp};
-use gpui_kit::base::{MotionStatus, Presence, Transition, transition_with_status};
+use gpui_base::actions::{Cancel, Confirm, SelectDown, SelectLeft, SelectRight, SelectUp};
+use gpui_base::{MotionStatus, Presence, Transition, transition_with_status};
 use windows_sys::Win32::System::DataExchange::IsClipboardFormatAvailable;
 use windows_sys::Win32::System::Ole::CF_UNICODETEXT;
 use windows_sys::Win32::UI::WindowsAndMessaging::SPI_GETMENUSHOWDELAY;

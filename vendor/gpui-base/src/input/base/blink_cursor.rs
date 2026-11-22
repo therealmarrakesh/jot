@@ -1,5 +1,5 @@
 use gpui::{Context, Pixels, Task, px};
-use instant::Duration;
+use std::time::Duration;
 
 #[cfg(not(target_os = "windows"))]
 static INTERVAL: Duration = Duration::from_millis(500);
@@ -8,7 +8,7 @@ static PAUSE_DELAY: Duration = Duration::from_millis(300);
 
 #[cfg(target_os = "windows")]
 fn interval() -> Option<Duration> {
-    let millis = unsafe { windows::Win32::UI::WindowsAndMessaging::GetCaretBlinkTime() };
+    let millis = unsafe { windows_sys::Win32::UI::WindowsAndMessaging::GetCaretBlinkTime() };
     (millis != 0 && millis != u32::MAX).then(|| Duration::from_millis(millis.into()))
 }
 

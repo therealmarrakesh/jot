@@ -90,8 +90,6 @@ impl<M: InputModeKind> InputBaseState<M> {
         self.scroll_to(offset, direction, cx);
         self.pause_blink_cursor(cx);
         self.update_preferred_column();
-        M::hide_context_menu(self, cx);
-        M::clear_inline_completion(self, cx);
         cx.notify()
     }
 
@@ -231,8 +229,6 @@ impl<M: InputModeKind> InputBaseState<M> {
         self.cursor_line_end_affinity = active_affinity;
         self.scroll_to(self.cursor(), direction, cx);
         self.pause_blink_cursor(cx);
-        M::hide_context_menu(self, cx);
-        M::clear_inline_completion(self, cx);
         cx.notify();
     }
 
@@ -342,19 +338,11 @@ impl<M: InputModeKind> InputBaseState<M> {
         );
     }
 
-    pub(super) fn up(&mut self, action: &MoveUp, window: &mut Window, cx: &mut Context<Self>) {
-        if M::handle_context_menu_action(self, Box::new(action.clone()), window, cx) {
-            return;
-        }
-
+    pub(super) fn up(&mut self, _: &MoveUp, window: &mut Window, cx: &mut Context<Self>) {
         self.move_vertical(-1, true, window, cx);
     }
 
-    pub(super) fn down(&mut self, action: &MoveDown, window: &mut Window, cx: &mut Context<Self>) {
-        if M::handle_context_menu_action(self, Box::new(action.clone()), window, cx) {
-            return;
-        }
-
+    pub(super) fn down(&mut self, _: &MoveDown, window: &mut Window, cx: &mut Context<Self>) {
         self.move_vertical(1, true, window, cx);
     }
 

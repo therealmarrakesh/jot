@@ -1,5 +1,5 @@
 use super::*;
-use gpui_kit::base::{Sequence, Transition, TransitionId};
+use gpui_base::{Sequence, Transition, TransitionId};
 
 const TAB_WIDTH: f32 = 240.;
 const TAB_MIN_WIDTH: f32 = 80.;
@@ -373,10 +373,12 @@ impl Jot {
             None => (None, String::new(), document::Format::default()),
         };
         let editor = cx.new(|cx| {
-            TextareaState::new(window, cx)
+            let mut state = TextareaState::new(window, cx)
                 .soft_wrap(word_wrap)
                 .viewport_wheel_step()
-                .default_value(text)
+                .default_value(text);
+            state.set_editor_paddings(EDITOR_PADDINGS);
+            state
         });
         Self::adopt_tab(
             TabData {
@@ -392,8 +394,14 @@ impl Jot {
     }
 
     pub(crate) fn adopt_tab(data: TabData, window: &mut Window, cx: &mut Context<Self>) -> Tab {
-        data.editor
-            .update(cx, |editor, cx| editor.attach_window(window, cx));
+        let jot = cx.weak_entity();
+        data.editor.update(cx, |editor, cx| {
+            editor.attach_window(window, cx);
+            editor.on_context_menu(Rc::new(move |_, _, position, window, cx| {
+                jot.update(cx, |jot, cx| jot.open_context_menu(position, window, cx))
+                    .ok();
+            }));
+        });
         let _changes = cx.subscribe(&data.editor, |this, editor, event: &InputEvent, cx| {
             if let InputEvent::Change = event
                 && let Some(tab) = this.tabs.iter_mut().find(|tab| tab.data.editor == editor)

@@ -178,7 +178,6 @@ impl<M: InputModeKind> InputBaseState<M> {
                 // from starting a drag under it.
                 crate::GlobalState::suppress_text_selection(cx);
                 self.undo_manager.break_transaction_coalescing();
-                M::clear_inline_completion(self, cx);
                 self.touch_selection = TouchSelection::default();
 
                 let (offset, line_end_affinity, _) =

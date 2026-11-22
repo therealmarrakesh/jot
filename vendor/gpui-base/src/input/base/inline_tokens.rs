@@ -326,7 +326,7 @@ impl<M: InputModeKind> InputBaseState<M> {
         if self.ime_marked_range.is_some() {
             return Err(InlineTokenError::CompositionActive);
         }
-        if M::CODE_EDITOR || self.masked || self.token_is_secret() || !self.mask_pattern.is_none() {
+        if self.masked || self.token_is_secret() || !self.mask_pattern.is_none() {
             return Err(InlineTokenError::UnsupportedMode);
         }
         Ok(())
@@ -377,7 +377,7 @@ impl<M: InputModeKind> InputBaseState<M> {
     /// normalization changed the text, since their ranges would no longer
     /// describe it.
     pub(super) fn install_tokens(&mut self, content: InputContent) {
-        let supported = !M::CODE_EDITOR && self.mask_pattern.is_none();
+        let supported = self.mask_pattern.is_none();
         let text_kept = self.text == content.text.as_ref();
         self.inline_tokens = (supported && text_kept && !content.tokens.is_empty()).then(|| {
             Box::new(InlineTokenStore {

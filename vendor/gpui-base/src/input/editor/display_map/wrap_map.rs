@@ -9,7 +9,6 @@ use std::ops::Range;
 use gpui::{App, Font, Pixels};
 use ropey::Rope;
 
-use super::fold_map::FoldMap;
 use super::text_wrapper::{LineItem, TextWrapper, WrapDisplayPoint, WrappingIndent};
 use super::{BufferPoint, WrapPoint};
 use crate::input::RopeExt;
@@ -161,11 +160,4 @@ impl WrapMap {
         self.wrapper.text()
     }
 
-    /// Calculate how many wrap rows of a buffer line are visible (not folded)
-    pub(super) fn visible_wrap_row_count_for_line(&self, line: usize, fold_map: &FoldMap) -> usize {
-        let wrap_range = self.buffer_line_to_wrap_row_range(line);
-        wrap_range
-            .filter(|&wr| fold_map.wrap_row_to_display_row(wr).is_some())
-            .count()
-    }
 }

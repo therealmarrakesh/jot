@@ -1,5 +1,4 @@
 use super::inline_line::InputLine;
-use gpui::Half;
 use std::borrow::Cow;
 use std::ops::{Range, RangeInclusive};
 use std::rc::Rc;
@@ -12,10 +11,7 @@ use smallvec::SmallVec;
 use sum_tree::{Bias, Dimensions, SumTree};
 use unicode_segmentation::UnicodeSegmentation as _;
 
-use crate::input::{
-    Point as TreeSitterPoint, RopeExt,
-    layout::{LastLayout, WhitespaceIndicators},
-};
+use crate::input::{Point as TreeSitterPoint, RopeExt, layout::LastLayout};
 
 /// Controls how soft-wrapped continuation lines are indented.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -795,9 +791,6 @@ pub(crate) struct LineLayout {
     /// indentation when [`WrappingIndent::Same`] is used.
     pub(crate) wrap_indent: Pixels,
     pub(crate) longest_width: Pixels,
-    pub(crate) whitespace_indicators: Option<WhitespaceIndicators>,
-    /// Whitespace indicators: (line_index, x_position, is_tab)
-    pub(crate) whitespace_chars: Vec<(usize, Pixels, bool)>,
     /// Whether any run of this line carries a background color, so [`Self::paint_background`]
     /// can skip the glyph walk for the common case of a line without highlights.
     has_background: bool,
@@ -810,8 +803,6 @@ impl LineLayout {
             longest_width: px(0.),
             wrapped_lines: SmallVec::new(),
             wrap_indent: px(0.),
-            whitespace_chars: Vec::new(),
-            whitespace_indicators: None,
             has_background: false,
         }
     }
@@ -863,34 +854,6 @@ impl LineLayout {
             .max()
             .unwrap_or_default();
         self.wrapped_lines = lines;
-        self
-    }
-
-    pub(crate) fn with_whitespaces(mut self, indicators: Option<WhitespaceIndicators>) -> Self {
-        self.whitespace_indicators = indicators;
-        let Some(indicators) = self.whitespace_indicators.as_ref() else {
-            return self;
-        };
-
-        let space_indicator_offset = indicators.space.width.half();
-
-        for (line_index, wrapped_line) in self.wrapped_lines.iter().enumerate() {
-            for (relative_offset, c) in wrapped_line.text.char_indices() {
-                if matches!(c, ' ' | '\t') {
-                    let is_tab = c == '\t';
-                    let start_x = wrapped_line.x_for_index(relative_offset);
-                    let end_x = wrapped_line.x_for_index(relative_offset + c.len_utf8());
-                    // Center the indicator in the actual character's space
-                    let x_position = if c == ' ' {
-                        (start_x + end_x).half() - space_indicator_offset
-                    } else {
-                        start_x
-                    };
-
-                    self.whitespace_chars.push((line_index, x_position, is_tab));
-                }
-            }
-        }
         self
     }
 
@@ -1117,24 +1080,6 @@ impl LineLayout {
                 window,
                 cx,
             );
-        }
-
-        // Paint whitespace indicators
-        if let Some(indicators) = self.whitespace_indicators.as_ref() {
-            for (line_index, x_position, is_tab) in &self.whitespace_chars {
-                let invisible = if *is_tab {
-                    indicators.tab.clone()
-                } else {
-                    indicators.space.clone()
-                };
-
-                let origin = point(
-                    pos.x + *x_position + self.line_indent(*line_index),
-                    pos.y + *line_index as f32 * line_height,
-                );
-
-                _ = invisible.paint(origin, line_height, text_align, align_width, window, cx);
-            }
         }
     }
 }

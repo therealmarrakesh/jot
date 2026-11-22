@@ -1,5 +1,5 @@
 use super::*;
-use gpui_kit::base::{Transition, transition};
+use gpui_base::{Transition, transition};
 use std::collections::HashMap;
 use std::time::Instant;
 use windows_sys::Win32::Foundation::{POINT, RECT};
@@ -28,7 +28,7 @@ const RESHOW_DELAY_FACTOR: f32 = 1.5;
 const RESHOW_WINDOW: Duration = Duration::from_millis(200);
 const FADE: Duration = Duration::from_millis(167);
 
-fn card(p: Palette, text: SharedString, size: gpui_kit::Size<Pixels>) -> Div {
+fn card(p: Palette, text: SharedString, size: Size<Pixels>) -> Div {
     div()
         .w(size.width)
         .h(size.height)
@@ -65,7 +65,7 @@ fn card(p: Palette, text: SharedString, size: gpui_kit::Size<Pixels>) -> Div {
 
 struct TooltipView {
     text: SharedString,
-    size: gpui_kit::Size<Pixels>,
+    size: Size<Pixels>,
     visible: bool,
 }
 
@@ -521,11 +521,11 @@ fn popup(cx: &mut App) -> Option<overlay::Overlay<TooltipView>> {
     Some(popup)
 }
 
-fn measure(text: &SharedString, window: &mut Window) -> gpui_kit::Size<Pixels> {
+fn measure(text: &SharedString, window: &mut Window) -> Size<Pixels> {
     let runs = [TextRun {
         len: text.len(),
         font: font(SMALL_FONT),
-        color: gpui_kit::black(),
+        color: black(),
         background_color: None,
         underline: None,
         strikethrough: None,

@@ -1,8 +1,5 @@
-#[cfg(not(target_family = "wasm"))]
-use std::time::Instant;
-use std::{rc::Rc, time::Duration};
-#[cfg(target_family = "wasm")]
-use web_time::Instant;
+use std::time::{Duration, Instant};
+use std::rc::Rc;
 
 use gpui::{
     App, Bounds, ElementId, Pixels, SharedString, Size, SpringConfig, SpringState, SpringTarget,
@@ -141,12 +138,6 @@ impl Transition {
 
     fn sample(&self, progress: f32) -> f32 {
         self.easing.sample(progress)
-    }
-
-    /// The easing curve, for a caller that samples one timeline at several
-    /// offsets, such as a staggered plot appear.
-    pub(crate) fn curve(&self) -> &Easing {
-        &self.easing
     }
 
     fn progress(&self, elapsed: Duration, duration: Duration) -> (f32, MotionStatus) {

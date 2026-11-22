@@ -39,7 +39,7 @@ impl Render for KeyTipView {
                 .font_family(FONT)
                 .text_size(px(FONT_SIZE))
                 .line_height(px(LINE_HEIGHT))
-                .text_color(gpui_kit::white())
+                .text_color(white())
                 .whitespace_nowrap()
                 .child(tip.key.to_string())
         }))
