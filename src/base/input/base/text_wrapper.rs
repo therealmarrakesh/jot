@@ -152,8 +152,8 @@ fn measured_wrap_boundaries(
         .grapheme_indices(true)
         .map(|(ix, grapheme)| ix + grapheme.len())
         .collect();
-    let opportunities: Vec<usize> = unicode_linebreak::linebreaks(text)
-        .map(|(ix, _)| ix)
+    let opportunities: Vec<usize> = crate::win32::line_break_opportunities(text)
+        .into_iter()
         .filter(|ix| ends.binary_search(ix).is_ok())
         .collect();
     let mut first = 0;
@@ -1017,6 +1017,12 @@ mod tests {
         assert_eq!(wrap("abc", 0., false), vec![1, 2]);
         // Closing punctuation stays with the preceding Chinese character.
         assert_eq!(wrap("你好，世界", 2., false), vec![3, 9]);
+        // Non-breaking space glues words together; hyphen allows breaking after it.
+        assert!(crate::win32::line_break_opportunities("foo\u{00A0}bar").is_empty());
+        assert_eq!(crate::win32::line_break_opportunities("foo-bar"), vec![4]);
+        // Astral-plane surrogate pairs (emoji) map cleanly to UTF-8 boundaries.
+        assert_eq!(wrap("👨‍👩‍👧‍👦 word", 4., false), vec!["👨‍👩‍👧‍👦 ".len()]);
+        assert_eq!(wrap("你好😀世界", 3., false), vec!["你好😀".len()]);
     }
 
     #[test]

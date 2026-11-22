@@ -21,7 +21,6 @@ taffy = { version = "0.13.0", default-features = false, features = [
     "block_layout",
     "content_size",
 ] }
-unicode-linebreak = "0.1"
 unicode-segmentation = "1.12.0"
 windows = { version = "0.62", features = [
     "Wdk_System_SystemServices",

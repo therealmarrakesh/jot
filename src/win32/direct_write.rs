@@ -1496,3 +1496,236 @@ fn is_color_glyph(
 }
 
 const DEFAULT_LOCALE_NAME: PCWSTR = windows::core::w!("en-US");
+
+struct LineBreakAnalyzer {
+    analyzer: IDWriteTextAnalyzer,
+    locale: HSTRING,
+    utf16_scratch: Vec<u16>,
+    breakpoints_scratch: Vec<DWRITE_LINE_BREAKPOINT>,
+}
+
+impl LineBreakAnalyzer {
+    fn new() -> Result<Self> {
+        let factory: IDWriteFactory = unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)? };
+        let analyzer = unsafe { factory.CreateTextAnalyzer()? };
+        let mut locale = [0u16; LOCALE_NAME_MAX_LENGTH as usize];
+        unsafe { GetUserDefaultLocaleName(&mut locale) };
+        let locale = HSTRING::from_wide(&locale);
+        Ok(Self {
+            analyzer,
+            locale,
+            utf16_scratch: Vec::new(),
+            breakpoints_scratch: Vec::new(),
+        })
+    }
+
+    fn opportunities(&mut self, text: &str) -> Vec<usize> {
+        self.utf16_scratch.clear();
+        self.utf16_scratch.extend(text.encode_utf16());
+        let Ok(text_len) = u32::try_from(self.utf16_scratch.len()) else {
+            return Vec::new();
+        };
+        if text_len < 2 {
+            return Vec::new();
+        }
+
+        self.breakpoints_scratch.clear();
+        self.breakpoints_scratch
+            .resize(self.utf16_scratch.len(), DWRITE_LINE_BREAKPOINT::default());
+
+        let source: IDWriteTextAnalysisSource = LineBreakSource {
+            text: self.utf16_scratch.as_ptr(),
+            len: text_len,
+            locale: self.locale.as_ptr(),
+        }
+        .into();
+        let sink: IDWriteTextAnalysisSink = LineBreakSink {
+            breakpoints: self.breakpoints_scratch.as_mut_ptr(),
+            len: self.breakpoints_scratch.len(),
+        }
+        .into();
+
+        if unsafe {
+            self.analyzer
+                .AnalyzeLineBreakpoints(&source, 0, text_len, &sink)
+        }
+        .is_err()
+        {
+            return Vec::new();
+        }
+        drop(sink);
+        drop(source);
+
+        const CAN_BREAK: u8 = DWRITE_BREAK_CONDITION_CAN_BREAK.0 as u8;
+        const MUST_BREAK: u8 = DWRITE_BREAK_CONDITION_MUST_BREAK.0 as u8;
+
+        let mut opportunities = Vec::new();
+        let mut utf16_ix = 0usize;
+        let mut chars = text.char_indices();
+        if let Some((_, first)) = chars.next() {
+            utf16_ix += first.len_utf16();
+            for (byte_ix, ch) in chars {
+                let after = (self.breakpoints_scratch[utf16_ix - 1]._bitfield >> 2) & 0b11;
+                let before = self.breakpoints_scratch[utf16_ix]._bitfield & 0b11;
+                if matches!(after.max(before), CAN_BREAK | MUST_BREAK) {
+                    opportunities.push(byte_ix);
+                }
+                utf16_ix += ch.len_utf16();
+            }
+        }
+        opportunities
+    }
+}
+
+thread_local! {
+    static LINE_BREAK_ANALYZER: std::cell::RefCell<Option<LineBreakAnalyzer>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Returns UTF-8 byte offsets where UAX #14 line wrapping may break `text`,
+/// computed via Windows DirectWrite (`IDWriteTextAnalyzer::AnalyzeLineBreakpoints`).
+pub(crate) fn line_break_opportunities(text: &str) -> Vec<usize> {
+    if text.len() < 2 {
+        return Vec::new();
+    }
+    LINE_BREAK_ANALYZER.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        if slot.is_none() {
+            *slot = LineBreakAnalyzer::new().log_err();
+        }
+        slot.as_mut()
+            .map_or_else(Vec::new, |analyzer| analyzer.opportunities(text))
+    })
+}
+
+#[implement(IDWriteTextAnalysisSource)]
+struct LineBreakSource {
+    text: *const u16,
+    len: u32,
+    locale: *const u16,
+}
+
+#[allow(non_snake_case)]
+impl IDWriteTextAnalysisSource_Impl for LineBreakSource_Impl {
+    fn GetTextAtPosition(
+        &self,
+        textposition: u32,
+        textstring: *mut *mut u16,
+        textlength: *mut u32,
+    ) -> windows::core::Result<()> {
+        unsafe {
+            if textposition >= self.len {
+                *textstring = std::ptr::null_mut();
+                *textlength = 0;
+            } else {
+                *textstring = self.text.add(textposition as usize).cast_mut();
+                *textlength = self.len - textposition;
+            }
+        }
+        Ok(())
+    }
+
+    fn GetTextBeforePosition(
+        &self,
+        textposition: u32,
+        textstring: *mut *mut u16,
+        textlength: *mut u32,
+    ) -> windows::core::Result<()> {
+        unsafe {
+            if textposition == 0 || textposition > self.len {
+                *textstring = std::ptr::null_mut();
+                *textlength = 0;
+            } else {
+                *textstring = self.text.cast_mut();
+                *textlength = textposition;
+            }
+        }
+        Ok(())
+    }
+
+    fn GetParagraphReadingDirection(&self) -> DWRITE_READING_DIRECTION {
+        DWRITE_READING_DIRECTION_LEFT_TO_RIGHT
+    }
+
+    fn GetLocaleName(
+        &self,
+        textposition: u32,
+        textlength: *mut u32,
+        localename: *mut *mut u16,
+    ) -> windows::core::Result<()> {
+        unsafe {
+            *textlength = self.len.saturating_sub(textposition);
+            *localename = self.locale.cast_mut();
+        }
+        Ok(())
+    }
+
+    fn GetNumberSubstitution(
+        &self,
+        textposition: u32,
+        textlength: *mut u32,
+        numbersubstitution: OutRef<'_, IDWriteNumberSubstitution>,
+    ) -> windows::core::Result<()> {
+        unsafe {
+            *textlength = self.len.saturating_sub(textposition);
+        }
+        numbersubstitution.write(None)
+    }
+}
+
+#[implement(IDWriteTextAnalysisSink)]
+struct LineBreakSink {
+    breakpoints: *mut DWRITE_LINE_BREAKPOINT,
+    len: usize,
+}
+
+#[allow(non_snake_case)]
+impl IDWriteTextAnalysisSink_Impl for LineBreakSink_Impl {
+    fn SetScriptAnalysis(
+        &self,
+        _textposition: u32,
+        _textlength: u32,
+        _scriptanalysis: *const DWRITE_SCRIPT_ANALYSIS,
+    ) -> windows::core::Result<()> {
+        Ok(())
+    }
+
+    fn SetLineBreakpoints(
+        &self,
+        textposition: u32,
+        textlength: u32,
+        linebreakpoints: *const DWRITE_LINE_BREAKPOINT,
+    ) -> windows::core::Result<()> {
+        let start = textposition as usize;
+        let count = textlength as usize;
+        if count == 0 || linebreakpoints.is_null() {
+            return Ok(());
+        }
+        if start.saturating_add(count) > self.len {
+            return Err(Error::new(E_INVALIDARG, "line breakpoints out of bounds"));
+        }
+        unsafe {
+            std::ptr::copy_nonoverlapping(linebreakpoints, self.breakpoints.add(start), count);
+        }
+        Ok(())
+    }
+
+    fn SetBidiLevel(
+        &self,
+        _textposition: u32,
+        _textlength: u32,
+        _explicitlevel: u8,
+        _resolvedlevel: u8,
+    ) -> windows::core::Result<()> {
+        Ok(())
+    }
+
+    fn SetNumberSubstitution(
+        &self,
+        _textposition: u32,
+        _textlength: u32,
+        _numbersubstitution: Ref<'_, IDWriteNumberSubstitution>,
+    ) -> windows::core::Result<()> {
+        Ok(())
+    }
+}
