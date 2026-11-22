@@ -1,6 +1,6 @@
 use std::ops::Range;
 
-use gpui::{Context, Window};
+use crate::ui::{Context, Window};
 use ropey::Rope;
 
 use super::{EditorState, RopeExt as _, rope_ext::Bias};

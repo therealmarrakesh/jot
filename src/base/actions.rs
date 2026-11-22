@@ -1,13 +1,13 @@
 //! Common actions shared by keyboard-driven GPUI controls.
 
-use gpui::actions;
+use crate::ui::actions;
 
 #[derive(Clone, PartialEq, Eq)]
-pub struct Confirm {
+pub(crate) struct Confirm {
     /// Whether the confirmation uses the secondary action.
-    pub secondary: bool,
+    pub(crate) secondary: bool,
 }
-gpui::impl_action!(ui, Confirm);
+crate::ui::impl_action!(ui, Confirm);
 
 actions!(
     ui,

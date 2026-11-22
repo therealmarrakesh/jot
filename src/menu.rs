@@ -97,11 +97,6 @@ struct CommandButton {
     glyph: &'static str,
 }
 
-pub(crate) enum MenuEvent {
-    Opened,
-    Closed,
-}
-
 fn context_menu(editor: &EditorState) -> (Vec<CommandButton>, Vec<Entry>) {
     let selection = !editor.selected_range().is_empty();
     let button = |label, glyph, enabled, action| CommandButton {
@@ -408,7 +403,7 @@ fn cycle(
 
 fn menu_show_delay() -> Duration {
     Duration::from_millis(
-        gpui::system_parameters_u32(SPI_GETMENUSHOWDELAY.0)
+        crate::ui::system_parameters_u32(SPI_GETMENUSHOWDELAY.0)
             .map_or(DEFAULT_MENU_SHOW_DELAY_MS, u64::from),
     )
 }
@@ -576,8 +571,11 @@ enum SubmenuChange {
     Close,
 }
 
+pub(crate) fn bar_width(areas: &Rc<Cell<[Bounds<Pixels>; 3]>>) -> f32 {
+    areas.get()[BAR_AREA].size.width.as_f32()
+}
+
 pub(crate) struct MenuBar {
-    jot: WeakEntity<Jot>,
     focus: FocusHandle,
     open: Option<OpenMenu>,
     serial: usize,
@@ -587,27 +585,19 @@ pub(crate) struct MenuBar {
     bar_focus: Option<MenuKind>,
     access: bool,
     bounds: Bounds<Pixels>,
-    _window_changes: [Subscription; 2],
+    _window_bounds: Subscription,
 }
 
 impl MenuBar {
-    pub(crate) fn new(jot: WeakEntity<Jot>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let _window_changes = [
-            cx.observe_window_activation(window, |this, window, cx| {
-                if !window.is_window_active() {
-                    this.cancel(window, cx);
-                }
-            }),
-            cx.observe_window_bounds(window, |this, window, cx| {
-                let bounds = window.bounds();
-                if bounds != this.bounds {
-                    this.bounds = bounds;
-                    this.cancel(window, cx);
-                }
-            }),
-        ];
+    pub(crate) fn new(window: &mut Window, cx: &mut Context<Jot>) -> Self {
+        let _window_bounds = cx.observe_window_bounds(window, |this, window, cx| {
+            let bounds = window.bounds();
+            if bounds != this.menu_bar.bounds {
+                this.menu_bar.bounds = bounds;
+                this.menu_cancel(window, cx);
+            }
+        });
         Self {
-            jot,
             focus: cx.focus_handle(),
             open: None,
             serial: 0,
@@ -617,7 +607,7 @@ impl MenuBar {
             bar_focus: None,
             access: false,
             bounds: window.bounds(),
-            _window_changes,
+            _window_bounds,
         }
     }
 
@@ -629,200 +619,21 @@ impl MenuBar {
         self.access
     }
 
-    pub(crate) fn exit_access(&mut self, cx: &mut Context<Self>) {
-        if self.access {
-            self.access = false;
-            cx.notify();
-        }
-    }
-
-    fn cancel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.live_open().is_some() {
-            self.close_menu(window, cx);
-        } else if self.bar_focus.is_some() {
-            self.leave_bar(window, cx);
-        }
-        self.bar_focus = None;
-        self.exit_access(cx);
-    }
-
     pub(crate) fn width(&self) -> f32 {
-        self.hit_areas.get()[BAR_AREA].size.width.as_f32()
+        bar_width(&self.hit_areas)
     }
 
-    pub(crate) fn pointer_down(&mut self, cx: &mut Context<Self>) {
-        self.bar_focus = None;
-        self.exit_access(cx);
+    pub(crate) fn hit_areas(&self) -> Rc<Cell<[Bounds<Pixels>; 3]>> {
+        self.hit_areas.clone()
     }
 
-    pub(crate) fn key_down(
-        &mut self,
-        keystroke: &Keystroke,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        let modifiers = keystroke.modifiers;
-        if matches!(keystroke.key.as_str(), "alt" | "f10") && !modifiers.modified() {
-            self.toggle_access(window, cx);
-            return true;
-        }
-        let key = match keystroke.key.as_bytes() {
-            [byte] if byte.is_ascii_alphanumeric() => Some(char::from(byte.to_ascii_uppercase())),
-            _ => None,
-        };
-        if !self.access {
-            return match key {
-                Some(key) if modifiers.alt && !modifiers.control && !modifiers.platform => {
-                    self.invoke_access(key, window, cx)
-                }
-                _ => false,
-            };
-        }
-        match keystroke.key.as_str() {
-            "escape" => {
-                self.access_back(window, cx);
-                true
-            }
-            "up" | "down" | "left" | "right" | "tab" | "space" | "enter" => {
-                self.exit_access(cx);
-                false
-            }
-            _ => {
-                if let Some(key) = key.filter(|_| !modifiers.control && !modifiers.platform) {
-                    self.invoke_access(key, window, cx);
-                }
-                true
-            }
-        }
-    }
-
-    fn toggle_access(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.access {
-            self.exit_access(cx);
-            if self.live_open().is_none() {
-                self.leave_bar(window, cx);
-            }
-            return;
-        }
-        match self.live_open() {
-            Some(open) if open.kind.is_none() => return,
-            Some(_) => {}
-            None => {
-                if self.bar_focus.is_none() {
-                    self.bar_focus = Some(MenuKind::File);
-                }
-                self.focus.focus(window, cx);
-            }
-        }
-        self.access = true;
-        cx.notify();
-    }
-
-    fn access_back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        match self.live_open_mut() {
-            Some(open) => match open.live_submenu().map(|submenu| submenu.ix) {
-                Some(ix) => {
-                    open.panel.focused = Some(ix);
-                    self.close_submenu(cx);
-                }
-                None => self.close_to_bar(window, cx),
-            },
-            None => {
-                self.access = false;
-                self.leave_bar(window, cx);
-            }
-        }
-    }
-
-    fn invoke_access(&mut self, key: char, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        let Some(open) = self.live_open_mut() else {
-            let Some(kind) = MenuKind::ALL
-                .into_iter()
-                .find(|kind| kind.access_key() == Some(key))
-            else {
-                return false;
-            };
-            self.open_by_keyboard(kind, window, cx);
-            self.access = true;
-            return true;
-        };
-        if open.kind.is_none() {
-            return false;
-        }
-        if let Some(submenu) = open.focused_submenu() {
-            let Some(sub) = submenu.panel.find_key(key) else {
-                return false;
-            };
-            let parent = submenu.ix;
-            self.access = false;
-            self.activate((parent, Some(sub)), window, cx);
-            return true;
-        }
-        let Some(ix) = open.panel.find_key(key) else {
-            return false;
-        };
-        if matches!(open.panel.entries[ix], Entry::Submenu(..)) {
-            open.panel.focused = Some(ix);
-            self.access = true;
-            self.open_submenu(ix, true, window, cx);
-        } else {
-            self.access = false;
-            self.activate((ix, None), window, cx);
-        }
-        true
-    }
-
-    fn open_by_keyboard(&mut self, kind: MenuKind, window: &mut Window, cx: &mut Context<Self>) {
-        self.open_menu(kind, window, cx);
-        if let Some(open) = self.open.as_mut() {
-            open.panel.step(1);
-            open.focus_visible = true;
-        }
-    }
-
-    fn close_to_bar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(open) = self.live_open_mut() else {
-            return;
-        };
-        let Some(kind) = open.kind else {
-            return self.close_menu(window, cx);
-        };
-        open.motion.closing = true;
-        self.submenu_timer = Task::ready(());
-        self.bar_focus = Some(kind);
-        self.focus.focus(window, cx);
-        cx.emit(MenuEvent::Closed);
-        cx.notify();
-    }
-
-    fn leave_bar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.bar_focus = None;
-        if let Some(target) = self.action_context(cx) {
-            target.focus(window, cx);
-        }
-        cx.notify();
+    pub(crate) fn focus_handle(&self) -> &FocusHandle {
+        &self.focus
     }
 
     fn bar_focused(&self, window: &Window) -> Option<MenuKind> {
         self.bar_focus
             .filter(|_| self.live_open().is_none() && self.focus.is_focused(window))
-    }
-
-    fn move_bar_focus(&mut self, delta: isize, cx: &mut Context<Self>) {
-        if let Some(kind) = self.bar_focus {
-            self.bar_focus = Some(kind.cycle(delta));
-            cx.notify();
-        }
-    }
-
-    fn editor(&self, cx: &App) -> Option<Entity<EditorState>> {
-        self.jot
-            .upgrade()
-            .map(|jot| jot.read(cx).active_editor().clone())
-    }
-
-    fn action_context(&self, cx: &App) -> Option<FocusHandle> {
-        self.editor(cx).map(|editor| editor.focus_handle(cx))
     }
 
     fn next_serial(&mut self) -> usize {
@@ -840,525 +651,6 @@ impl MenuBar {
 
     fn open_kind(&self) -> Option<MenuKind> {
         self.live_open().and_then(|open| open.kind)
-    }
-
-    fn open_menu(&mut self, kind: MenuKind, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(editor) = self.editor(cx) else {
-            return;
-        };
-        let entries = kind.entries(editor.read(cx), cx);
-        let panel = Panel::new(entries, MIN_WIDTH, true, &editor.focus_handle(cx), window);
-        self.show(OpenMenu::new(Some(kind), panel), window, cx);
-    }
-
-    pub(crate) fn focus_handle(&self) -> &FocusHandle {
-        &self.focus
-    }
-
-    pub(crate) fn open_context_menu(
-        &mut self,
-        editor: &Entity<EditorState>,
-        anchor: Point<Pixels>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let (commands, entries) = context_menu(editor.read(cx));
-        let panel = Panel::new(
-            entries,
-            CONTEXT_WIDTH,
-            false,
-            &editor.focus_handle(cx),
-            window,
-        );
-        let focused_command = commands.iter().position(|button| button.command.enabled);
-        self.show(
-            OpenMenu {
-                anchor: Some(anchor),
-                commands,
-                focused_command,
-                focus_visible: window.last_input_was_keyboard(),
-                ..OpenMenu::new(None, panel)
-            },
-            window,
-            cx,
-        );
-    }
-
-    pub(crate) fn open_flyout_above(
-        &mut self,
-        editor: &Entity<EditorState>,
-        entries: Vec<Entry>,
-        target: Bounds<Pixels>,
-        return_focus: FocusHandle,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let panel = Panel::new(
-            entries,
-            FLYOUT_MIN_WIDTH,
-            true,
-            &editor.focus_handle(cx),
-            window,
-        );
-        let anchor = point(
-            target.center().x - px((panel.width / 2.).floor()),
-            target.top() - px(FLYOUT_GAP + panel.height()),
-        );
-        self.show(
-            OpenMenu {
-                anchor: Some(anchor),
-                upward: true,
-                return_focus: Some(return_focus),
-                ..OpenMenu::new(None, panel)
-            },
-            window,
-            cx,
-        );
-    }
-
-    fn show(&mut self, open: OpenMenu, window: &mut Window, cx: &mut Context<Self>) {
-        self.bar_focus = None;
-        let motion = Motion::new(self.next_serial(), !open.commands.is_empty());
-        self.open = Some(OpenMenu { motion, ..open });
-        self.submenu_timer = Task::ready(());
-        self.focus.focus(window, cx);
-        cx.emit(MenuEvent::Opened);
-        cx.notify();
-    }
-
-    fn close_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.access = false;
-        let return_focus = self.live_open_mut().and_then(|open| {
-            open.motion.closing = true;
-            open.return_focus.take()
-        });
-        self.submenu_timer = Task::ready(());
-        if let Some(target) = return_focus.or_else(|| self.action_context(cx)) {
-            target.focus(window, cx);
-        }
-        cx.emit(MenuEvent::Closed);
-        cx.notify();
-    }
-
-    fn run_command(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(command) = self
-            .live_open()
-            .and_then(|open| open.commands.get(ix))
-            .map(|button| button.command)
-            .filter(|command| command.enabled)
-        else {
-            return;
-        };
-        let action = (command.action)();
-        self.dispatch(action, window, cx);
-    }
-
-    fn dispatch(&mut self, action: Box<dyn Action>, window: &mut Window, cx: &mut Context<Self>) {
-        self.close_menu(window, cx);
-        let Some(target) = self.action_context(cx) else {
-            return;
-        };
-        window.defer(cx, move |window, cx| {
-            target.dispatch_action(action.as_ref(), window, cx);
-        });
-    }
-
-    fn command_row(open: &OpenMenu, window: &Window, cx: &mut Context<Self>) -> Div {
-        let p = palette(cx);
-        let commands = &open.commands;
-        let count = commands.len() as f32;
-        let row = open.panel.width + 2. * COMMAND_OUTSET;
-        let cell = ((row - (count - 1.)) / count).floor();
-        let ring = open.focused_command.filter(|_| open.focus_visible);
-        div()
-            .absolute()
-            .top(px(BORDER))
-            .left(px(-COMMAND_OUTSET))
-            .w(px(row))
-            .h(px(COMMAND_ROW))
-            .flex()
-            .children(commands.iter().enumerate().flat_map(|(ix, command)| {
-                let divider = (ix > 0).then(|| {
-                    div()
-                        .flex_none()
-                        .w(px(1.))
-                        .h(px(COMMAND_DIVIDER_HEIGHT))
-                        .mt(px(COMMAND_DIVIDER_TOP))
-                        .bg(rgb(p.menu_separator))
-                });
-                let button =
-                    Self::command_button(p, ix, command, cell, ring == Some(ix), window, cx);
-                divider
-                    .into_iter()
-                    .map(IntoElement::into_any_element)
-                    .chain(Some(button.into_any_element()))
-            }))
-            .child(
-                div()
-                    .absolute()
-                    .left(px(BORDER + COMMAND_OUTSET))
-                    .right(px(BORDER + COMMAND_OUTSET))
-                    .bottom(px(-1.))
-                    .h(px(1.))
-                    .bg(rgb(p.menu_separator)),
-            )
-    }
-
-    fn command_button(
-        p: Palette,
-        ix: usize,
-        button: &CommandButton,
-        cell: f32,
-        focused: bool,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) -> Stateful<Div> {
-        let face = cell - 2. * (COMMAND_GAP + COMMAND_INSET);
-        let CommandButton { command, glyph } = button;
-        let enabled = command.enabled;
-        let color = if enabled {
-            p.text_primary
-        } else {
-            p.text_disabled
-        };
-        let label_width = text_width(window, command.label, SMALL_FONT, COMMAND_LABEL_SIZE);
-        let label_left = (face - COMMAND_LABEL_PANEL) / 2.
-            + round_half_up((COMMAND_LABEL_PANEL - label_width) / 2.);
-        div()
-            .id(("menu-command", ix))
-            .flex_none()
-            .w(px(cell))
-            .h_full()
-            .pt(px(COMMAND_ROW - COMMAND_BUTTON + COMMAND_INSET))
-            .px(px(COMMAND_GAP + COMMAND_INSET))
-            .pb(px(COMMAND_INSET))
-            .on_click(cx.listener(move |this, _, window, cx| this.run_command(ix, window, cx)))
-            .child(
-                div()
-                    .id(("menu-command-face", ix))
-                    .size_full()
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .pt(px(COMMAND_ICON_TOP))
-                    .rounded(px(field::CONTROL_RADIUS))
-                    .text_color(rgba(color))
-                    .child(
-                        div()
-                            .h(px(COMMAND_LINE))
-                            .line_height(px(COMMAND_LINE))
-                            .font_family(ICON_FONT)
-                            .text_size(px(ICON_SIZE))
-                            .child(*glyph),
-                    )
-                    .child(
-                        div()
-                            .self_start()
-                            .ml(px(label_left))
-                            .w(px(label_width))
-                            .text_center()
-                            .mt(px(COMMAND_LABEL_GAP))
-                            .h(px(COMMAND_LINE))
-                            .line_height(px(COMMAND_LINE))
-                            .font_family(SMALL_FONT)
-                            .text_size(px(COMMAND_LABEL_SIZE))
-                            .child(command.label),
-                    )
-                    .brush_transition(Brushes::subtle(p))
-                    .disabled(!enabled)
-                    .when(enabled, |this| {
-                        this.pressed(move |style| style.text_color(rgba(p.text_secondary)))
-                    })
-                    .when(focused, |this| {
-                        this.child(field::focus_ring(
-                            p,
-                            Edges::default(),
-                            px(field::CONTROL_RADIUS),
-                        ))
-                    }),
-            )
-    }
-
-    fn activate(
-        &mut self,
-        path: (usize, Option<usize>),
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(open) = self.live_open() else {
-            return;
-        };
-        let entry = match path {
-            (ix, None) => open.panel.entries[ix].clone(),
-            (_, Some(sub)) => match open.live_submenu() {
-                Some(submenu) => submenu.panel.entries[sub].clone(),
-                None => return,
-            },
-        };
-        match entry {
-            Entry::Submenu(..) => self.open_submenu(path.0, true, window, cx),
-            entry if !entry.selectable() => {}
-            entry => {
-                if let Some(action) = entry.action() {
-                    self.dispatch(action, window, cx);
-                }
-            }
-        }
-    }
-
-    fn open_submenu(
-        &mut self,
-        ix: usize,
-        highlight_first: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(action_context) = self.action_context(cx) else {
-            return;
-        };
-        let serial = self.next_serial();
-        self.submenu_timer = Task::ready(());
-        let Some(open) = self.live_open_mut() else {
-            return;
-        };
-        let Entry::Submenu(_, entries) = &open.panel.entries[ix] else {
-            return;
-        };
-        if open.live_submenu().is_none_or(|submenu| submenu.ix != ix) {
-            open.submenu = Some(OpenSubmenu {
-                ix,
-                panel: Panel::new(entries.clone(), MIN_WIDTH, true, &action_context, window),
-                motion: Motion::new(serial, false),
-            });
-        }
-        open.focus_visible |= highlight_first;
-        if highlight_first && let Some(submenu) = open.live_submenu_mut() {
-            submenu.panel.focused = None;
-            submenu.panel.step(1);
-        }
-        cx.notify();
-    }
-
-    fn close_submenu(&mut self, cx: &mut Context<Self>) {
-        self.submenu_timer = Task::ready(());
-        if let Some(submenu) = self.open.as_mut().and_then(OpenMenu::live_submenu_mut) {
-            submenu.motion.closing = true;
-            cx.notify();
-        }
-    }
-
-    fn schedule_submenu(
-        &mut self,
-        change: SubmenuChange,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let target = match change {
-            SubmenuChange::Keep => {
-                self.submenu_timer = Task::ready(());
-                return;
-            }
-            SubmenuChange::Open(ix) => Some(ix),
-            SubmenuChange::Close => None,
-        };
-        let delay = menu_show_delay();
-        self.submenu_timer = cx.spawn_in(window, async move |this, cx| {
-            cx.background_executor().timer(delay).await;
-            this.update_in(cx, |this, window, cx| match target {
-                Some(ix) => this.open_submenu(ix, false, window, cx),
-                None => this.close_submenu(cx),
-            })
-            .ok();
-        });
-    }
-
-    fn hover_row(
-        &mut self,
-        path: (usize, Option<usize>),
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(open) = self.live_open() else {
-            return;
-        };
-        let change = match path {
-            (ix, None) => {
-                let current = open.live_submenu().map(|submenu| submenu.ix);
-                match (&open.panel.entries[ix], current) {
-                    (Entry::Submenu(..), Some(open_ix)) if open_ix == ix => SubmenuChange::Keep,
-                    (Entry::Submenu(..), _) => SubmenuChange::Open(ix),
-                    (_, Some(_)) => SubmenuChange::Close,
-                    (_, None) => SubmenuChange::Keep,
-                }
-            }
-            (_, Some(_)) => SubmenuChange::Keep,
-        };
-        self.schedule_submenu(change, window, cx);
-        cx.notify();
-    }
-
-    fn switch(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(kind) = self.open_kind() else {
-            return;
-        };
-        self.open_by_keyboard(kind.cycle(delta), window, cx);
-    }
-
-    fn on_up(&mut self, _: &SelectUp, window: &mut Window, cx: &mut Context<Self>) {
-        self.step_active(-1, window, cx);
-    }
-
-    fn on_down(&mut self, _: &SelectDown, window: &mut Window, cx: &mut Context<Self>) {
-        self.step_active(1, window, cx);
-    }
-
-    fn step_active(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(open) = self.live_open_mut() else {
-            if delta > 0
-                && let Some(kind) = self.bar_focused(window)
-            {
-                self.open_by_keyboard(kind, window, cx);
-            }
-            return;
-        };
-        open.focus_visible = true;
-        if open.in_submenu() {
-            if let Some(submenu) = open.live_submenu_mut() {
-                submenu.panel.step(delta);
-            }
-        } else if open.commands.is_empty() {
-            open.panel.step(delta);
-        } else {
-            open.step_linear(delta);
-        }
-        cx.notify();
-    }
-
-    fn on_confirm(&mut self, _: &Confirm, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(open) = self.live_open() else {
-            if let Some(kind) = self.bar_focused(window) {
-                self.open_by_keyboard(kind, window, cx);
-            }
-            return;
-        };
-        if let Some(ix) = open.focused_command {
-            self.run_command(ix, window, cx);
-            return;
-        }
-        let sub = open
-            .live_submenu()
-            .and_then(|submenu| submenu.panel.focused);
-        if let Some(ix) = open.panel.focused {
-            self.activate((ix, sub), window, cx);
-        }
-    }
-
-    fn on_cancel(&mut self, _: &Cancel, window: &mut Window, cx: &mut Context<Self>) {
-        match self.live_open() {
-            Some(open) if open.in_submenu() => self.close_submenu(cx),
-            Some(open) if open.kind.is_some() => self.close_to_bar(window, cx),
-            Some(_) => self.close_menu(window, cx),
-            None => self.leave_bar(window, cx),
-        }
-    }
-
-    fn on_left(&mut self, _: &SelectLeft, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(open) = self.live_open_mut() else {
-            self.move_bar_focus(-1, cx);
-            return;
-        };
-        open.focus_visible = true;
-        if !open.commands.is_empty() {
-            open.step_command(-1);
-            cx.notify();
-        } else if open.in_submenu() {
-            self.close_submenu(cx);
-        } else {
-            self.switch(-1, window, cx);
-        }
-    }
-
-    fn on_right(&mut self, _: &SelectRight, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(open) = self.live_open_mut() else {
-            self.move_bar_focus(1, cx);
-            return;
-        };
-        open.focus_visible = true;
-        if !open.commands.is_empty() {
-            open.step_command(1);
-            cx.notify();
-            return;
-        }
-        let submenu_row = open.panel.focused.filter(|ix| {
-            !open.in_submenu() && matches!(open.panel.entries[*ix], Entry::Submenu(..))
-        });
-        match submenu_row {
-            Some(ix) => self.open_submenu(ix, true, window, cx),
-            None => self.switch(1, window, cx),
-        }
-    }
-
-    fn trigger(
-        &self,
-        kind: MenuKind,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement + use<> {
-        let p = palette(cx);
-        let open = self.open.as_ref().filter(|open| open.kind == Some(kind));
-        let active = open.is_some_and(|open| !open.is_closing());
-        let popup = open.map(|open| self.popup(open, window, cx));
-        let ring = self.bar_focused(window) == Some(kind);
-
-        let trigger = div()
-            .id(kind.title())
-            .relative()
-            .flex()
-            .items_center()
-            .h_full()
-            .px(px(BAR_ITEM_PADDING))
-            .rounded(px(field::CONTROL_RADIUS))
-            .when(active, |this| this.bg(rgba(p.subtle_tertiary)))
-            .hover(move |style| style.bg(rgba(p.subtle_secondary)))
-            .pressed(move |style| style.bg(rgba(p.subtle_tertiary)))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _, window, cx| {
-                    window.prevent_default();
-                    cx.stop_propagation();
-                    if this.open_kind() == Some(kind) {
-                        this.close_menu(window, cx);
-                    } else {
-                        this.open_menu(kind, window, cx);
-                    }
-                }),
-            )
-            .on_hover(cx.listener(move |this, hovered: &bool, window, cx| {
-                if *hovered && this.open_kind().is_some_and(|open| open != kind) {
-                    this.open_menu(kind, window, cx);
-                }
-            }))
-            .child(div().relative().top(px(1.)).child(kind.title()))
-            .when(ring, |this| {
-                this.child(
-                    deferred(field::focus_ring(
-                        p,
-                        BAR_FOCUS_OUTSET,
-                        px(field::CONTROL_RADIUS + BAR_FOCUS_OUTSET.left),
-                    ))
-                    .with_priority(2),
-                )
-            })
-            .when_some(popup, |this, popup| {
-                this.child(
-                    div()
-                        .absolute()
-                        .left_0()
-                        .top(px(MENU_BAR_HEIGHT))
-                        .child(deferred(anchored().child(popup)).with_priority(1)),
-                )
-            });
-        record_bounds(self.trigger_areas.clone(), kind.index(), trigger)
     }
 
     fn key_tips(&self, window: &Window) -> Vec<keytips::KeyTip> {
@@ -1410,10 +702,699 @@ impl MenuBar {
             })
             .collect()
     }
+}
 
-    fn sync_key_tips(&self, window: &Window, cx: &mut Context<Self>) {
+impl Jot {
+    fn menu_exit_access(&mut self, cx: &mut Context<Self>) {
+        if self.menu_bar.access {
+            self.menu_bar.access = false;
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn menu_cancel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.menu_bar.live_open().is_some() {
+            self.menu_close(window, cx);
+        } else if self.menu_bar.bar_focus.is_some() {
+            self.menu_leave_bar(window, cx);
+        }
+        self.menu_bar.bar_focus = None;
+        self.menu_exit_access(cx);
+    }
+
+    pub(crate) fn menu_pointer_down(&mut self, cx: &mut Context<Self>) {
+        self.menu_bar.bar_focus = None;
+        self.menu_exit_access(cx);
+    }
+
+    pub(crate) fn menu_key_down(
+        &mut self,
+        keystroke: &Keystroke,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let modifiers = keystroke.modifiers;
+        if matches!(keystroke.key.as_str(), "alt" | "f10") && !modifiers.modified() {
+            self.menu_toggle_access(window, cx);
+            return true;
+        }
+        let key = match keystroke.key.as_bytes() {
+            [byte] if byte.is_ascii_alphanumeric() => Some(char::from(byte.to_ascii_uppercase())),
+            _ => None,
+        };
+        if !self.menu_bar.access {
+            return match key {
+                Some(key) if modifiers.alt && !modifiers.control && !modifiers.platform => {
+                    self.menu_invoke_access(key, window, cx)
+                }
+                _ => false,
+            };
+        }
+        match keystroke.key.as_str() {
+            "escape" => {
+                self.menu_access_back(window, cx);
+                true
+            }
+            "up" | "down" | "left" | "right" | "tab" | "space" | "enter" => {
+                self.menu_exit_access(cx);
+                false
+            }
+            _ => {
+                if let Some(key) = key.filter(|_| !modifiers.control && !modifiers.platform) {
+                    self.menu_invoke_access(key, window, cx);
+                }
+                true
+            }
+        }
+    }
+
+    fn menu_toggle_access(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.menu_bar.access {
+            self.menu_exit_access(cx);
+            if self.menu_bar.live_open().is_none() {
+                self.menu_leave_bar(window, cx);
+            }
+            return;
+        }
+        match self.menu_bar.live_open() {
+            Some(open) if open.kind.is_none() => return,
+            Some(_) => {}
+            None => {
+                if self.menu_bar.bar_focus.is_none() {
+                    self.menu_bar.bar_focus = Some(MenuKind::File);
+                }
+                self.menu_bar.focus.focus(window, cx);
+            }
+        }
+        self.menu_bar.access = true;
+        cx.notify();
+    }
+
+    fn menu_access_back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match self.menu_bar.live_open_mut() {
+            Some(open) => match open.live_submenu().map(|submenu| submenu.ix) {
+                Some(ix) => {
+                    open.panel.focused = Some(ix);
+                    self.menu_close_submenu(cx);
+                }
+                None => self.menu_close_to_bar(window, cx),
+            },
+            None => {
+                self.menu_bar.access = false;
+                self.menu_leave_bar(window, cx);
+            }
+        }
+    }
+
+    fn menu_invoke_access(&mut self, key: char, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some(open) = self.menu_bar.live_open_mut() else {
+            let Some(kind) = MenuKind::ALL
+                .into_iter()
+                .find(|kind| kind.access_key() == Some(key))
+            else {
+                return false;
+            };
+            self.menu_open_by_keyboard(kind, window, cx);
+            self.menu_bar.access = true;
+            return true;
+        };
+        if open.kind.is_none() {
+            return false;
+        }
+        if let Some(submenu) = open.focused_submenu() {
+            let Some(sub) = submenu.panel.find_key(key) else {
+                return false;
+            };
+            let parent = submenu.ix;
+            self.menu_bar.access = false;
+            self.menu_activate((parent, Some(sub)), window, cx);
+            return true;
+        }
+        let Some(ix) = open.panel.find_key(key) else {
+            return false;
+        };
+        if matches!(open.panel.entries[ix], Entry::Submenu(..)) {
+            open.panel.focused = Some(ix);
+            self.menu_bar.access = true;
+            self.menu_open_submenu(ix, true, window, cx);
+        } else {
+            self.menu_bar.access = false;
+            self.menu_activate((ix, None), window, cx);
+        }
+        true
+    }
+
+    fn menu_open_by_keyboard(&mut self, kind: MenuKind, window: &mut Window, cx: &mut Context<Self>) {
+        self.menu_open(kind, window, cx);
+        if let Some(open) = self.menu_bar.open.as_mut() {
+            open.panel.step(1);
+            open.focus_visible = true;
+        }
+    }
+
+    fn menu_close_to_bar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(open) = self.menu_bar.live_open_mut() else {
+            return;
+        };
+        let Some(kind) = open.kind else {
+            return self.menu_close(window, cx);
+        };
+        open.motion.closing = true;
+        self.menu_bar.submenu_timer = Task::ready(());
+        self.menu_bar.bar_focus = Some(kind);
+        self.menu_bar.focus.focus(window, cx);
+        self.sync_selection_focus(cx);
+        cx.notify();
+    }
+
+    fn menu_leave_bar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.menu_bar.bar_focus = None;
+        self.active_editor().focus_handle(cx).focus(window, cx);
+        cx.notify();
+    }
+
+    fn menu_move_bar_focus(&mut self, delta: isize, cx: &mut Context<Self>) {
+        if let Some(kind) = self.menu_bar.bar_focus {
+            self.menu_bar.bar_focus = Some(kind.cycle(delta));
+            cx.notify();
+        }
+    }
+
+    fn menu_open(&mut self, kind: MenuKind, window: &mut Window, cx: &mut Context<Self>) {
+        let editor = self.active_editor();
+        let entries = kind.entries(editor.read(cx), cx);
+        let panel = Panel::new(entries, MIN_WIDTH, true, &editor.focus_handle(cx), window);
+        self.menu_show(OpenMenu::new(Some(kind), panel), window, cx);
+    }
+
+    pub(crate) fn open_context_menu(
+        &mut self,
+        anchor: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let editor = self.active_editor();
+        let (commands, entries) = context_menu(editor.read(cx));
+        let panel = Panel::new(
+            entries,
+            CONTEXT_WIDTH,
+            false,
+            &editor.focus_handle(cx),
+            window,
+        );
+        let focused_command = commands.iter().position(|button| button.command.enabled);
+        self.menu_show(
+            OpenMenu {
+                anchor: Some(anchor),
+                commands,
+                focused_command,
+                focus_visible: window.last_input_was_keyboard(),
+                ..OpenMenu::new(None, panel)
+            },
+            window,
+            cx,
+        );
+    }
+
+    pub(crate) fn open_flyout_above(
+        &mut self,
+        entries: Vec<Entry>,
+        target: Bounds<Pixels>,
+        return_focus: FocusHandle,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let panel = Panel::new(
+            entries,
+            FLYOUT_MIN_WIDTH,
+            true,
+            &self.active_editor().focus_handle(cx),
+            window,
+        );
+        let anchor = point(
+            target.center().x - px((panel.width / 2.).floor()),
+            target.top() - px(FLYOUT_GAP + panel.height()),
+        );
+        self.menu_show(
+            OpenMenu {
+                anchor: Some(anchor),
+                upward: true,
+                return_focus: Some(return_focus),
+                ..OpenMenu::new(None, panel)
+            },
+            window,
+            cx,
+        );
+    }
+
+    fn menu_show(&mut self, open: OpenMenu, window: &mut Window, cx: &mut Context<Self>) {
+        self.menu_bar.bar_focus = None;
+        let motion = Motion::new(self.menu_bar.next_serial(), !open.commands.is_empty());
+        self.menu_bar.open = Some(OpenMenu { motion, ..open });
+        self.menu_bar.submenu_timer = Task::ready(());
+        self.menu_bar.focus.focus(window, cx);
+        self.sync_selection_focus(cx);
+        cx.notify();
+    }
+
+    fn menu_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.menu_bar.access = false;
+        let return_focus = self.menu_bar.live_open_mut().and_then(|open| {
+            open.motion.closing = true;
+            open.return_focus.take()
+        });
+        self.menu_bar.submenu_timer = Task::ready(());
+        let target = return_focus.unwrap_or_else(|| self.active_editor().focus_handle(cx));
+        target.focus(window, cx);
+        self.sync_selection_focus(cx);
+        cx.notify();
+    }
+
+    fn menu_run_command(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(command) = self
+            .menu_bar
+            .live_open()
+            .and_then(|open| open.commands.get(ix))
+            .map(|button| button.command)
+            .filter(|command| command.enabled)
+        else {
+            return;
+        };
+        let action = (command.action)();
+        self.menu_dispatch(action, window, cx);
+    }
+
+    fn menu_dispatch(&mut self, action: Box<dyn Action>, window: &mut Window, cx: &mut Context<Self>) {
+        self.menu_close(window, cx);
+        let target = self.active_editor().focus_handle(cx);
+        window.defer(cx, move |window, cx| {
+            target.dispatch_action(action.as_ref(), window, cx);
+        });
+    }
+
+    fn menu_command_row(open: &OpenMenu, window: &Window, cx: &mut Context<Self>) -> Div {
+        let p = palette(cx);
+        let commands = &open.commands;
+        let count = commands.len() as f32;
+        let row = open.panel.width + 2. * COMMAND_OUTSET;
+        let cell = ((row - (count - 1.)) / count).floor();
+        let ring = open.focused_command.filter(|_| open.focus_visible);
+        div()
+            .absolute()
+            .top(px(BORDER))
+            .left(px(-COMMAND_OUTSET))
+            .w(px(row))
+            .h(px(COMMAND_ROW))
+            .flex()
+            .children(commands.iter().enumerate().flat_map(|(ix, command)| {
+                let divider = (ix > 0).then(|| {
+                    div()
+                        .flex_none()
+                        .w(px(1.))
+                        .h(px(COMMAND_DIVIDER_HEIGHT))
+                        .mt(px(COMMAND_DIVIDER_TOP))
+                        .bg(rgb(p.menu_separator))
+                });
+                let button =
+                    Self::menu_command_button(p, ix, command, cell, ring == Some(ix), window, cx);
+                divider
+                    .into_iter()
+                    .map(IntoElement::into_any_element)
+                    .chain(Some(button.into_any_element()))
+            }))
+            .child(
+                div()
+                    .absolute()
+                    .left(px(BORDER + COMMAND_OUTSET))
+                    .right(px(BORDER + COMMAND_OUTSET))
+                    .bottom(px(-1.))
+                    .h(px(1.))
+                    .bg(rgb(p.menu_separator)),
+            )
+    }
+
+    fn menu_command_button(
+        p: Palette,
+        ix: usize,
+        button: &CommandButton,
+        cell: f32,
+        focused: bool,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let face = cell - 2. * (COMMAND_GAP + COMMAND_INSET);
+        let CommandButton { command, glyph } = button;
+        let enabled = command.enabled;
+        let color = if enabled {
+            p.text_primary
+        } else {
+            p.text_disabled
+        };
+        let label_width = text_width(window, command.label, SMALL_FONT, COMMAND_LABEL_SIZE);
+        let label_left = (face - COMMAND_LABEL_PANEL) / 2.
+            + round_half_up((COMMAND_LABEL_PANEL - label_width) / 2.);
+        div()
+            .id(("menu-command", ix))
+            .flex_none()
+            .w(px(cell))
+            .h_full()
+            .pt(px(COMMAND_ROW - COMMAND_BUTTON + COMMAND_INSET))
+            .px(px(COMMAND_GAP + COMMAND_INSET))
+            .pb(px(COMMAND_INSET))
+            .on_click(cx.listener(move |this, _, window, cx| this.menu_run_command(ix, window, cx)))
+            .child(
+                div()
+                    .id(("menu-command-face", ix))
+                    .size_full()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .pt(px(COMMAND_ICON_TOP))
+                    .rounded(px(field::CONTROL_RADIUS))
+                    .text_color(rgba(color))
+                    .child(
+                        div()
+                            .h(px(COMMAND_LINE))
+                            .line_height(px(COMMAND_LINE))
+                            .font_family(ICON_FONT)
+                            .text_size(px(ICON_SIZE))
+                            .child(*glyph),
+                    )
+                    .child(
+                        div()
+                            .self_start()
+                            .ml(px(label_left))
+                            .w(px(label_width))
+                            .text_center()
+                            .mt(px(COMMAND_LABEL_GAP))
+                            .h(px(COMMAND_LINE))
+                            .line_height(px(COMMAND_LINE))
+                            .font_family(SMALL_FONT)
+                            .text_size(px(COMMAND_LABEL_SIZE))
+                            .child(command.label),
+                    )
+                    .brush_transition(Brushes::subtle(p))
+                    .disabled(!enabled)
+                    .when(enabled, |this| {
+                        this.pressed(move |style| style.text_color(rgba(p.text_secondary)))
+                    })
+                    .when(focused, |this| {
+                        this.child(field::focus_ring(
+                            p,
+                            Edges::default(),
+                            px(field::CONTROL_RADIUS),
+                        ))
+                    }),
+            )
+    }
+
+    fn menu_activate(
+        &mut self,
+        path: (usize, Option<usize>),
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(open) = self.menu_bar.live_open() else {
+            return;
+        };
+        let entry = match path {
+            (ix, None) => open.panel.entries[ix].clone(),
+            (_, Some(sub)) => match open.live_submenu() {
+                Some(submenu) => submenu.panel.entries[sub].clone(),
+                None => return,
+            },
+        };
+        match entry {
+            Entry::Submenu(..) => self.menu_open_submenu(path.0, true, window, cx),
+            entry if !entry.selectable() => {}
+            entry => {
+                if let Some(action) = entry.action() {
+                    self.menu_dispatch(action, window, cx);
+                }
+            }
+        }
+    }
+
+    fn menu_open_submenu(
+        &mut self,
+        ix: usize,
+        highlight_first: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let action_context = self.active_editor().focus_handle(cx);
+        let serial = self.menu_bar.next_serial();
+        self.menu_bar.submenu_timer = Task::ready(());
+        let Some(open) = self.menu_bar.live_open_mut() else {
+            return;
+        };
+        let Entry::Submenu(_, entries) = &open.panel.entries[ix] else {
+            return;
+        };
+        if open.live_submenu().is_none_or(|submenu| submenu.ix != ix) {
+            open.submenu = Some(OpenSubmenu {
+                ix,
+                panel: Panel::new(entries.clone(), MIN_WIDTH, true, &action_context, window),
+                motion: Motion::new(serial, false),
+            });
+        }
+        open.focus_visible |= highlight_first;
+        if highlight_first && let Some(submenu) = open.live_submenu_mut() {
+            submenu.panel.focused = None;
+            submenu.panel.step(1);
+        }
+        cx.notify();
+    }
+
+    fn menu_close_submenu(&mut self, cx: &mut Context<Self>) {
+        self.menu_bar.submenu_timer = Task::ready(());
+        if let Some(submenu) = self.menu_bar.open.as_mut().and_then(OpenMenu::live_submenu_mut) {
+            submenu.motion.closing = true;
+            cx.notify();
+        }
+    }
+
+    fn menu_schedule_submenu(
+        &mut self,
+        change: SubmenuChange,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let target = match change {
+            SubmenuChange::Keep => {
+                self.menu_bar.submenu_timer = Task::ready(());
+                return;
+            }
+            SubmenuChange::Open(ix) => Some(ix),
+            SubmenuChange::Close => None,
+        };
+        let delay = menu_show_delay();
+        self.menu_bar.submenu_timer = cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor().timer(delay).await;
+            this.update_in(cx, |this, window, cx| match target {
+                Some(ix) => this.menu_open_submenu(ix, false, window, cx),
+                None => this.menu_close_submenu(cx),
+            })
+            .ok();
+        });
+    }
+
+    fn menu_hover_row(
+        &mut self,
+        path: (usize, Option<usize>),
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(open) = self.menu_bar.live_open() else {
+            return;
+        };
+        let change = match path {
+            (ix, None) => {
+                let current = open.live_submenu().map(|submenu| submenu.ix);
+                match (&open.panel.entries[ix], current) {
+                    (Entry::Submenu(..), Some(open_ix)) if open_ix == ix => SubmenuChange::Keep,
+                    (Entry::Submenu(..), _) => SubmenuChange::Open(ix),
+                    (_, Some(_)) => SubmenuChange::Close,
+                    (_, None) => SubmenuChange::Keep,
+                }
+            }
+            (_, Some(_)) => SubmenuChange::Keep,
+        };
+        self.menu_schedule_submenu(change, window, cx);
+        cx.notify();
+    }
+
+    fn menu_switch(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(kind) = self.menu_bar.open_kind() else {
+            return;
+        };
+        self.menu_open_by_keyboard(kind.cycle(delta), window, cx);
+    }
+
+    fn menu_on_up(&mut self, _: &SelectUp, window: &mut Window, cx: &mut Context<Self>) {
+        self.menu_step_active(-1, window, cx);
+    }
+
+    fn menu_on_down(&mut self, _: &SelectDown, window: &mut Window, cx: &mut Context<Self>) {
+        self.menu_step_active(1, window, cx);
+    }
+
+    fn menu_step_active(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(open) = self.menu_bar.live_open_mut() else {
+            if delta > 0
+                && let Some(kind) = self.menu_bar.bar_focused(window)
+            {
+                self.menu_open_by_keyboard(kind, window, cx);
+            }
+            return;
+        };
+        open.focus_visible = true;
+        if open.in_submenu() {
+            if let Some(submenu) = open.live_submenu_mut() {
+                submenu.panel.step(delta);
+            }
+        } else if open.commands.is_empty() {
+            open.panel.step(delta);
+        } else {
+            open.step_linear(delta);
+        }
+        cx.notify();
+    }
+
+    fn menu_on_confirm(&mut self, _: &Confirm, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(open) = self.menu_bar.live_open() else {
+            if let Some(kind) = self.menu_bar.bar_focused(window) {
+                self.menu_open_by_keyboard(kind, window, cx);
+            }
+            return;
+        };
+        if let Some(ix) = open.focused_command {
+            self.menu_run_command(ix, window, cx);
+            return;
+        }
+        let sub = open
+            .live_submenu()
+            .and_then(|submenu| submenu.panel.focused);
+        if let Some(ix) = open.panel.focused {
+            self.menu_activate((ix, sub), window, cx);
+        }
+    }
+
+    fn menu_on_cancel(&mut self, _: &Cancel, window: &mut Window, cx: &mut Context<Self>) {
+        match self.menu_bar.live_open() {
+            Some(open) if open.in_submenu() => self.menu_close_submenu(cx),
+            Some(open) if open.kind.is_some() => self.menu_close_to_bar(window, cx),
+            Some(_) => self.menu_close(window, cx),
+            None => self.menu_leave_bar(window, cx),
+        }
+    }
+
+    fn menu_on_left(&mut self, _: &SelectLeft, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(open) = self.menu_bar.live_open_mut() else {
+            self.menu_move_bar_focus(-1, cx);
+            return;
+        };
+        open.focus_visible = true;
+        if !open.commands.is_empty() {
+            open.step_command(-1);
+            cx.notify();
+        } else if open.in_submenu() {
+            self.menu_close_submenu(cx);
+        } else {
+            self.menu_switch(-1, window, cx);
+        }
+    }
+
+    fn menu_on_right(&mut self, _: &SelectRight, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(open) = self.menu_bar.live_open_mut() else {
+            self.menu_move_bar_focus(1, cx);
+            return;
+        };
+        open.focus_visible = true;
+        if !open.commands.is_empty() {
+            open.step_command(1);
+            cx.notify();
+            return;
+        }
+        let submenu_row = open.panel.focused.filter(|ix| {
+            !open.in_submenu() && matches!(open.panel.entries[*ix], Entry::Submenu(..))
+        });
+        match submenu_row {
+            Some(ix) => self.menu_open_submenu(ix, true, window, cx),
+            None => self.menu_switch(1, window, cx),
+        }
+    }
+
+    fn menu_trigger(
+        &self,
+        kind: MenuKind,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let p = palette(cx);
+        let open = self
+            .menu_bar
+            .open
+            .as_ref()
+            .filter(|open| open.kind == Some(kind));
+        let active = open.is_some_and(|open| !open.is_closing());
+        let popup = open.map(|open| self.menu_popup(open, window, cx));
+        let ring = self.menu_bar.bar_focused(window) == Some(kind);
+
+        let trigger = div()
+            .id(kind.title())
+            .relative()
+            .flex()
+            .items_center()
+            .h_full()
+            .px(px(BAR_ITEM_PADDING))
+            .rounded(px(field::CONTROL_RADIUS))
+            .when(active, |this| this.bg(rgba(p.subtle_tertiary)))
+            .hover(move |style| style.bg(rgba(p.subtle_secondary)))
+            .pressed(move |style| style.bg(rgba(p.subtle_tertiary)))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, window, cx| {
+                    window.prevent_default();
+                    cx.stop_propagation();
+                    if this.menu_bar.open_kind() == Some(kind) {
+                        this.menu_close(window, cx);
+                    } else {
+                        this.menu_open(kind, window, cx);
+                    }
+                }),
+            )
+            .on_hover(cx.listener(move |this, hovered: &bool, window, cx| {
+                if *hovered && this.menu_bar.open_kind().is_some_and(|open| open != kind) {
+                    this.menu_open(kind, window, cx);
+                }
+            }))
+            .child(div().relative().top(px(1.)).child(kind.title()))
+            .when(ring, |this| {
+                this.child(
+                    deferred(field::focus_ring(
+                        p,
+                        BAR_FOCUS_OUTSET,
+                        px(field::CONTROL_RADIUS + BAR_FOCUS_OUTSET.left),
+                    ))
+                    .with_priority(2),
+                )
+            })
+            .when_some(popup, |this, popup| {
+                this.child(
+                    div()
+                        .absolute()
+                        .left_0()
+                        .top(px(MENU_BAR_HEIGHT))
+                        .child(deferred(anchored().child(popup)).with_priority(1)),
+                )
+            });
+        record_bounds(self.menu_bar.trigger_areas.clone(), kind.index(), trigger)
+    }
+
+    fn menu_sync_key_tips(&self, window: &Window, cx: &mut Context<Self>) {
         let owner = window.window_handle();
-        let tips = self.key_tips(window);
+        let tips = self.menu_bar.key_tips(window);
         if tips.is_empty() {
             if keytips::is_owner(owner, cx) {
                 cx.defer(move |cx| keytips::hide_owner(owner, cx));
@@ -1425,7 +1406,7 @@ impl MenuBar {
         cx.defer(move |cx| keytips::show(owner, origin, scale, tips, cx));
     }
 
-    fn popup(
+    fn menu_popup(
         &self,
         open: &OpenMenu,
         window: &Window,
@@ -1450,7 +1431,7 @@ impl MenuBar {
         let submenu = open
             .submenu
             .as_ref()
-            .map(|submenu| self.submenu_popup(open, submenu, cx));
+            .map(|submenu| self.menu_submenu_popup(open, submenu, cx));
 
         let panel = div()
             .relative()
@@ -1461,12 +1442,13 @@ impl MenuBar {
             .cursor_default()
             .on_mouse_down_out(cx.listener(|this, event: &MouseDownEvent, window, cx| {
                 let inside = this
+                    .menu_bar
                     .hit_areas
                     .get()
                     .iter()
                     .any(|area| area.contains(&event.position));
                 if !inside {
-                    this.close_menu(window, cx);
+                    this.menu_close(window, cx);
                 }
             }))
             .children(reveal(
@@ -1479,15 +1461,15 @@ impl MenuBar {
                 div()
                     .size_full()
                     .when(has_commands, |this| {
-                        this.child(Self::command_row(open, window, cx))
+                        this.child(Self::menu_command_row(open, window, cx))
                     })
-                    .child(Self::panel_rows(open, panel, None, bar, has_commands, cx)),
+                    .child(Self::menu_panel_rows(open, panel, None, bar, has_commands, cx)),
             ))
             .children(submenu);
-        record_bounds(self.hit_areas.clone(), MENU_AREA, panel)
+        record_bounds(self.menu_bar.hit_areas.clone(), MENU_AREA, panel)
     }
 
-    fn submenu_popup(
+    fn menu_submenu_popup(
         &self,
         open: &OpenMenu,
         submenu: &OpenSubmenu,
@@ -1498,7 +1480,7 @@ impl MenuBar {
         let sub_height = submenu.panel.height();
         let hidden = sub_height * SUBMENU_CLOSED_RATIO * (1. - submenu.motion.unroll);
         let top = open.panel.row_top(submenu.ix) - BORDER - PADDING_Y;
-        let rows = Self::panel_rows(open, &submenu.panel, Some(submenu.ix), 0., false, cx);
+        let rows = Self::menu_panel_rows(open, &submenu.panel, Some(submenu.ix), 0., false, cx);
         let panel = div()
             .id("submenu")
             .absolute()
@@ -1518,10 +1500,10 @@ impl MenuBar {
                 -hidden,
                 rows,
             ));
-        record_bounds(self.hit_areas.clone(), SUBMENU_AREA, panel)
+        record_bounds(self.menu_bar.hit_areas.clone(), SUBMENU_AREA, panel)
     }
 
-    fn panel_rows(
+    fn menu_panel_rows(
         open: &OpenMenu,
         panel: &Panel,
         parent: Option<usize>,
@@ -1572,14 +1554,79 @@ impl MenuBar {
                     })
                     .on_hover(cx.listener(move |this, hovered: &bool, window, cx| {
                         if *hovered {
-                            this.hover_row(path, window, cx);
+                            this.menu_hover_row(path, window, cx);
                         }
                     }))
                     .on_click(
-                        cx.listener(move |this, _, window, cx| this.activate(path, window, cx)),
+                        cx.listener(move |this, _, window, cx| this.menu_activate(path, window, cx)),
                     )
                     .child(face)
             }))
+    }
+
+    pub(crate) fn render_menu(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let p = palette(cx);
+        if self.menu_bar.access || keytips::is_owner(window.window_handle(), cx) {
+            let this = cx.entity().downgrade();
+            window.defer(cx, move |window, cx| {
+                this.update(cx, |jot, cx| jot.menu_sync_key_tips(window, cx))
+                    .ok();
+            });
+        }
+        if self
+            .menu_bar
+            .open
+            .as_mut()
+            .is_some_and(|open| open.sample(window, cx))
+        {
+            self.menu_bar.open = None;
+        }
+        if self
+            .menu_bar
+            .open
+            .as_ref()
+            .is_none_or(|open| open.submenu.is_none())
+        {
+            let mut areas = self.menu_bar.hit_areas.get();
+            areas[SUBMENU_AREA] = Bounds::default();
+            self.menu_bar.hit_areas.set(areas);
+        }
+        let flyout = self.menu_bar.open.as_ref().and_then(|open| {
+            let anchor = open.anchor?;
+            Some(
+                deferred(
+                    anchored()
+                        .position(anchor)
+                        .child(self.menu_popup(open, window, cx)),
+                )
+                .with_priority(1),
+            )
+        });
+
+        let bar = div()
+            .id("menu-bar")
+            .track_focus(&self.menu_bar.focus)
+            .key_context(CONTEXT)
+            .relative()
+            .flex()
+            .h_full()
+            .gap(px(BAR_GAP))
+            .font_family(TEXT_FONT)
+            .text_size(px(LABEL_SIZE))
+            .text_color(rgba(p.text_primary))
+            .on_action(cx.listener(Self::menu_on_up))
+            .on_action(cx.listener(Self::menu_on_down))
+            .on_action(cx.listener(Self::menu_on_confirm))
+            .on_action(cx.listener(Self::menu_on_cancel))
+            .on_action(cx.listener(Self::menu_on_left))
+            .on_action(cx.listener(Self::menu_on_right))
+            .children(MenuKind::ALL.map(|kind| self.menu_trigger(kind, window, cx)))
+            .children(flyout);
+        record_bounds(self.menu_bar.hit_areas.clone(), BAR_AREA, bar)
     }
 }
 
@@ -1785,63 +1832,4 @@ fn shortcut_text(
         }
     });
     Some(parts.join("+").into())
-}
-
-impl EventEmitter<MenuEvent> for MenuBar {}
-
-impl Render for MenuBar {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let p = palette(cx);
-        if self.access || keytips::is_owner(window.window_handle(), cx) {
-            let this = cx.entity().downgrade();
-            window.defer(cx, move |window, cx| {
-                this.update(cx, |menu_bar, cx| menu_bar.sync_key_tips(window, cx))
-                    .ok();
-            });
-        }
-        if self
-            .open
-            .as_mut()
-            .is_some_and(|open| open.sample(window, cx))
-        {
-            self.open = None;
-        }
-        if self.open.as_ref().is_none_or(|open| open.submenu.is_none()) {
-            let mut areas = self.hit_areas.get();
-            areas[SUBMENU_AREA] = Bounds::default();
-            self.hit_areas.set(areas);
-        }
-        let flyout = self.open.as_ref().and_then(|open| {
-            let anchor = open.anchor?;
-            Some(
-                deferred(
-                    anchored()
-                        .position(anchor)
-                        .child(self.popup(open, window, cx)),
-                )
-                .with_priority(1),
-            )
-        });
-
-        let bar = div()
-            .id("menu-bar")
-            .track_focus(&self.focus)
-            .key_context(CONTEXT)
-            .relative()
-            .flex()
-            .h_full()
-            .gap(px(BAR_GAP))
-            .font_family(TEXT_FONT)
-            .text_size(px(LABEL_SIZE))
-            .text_color(rgba(p.text_primary))
-            .on_action(cx.listener(Self::on_up))
-            .on_action(cx.listener(Self::on_down))
-            .on_action(cx.listener(Self::on_confirm))
-            .on_action(cx.listener(Self::on_cancel))
-            .on_action(cx.listener(Self::on_left))
-            .on_action(cx.listener(Self::on_right))
-            .children(MenuKind::ALL.map(|kind| self.trigger(kind, window, cx)))
-            .children(flyout);
-        record_bounds(self.hit_areas.clone(), BAR_AREA, bar)
-    }
 }

@@ -1,12 +1,11 @@
 use std::{ops::Range, rc::Rc};
 
-use gpui::{Bounds, Pixels};
+use crate::ui::{Bounds, Pixels};
 
 use super::display_map::LineLayout;
 
 #[derive(Clone)]
 pub(super) struct LastLayout {
-    pub(super) visible_range: Range<usize>,
     pub(super) visible_buffer_lines: Vec<usize>,
     pub(super) visible_line_byte_offsets: Vec<usize>,
     pub(super) visible_top: Pixels,

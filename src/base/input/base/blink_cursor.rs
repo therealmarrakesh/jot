@@ -1,4 +1,4 @@
-use gpui::{Context, Task};
+use crate::ui::{Context, Task};
 use std::time::Duration;
 
 fn blink_interval() -> Option<Duration> {

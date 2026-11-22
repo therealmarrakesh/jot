@@ -1,11 +1,11 @@
 use super::*;
 use field::{BODY_LINE, BODY_SIZE, text_field};
-use gpui::futures::channel::oneshot;
+use crate::ui::futures::channel::oneshot;
 use crate::base::actions::{Cancel, Confirm};
 use crate::base::input::{EditorState, Position};
 use crate::base::{MotionStatus, transition_from};
 
-gpui::actions!(jot_dialog, [FocusNext, FocusPrev]);
+crate::ui::actions!(jot_dialog, [FocusNext, FocusPrev]);
 
 const CONTEXT: &str = "JotDialog";
 const TITLE_FONT: &str = "Segoe UI Variable Display";

@@ -1,5 +1,5 @@
 //! A visual row whose offsets remain in source UTF-8 bytes.
-use gpui::{App, Pixels, Point, ShapedLine, TextAlign, Window, px};
+use crate::ui::{App, Pixels, Point, ShapedLine, TextAlign, Window, px};
 
 pub(crate) struct InputLine {
     pub(crate) len: usize,
@@ -46,13 +46,6 @@ impl InputLine {
         match &self.content {
             Content::Text(line) => line.closest_index_for_x(x),
             Content::Unshaped => 0,
-        }
-    }
-
-    pub(crate) fn index_for_x(&self, x: Pixels) -> Option<usize> {
-        match &self.content {
-            Content::Text(line) => line.index_for_x(x),
-            Content::Unshaped => None,
         }
     }
 

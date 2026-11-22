@@ -1,6 +1,6 @@
 //! Text input: the shared editing engine for single-line and multi-line plain text.
 
-use gpui::App;
+use crate::ui::App;
 
 #[path = "base/blink_cursor.rs"]
 pub(crate) mod blink_cursor;
@@ -33,9 +33,9 @@ pub(crate) fn init(cx: &mut App) {
     state::init(cx);
 }
 
-pub use cursor::Selection;
-pub use display_map::WrappingIndent;
-pub use indent::TabSize;
-pub use rope_ext::{Point, Position, RopeExt};
-pub use ropey::{Rope, RopeBuilder};
-pub use state::*;
+pub(crate) use cursor::Selection;
+pub(crate) use display_map::WrappingIndent;
+pub(crate) use indent::TabSize;
+pub(crate) use rope_ext::{Point, Position, RopeExt};
+pub(crate) use ropey::{Rope, RopeBuilder};
+pub(crate) use state::*;

@@ -117,7 +117,7 @@ pub(crate) fn button(
 #[derive(Clone, Copy)]
 pub(crate) struct IconButtonStyle {
     pub(crate) glyph_size: Pixels,
-    pub(crate) size: gpui::Size<Pixels>,
+    pub(crate) size: crate::ui::Size<Pixels>,
     pub(crate) radius: Pixels,
 }
 

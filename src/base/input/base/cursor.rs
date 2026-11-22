@@ -1,24 +1,20 @@
 use std::ops::{Range, RangeBounds};
 
-use gpui::Pixels;
+use crate::ui::Pixels;
 
 /// A selection in the text, represented by start and end byte indices.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Default)]
-pub struct Selection {
-    pub start: usize,
-    pub end: usize,
+pub(crate) struct Selection {
+    pub(crate) start: usize,
+    pub(crate) end: usize,
 }
 
 impl Selection {
-    pub fn new(start: usize, end: usize) -> Self {
+    pub(crate) fn new(start: usize, end: usize) -> Self {
         Self { start, end }
     }
 
-    pub fn len(&self) -> usize {
-        self.end.saturating_sub(self.start)
-    }
-
-    pub fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.start == self.end
     }
 }
@@ -120,7 +116,7 @@ impl RangeBounds<usize> for CursorSelection {
 mod tests {
     use super::*;
     use crate::base::input::Position;
-    use gpui::px;
+    use crate::ui::px;
 
     #[test]
     fn selection_keeps_its_public_range_api() {

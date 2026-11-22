@@ -110,10 +110,6 @@ impl Element for BrushTransition {
         Element::id(&self.element)
     }
 
-    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
-        self.element.source_location()
-    }
-
     fn request_layout(
         &mut self,
         id: Option<&GlobalElementId>,

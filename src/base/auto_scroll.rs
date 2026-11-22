@@ -2,17 +2,17 @@ use std::cell::Cell;
 use std::rc::Rc;
 use std::time::Duration;
 
-use gpui::{AsyncApp, Bounds, Context, Pixels, Point, Task, WeakEntity, px};
+use crate::ui::{AsyncApp, Bounds, Context, Pixels, Point, Task, WeakEntity, px};
 
 /// Manages timer-based auto-scrolling during drag interactions.
 ///
 /// Delta convention: positive moves toward the bottom and negative moves
 /// toward the top.
-pub struct AutoScroll {
+pub(crate) struct AutoScroll {
     delta: Rc<Cell<Option<Pixels>>>,
     task: Option<Task<()>>,
     /// Last drag position, available to the interaction that owns selection.
-    pub last_drag_position: Option<Point<Pixels>>,
+    pub(crate) last_drag_position: Option<Point<Pixels>>,
 }
 
 impl Default for AutoScroll {
@@ -26,12 +26,8 @@ impl Default for AutoScroll {
 }
 
 impl AutoScroll {
-    pub fn delta(&self) -> Option<Pixels> {
-        self.delta.get()
-    }
-
     /// Computes the scroll delta for a pointer Y position within the viewport.
-    pub fn compute_delta(y: Pixels, bounds: Bounds<Pixels>) -> Option<Pixels> {
+    pub(crate) fn compute_delta(y: Pixels, bounds: Bounds<Pixels>) -> Option<Pixels> {
         const MIN_SPEED: f32 = 12.0;
         const MAX_SPEED: f32 = 64.0;
         const INNER_ZONE: f32 = 16.0;
@@ -51,7 +47,7 @@ impl AutoScroll {
         }
     }
 
-    pub fn set<T, F>(&mut self, delta: Option<Pixels>, cx: &mut Context<T>, tick: F)
+    pub(crate) fn set<T, F>(&mut self, delta: Option<Pixels>, cx: &mut Context<T>, tick: F)
     where
         T: 'static,
         F: Fn(Pixels, &mut T, &mut Context<T>) + 'static,
@@ -99,11 +95,11 @@ impl AutoScroll {
         }
     }
 
-    pub fn is_active(&self) -> bool {
+    pub(crate) fn is_active(&self) -> bool {
         self.delta.get().is_some()
     }
 
-    pub fn stop(&mut self) {
+    pub(crate) fn stop(&mut self) {
         self.delta.set(None);
         self.task = None;
         self.last_drag_position = None;
@@ -112,7 +108,7 @@ impl AutoScroll {
 
 #[cfg(test)]
 mod tests {
-    use gpui::{Bounds, point, size};
+    use crate::ui::{Bounds, point, size};
 
     use super::*;
 

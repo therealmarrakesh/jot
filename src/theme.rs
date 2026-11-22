@@ -226,10 +226,7 @@ pub(crate) fn theme_shadow(dark: bool, z: f32, scale: f32) -> Vec<BoxShadow> {
 }
 
 pub(crate) fn apply(appearance: WindowAppearance, cx: &mut App) {
-    let dark = matches!(
-        appearance,
-        WindowAppearance::Dark | WindowAppearance::VibrantDark
-    );
+    let dark = matches!(appearance, WindowAppearance::Dark);
     let mut palette = if dark { DARK } else { LIGHT };
     if let Some(accent) = system_accent(palette.dark) {
         palette.accent = accent;

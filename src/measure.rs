@@ -25,10 +25,6 @@ impl Element for Measured {
         None
     }
 
-    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
-        None
-    }
-
     fn request_layout(
         &mut self,
         _: Option<&GlobalElementId>,

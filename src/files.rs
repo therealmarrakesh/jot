@@ -1,6 +1,6 @@
 use super::*;
 use document::{Encoding, Format, LoadError, default_directory, display_name, file_name};
-use gpui::{SaveChoice, SavePathOptions};
+use crate::ui::{SaveChoice, SavePathOptions};
 use std::io;
 
 const UNTITLED_FILE_NAME: &str = "Untitled.txt";
@@ -44,7 +44,6 @@ impl Jot {
 
     pub(crate) fn open(&mut self, _: &Open, window: &mut Window, cx: &mut Context<Self>) {
         let paths = cx.prompt_for_paths(PathPromptOptions {
-            files: true,
             directories: false,
             multiple: true,
             prompt: None,
@@ -163,17 +162,17 @@ impl Jot {
     }
 
     pub(crate) fn save_all(&mut self, _: &SaveAll, window: &mut Window, cx: &mut Context<Self>) {
-        let dirty = self.dirty_tabs();
+        let dirty = self.dirty_tabs(cx);
         cx.spawn_in(window, async move |this, cx| {
             visit_tabs(&this, dirty, Self::save_tab, cx).await;
         })
         .detach();
     }
 
-    fn dirty_tabs(&self) -> Vec<EntityId> {
+    fn dirty_tabs(&self, cx: &App) -> Vec<EntityId> {
         self.tabs
             .iter()
-            .filter(|tab| tab.data.dirty)
+            .filter(|tab| tab.data.is_dirty(cx))
             .map(|tab| tab.data.editor.entity_id())
             .collect()
     }
@@ -208,7 +207,7 @@ impl Jot {
         let current = self.tabs[ix].data.path.clone();
         let format = self.tabs[ix].data.format;
         let suggested = file_name(current.as_deref()).unwrap_or_else(|| UNTITLED_FILE_NAME.into());
-        let target = gpui::prompt_for_save_path(
+        let target = crate::ui::prompt_for_save_path(
             self.hwnd,
             cx.foreground_executor(),
             SavePathOptions {
@@ -316,13 +315,11 @@ impl Jot {
                         return false;
                     };
                     let tab = &mut this.tabs[ix];
-                    let clean = tab.data.editor.update(cx, |editor, _| {
+                    tab.data.editor.update(cx, |editor, _| {
                         editor.mark_saved_version(snapshot);
-                        editor.is_clean()
                     });
                     tab.data.path = Some(path);
                     tab.data.format = format;
-                    tab.data.dirty = !clean;
                     this.refresh_title(window);
                     cx.notify();
                     true
@@ -337,7 +334,7 @@ impl Jot {
     }
 
     pub(crate) fn close_tab(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.tabs[ix].data.dirty {
+        if !self.tabs[ix].data.is_dirty(cx) {
             self.remove_tab(ix, window, cx);
             return;
         }
@@ -395,7 +392,7 @@ impl Jot {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let dirty = self.dirty_tabs();
+        let dirty = self.dirty_tabs(cx);
         if dirty.is_empty() {
             return true;
         }

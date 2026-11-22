@@ -1,6 +1,7 @@
 use std::fs::OpenOptions;
 use std::io::Write as _;
 use std::path::PathBuf;
+#[cfg(test)]
 use std::sync::mpsc;
 
 use windows::Win32::Foundation::{CloseHandle, ERROR_PIPE_CONNECTED, GetLastError, HANDLE};
@@ -127,7 +128,7 @@ fn start_listener_on(pipe: String, on_receive: impl Fn(Vec<PathBuf>) + Send + 's
         });
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 fn _channel_smoke(pipe: &str) -> mpsc::Receiver<Vec<PathBuf>> {
     let (tx, rx) = mpsc::channel();
     start_listener_on(pipe.to_string(), move |paths| {

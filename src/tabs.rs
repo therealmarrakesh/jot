@@ -386,7 +386,6 @@ impl Jot {
                 zoom: 1.,
                 path,
                 format,
-                dirty: false,
             },
             window,
             cx,
@@ -402,26 +401,9 @@ impl Jot {
                     .ok();
             }));
         });
-        let _changes = cx.subscribe(&data.editor, |this, editor, event: &InputEvent, cx| {
-            if let InputEvent::Change = event
-                && let Some(tab) = this.tabs.iter_mut().find(|tab| tab.data.editor == editor)
-            {
-                let editor = editor.read(cx);
-                let dirty = if tab.data.path.is_some() {
-                    !editor.is_clean()
-                } else {
-                    !editor.is_clean() && editor.text().len() > 0
-                };
-                if tab.data.dirty != dirty {
-                    tab.data.dirty = dirty;
-                    cx.notify();
-                }
-            }
-        });
         Tab {
             data,
             slot: SlotKey::default(),
-            _changes,
         }
     }
 
@@ -536,11 +518,6 @@ impl Jot {
             window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
                 if phase == DispatchPhase::Bubble && !area.get().contains(&event.position) {
                     moved.update(cx, |jot, cx| jot.thaw_tabs(cx)).ok();
-                }
-            });
-            window.on_mouse_event(move |_: &MouseExitEvent, phase, _, cx| {
-                if phase == DispatchPhase::Bubble {
-                    jot.update(cx, |jot, cx| jot.thaw_tabs(cx)).ok();
                 }
             });
         })
@@ -743,7 +720,7 @@ impl Jot {
             .and_then(|hovered| self.tab_index(hovered));
         let separator =
             !active && ix + 1 != self.active && hovered != Some(ix) && hovered != Some(ix + 1);
-        let dirty = tab.data.dirty;
+        let dirty = tab.data.is_dirty(cx);
         let show_close = self.strip.hovered == Some(id) || (active && !dirty);
         let show_dot = dirty && !show_close;
         let trailing = if show_close || show_dot {

@@ -1,4 +1,4 @@
-use gpui::{Context, Pixels, Point, Window};
+use crate::ui::{Context, Pixels, Point, Window};
 
 use crate::base::input::rope_ext::Bias;
 use crate::base::input::{

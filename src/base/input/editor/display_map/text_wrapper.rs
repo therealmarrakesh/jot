@@ -2,19 +2,20 @@ use super::inline_line::InputLine;
 use std::borrow::Cow;
 use std::ops::{Range, RangeInclusive};
 
-use gpui::{
+use crate::ui::{
     App, Font, LineFragment, Pixels, Point, ShapedLine, Size, Window, point, px, size,
 };
 use ropey::Rope;
-use gpui::smallvec::SmallVec;
+use crate::ui::smallvec::SmallVec;
 use unicode_segmentation::UnicodeSegmentation as _;
 
 use crate::base::input::{Point as TreeSitterPoint, RopeExt, layout::LastLayout};
 
 /// Controls how soft-wrapped continuation lines are indented.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum WrappingIndent {
+pub(crate) enum WrappingIndent {
     /// Continuation lines start flush-left at the full editor width.
+    #[cfg(test)]
     None,
     /// Continuation lines keep the same indentation as the first line.
     #[default]
@@ -78,12 +79,12 @@ fn measured_wrap_boundaries(
     width: Pixels,
     wrapping_indent: WrappingIndent,
     mut measure: impl FnMut(&str) -> Pixels,
-) -> Vec<gpui::Boundary> {
+) -> Vec<crate::ui::Boundary> {
     let indent = if wrapping_indent == WrappingIndent::Same {
         text.chars()
             .take_while(|&c| c == ' ')
             .count()
-            .min(gpui::LineWrapper::MAX_INDENT as usize)
+            .min(crate::ui::LineWrapper::MAX_INDENT as usize)
     } else {
         0
     };
@@ -136,7 +137,7 @@ fn measured_wrap_boundaries(
             .map(|ix| opportunities[ix])
             .filter(|&ix| ix > start && (start != 0 || ix > indent))
             .unwrap_or(fitting_end);
-        result.push(gpui::Boundary {
+        result.push(crate::ui::Boundary {
             ix: end,
             next_indent: indent as u32,
         });
@@ -272,6 +273,7 @@ impl LineTree {
         self.total
     }
 
+    #[cfg(test)]
     pub(crate) fn iter(&self) -> impl Iterator<Item = &LineItem> {
         self.chunks.iter().flat_map(|chunk| chunk.items.iter())
     }
@@ -398,7 +400,6 @@ pub(crate) struct TextWrapper {
     _initialized: bool,
 }
 
-#[allow(unused)]
 impl TextWrapper {
     pub(crate) fn new(font: Font, font_size: Pixels, wrap_width: Option<Pixels>) -> Self {
         Self {
@@ -411,17 +412,6 @@ impl TextWrapper {
             ascii_max_width: None,
             _initialized: false,
         }
-    }
-
-    #[inline]
-    pub(crate) fn set_default_text(&mut self, text: &Rope) {
-        self.text = text.clone();
-    }
-
-    /// Get reference to the rope text.
-    #[inline]
-    pub(crate) fn text(&self) -> &Rope {
-        &self.text
     }
 
     /// Get the total number of lines including wrapped lines.
@@ -449,6 +439,7 @@ impl TextWrapper {
     }
 
     /// Iterate buffer lines in order.
+    #[cfg(test)]
     #[inline]
     pub(crate) fn iter_lines(&self) -> impl Iterator<Item = &LineItem> {
         self.lines.iter()
@@ -461,6 +452,7 @@ impl TextWrapper {
     }
 
     /// Wrap row range of buffer line `row`.
+    #[cfg(test)]
     pub(crate) fn buffer_line_to_wrap_row_range(&self, row: usize) -> Range<usize> {
         let (start, item) = self.lines.get_by_buffer_row(row);
         let len = item.map(|l| l.lines_len()).unwrap_or(0);
@@ -481,26 +473,6 @@ impl TextWrapper {
         }
 
         self.wrap_width = wrap_width;
-        self.update_all(&self.text.clone(), cx);
-    }
-
-    pub(crate) fn set_wrapping_indent(&mut self, wrapping_indent: WrappingIndent, cx: &mut App) {
-        if wrapping_indent == self.wrapping_indent {
-            return;
-        }
-
-        self.wrapping_indent = wrapping_indent;
-        self.update_all(&self.text.clone(), cx);
-    }
-
-    pub(crate) fn set_font(&mut self, font: Font, font_size: Pixels, cx: &mut App) {
-        if self.font.eq(&font) && self.font_size == font_size {
-            return;
-        }
-
-        self.font = font;
-        self.font_size = font_size;
-        self.ascii_max_width = None;
         self.update_all(&self.text.clone(), cx);
     }
 
@@ -541,15 +513,6 @@ impl TextWrapper {
         false
     }
 
-    pub(crate) fn prepare_if_need(&mut self, text: &Rope, cx: &mut App) -> bool {
-        if self._initialized {
-            return false;
-        }
-        self._initialized = true;
-        self.update_all(text, cx);
-        true
-    }
-
     /// Update the text wrapper and recalculate the wrapped lines.
     pub(crate) fn update(
         &mut self,
@@ -576,7 +539,7 @@ impl TextWrapper {
         } else {
             0
         };
-        let text_system = gpui::WindowTextSystem::new(text_system_ref.clone());
+        let text_system = crate::ui::WindowTextSystem::new(text_system_ref.clone());
         let font = self.font.clone();
         let font_size = self.font_size;
         let wrapping_indent = self.wrapping_indent;
@@ -588,8 +551,9 @@ impl TextWrapper {
             &mut |line_str, wrap_width, _line_start| {
                 if wraps_by_char_widths(line_str) {
                     let indent = match wrapping_indent {
-                        WrappingIndent::Same => gpui::IndentAdjustment::SameIndent,
-                        WrappingIndent::None => gpui::IndentAdjustment::NoIndent,
+                        WrappingIndent::Same => crate::ui::IndentAdjustment::SameIndent,
+                        #[cfg(test)]
+                        WrappingIndent::None => crate::ui::IndentAdjustment::NoIndent,
                     };
                     return line_wrapper
                         .wrap_line(&[LineFragment::text(line_str)], wrap_width, indent)
@@ -600,10 +564,10 @@ impl TextWrapper {
                         .layout_line(
                             text,
                             font_size,
-                            &[gpui::TextRun {
+                            &[crate::ui::TextRun {
                                 len: text.len(),
                                 font: font.clone(),
-                                color: gpui::black(),
+                                color: crate::ui::black(),
                                 background_color: None,
                                 underline: None,
                             }],
@@ -624,7 +588,7 @@ impl TextWrapper {
         ascii_fit_len: usize,
         wrap_line: &mut F,
     ) where
-        F: FnMut(&str, Pixels, usize) -> Vec<gpui::Boundary>,
+        F: FnMut(&str, Pixels, usize) -> Vec<crate::ui::Boundary>,
     {
         self._update(changed_text, range, new_text, ascii_fit_len, wrap_line);
     }
@@ -637,7 +601,7 @@ impl TextWrapper {
         ascii_fit_len: usize,
         wrap_line: &mut F,
     ) where
-        F: FnMut(&str, Pixels, usize) -> Vec<gpui::Boundary>,
+        F: FnMut(&str, Pixels, usize) -> Vec<crate::ui::Boundary>,
     {
         // Remove the old changed lines.
         let buffer_line_count = self.lines_count();
@@ -695,6 +659,7 @@ impl TextWrapper {
                                 indent_chars = boundary.next_indent;
                             }
                         }
+                        #[cfg(test)]
                         WrappingIndent::None => {
                             let boundaries = wrap_line(&line_str, wrap_width, line_start);
                             if let Some(first) = boundaries.first() {
@@ -832,13 +797,13 @@ impl TextWrapper {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct WrapDisplayPoint {
     /// The 0-based soft wrapped row index in the text.
-    pub row: usize,
+    pub(crate) row: usize,
     /// The 0-based row index in local line (include first line).
     ///
     /// This value only valid when return from [`TextWrapper::offset_to_display_point`], otherwise it will be ignored.
-    pub local_row: usize,
+    pub(crate) local_row: usize,
     /// The 0-based column byte index in the display line (with soft wrap).
-    pub column: usize,
+    pub(crate) column: usize,
 }
 
 impl WrapDisplayPoint {
@@ -1006,16 +971,6 @@ impl LineLayout {
         Some((offset + ix, line_end_affinity))
     }
 
-    pub(crate) fn index_for_position(
-        &self,
-        pos: Point<Pixels>,
-        last_layout: &LastLayout,
-    ) -> Option<usize> {
-        let (i, offset, x) = self.wrapped_line_at(pos, last_layout)?;
-
-        Some(offset + self.wrapped_lines[i].index_for_x(x)?)
-    }
-
     pub(crate) fn size(&self, line_height: Pixels) -> Size<Pixels> {
         let width = self
             .wrapped_lines
@@ -1050,7 +1005,7 @@ mod tests {
     use super::*;
     use std::rc::Rc;
 
-    use gpui::{Boundary, FontFeatures, FontStyle, FontWeight, px};
+    use crate::ui::{Boundary, FontFeatures, FontStyle, FontWeight, px};
 
     #[test]
     fn measured_wrap_keeps_cjk_latin_boundary_stable_during_edits() {
@@ -1060,7 +1015,7 @@ mod tests {
                 .map(|c| if c.is_ascii() { 1. } else { 2. })
                 .sum())
         };
-        let mut wrapper = TextWrapper::new(gpui::font("Arial"), px(14.), Some(px(6.)));
+        let mut wrapper = TextWrapper::new(crate::ui::font("Arial"), px(14.), Some(px(6.)));
         let mut previous = Rope::new();
         for value in ["abcd的", "abcd的s", "abcd的ss", "abcd的s", "abcd的"] {
             let text = Rope::from(value);
@@ -1109,7 +1064,7 @@ mod tests {
 
     #[test]
     fn test_update() {
-        let font = gpui::Font {
+        let font = crate::ui::Font {
             family: "Arial".into(),
             weight: FontWeight::default(),
             style: FontStyle::Normal,
@@ -1304,8 +1259,8 @@ mod tests {
         assert_eq!(wrapper.lines_count(), 2);
     }
 
-    fn test_font() -> gpui::Font {
-        gpui::Font {
+    fn test_font() -> crate::ui::Font {
+        crate::ui::Font {
             family: "Arial".into(),
             weight: FontWeight::default(),
             style: FontStyle::Normal,
@@ -1367,17 +1322,17 @@ mod tests {
             LineItem {
                 len: 2,
                 indent: 0,
-                wrapped_lines: gpui::smallvec::smallvec![0..2],
+                wrapped_lines: crate::ui::smallvec::smallvec![0..2],
             },
             LineItem {
                 len: 4,
                 indent: 0,
-                wrapped_lines: gpui::smallvec::smallvec![0..2, 2..4],
+                wrapped_lines: crate::ui::smallvec::smallvec![0..2, 2..4],
             },
             LineItem {
                 len: 1,
                 indent: 0,
-                wrapped_lines: gpui::smallvec::smallvec![0..1],
+                wrapped_lines: crate::ui::smallvec::smallvec![0..1],
             },
         ]);
 
@@ -1445,7 +1400,7 @@ mod tests {
 
         let line1 = ShapedLine::default().with_len(100);
         let line2 = ShapedLine::default().with_len(50);
-        let wrapped_lines = gpui::smallvec::smallvec![line1, line2];
+        let wrapped_lines = crate::ui::smallvec::smallvec![line1, line2];
         line_layout.set_wrapped_lines(wrapped_lines);
         assert_eq!(line_layout.len(), 150);
         assert_eq!(line_layout.wrapped_lines.len(), 2);
@@ -1454,7 +1409,6 @@ mod tests {
     /// A layout context whose only load-bearing field is the line height.
     fn test_last_layout(line_height: Pixels) -> LastLayout {
         LastLayout {
-            visible_range: 0..1,
             visible_buffer_lines: vec![0],
             visible_line_byte_offsets: vec![0],
             visible_top: px(0.),
@@ -1470,7 +1424,7 @@ mod tests {
     #[test]
     fn test_position_for_index_prefers_first_leading_empty_visual_line() {
         let mut line_layout = LineLayout::new();
-        line_layout.set_wrapped_lines(gpui::smallvec::smallvec![
+        line_layout.set_wrapped_lines(crate::ui::smallvec::smallvec![
             ShapedLine::default(),
             ShapedLine::default(),
             ShapedLine::default().with_len(3),
@@ -1486,7 +1440,7 @@ mod tests {
     fn clicking_past_a_wrapped_row_keeps_the_caret_on_that_row() {
         // One buffer line wrapped into two visual rows, splitting at byte 10.
         let mut line_layout = LineLayout::new();
-        line_layout.set_wrapped_lines(gpui::smallvec::smallvec![
+        line_layout.set_wrapped_lines(crate::ui::smallvec::smallvec![
             ShapedLine::default().with_len(10),
             ShapedLine::default().with_len(5),
         ]);
@@ -1531,12 +1485,12 @@ mod tests {
             LineItem {
                 len: Rope::from("first line").len(),
                 indent: 0,
-                wrapped_lines: gpui::smallvec::smallvec![0..10],
+                wrapped_lines: crate::ui::smallvec::smallvec![0..10],
             },
             LineItem {
                 len: Rope::from("this one wraps").len(),
                 indent: 0,
-                wrapped_lines: gpui::smallvec::smallvec![0..9, 9..14],
+                wrapped_lines: crate::ui::smallvec::smallvec![0..9, 9..14],
             },
         ]);
 
@@ -1567,7 +1521,7 @@ mod tests {
 
     #[test]
     fn test_offset_to_display_point() {
-        let font = gpui::Font {
+        let font = crate::ui::Font {
             family: "Arial".into(),
             weight: FontWeight::default(),
             style: FontStyle::Normal,
@@ -1584,25 +1538,25 @@ mod tests {
             LineItem {
                 len: Rope::from("Hello, 世界!\r").len(),
                 indent: 0,
-                wrapped_lines: gpui::smallvec::smallvec![0..15],
+                wrapped_lines: crate::ui::smallvec::smallvec![0..15],
             },
             // range: 16..36
             LineItem {
                 len: Rope::from("This is second line.\n").len(),
                 indent: 0,
-                wrapped_lines: gpui::smallvec::smallvec![0..10, 10..20],
+                wrapped_lines: crate::ui::smallvec::smallvec![0..10, 10..20],
             },
             // range: 37..56
             LineItem {
                 len: Rope::from("This is third line.\n").len(),
                 indent: 0,
-                wrapped_lines: gpui::smallvec::smallvec![0..9, 9..15, 15..20],
+                wrapped_lines: crate::ui::smallvec::smallvec![0..9, 9..15, 15..20],
             },
             // range: 57..79
             LineItem {
                 len: Rope::from("这里是第 4 行。").len(),
                 indent: 0,
-                wrapped_lines: gpui::smallvec::smallvec![0..22],
+                wrapped_lines: crate::ui::smallvec::smallvec![0..22],
             },
         ]);
 
@@ -1737,7 +1691,7 @@ mod tests {
     #[test]
     fn test_wrap_indent_offsets_continuation_lines() {
         let mut line_layout = LineLayout::new();
-        line_layout.set_wrapped_lines(gpui::smallvec::smallvec![
+        line_layout.set_wrapped_lines(crate::ui::smallvec::smallvec![
             ShapedLine::default().with_len(5),
             ShapedLine::default().with_len(10),
         ]);
@@ -1745,7 +1699,6 @@ mod tests {
         line_layout = line_layout.wrap_indent(px(20.0));
 
         let last_layout = LastLayout {
-            visible_range: 0..1,
             visible_buffer_lines: vec![0],
             visible_line_byte_offsets: vec![0],
             visible_top: px(0.),

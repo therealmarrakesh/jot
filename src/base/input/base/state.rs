@@ -1,9 +1,9 @@
-use gpui::{
+use crate::ui::{
     App, AppContext, Bounds, ClipboardItem, Context, Edges, Entity, EntityInputHandler,
-    EventEmitter, FocusHandle, Focusable, InteractiveElement as _, IntoElement, KeyBinding,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Point,
-    Render, ScrollDelta, ScrollHandle, ScrollWheelEvent, SharedString, Styled as _, Subscription,
-    UTF16Selection, WeakFocusHandle, Window, actions, div, point, prelude::FluentBuilder as _, px,
+    FocusHandle, Focusable, InteractiveElement as _, IntoElement, KeyBinding, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Point, Render,
+    ScrollDelta, ScrollHandle, ScrollWheelEvent, SharedString, Styled as _, Subscription,
+    FluentBuilder as _, UTF16Selection, WeakFocusHandle, Window, actions, div, point, px,
 };
 use ropey::{Rope, RopeSlice};
 use std::borrow::Cow;
@@ -43,19 +43,13 @@ fn wheel_scroll_amount(horizontal: bool) -> u32 {
     } else {
         SPI_GETWHEELSCROLLLINES
     };
-    gpui::system_parameters_u32(action.0).unwrap_or(DEFAULT_WHEEL_SCROLL)
+    crate::ui::system_parameters_u32(action.0).unwrap_or(DEFAULT_WHEEL_SCROLL)
 }
-
-#[derive(Clone, PartialEq, Eq)]
-pub struct Enter {
-    pub secondary: bool,
-    pub shift: bool,
-}
-gpui::impl_action!(input, Enter);
 
 actions!(
     input,
     [
+        Enter,
         Backspace,
         Delete,
         DeleteToPreviousWordStart,
@@ -92,14 +86,6 @@ actions!(
     ]
 );
 
-#[derive(Clone)]
-pub enum InputEvent {
-    Change,
-    PressEnter { secondary: bool, shift: bool },
-    Focus,
-    Blur,
-}
-
 pub(super) const CONTEXT: &str = "Input";
 
 pub(crate) fn init(cx: &mut App) {
@@ -110,30 +96,9 @@ pub(crate) fn init(cx: &mut App) {
         KeyBinding::new("shift-delete", Delete, Some(CONTEXT)),
         KeyBinding::new("ctrl-backspace", DeleteToPreviousWordStart, Some(CONTEXT)),
         KeyBinding::new("ctrl-delete", DeleteToNextWordEnd, Some(CONTEXT)),
-        KeyBinding::new(
-            "enter",
-            Enter {
-                secondary: false,
-                shift: false,
-            },
-            Some(CONTEXT),
-        ),
-        KeyBinding::new(
-            "shift-enter",
-            Enter {
-                secondary: false,
-                shift: true,
-            },
-            Some(CONTEXT),
-        ),
-        KeyBinding::new(
-            "secondary-enter",
-            Enter {
-                secondary: true,
-                shift: false,
-            },
-            Some(CONTEXT),
-        ),
+        KeyBinding::new("enter", Enter, Some(CONTEXT)),
+        KeyBinding::new("shift-enter", Enter, Some(CONTEXT)),
+        KeyBinding::new("secondary-enter", Enter, Some(CONTEXT)),
         KeyBinding::new("escape", Escape, Some(CONTEXT)),
         KeyBinding::new("up", MoveUp, Some(CONTEXT)),
         KeyBinding::new("down", MoveDown, Some(CONTEXT)),
@@ -173,7 +138,7 @@ pub(crate) fn init(cx: &mut App) {
 }
 
 /// Unified single-caret text editor state for both single-line inputs and multi-line documents.
-pub struct EditorState {
+pub(crate) struct EditorState {
     multi_line: bool,
     pub(super) focus_handle: FocusHandle,
     selection_focus: Option<WeakFocusHandle>,
@@ -190,8 +155,8 @@ pub struct EditorState {
     pub(super) ime_marked_range: Option<CursorSelection>,
     pub(super) last_layout: Option<LastLayout>,
     pub(super) caret_bounds: Option<Bounds<Pixels>>,
-    pub caret_height: Cell<Pixels>,
-    pub caret_hidden: Cell<bool>,
+    pub(crate) caret_height: Cell<Pixels>,
+    pub(crate) caret_hidden: Cell<bool>,
     pub(super) last_cursor: Option<usize>,
     pub(super) input_bounds: Bounds<Pixels>,
     pub(super) last_bounds: Option<Bounds<Pixels>>,
@@ -201,7 +166,7 @@ pub struct EditorState {
     pub(super) validate: Option<Box<dyn Fn(&str, &mut App) -> bool + 'static>>,
     pub(crate) scroll_handle: ScrollHandle,
     pub(crate) deferred_scroll_offset: Option<Point<Pixels>>,
-    pub(crate) scroll_size: gpui::Size<Pixels>,
+    pub(crate) scroll_size: crate::ui::Size<Pixels>,
     pub(super) editor_scrollbar_snapshot: Cell<Option<EditorScrollbarSnapshot>>,
     viewport_wheel_step: bool,
     pub(super) longest_line_width: Cell<Option<(LongestLineKey, Pixels)>>,
@@ -209,20 +174,17 @@ pub struct EditorState {
     pub(super) placeholder: SharedString,
     context_menu_handler: Option<Rc<dyn Fn(Point<Pixels>, &mut Window, &mut App)>>,
     pending_context_menu: Option<(Point<Pixels>, usize)>,
-    pub(super) emit_events: bool,
     _subscriptions: Vec<Subscription>,
     _window_subscriptions: Vec<Subscription>,
     pub(super) auto_scroll: AutoScroll,
 }
 
-impl EventEmitter<InputEvent> for EditorState {}
-
 impl EditorState {
-    pub fn single_line(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub(crate) fn single_line(window: &mut Window, cx: &mut Context<Self>) -> Self {
         Self::new_inner(false, window, cx)
     }
 
-    pub fn multi_line(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub(crate) fn multi_line(window: &mut Window, cx: &mut Context<Self>) -> Self {
         Self::new_inner(true, window, cx)
     }
 
@@ -274,7 +236,7 @@ impl EditorState {
             validate: None,
             scroll_handle: ScrollHandle::new(),
             deferred_scroll_offset: None,
-            scroll_size: gpui::size(px(0.), px(0.)),
+            scroll_size: crate::ui::size(px(0.), px(0.)),
             editor_scrollbar_snapshot: Cell::new(None),
             viewport_wheel_step: false,
             longest_line_width: Cell::new(None),
@@ -282,33 +244,32 @@ impl EditorState {
             placeholder: SharedString::default(),
             context_menu_handler: None,
             pending_context_menu: None,
-            emit_events: true,
             _subscriptions,
             _window_subscriptions,
             auto_scroll: AutoScroll::default(),
         }
     }
 
-    pub fn caret_bounds(&self) -> Option<Bounds<Pixels>> {
+    pub(crate) fn caret_bounds(&self) -> Option<Bounds<Pixels>> {
         self.caret_bounds
     }
 
-    pub fn viewport_wheel_step(mut self) -> Self {
+    pub(crate) fn viewport_wheel_step(mut self) -> Self {
         self.viewport_wheel_step = true;
         self
     }
 
     #[inline]
-    pub fn is_multi_line(&self) -> bool {
+    pub(crate) fn is_multi_line(&self) -> bool {
         self.multi_line
     }
 
     #[inline]
-    pub fn is_single_line(&self) -> bool {
+    pub(crate) fn is_single_line(&self) -> bool {
         !self.multi_line
     }
 
-    pub fn is_copyable(&self) -> bool {
+    pub(crate) fn is_copyable(&self) -> bool {
         !self.selection.is_empty()
     }
 
@@ -334,39 +295,39 @@ impl EditorState {
         ]
     }
 
-    pub fn attach_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn attach_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self._window_subscriptions = Self::window_subscriptions(&self.focus_handle, window, cx);
     }
 
-    pub fn can_undo(&self) -> bool {
+    pub(crate) fn can_undo(&self) -> bool {
         self.undo_manager.has_undos()
     }
 
-    pub fn begin_save(&mut self) -> u64 {
+    pub(crate) fn begin_save(&mut self) -> u64 {
         self.undo_manager.begin_save()
     }
 
-    pub fn mark_saved_version(&mut self, version: u64) {
+    pub(crate) fn mark_saved_version(&mut self, version: u64) {
         self.undo_manager.mark_saved_version(version);
     }
 
-    pub fn is_clean(&self) -> bool {
+    pub(crate) fn is_clean(&self) -> bool {
         self.undo_manager.is_clean()
     }
 
-    pub fn on_context_menu(
+    pub(crate) fn on_context_menu(
         &mut self,
         handler: Rc<dyn Fn(Point<Pixels>, &mut Window, &mut App)>,
     ) {
         self.context_menu_handler = Some(handler);
     }
 
-    pub fn set_selection_focus(&mut self, focus: Option<FocusHandle>, cx: &mut Context<Self>) {
+    pub(crate) fn set_selection_focus(&mut self, focus: Option<FocusHandle>, cx: &mut Context<Self>) {
         self.selection_focus = focus.as_ref().map(FocusHandle::downgrade);
         cx.notify();
     }
 
-    pub fn has_selection_focus(&self, window: &Window, cx: &App) -> bool {
+    pub(crate) fn has_selection_focus(&self, window: &Window, cx: &App) -> bool {
         self.focus_handle.is_focused(window)
             || self
                 .selection_focus
@@ -375,22 +336,22 @@ impl EditorState {
                 .is_some_and(|focus| focus.is_focused(window) || focus.contains_focused(window, cx))
     }
 
-    pub fn placeholder(mut self, placeholder: impl Into<SharedString>) -> Self {
+    pub(crate) fn placeholder(mut self, placeholder: impl Into<SharedString>) -> Self {
         self.placeholder = placeholder.into();
         self
     }
 
-    pub fn validate(mut self, f: impl Fn(&str, &mut App) -> bool + 'static) -> Self {
+    pub(crate) fn validate(mut self, f: impl Fn(&str, &mut App) -> bool + 'static) -> Self {
         self.validate = Some(Box::new(f));
         self
     }
 
-    pub fn soft_wrap(mut self, wrap: bool) -> Self {
+    pub(crate) fn soft_wrap(mut self, wrap: bool) -> Self {
         self.soft_wrap = wrap;
         self
     }
 
-    pub fn set_soft_wrap(&mut self, wrap: bool, _: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn set_soft_wrap(&mut self, wrap: bool, _: &mut Window, cx: &mut Context<Self>) {
         self.soft_wrap = wrap;
         if wrap {
             let wrap_width = self
@@ -410,24 +371,24 @@ impl EditorState {
         cx.notify();
     }
 
-    pub fn set_editor_paddings(&mut self, paddings: Edges<Pixels>) {
+    pub(crate) fn set_editor_paddings(&mut self, paddings: Edges<Pixels>) {
         self.editor_paddings = paddings;
     }
 
-    pub fn default_rope(mut self, value: Rope) -> Self {
+    pub(crate) fn default_rope(mut self, value: Rope) -> Self {
         self.text = value;
         self
     }
 
-    pub fn value(&self) -> SharedString {
+    pub(crate) fn value(&self) -> SharedString {
         SharedString::new(self.text.to_string())
     }
 
-    pub fn text(&self) -> &Rope {
+    pub(crate) fn text(&self) -> &Rope {
         &self.text
     }
 
-    pub fn set_cursor_position(
+    pub(crate) fn set_cursor_position(
         &mut self,
         position: impl Into<Position>,
         window: &mut Window,
@@ -441,7 +402,7 @@ impl EditorState {
         self.focus(window, cx);
     }
 
-    pub fn focus(&self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn focus(&self, window: &mut Window, cx: &mut Context<Self>) {
         self.focus_handle.focus(window, cx);
         self.blink_cursor.update(cx, |cursor, cx| {
             cursor.start(cx);
@@ -470,7 +431,7 @@ impl EditorState {
         (0, 0, None)
     }
 
-    pub fn set_value(
+    pub(crate) fn set_value(
         &mut self,
         value: impl Into<SharedString>,
         window: &mut Window,
@@ -478,10 +439,8 @@ impl EditorState {
     ) {
         let value = value.into();
         self.undo_manager.set_ignoring(true);
-        self.emit_events = false;
         self.replace_text(value, window, cx);
         self.undo_manager.set_ignoring(false);
-        self.emit_events = true;
 
         self.reset_selection();
         self.reset_scroll_to_start();
@@ -490,7 +449,7 @@ impl EditorState {
         cx.notify();
     }
 
-    pub fn replace(
+    pub(crate) fn replace(
         &mut self,
         text: impl Into<SharedString>,
         window: &mut Window,
@@ -503,7 +462,7 @@ impl EditorState {
         self.set_cursor_to(end);
     }
 
-    pub fn replace_ranges(
+    pub(crate) fn replace_ranges(
         &mut self,
         edits: &[(Range<usize>, String)],
         window: &mut Window,
@@ -754,7 +713,7 @@ impl EditorState {
         );
     }
 
-    pub(super) fn enter(&mut self, action: &Enter, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn enter(&mut self, _: &Enter, window: &mut Window, cx: &mut Context<Self>) {
         if self.is_multi_line() {
             self.replace_text_in_range(None, "\n", window, cx);
             self.pause_blink_cursor(cx);
@@ -762,16 +721,11 @@ impl EditorState {
             self.undo_manager.break_transaction_coalescing();
             cx.propagate();
         }
-
-        cx.emit(InputEvent::PressEnter {
-            secondary: action.secondary,
-            shift: action.shift,
-        });
     }
 
-    pub(super) fn escape(&mut self, _: &Escape, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn escape(&mut self, _: &Escape, _window: &mut Window, cx: &mut Context<Self>) {
         if self.ime_marked_range.is_some() {
-            self.unmark_text(window, cx);
+            self.unmark_text();
         }
         cx.propagate();
     }
@@ -1130,7 +1084,7 @@ impl EditorState {
         cx.notify();
     }
 
-    pub fn cursor(&self) -> usize {
+    pub(crate) fn cursor(&self) -> usize {
         if let Some(ime_marked_range) = &self.ime_marked_range {
             return ime_marked_range.end;
         }
@@ -1148,17 +1102,17 @@ impl EditorState {
         self.selection.reversed = false;
     }
 
-    pub fn selected_range(&self) -> Range<usize> {
+    pub(crate) fn selected_range(&self) -> Range<usize> {
         self.selection.into()
     }
 
-    pub fn select_all(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn select_all(&mut self, _: &mut Window, cx: &mut Context<Self>) {
         self.undo_manager.break_transaction_coalescing();
         self.set_selection(0, self.text.len());
         cx.notify();
     }
 
-    pub fn set_selected_range(&mut self, range: Range<usize>, cx: &mut Context<Self>) {
+    pub(crate) fn set_selected_range(&mut self, range: Range<usize>, cx: &mut Context<Self>) {
         let end_bias = if range.start == range.end {
             Bias::Left
         } else {
@@ -1342,7 +1296,7 @@ impl EditorState {
         self.cursor_boundary(offset.saturating_add(1), Bias::Right)
     }
 
-    pub fn show_cursor(&self, window: &Window, cx: &App) -> bool {
+    pub(crate) fn show_cursor(&self, window: &Window, cx: &App) -> bool {
         self.focus_handle.is_focused(window)
             && self.blink_cursor.read(cx).visible()
             && window.is_window_active()
@@ -1352,7 +1306,6 @@ impl EditorState {
         self.blink_cursor.update(cx, |cursor, cx| {
             cursor.start(cx);
         });
-        cx.emit(InputEvent::Focus);
     }
 
     fn on_blur(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
@@ -1360,7 +1313,6 @@ impl EditorState {
         self.blink_cursor.update(cx, |cursor, cx| {
             cursor.stop(cx);
         });
-        cx.emit(InputEvent::Blur);
         cx.notify();
     }
 
@@ -1439,7 +1391,7 @@ impl EditorState {
         }
     }
 
-    pub fn selected_text(&self) -> RopeSlice<'_> {
+    pub(crate) fn selected_text(&self) -> RopeSlice<'_> {
         let range_utf16 = self.range_to_utf16(&self.selected_range());
         let range = self.range_from_utf16(&range_utf16);
         self.text.slice(range)
@@ -1520,26 +1472,16 @@ impl EditorState {
 
         self.ime_marked_range.take();
         self.update_preferred_column();
-        if self.emit_events {
-            cx.emit(InputEvent::Change);
-        }
         cx.notify();
+    }
+
+    fn unmark_text(&mut self) {
+        self.ime_marked_range = None;
+        self.undo_manager.commit_transaction();
     }
 }
 
 impl EntityInputHandler for EditorState {
-    fn text_for_range(
-        &mut self,
-        range_utf16: Range<usize>,
-        adjusted_range: &mut Option<Range<usize>>,
-        _window: &mut Window,
-        _cx: &mut Context<Self>,
-    ) -> Option<String> {
-        let range = self.range_from_utf16(&range_utf16);
-        adjusted_range.replace(self.range_to_utf16(&range));
-        Some(self.text.slice(range).to_string())
-    }
-
     fn selected_text_range(
         &mut self,
         _ignore_disabled_input: bool,
@@ -1548,22 +1490,7 @@ impl EntityInputHandler for EditorState {
     ) -> Option<UTF16Selection> {
         Some(UTF16Selection {
             range: self.range_to_utf16(&self.selected_range()),
-            reversed: self.selection.reversed,
         })
-    }
-
-    fn marked_text_range(
-        &self,
-        _window: &mut Window,
-        _cx: &mut Context<Self>,
-    ) -> Option<Range<usize>> {
-        self.ime_marked_range
-            .map(|range| self.range_to_utf16(&range.into()))
-    }
-
-    fn unmark_text(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {
-        self.ime_marked_range = None;
-        self.undo_manager.commit_transaction();
     }
 
     fn replace_text_in_range(
@@ -1633,9 +1560,6 @@ impl EntityInputHandler for EditorState {
             self.undo_manager.commit_transaction();
         }
         self.update_preferred_column();
-        if self.emit_events {
-            cx.emit(InputEvent::Change);
-        }
         cx.notify();
     }
 
@@ -1771,24 +1695,6 @@ impl EntityInputHandler for EditorState {
             bounds.origin + start_origin,
             bounds.origin + point(end_origin.x, end_origin.y + line_height),
         ))
-    }
-
-    fn character_index_for_point(
-        &mut self,
-        point: gpui::Point<Pixels>,
-        _window: &mut Window,
-        _cx: &mut Context<Self>,
-    ) -> Option<usize> {
-        let last_layout = self.last_layout.as_ref()?;
-        let line_point = self.last_bounds?.localize(&point)?;
-
-        for (vi, line) in last_layout.lines.iter().enumerate() {
-            let offset = last_layout.visible_line_byte_offsets[vi];
-            if let Some(utf8_index) = line.index_for_position(line_point, last_layout) {
-                return Some(self.offset_to_utf16(offset + utf8_index));
-            }
-        }
-        None
     }
 }
 

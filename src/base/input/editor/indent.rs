@@ -1,14 +1,13 @@
 use crate::base::input::{
     EditorState, Indent, IndentInline, Outdent, OutdentInline, RopeExt, cursor::CursorSelection,
 };
-use gpui::{Context, SharedString, Window};
-use ropey::RopeSlice;
+use crate::ui::{Context, SharedString, Window};
 use std::ops::Range;
 
 #[derive(Debug, Copy, Clone)]
-pub struct TabSize {
-    pub tab_size: usize,
-    pub hard_tabs: bool,
+pub(crate) struct TabSize {
+    pub(crate) tab_size: usize,
+    pub(crate) hard_tabs: bool,
 }
 
 impl Default for TabSize {
@@ -27,19 +26,6 @@ impl TabSize {
         } else {
             " ".repeat(self.tab_size).into()
         }
-    }
-
-    /// Count the indent size of the line in spaces.
-    pub fn indent_count(&self, line: &RopeSlice) -> usize {
-        let mut count = 0;
-        for ch in line.chars() {
-            match ch {
-                '\t' => count += self.tab_size,
-                ' ' => count += 1,
-                _ => break,
-            }
-        }
-        count
     }
 }
 
@@ -206,8 +192,6 @@ enum IndentDirection {
 
 #[cfg(test)]
 mod tests {
-    use ropey::RopeSlice;
-
     use super::TabSize;
 
     #[test]
@@ -233,20 +217,5 @@ mod tests {
             hard_tabs: true,
         };
         assert_eq!(tab.to_string(), "\t");
-    }
-
-    #[test]
-    fn test_tab_size_indent_count() {
-        let tab = TabSize {
-            tab_size: 4,
-            hard_tabs: false,
-        };
-        assert_eq!(tab.indent_count(&RopeSlice::from("abc")), 0);
-        assert_eq!(tab.indent_count(&RopeSlice::from("  abc")), 2);
-        assert_eq!(tab.indent_count(&RopeSlice::from("    abc")), 4);
-        assert_eq!(tab.indent_count(&RopeSlice::from("\tabc")), 4);
-        assert_eq!(tab.indent_count(&RopeSlice::from("  \tabc")), 6);
-        assert_eq!(tab.indent_count(&RopeSlice::from(" \t abc  ")), 6);
-        assert_eq!(tab.indent_count(&RopeSlice::from("abc")), 0);
     }
 }

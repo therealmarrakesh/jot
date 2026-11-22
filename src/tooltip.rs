@@ -252,10 +252,6 @@ impl Element for Host {
         None
     }
 
-    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
-        None
-    }
-
     fn request_layout(
         &mut self,
         _: Option<&GlobalElementId>,
@@ -468,7 +464,7 @@ fn modifiers_changed(modifiers: &Modifiers, cx: &mut App) {
 
 fn show_delay(reshow: bool) -> Duration {
     let hover =
-        gpui::system_parameters_u32(SPI_GETMOUSEHOVERTIME.0).unwrap_or(DEFAULT_HOVER_TIME) as f32;
+        crate::ui::system_parameters_u32(SPI_GETMOUSEHOVERTIME.0).unwrap_or(DEFAULT_HOVER_TIME) as f32;
     let factor = if reshow {
         RESHOW_DELAY_FACTOR
     } else {
@@ -628,7 +624,7 @@ fn show(snap: Snap, cx: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{WindowHandle, WindowId};
+    use crate::ui::{WindowHandle, WindowId};
 
     fn win(id: u64) -> AnyWindowHandle {
         WindowHandle::<TooltipView>::new(WindowId::from(id)).into()

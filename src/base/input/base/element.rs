@@ -1,5 +1,5 @@
-use gpui::smallvec::SmallVec;
-use gpui::{
+use crate::ui::smallvec::SmallVec;
+use crate::ui::{
     AnyElement, App, Bounds, ContentMask, Corners, Edges, Element, ElementId, ElementInputHandler,
     Entity, GlobalElementId, Half, HitboxBehavior, IntoElement, LayoutId, MouseButton,
     MouseMoveEvent, MouseUpEvent, Pixels, Point, Position, SharedString, Size, Style, TextRun,
@@ -35,7 +35,7 @@ pub(super) struct LongestLineKey {
     document_revision: u64,
     row: usize,
     len: usize,
-    font: gpui::Font,
+    font: crate::ui::Font,
     text_size: Pixels,
     wrap_width: Option<Pixels>,
 }
@@ -104,10 +104,6 @@ impl Element for EditorScrollbar {
 
     fn id(&self) -> Option<ElementId> {
         Some("editor-scrollbar".into())
-    }
-
-    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
-        None
     }
 
     fn request_layout(
@@ -507,7 +503,7 @@ impl TextElement {
             let shaped_line = window
                 .text_system()
                 .shape_line(text, font_size, line_runs, None);
-            return vec![LineLayout::new().lines(gpui::smallvec::smallvec![shaped_line])];
+            return vec![LineLayout::new().lines(crate::ui::smallvec::smallvec![shaped_line])];
         }
 
         if state.text.len() == 0 {
@@ -617,10 +613,6 @@ impl Element for TextElement {
         None
     }
 
-    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
-        None
-    }
-
     fn request_layout(
         &mut self,
         _id: Option<&GlobalElementId>,
@@ -708,7 +700,6 @@ impl Element for TextElement {
         let visible_range_offset = visible_start_offset..visible_end_offset;
 
         let mut last_layout = LastLayout {
-            visible_range,
             visible_buffer_lines,
             visible_line_byte_offsets,
             visible_top,
@@ -778,7 +769,7 @@ impl Element for TextElement {
                             &[TextRun {
                                 len: longest_line.len(),
                                 font: key.font.clone(),
-                                color: gpui::black(),
+                                color: crate::ui::black(),
                                 background_color: None,
                                 underline: None,
                             }],

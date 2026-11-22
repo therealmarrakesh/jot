@@ -16,13 +16,14 @@ mod tab_drag;
 mod tabs;
 mod theme;
 mod tooltip;
+mod ui;
+mod win32;
 
 use brush::{BrushTransitionExt as _, Brushes, PressedExt as _};
-use gpui::prelude::FluentBuilder as _;
-use gpui::*;
+use crate::ui::*;
 use crate::base::Easing;
 use crate::base::actions::Cancel;
-use crate::base::input::{self, EditorState, InputEvent, Rope, RopeExt as _};
+use crate::base::input::{self, EditorState, Rope, RopeExt as _};
 use menu::MenuBar;
 use std::cell::Cell;
 use std::ops::Range;
@@ -235,7 +236,7 @@ fn caption_buttons(window: &Window, p: Palette) -> impl IntoElement {
         .child(div().flex_1().window_control_area(WindowControlArea::Drag))
 }
 
-gpui::actions!(
+crate::ui::actions!(
     jot,
     [
         NewTab,
@@ -271,7 +272,7 @@ gpui::actions!(
 
 #[derive(Clone, PartialEq, Eq)]
 struct SelectTab(usize);
-gpui::impl_action!(jot, SelectTab);
+crate::ui::impl_action!(jot, SelectTab);
 
 struct ViewSettings {
     status_bar: bool,
@@ -339,7 +340,6 @@ fn window_options(window_size: Option<Size<Pixels>>, cx: &App) -> WindowOptions 
         titlebar: Some(TitlebarOptions {
             title: Some(APP_NAME.into()),
             appears_transparent: true,
-            traffic_light_position: None,
         }),
         window_background: WindowBackgroundAppearance::MicaAltBackdrop,
         ..Default::default()
@@ -425,13 +425,22 @@ struct TabData {
     zoom: f32,
     path: Option<PathBuf>,
     format: document::Format,
-    dirty: bool,
+}
+
+impl TabData {
+    pub(crate) fn is_dirty(&self, cx: &App) -> bool {
+        let editor = self.editor.read(cx);
+        if self.path.is_some() {
+            !editor.is_clean()
+        } else {
+            !editor.is_clean() && editor.text().len() > 0
+        }
+    }
 }
 
 struct Tab {
     data: TabData,
     slot: tabs::SlotKey,
-    _changes: Subscription,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -463,7 +472,7 @@ struct Jot {
     active: usize,
     strip: tabs::TabStrip,
     hwnd: isize,
-    menu_bar: Entity<MenuBar>,
+    menu_bar: MenuBar,
     dialogs: dialog::Dialogs,
     find: find::FindBar,
     min_size: Rc<Cell<Option<MinSizeCache>>>,
@@ -476,31 +485,20 @@ impl Jot {
             Some(data) => Self::adopt_tab(data, window, cx),
             None => Self::create_tab(None, window, cx),
         };
-        let jot = cx.weak_entity();
-        let menu_bar = cx.new(|cx| MenuBar::new(jot, window, cx));
-        let menu_events = cx.subscribe(&menu_bar, |this, _, _: &menu::MenuEvent, cx| {
-            this.sync_selection_focus(cx)
-        });
+        let menu_bar = MenuBar::new(window, cx);
         let dialogs = dialog::Dialogs::new(window, cx);
         let find = find::FindBar::new(window, cx);
 
         let access_keys = {
             let jot = cx.weak_entity();
-            let menu_bar = menu_bar.downgrade();
             let handle = window.window_handle();
             cx.intercept_keystrokes(move |event, window, cx| {
                 if window.window_handle() != handle {
                     return;
                 }
                 if jot
-                    .read_with(cx, |jot, _| jot.dialogs.is_open())
-                    .unwrap_or(false)
-                {
-                    return;
-                }
-                if menu_bar
-                    .update(cx, |menu_bar, cx| {
-                        menu_bar.key_down(&event.keystroke, window, cx)
+                    .update(cx, |jot, cx| {
+                        !jot.dialogs.is_open() && jot.menu_key_down(&event.keystroke, window, cx)
                     })
                     .unwrap_or(false)
                 {
@@ -509,14 +507,14 @@ impl Jot {
             })
         };
         let _subscriptions = vec![
-            menu_events,
             access_keys,
             cx.observe_window_appearance(window, |_, window, cx| {
                 theme::apply(window.appearance(), cx);
                 cx.notify();
             }),
-            cx.observe_window_activation(window, |_, window, cx| {
+            cx.observe_window_activation(window, |this, window, cx| {
                 if !window.is_window_active() {
+                    this.menu_cancel(window, cx);
                     tooltip::window_deactivated(window.window_handle(), cx);
                     cx.notify();
                 }
@@ -599,7 +597,7 @@ impl Jot {
     ) -> Option<impl IntoElement + use<>> {
         let zoom_pct = metrics.map_or((self.zoom() * 100.).round() as u32, |m| m.zoom_pct);
         let scale = window.scale_factor();
-        let menu_width = self.menu_bar.read(cx).width();
+        let menu_width = self.menu_bar.width();
         let key = MinSizeKey {
             status: metrics,
             zoom_pct,
@@ -614,7 +612,7 @@ impl Jot {
             return None;
         }
         let hwnd = self.hwnd;
-        let menu_bar = self.menu_bar.clone();
+        let menu_areas = self.menu_bar.hit_areas();
         let cache = self.min_size.clone();
         let status = metrics.map(|metrics| self.status_bar(metrics, cx).into_any_element());
         let rows = tabs::STRIP_TOP
@@ -628,7 +626,7 @@ impl Jot {
                     let status = status.map(|mut status| {
                         status.layout_as_root(AvailableSpace::min_size(), window, cx)
                     });
-                    let measured_menu = menu_bar.read(cx).width();
+                    let measured_menu = menu::bar_width(&menu_areas);
                     let menu_row =
                         MENU_BAR_LEFT + measured_menu + THEME_BUTTON_WIDTH + THEME_BUTTON_RIGHT;
                     let width = status
@@ -646,7 +644,7 @@ impl Jot {
                         size: next,
                     }));
                     if changed {
-                        gpui::set_window_min_size(hwnd, Some(next));
+                        crate::ui::set_window_min_size(hwnd, Some(next));
                     }
                 },
                 |_, _, _, _| {},
@@ -673,9 +671,8 @@ impl Jot {
     }
 
     pub(crate) fn sync_selection_focus(&mut self, cx: &mut Context<Self>) {
-        let menu_bar = self.menu_bar.read(cx);
-        let focus = if menu_bar.is_open() {
-            Some(menu_bar.focus_handle().clone())
+        let focus = if self.menu_bar.is_open() {
+            Some(self.menu_bar.focus_handle().clone())
         } else {
             self.find.selection_focus()
         };
@@ -806,7 +803,7 @@ impl Jot {
             .child(caption_buttons(window, p))
     }
 
-    fn render_menu_bar(&self, p: Palette) -> impl IntoElement {
+    fn render_menu_bar(&self, menu: impl IntoElement, p: Palette) -> impl IntoElement {
         div()
             .flex_none()
             .child(
@@ -816,7 +813,7 @@ impl Jot {
                     .pl(px(MENU_BAR_LEFT))
                     .pr(px(THEME_BUTTON_RIGHT))
                     .bg(rgba(p.layer))
-                    .child(self.menu_bar.clone())
+                    .child(menu)
                     .child(div().flex_1())
                     .child(
                         field::icon_button(
@@ -858,18 +855,6 @@ impl Jot {
         self.open_context_menu(anchor, window, cx);
     }
 
-    fn open_context_menu(
-        &mut self,
-        position: Point<Pixels>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let editor = self.active_editor().clone();
-        self.menu_bar.update(cx, |menu_bar, cx| {
-            menu_bar.open_context_menu(&editor, position, window, cx);
-        });
-    }
-
     fn editor(
         &self,
         find: Option<impl IntoElement>,
@@ -880,7 +865,7 @@ impl Jot {
         {
             let state = editor.read(cx);
             state.caret_height.set(self.caret_height());
-            state.caret_hidden.set(self.menu_bar.read(cx).access_active());
+            state.caret_hidden.set(self.menu_bar.access_active());
         }
         div()
             .id("editor-area")
@@ -891,7 +876,7 @@ impl Jot {
             .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
                 if !event.modifiers.control
                     || this.dialogs.is_open()
-                    || this.menu_bar.read(cx).is_open()
+                    || this.menu_bar.is_open()
                 {
                     return;
                 }
@@ -987,6 +972,7 @@ impl Render for Jot {
             .status_bar
             .then(|| self.status_metrics(cx));
         let strip = self.sample_tabs(window, cx);
+        let menu = self.render_menu(window, cx);
         let dialogs = self.render_dialogs(window, cx);
         let min_size = self.min_size_probe(status_metrics, window, cx);
         let find = self.render_find(window, cx);
@@ -995,8 +981,7 @@ impl Render for Jot {
             .relative()
             .size_full()
             .capture_any_mouse_down(cx.listener(|this, _, _, cx| {
-                this.menu_bar
-                    .update(cx, |menu_bar, cx| menu_bar.pointer_down(cx));
+                this.menu_pointer_down(cx);
             }))
             .on_drop(cx.listener(Self::open_dropped))
             .on_action(cx.listener(Self::cancel))
@@ -1031,7 +1016,7 @@ impl Render for Jot {
                     .flex_col()
                     .size_full()
                     .child(self.title_bar(&strip, window, cx))
-                    .child(self.render_menu_bar(p))
+                    .child(self.render_menu_bar(menu, p))
                     .child(self.editor(find, cx))
                     .children(status_metrics.map(|metrics| self.status_bar(metrics, cx))),
             )
@@ -1117,12 +1102,12 @@ fn main() {
     }
 
     let platform = Rc::new(
-        gpui::WindowsPlatform::new().expect("Failed to initialize Windows platform"),
+        crate::ui::WindowsPlatform::new().expect("Failed to initialize Windows platform"),
     );
     Application::with_platform(platform).run(move |cx| {
         base::init(cx);
 
-        let (handoff_tx, mut handoff_rx) = gpui::futures::channel::mpsc::unbounded::<Vec<PathBuf>>();
+        let (handoff_tx, mut handoff_rx) = crate::ui::futures::channel::mpsc::unbounded::<Vec<PathBuf>>();
         instance::start_listener(move |incoming| {
             let _ = handoff_tx.unbounded_send(incoming);
         });
@@ -1252,7 +1237,7 @@ mod large_file_smoke {
             while i < line.len() {
                 let b = line.floor_char_boundary(i);
                 if b > 0 && b < line.len() {
-                    out.push(gpui::Boundary { ix: b, next_indent: 0 });
+                    out.push(crate::ui::Boundary { ix: b, next_indent: 0 });
                 }
                 i += 110;
             }

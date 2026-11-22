@@ -4,7 +4,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use gpui::{
+use crate::ui::{
     Anchor, App, Axis, Bounds, ContentMask, CursorStyle, Element, ElementId, EntityId,
     GlobalElementId, Hitbox, HitboxBehavior, Hsla, IntoElement, LayoutId, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, Pixels, Point, Position, ScrollHandle, ScrollWheelEvent, Size,
@@ -291,10 +291,6 @@ impl Element for Scrollbar {
 
     fn id(&self) -> Option<ElementId> {
         Some("jot-scrollbar".into())
-    }
-
-    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
-        None
     }
 
     fn request_layout(

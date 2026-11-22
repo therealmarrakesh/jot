@@ -679,10 +679,7 @@ impl Jot {
             }),
         ];
         let return_focus = self.find.query.focus_handle(cx);
-        let editor = self.active_editor().clone();
-        self.menu_bar.update(cx, |menu_bar, cx| {
-            menu_bar.open_flyout_above(&editor, entries, target, return_focus, window, cx)
-        });
+        self.open_flyout_above(entries, target, return_focus, window, cx);
     }
 
     pub(crate) fn render_find(
@@ -970,7 +967,7 @@ fn icon_button(
         glyph,
         field::IconButtonStyle {
             glyph_size: u(size),
-            size: gpui::size(u(ICON_BUTTON_SIZE), u(ICON_BUTTON_SIZE)),
+            size: crate::ui::size(u(ICON_BUTTON_SIZE), u(ICON_BUTTON_SIZE)),
             radius: u(CONTROL_RADIUS),
         },
         true,

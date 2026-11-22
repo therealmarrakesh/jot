@@ -1,9 +1,9 @@
 use std::time::{Duration, Instant};
 
-use gpui::{App, ElementId, Hsla, Pixels, Point, Window, point, px};
+use crate::ui::{App, ElementId, Hsla, Pixels, Point, Window, point, px};
 
 /// A cubic bezier easing curve like CSS `cubic-bezier(x1, y1, x2, y2)`.
-pub fn cubic_bezier(x1: f32, y1: f32, x2: f32, y2: f32, t: f32) -> f32 {
+pub(crate) fn cubic_bezier(x1: f32, y1: f32, x2: f32, y2: f32, t: f32) -> f32 {
     let t = t.clamp(0.0, 1.0);
     let (cx, cy) = (3.0 * x1, 3.0 * y1);
     let (bx, by) = (3.0 * (x2 - x1) - cx, 3.0 * (y2 - y1) - cy);
@@ -48,19 +48,19 @@ pub fn cubic_bezier(x1: f32, y1: f32, x2: f32, y2: f32, t: f32) -> f32 {
 }
 
 #[inline]
-pub fn ease_out_cubic(t: f32) -> f32 {
+pub(crate) fn ease_out_cubic(t: f32) -> f32 {
     let t = t.clamp(0.0, 1.0);
     1.0 - (1.0 - t).powi(3)
 }
 
 #[inline]
-pub fn ease_in_cubic(t: f32) -> f32 {
+pub(crate) fn ease_in_cubic(t: f32) -> f32 {
     let t = t.clamp(0.0, 1.0);
     t * t * t
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub enum Easing {
+pub(crate) enum Easing {
     Linear,
     #[default]
     EaseOutCubic,
@@ -75,7 +75,7 @@ pub enum Easing {
 
 impl Easing {
     #[inline]
-    pub fn sample(self, progress: f32) -> f32 {
+    pub(crate) fn sample(self, progress: f32) -> f32 {
         let progress = progress.clamp(0.0, 1.0);
         match self {
             Self::Linear => progress,
@@ -86,7 +86,7 @@ impl Easing {
     }
 }
 
-pub trait Interpolate: Clone {
+pub(crate) trait Interpolate: Clone {
     fn interpolate(&self, target: &Self, progress: f32) -> Self;
 }
 
@@ -125,26 +125,26 @@ impl Interpolate for Hsla {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum MotionStatus {
+pub(crate) enum MotionStatus {
     Idle,
     Running,
     Finished,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct MotionValue<T> {
-    pub value: T,
-    pub status: MotionStatus,
+pub(crate) struct MotionValue<T> {
+    pub(crate) value: T,
+    pub(crate) status: MotionStatus,
 }
 
 /// Pure scalar/value transition driven by caller-supplied timestamps.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct TimedTransition<T> {
-    pub from: T,
-    pub target: T,
-    pub started_at: Instant,
-    pub duration: Duration,
-    pub easing: Easing,
+    pub(crate) from: T,
+    pub(crate) target: T,
+    pub(crate) started_at: Instant,
+    pub(crate) duration: Duration,
+    pub(crate) easing: Easing,
 }
 
 impl<T: Interpolate + PartialEq> TimedTransition<T> {
@@ -205,7 +205,7 @@ struct KeyedTransition<T> {
 }
 
 /// Transitions smoothly toward `target`, starting at `target` on first render.
-pub fn transition<T>(
+pub(crate) fn transition<T>(
     id: impl Into<ElementId>,
     target: T,
     duration: Duration,
@@ -220,7 +220,7 @@ where
 }
 
 /// Transitions smoothly toward `target`, seeding keyed state at `initial` on first render.
-pub fn transition_from<T>(
+pub(crate) fn transition_from<T>(
     id: impl Into<ElementId>,
     initial: T,
     target: T,
