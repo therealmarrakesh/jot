@@ -54,9 +54,7 @@ impl Jot {
                 return;
             };
             this.update_in(cx, |this, window, cx| {
-                for path in paths {
-                    this.open_path(path, window, cx);
-                }
+                this.open_paths(paths, window, cx);
             })
             .ok();
         })
@@ -69,40 +67,89 @@ impl Jot {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        for path in paths.paths() {
-            self.open_path(path.clone(), window, cx);
-        }
+        self.open_paths(paths.paths().to_vec(), window, cx);
     }
 
-    pub(crate) fn open_path(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
-        let path = std::path::absolute(&path).unwrap_or(path);
-        if let Some(ix) = self.tabs.iter().position(|tab| {
+    fn find_open_tab(&self, path: &Path) -> Option<usize> {
+        self.tabs.iter().position(|tab| {
             tab.data
                 .path
                 .as_deref()
-                .is_some_and(|existing| document::same_path(existing, &path))
-        }) {
-            self.activate_tab(ix, window, cx);
+                .is_some_and(|existing| document::same_path(existing, path))
+        })
+    }
+
+    pub(crate) fn open_paths(
+        &mut self,
+        paths: Vec<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let mut to_load: Vec<PathBuf> = Vec::new();
+        let mut last_existing = None;
+        for raw in paths {
+            let path = std::path::absolute(&raw).unwrap_or(raw);
+            if let Some(ix) = self.find_open_tab(&path) {
+                last_existing = Some(ix);
+                continue;
+            }
+            if !to_load
+                .iter()
+                .any(|queued| document::same_path(queued, &path))
+            {
+                to_load.push(path);
+            }
+        }
+        if to_load.is_empty() {
+            if let Some(ix) = last_existing {
+                self.activate_tab(ix, window, cx);
+            }
             return;
         }
-        match document::load(&path) {
-            Ok(loaded) => {
-                let tab = Self::create_tab(Some((path, loaded)), window, cx);
-                if self.is_blank(self.active, cx) {
-                    self.replace_tab(self.active, tab, window, cx);
-                } else {
-                    self.push_tab(tab, window, cx);
+        cx.spawn_in(window, async move |this, cx| {
+            let results = cx
+                .background_executor()
+                .spawn(async move {
+                    to_load
+                        .into_iter()
+                        .map(|path| {
+                            let loaded = document::load(&path);
+                            (path, loaded)
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .await;
+            this.update_in(cx, |this, window, cx| {
+                for (path, result) in results {
+                    if let Some(ix) = this.find_open_tab(&path) {
+                        this.activate_tab(ix, window, cx);
+                        continue;
+                    }
+                    match result {
+                        Ok(loaded) => {
+                            let tab = Self::create_tab(Some((path, loaded)), window, cx);
+                            if this.is_blank(this.active, cx) {
+                                this.replace_tab(this.active, tab, window, cx);
+                            } else {
+                                this.push_tab(tab, window, cx);
+                            }
+                        }
+                        Err(error) => {
+                            let detail: SharedString = match error {
+                                LoadError::Undecodable => {
+                                    "Jot can't decode the text in this file.".into()
+                                }
+                                LoadError::Io(error) => error.to_string().into(),
+                            };
+                            let title = format!("Can't open {}", display_name(Some(&path)));
+                            this.show_error(title, detail, window, cx);
+                        }
+                    }
                 }
-            }
-            Err(error) => {
-                let detail: SharedString = match error {
-                    LoadError::Undecodable => "Jot can't decode the text in this file.".into(),
-                    LoadError::Io(error) => error.to_string().into(),
-                };
-                let title = format!("Can't open {}", display_name(Some(&path)));
-                self.show_error(title, detail, window, cx);
-            }
-        }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     pub(crate) fn save(&mut self, _: &Save, window: &mut Window, cx: &mut Context<Self>) {
@@ -212,71 +259,81 @@ impl Jot {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Task<bool> {
-        let tab = &self.tabs[ix];
-        let id = tab.data.editor.entity_id();
-        let text = tab.data.editor.read(cx).text().to_string();
-        let encoded = match document::encode(text, format) {
-            Ok(encoded) => encoded,
-            Err(error) => {
-                self.show_save_error(&path, &error, window, cx);
-                return Task::ready(false);
-            }
-        };
-        if !encoded.lossy {
-            return Task::ready(self.commit_tab(ix, path, format, &encoded.bytes, window, cx));
-        }
-        let answer = self.prompt(
-            APP_NAME,
-            format!("{}\n{LOSSY_ANSI_WARNING}", path.display()),
-            &["OK", "Cancel"],
-            window,
-            cx,
-        );
-        cx.spawn_in(window, async move |this, cx| match answer.await {
-            Ok(0) => this
-                .update_in(cx, |this, window, cx| match this.tab_index(id) {
-                    Some(ix) => this.commit_tab(ix, path, format, &encoded.bytes, window, cx),
-                    None => false,
-                })
-                .unwrap_or(false),
-            Ok(1) => {
-                let Ok(save_as) =
-                    this.update_in(cx, |this, window, cx| this.save_tab_as(id, window, cx))
-                else {
+        let editor = self.tabs[ix].data.editor.clone();
+        let id = editor.entity_id();
+        let snapshot = editor.update(cx, |editor, _| editor.begin_save());
+        let text = editor.read(cx).text().to_string();
+        let path = std::path::absolute(&path).unwrap_or(path);
+        cx.spawn_in(window, async move |this, cx| {
+            let encoded = cx
+                .background_executor()
+                .spawn(async move { document::encode(text, format) })
+                .await;
+            let encoded = match encoded {
+                Ok(encoded) => encoded,
+                Err(error) => {
+                    this.update_in(cx, |this, window, cx| {
+                        this.show_save_error(&path, &error, window, cx);
+                    })
+                    .ok();
+                    return false;
+                }
+            };
+            if encoded.lossy {
+                let Ok(answer) = this.update_in(cx, |this, window, cx| {
+                    this.prompt(
+                        APP_NAME,
+                        format!("{}\n{LOSSY_ANSI_WARNING}", path.display()),
+                        &["OK", "Cancel"],
+                        window,
+                        cx,
+                    )
+                }) else {
                     return false;
                 };
-                save_as.await
+                match answer.await {
+                    Ok(0) => {}
+                    Ok(1) => {
+                        let Ok(save_as) =
+                            this.update_in(cx, |this, window, cx| this.save_tab_as(id, window, cx))
+                        else {
+                            return false;
+                        };
+                        return save_as.await;
+                    }
+                    _ => return false,
+                }
             }
-            _ => false,
+            let write_path = path.clone();
+            let bytes = encoded.bytes;
+            let result = cx
+                .background_executor()
+                .spawn(async move { document::write(&write_path, &bytes) })
+                .await;
+            this.update_in(cx, |this, window, cx| match result {
+                Ok(()) => {
+                    let Some(ix) = this.tab_index(id) else {
+                        return false;
+                    };
+                    let tab = &mut this.tabs[ix];
+                    let clean = tab.data.editor.update(cx, |editor, _| {
+                        editor.mark_saved_version(snapshot);
+                        editor.is_clean()
+                    });
+                    tab.data.path = Some(path);
+                    tab.data.format = format;
+                    tab.data.dirty = !clean;
+                    this.refresh_title(window);
+                    cx.notify();
+                    true
+                }
+                Err(error) => {
+                    this.show_save_error(&path, &error, window, cx);
+                    false
+                }
+            })
+            .unwrap_or(false)
         })
-    }
-
-    fn commit_tab(
-        &mut self,
-        ix: usize,
-        path: PathBuf,
-        format: Format,
-        bytes: &[u8],
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        let path = std::path::absolute(&path).unwrap_or(path);
-        match document::write(&path, bytes) {
-            Ok(()) => {
-                let tab = &mut self.tabs[ix];
-                tab.data.editor.update(cx, |editor, _| editor.mark_saved());
-                tab.data.path = Some(path);
-                tab.data.format = format;
-                tab.data.dirty = false;
-                self.refresh_title(window);
-                cx.notify();
-                true
-            }
-            Err(error) => {
-                self.show_save_error(&path, &error, window, cx);
-                false
-            }
-        }
     }
 
     pub(crate) fn close_tab(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {

@@ -51,13 +51,34 @@ impl LineEnding {
             Some(_) => Self::Lf,
             None => Self::Crlf,
         };
-        let text = if text.contains('\r') {
-            text.replace("\r\n", "\n").replace('\r', "\n")
-        } else {
-            text
-        };
-        (text, line_ending)
+        (normalize_line_endings(text), line_ending)
     }
+}
+
+fn normalize_line_endings(text: String) -> String {
+    let bytes = text.as_bytes();
+    if !bytes.contains(&b'\r') {
+        return text;
+    }
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut start = 0;
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\r' {
+            out.extend_from_slice(&bytes[start..i]);
+            out.push(b'\n');
+            i += if bytes.get(i + 1) == Some(&b'\n') {
+                2
+            } else {
+                1
+            };
+            start = i;
+        } else {
+            i += 1;
+        }
+    }
+    out.extend_from_slice(&bytes[start..]);
+    String::from_utf8(out).expect("replacing ASCII CR/CRLF with LF preserves UTF-8")
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -103,17 +124,28 @@ impl Encoding {
         })
     }
 
-    fn decode(self, body: Vec<u8>) -> Option<String> {
-        let units = |unit: fn([u8; 2]) -> u16| {
+    fn decode(self, mut bytes: Vec<u8>, bom: usize) -> Option<String> {
+        let decode_utf16 = |body: &[u8], unit: fn([u8; 2]) -> u16| -> Option<String> {
             let (pairs, rest) = body.as_chunks::<2>();
-            rest.is_empty()
-                .then(|| pairs.iter().map(|&pair| unit(pair)).collect::<Vec<_>>())
+            if !rest.is_empty() {
+                return None;
+            }
+            let mut out = String::with_capacity(pairs.len());
+            for ch in char::decode_utf16(pairs.iter().map(|&pair| unit(pair))) {
+                out.push(ch.ok()?);
+            }
+            Some(out)
         };
         match self {
-            Self::Utf8 | Self::Utf8Bom => String::from_utf8(body).ok(),
-            Self::Utf16Le => String::from_utf16(&units(u16::from_le_bytes)?).ok(),
-            Self::Utf16Be => String::from_utf16(&units(u16::from_be_bytes)?).ok(),
-            Self::Ansi => ansi_decode(&body),
+            Self::Utf8 => String::from_utf8(bytes).ok(),
+            Self::Utf8Bom => {
+                std::str::from_utf8(&bytes[bom..]).ok()?;
+                bytes.drain(..bom);
+                String::from_utf8(bytes).ok()
+            }
+            Self::Utf16Le => decode_utf16(&bytes[bom..], u16::from_le_bytes),
+            Self::Utf16Be => decode_utf16(&bytes[bom..], u16::from_be_bytes),
+            Self::Ansi => ansi_decode(&bytes[bom..]),
         }
     }
 
@@ -142,7 +174,7 @@ impl Encoding {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Format {
     pub(crate) line_ending: LineEnding,
     pub(crate) encoding: Encoding,
@@ -165,10 +197,9 @@ pub(crate) struct Encoded {
 }
 
 pub(crate) fn load(path: &Path) -> Result<Loaded, LoadError> {
-    let mut bytes = fs::read(path).map_err(LoadError::Io)?;
+    let bytes = fs::read(path).map_err(LoadError::Io)?;
     let (encoding, bom) = Encoding::detect(&bytes);
-    bytes.drain(..bom);
-    let text = encoding.decode(bytes).ok_or(LoadError::Undecodable)?;
+    let text = encoding.decode(bytes, bom).ok_or(LoadError::Undecodable)?;
     let (text, line_ending) = LineEnding::split(text);
     Ok(Loaded {
         text,
@@ -454,6 +485,7 @@ mod tests {
         assert_eq!(LineEnding::split("a\nb\n".into()), ("a\nb\n".into(), LineEnding::Lf));
         assert_eq!(LineEnding::split("a\rb\r".into()), ("a\nb\n".into(), LineEnding::Cr));
         assert_eq!(LineEnding::split("a\r\nb\rc\nd".into()), ("a\nb\nc\nd".into(), LineEnding::Crlf));
+        assert_eq!(LineEnding::split("a\r\r\nb\r".into()), ("a\n\nb\n".into(), LineEnding::Cr));
     }
 
     #[test]
@@ -474,12 +506,14 @@ mod tests {
                 assert!(!encoded.lossy);
                 let (detected, bom) = Encoding::detect(&encoded.bytes);
                 assert_eq!(detected, encoding);
-                let decoded = detected.decode(encoded.bytes[bom..].to_vec()).unwrap();
+                let decoded = detected.decode(encoded.bytes, bom).unwrap();
                 let (normalized, detected_ending) = LineEnding::split(decoded);
                 assert_eq!(normalized, sample);
                 assert_eq!(detected_ending, line_ending);
             }
         }
+        // Reject odd-length UTF-16 payload.
+        assert!(Encoding::Utf16Le.decode(vec![0xff, 0xfe, b'a'], 2).is_none());
     }
 
     #[test]

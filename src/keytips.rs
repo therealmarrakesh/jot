@@ -143,6 +143,20 @@ pub(crate) fn show(
     state.rect = rect;
 }
 
+pub(crate) fn is_owner(owner: AnyWindowHandle, cx: &App) -> bool {
+    cx.try_global::<KeyTips>()
+        .is_some_and(|state| state.owner == Some(owner))
+}
+
+pub(crate) fn hide_owner(owner: AnyWindowHandle, cx: &mut App) {
+    if cx.has_global::<KeyTips>() {
+        let state = cx.global_mut::<KeyTips>();
+        if state.owner == Some(owner) {
+            state.hide();
+        }
+    }
+}
+
 pub(crate) fn window_closed(window: WindowId, cx: &mut App) {
     let state = cx.default_global::<KeyTips>();
     if state.owner.is_some_and(|owner| owner.window_id() == window) {

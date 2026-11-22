@@ -665,8 +665,12 @@ impl<M: InputModeKind> InputBaseState<M> {
         self.undo_manager.has_undos()
     }
 
-    pub fn mark_saved(&mut self) {
-        self.undo_manager.mark_saved();
+    pub fn begin_save(&mut self) -> u64 {
+        self.undo_manager.begin_save()
+    }
+
+    pub fn mark_saved_version(&mut self, version: u64) {
+        self.undo_manager.mark_saved_version(version);
     }
 
     pub fn is_clean(&self) -> bool {

@@ -1405,8 +1405,14 @@ impl MenuBar {
     }
 
     fn sync_key_tips(&self, window: &Window, cx: &mut Context<Self>) {
-        let tips = self.key_tips(window);
         let owner = window.window_handle();
+        let tips = self.key_tips(window);
+        if tips.is_empty() {
+            if keytips::is_owner(owner, cx) {
+                cx.defer(move |cx| keytips::hide_owner(owner, cx));
+            }
+            return;
+        }
         let origin = client_origin(window_hwnd(window));
         let scale = window.scale_factor();
         cx.defer(move |cx| keytips::show(owner, origin, scale, tips, cx));
@@ -1779,11 +1785,13 @@ impl EventEmitter<MenuEvent> for MenuBar {}
 impl Render for MenuBar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
-        let this = cx.entity().downgrade();
-        window.defer(cx, move |window, cx| {
-            this.update(cx, |menu_bar, cx| menu_bar.sync_key_tips(window, cx))
-                .ok();
-        });
+        if self.access || keytips::is_owner(window.window_handle(), cx) {
+            let this = cx.entity().downgrade();
+            window.defer(cx, move |window, cx| {
+                this.update(cx, |menu_bar, cx| menu_bar.sync_key_tips(window, cx))
+                    .ok();
+            });
+        }
         if self
             .open
             .as_mut()

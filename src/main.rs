@@ -467,6 +467,30 @@ struct Tab {
     _changes: Subscription,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct StatusMetrics {
+    line: usize,
+    column: usize,
+    selected: usize,
+    total: usize,
+    zoom_pct: u32,
+    format: document::Format,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+struct MinSizeKey {
+    status: Option<StatusMetrics>,
+    zoom_pct: u32,
+    menu_width: f32,
+    scale: f32,
+}
+
+#[derive(Clone, Copy)]
+struct MinSizeCache {
+    key: MinSizeKey,
+    size: Size<Pixels>,
+}
+
 struct Jot {
     tabs: Vec<Tab>,
     active: usize,
@@ -475,6 +499,7 @@ struct Jot {
     menu_bar: Entity<MenuBar>,
     dialogs: dialog::Dialogs,
     find: find::FindBar,
+    min_size: Rc<Cell<Option<MinSizeCache>>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -548,6 +573,7 @@ impl Jot {
             menu_bar,
             dialogs,
             find,
+            min_size: Rc::new(Cell::new(None)),
             _subscriptions,
         };
         jot.activate_tab(0, window, cx);
@@ -579,34 +605,87 @@ impl Jot {
         EDITOR_PADDING_TOP + EDITOR_PADDING_BOTTOM + self.line_height()
     }
 
-    fn min_size_probe(&self, status_bar: bool, cx: &App) -> impl IntoElement + use<> {
+    fn status_metrics(&self, cx: &App) -> StatusMetrics {
+        let editor = self.active_editor().read(cx);
+        let text = editor.text();
+        let cursor = editor.cursor();
+        let point = text.offset_to_point(cursor);
+        let column = text.byte_to_char_idx(cursor) - text.byte_to_char_idx(cursor - point.column);
+        let selection = editor.selected_range();
+        let selected =
+            text.byte_to_char_idx(selection.end) - text.byte_to_char_idx(selection.start);
+        StatusMetrics {
+            line: point.row + 1,
+            column: column + 1,
+            selected,
+            total: text.len_chars(),
+            zoom_pct: (self.zoom() * 100.).round() as u32,
+            format: self.tabs[self.active].data.format,
+        }
+    }
+
+    fn min_size_probe(
+        &self,
+        metrics: Option<StatusMetrics>,
+        window: &Window,
+        cx: &App,
+    ) -> Option<impl IntoElement + use<>> {
+        let zoom_pct = metrics.map_or((self.zoom() * 100.).round() as u32, |m| m.zoom_pct);
+        let scale = window.scale_factor();
+        let menu_width = self.menu_bar.read(cx).width();
+        let key = MinSizeKey {
+            status: metrics,
+            zoom_pct,
+            menu_width,
+            scale,
+        };
+        if self
+            .min_size
+            .get()
+            .is_some_and(|cached| cached.key == key)
+        {
+            return None;
+        }
         let hwnd = self.hwnd;
         let menu_bar = self.menu_bar.clone();
-        let status = status_bar.then(|| self.status_bar(cx).into_any_element());
+        let cache = self.min_size.clone();
+        let status = metrics.map(|metrics| self.status_bar(metrics, cx).into_any_element());
         let rows = tabs::STRIP_TOP
             + tabs::TAB_HEIGHT
             + MENU_BAR_HEIGHT
             + SEPARATOR_HEIGHT
             + self.editor_min_height();
-        canvas(
-            move |_, window, cx| {
-                let status = status.map(|mut status| {
-                    status.layout_as_root(AvailableSpace::min_size(), window, cx)
-                });
-                let menu_row = MENU_BAR_LEFT
-                    + menu_bar.read(cx).width()
-                    + THEME_BUTTON_WIDTH
-                    + THEME_BUTTON_RIGHT;
-                let width = status
-                    .map_or(0., |status| status.width.as_f32())
-                    .max(menu_row)
-                    .max(tabs::TITLE_BAR_MIN_WIDTH);
-                let height = rows + status.map_or(0., |status| status.height.as_f32());
-                gpui_windows::set_window_min_size(hwnd, Some(size(px(width), px(height))));
-            },
-            |_, _, _, _| {},
+        Some(
+            canvas(
+                move |_, window, cx| {
+                    let status = status.map(|mut status| {
+                        status.layout_as_root(AvailableSpace::min_size(), window, cx)
+                    });
+                    let measured_menu = menu_bar.read(cx).width();
+                    let menu_row =
+                        MENU_BAR_LEFT + measured_menu + THEME_BUTTON_WIDTH + THEME_BUTTON_RIGHT;
+                    let width = status
+                        .map_or(0., |status| status.width.as_f32())
+                        .max(menu_row)
+                        .max(tabs::TITLE_BAR_MIN_WIDTH);
+                    let height = rows + status.map_or(0., |status| status.height.as_f32());
+                    let next = size(px(width), px(height));
+                    let changed = cache.get().is_none_or(|cached| cached.size != next);
+                    cache.set(Some(MinSizeCache {
+                        key: MinSizeKey {
+                            menu_width: measured_menu,
+                            ..key
+                        },
+                        size: next,
+                    }));
+                    if changed {
+                        gpui_windows::set_window_min_size(hwnd, Some(next));
+                    }
+                },
+                |_, _, _, _| {},
+            )
+            .absolute(),
         )
-        .absolute()
     }
 
     fn caret_height(&self) -> Pixels {
@@ -844,17 +923,8 @@ impl Jot {
             .children(find)
     }
 
-    fn status_bar(&self, cx: &App) -> impl IntoElement {
+    fn status_bar(&self, metrics: StatusMetrics, cx: &App) -> impl IntoElement {
         let p = palette(cx);
-        let editor = self.active_editor().read(cx);
-        let text = editor.text();
-        let cursor = editor.cursor();
-        let point = text.offset_to_point(cursor);
-        let column = text.byte_to_char_idx(cursor) - text.byte_to_char_idx(cursor - point.column);
-        let selection = editor.selected_range();
-        let selected =
-            text.byte_to_char_idx(selection.end) - text.byte_to_char_idx(selection.start);
-        let total = text.len_chars();
 
         div().flex_none().child(separator(p)).child(
             div()
@@ -867,15 +937,15 @@ impl Jot {
                 .font_family(SMALL_FONT)
                 .text_size(px(12.))
                 .text_color(rgba(p.text_secondary))
-                .child(format!("Ln {}, Col {}", point.row + 1, column + 1))
+                .child(format!("Ln {}, Col {}", metrics.line, metrics.column))
                 .child(status_divider(p))
-                .child(character_count(selected, total))
+                .child(character_count(metrics.selected, metrics.total))
                 .child(status_spacer(p))
-                .child(format!("{}%", (self.zoom() * 100.).round()))
+                .child(format!("{}%", metrics.zoom_pct))
                 .child(status_divider(p))
-                .child(self.tabs[self.active].data.format.line_ending.label())
+                .child(metrics.format.line_ending.label())
                 .child(status_divider(p))
-                .child(self.tabs[self.active].data.format.encoding.label()),
+                .child(metrics.format.encoding.label()),
         )
     }
 }
@@ -911,10 +981,13 @@ fn status_spacer(p: Palette) -> Canvas<()> {
 impl Render for Jot {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
-        let status_bar = cx.global::<ViewSettings>().status_bar;
+        let status_metrics = cx
+            .global::<ViewSettings>()
+            .status_bar
+            .then(|| self.status_metrics(cx));
         let strip = self.sample_tabs(window, cx);
         let dialogs = self.render_dialogs(window, cx);
-        let min_size = self.min_size_probe(status_bar, cx);
+        let min_size = self.min_size_probe(status_metrics, window, cx);
         let find = self.render_find(window, cx);
 
         let root = div()
@@ -955,10 +1028,10 @@ impl Render for Jot {
                     .child(self.title_bar(&strip, window, cx))
                     .child(self.render_menu_bar(p))
                     .child(self.editor(find, window, cx))
-                    .when(status_bar, |this| this.child(self.status_bar(cx))),
+                    .children(status_metrics.map(|metrics| self.status_bar(metrics, cx))),
             )
             .children(dialogs)
-            .child(min_size);
+            .children(min_size);
         tooltip::host(root)
     }
 }
@@ -1034,9 +1107,7 @@ fn main() {
         if !paths.is_empty() {
             window
                 .update(cx, |jot, window, cx| {
-                    for path in paths {
-                        jot.open_path(path, window, cx);
-                    }
+                    jot.open_paths(paths, window, cx);
                 })
                 .ok();
         }

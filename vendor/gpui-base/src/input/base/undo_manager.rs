@@ -312,10 +312,14 @@ impl UndoManager {
         self.saved_version = Some(0);
     }
 
-    pub(super) fn mark_saved(&mut self) {
+    pub(super) fn begin_save(&mut self) -> u64 {
         self.commit_all_transactions();
         self.coalescing_boundary = true;
-        self.saved_version = Some(self.current_version);
+        self.current_version
+    }
+
+    pub(super) fn mark_saved_version(&mut self, version: u64) {
+        self.saved_version = Some(version);
     }
 
     pub(super) fn is_clean(&self) -> bool {
@@ -601,12 +605,21 @@ mod tests {
 
         // Saving marks current version clean and breaks coalescing so further
         // typing undoes back to the saved point rather than before it.
-        manager.mark_saved();
+        let saved = manager.begin_save();
+        manager.mark_saved_version(saved);
         assert!(manager.is_clean());
         manager.record_transaction(typing_change(1, "b"), EditIntent::Typing);
         assert!(!manager.is_clean());
         let replay = manager.undo().unwrap();
         assert_eq!(replay.changes, [typing_change(1, "b")]);
+        assert!(manager.is_clean());
+
+        // Edits made after begin_save remain dirty when the async save completes.
+        let snapshot = manager.begin_save();
+        manager.record_transaction(typing_change(1, "c"), EditIntent::Typing);
+        manager.mark_saved_version(snapshot);
+        assert!(!manager.is_clean());
+        assert!(manager.undo().is_some());
         assert!(manager.is_clean());
 
         // Undoing past the save point is dirty; redoing back to it is clean.
