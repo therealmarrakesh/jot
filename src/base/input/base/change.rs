@@ -1,9 +1,7 @@
-use std::fmt::Debug;
-
 use crate::base::input::Selection;
 
-/// One text replacement, in the coordinates of the document as it stood
-/// immediately before the replacement was applied.
+/// One text replacement, in the coordinates of the document immediately before
+/// the replacement was applied.
 #[derive(Debug, PartialEq, Clone)]
 pub(super) struct Change {
     pub(crate) old_range: Selection,
@@ -24,18 +22,6 @@ impl Change {
             old_text: old_text.to_string(),
             new_range: new_range.into(),
             new_text: new_text.to_string(),
-        }
-    }
-
-    /// The same change as it would read after `delta` bytes were inserted
-    /// (positive) or removed (negative) ahead of it.
-    pub(super) fn shifted(&self, delta: isize) -> Self {
-        let shift = |offset: usize| (offset as isize + delta).max(0) as usize;
-        Self {
-            old_range: (shift(self.old_range.start)..shift(self.old_range.end)).into(),
-            old_text: self.old_text.clone(),
-            new_range: (shift(self.new_range.start)..shift(self.new_range.end)).into(),
-            new_text: self.new_text.clone(),
         }
     }
 }

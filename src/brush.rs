@@ -1,5 +1,5 @@
 use super::*;
-use crate::base::{Interpolate, Transition, transition};
+use crate::base::{Interpolate, transition};
 
 const FADE_DURATION: Duration = Duration::from_millis(83);
 
@@ -200,7 +200,8 @@ impl Element for BrushTransition {
         let Premultiplied(color) = transition(
             "brush",
             Premultiplied(target),
-            Transition::new(FADE_DURATION).easing(Easing::Linear),
+            FADE_DURATION,
+            Easing::Linear,
             window,
             cx,
         );

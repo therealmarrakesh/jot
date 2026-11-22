@@ -1,5 +1,5 @@
 use super::*;
-use crate::base::input::{Input, InputState};
+use crate::base::input::EditorState;
 
 pub(crate) const CONTROL_HEIGHT: f32 = 32.;
 pub(crate) const CONTROL_RADIUS: f32 = 4.;
@@ -202,25 +202,8 @@ fn field_glyph(
         .child(glyph)
 }
 
-fn field_caret(input: &Entity<InputState>, window: &Window, cx: &App) -> impl IntoElement + use<> {
-    let input = input.clone();
-    let shown = input.read(cx).show_cursor(window, cx);
-    caret_canvas(
-        move |cx| {
-            let input = input.read(cx);
-            input
-                .selected_range()
-                .is_empty()
-                .then(|| input.prepaint_caret_geometry())
-                .flatten()
-        },
-        px(FIELD_CARET),
-        shown,
-    )
-}
-
 pub(crate) fn text_field(
-    input: &Entity<InputState>,
+    input: &Entity<EditorState>,
     search_icon: bool,
     surface: Surface,
     s: f32,
@@ -231,6 +214,7 @@ pub(crate) fn text_field(
     let u = |v: f32| px(v * s);
     let focused = input.focus_handle(cx).is_focused(window);
     let empty = input.read(cx).text().len() == 0;
+    input.read(cx).caret_height.set(px(FIELD_CARET));
     let id = input.entity_id();
     let (trailing, clear_right) = if search_icon {
         (
@@ -268,9 +252,8 @@ pub(crate) fn text_field(
                 .text_size(u(BODY_SIZE))
                 .line_height(u(BODY_LINE + 2.))
                 .text_color(rgba(p.text_primary))
-                .child(Input::new(input)),
+                .child(input.clone()),
         )
-        .child(field_caret(input, window, cx))
         .child(bottom_edge(
             focused,
             if focused {
@@ -302,7 +285,7 @@ fn bottom_edge(focused: bool, color: Rgba, s: f32) -> Div {
         .bg(color)
 }
 
-fn clear_button(p: Palette, input: Entity<InputState>, right: f32, s: f32) -> Stateful<Div> {
+fn clear_button(p: Palette, input: Entity<EditorState>, right: f32, s: f32) -> Stateful<Div> {
     field_glyph(p, ("field-clear", input.entity_id()), CLEAR_GLYPH, right, s)
         .hover(move |style| style.bg(rgba(p.subtle_secondary)))
         .pressed(move |style| {

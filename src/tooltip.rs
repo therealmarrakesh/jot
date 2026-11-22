@@ -1,5 +1,5 @@
 use super::*;
-use crate::base::{Transition, transition};
+use crate::base::transition;
 use std::collections::HashMap;
 use std::time::Instant;
 use windows::Win32::Foundation::{POINT, RECT};
@@ -75,7 +75,8 @@ impl Render for TooltipView {
         let opacity = transition(
             "tooltip-fade",
             if self.visible { 1. } else { 0. },
-            Transition::new(FADE),
+            FADE,
+            Easing::EaseOutCubic,
             window,
             cx,
         );
@@ -649,7 +650,7 @@ mod tests {
         }
     }
 
-    #[::core::prelude::v1::test]
+    #[test]
     fn tooltip_state_machine_transitions() {
         let w1 = win(1);
         let w2 = win(2);

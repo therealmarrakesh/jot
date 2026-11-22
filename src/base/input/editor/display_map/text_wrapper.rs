@@ -3,7 +3,7 @@ use std::borrow::Cow;
 use std::ops::{Range, RangeInclusive};
 
 use gpui::{
-    App, Font, LineFragment, Pixels, Point, ShapedLine, Size, TextAlign, Window, point, px, size,
+    App, Font, LineFragment, Pixels, Point, ShapedLine, Size, Window, point, px, size,
 };
 use ropey::Rope;
 use gpui::smallvec::SmallVec;
@@ -861,9 +861,6 @@ pub(crate) struct LineLayout {
     /// indentation when [`WrappingIndent::Same`] is used.
     pub(crate) wrap_indent: Pixels,
     pub(crate) longest_width: Pixels,
-    /// Whether any run of this line carries a background color, so [`Self::paint_background`]
-    /// can skip the glyph walk for the common case of a line without highlights.
-    has_background: bool,
 }
 
 impl LineLayout {
@@ -873,14 +870,7 @@ impl LineLayout {
             longest_width: px(0.),
             wrapped_lines: SmallVec::new(),
             wrap_indent: px(0.),
-            has_background: false,
         }
-    }
-
-    /// Record whether any run of this line carries a background color.
-    pub(crate) fn with_background(mut self, has_background: bool) -> Self {
-        self.has_background = has_background;
-        self
     }
 
     /// Set the left offset reserved for continuation wrapped lines.
@@ -933,11 +923,6 @@ impl LineLayout {
     }
 
     /// Get the position (x, y) for the given index in this line layout.
-    ///
-    /// - The `offset` is a local byte index in this line layout.
-    /// - When `line_end_affinity` is true, an offset at a soft wrap boundary is placed at
-    ///   the end of the current visual line rather than the start of the next one.
-    /// - The return value is relative to the top-left corner of this line layout, start from (0, 0)
     pub(crate) fn position_for_index(
         &self,
         offset: usize,
@@ -947,31 +932,22 @@ impl LineLayout {
         let mut acc_len = 0;
         let mut offset_y = px(0.);
 
-        let x_offset = last_layout.alignment_offset(self.longest_width);
-
         for (i, line) in self.wrapped_lines.iter().enumerate() {
             let is_last = i + 1 == self.wrapped_lines.len();
 
             let matches = if line.len == 0 {
-                // Empty visual lines still own their boundary offset.
                 offset == acc_len
             } else if is_last || line_end_affinity {
-                // Inclusive: cursor can sit at end of this visual line.
                 offset >= acc_len && offset <= acc_len + line.len
             } else {
-                // Exclusive: boundary offset belongs to the next visual line.
                 offset >= acc_len && offset < acc_len + line.len
             };
 
             if matches {
-                let x = line.x_for_index(offset.saturating_sub(acc_len))
-                    + x_offset
-                    + self.line_indent(i);
+                let x = line.x_for_index(offset.saturating_sub(acc_len)) + self.line_indent(i);
                 return Some(point(x, offset_y));
             }
 
-            // Always advance by actual line length. The last line gets +1 so the
-            // cursor can be placed after the final character.
             acc_len += if is_last { line.len + 1 } else { line.len };
             offset_y += last_layout.line_height;
         }
@@ -979,15 +955,9 @@ impl LineLayout {
         None
     }
 
-    /// Get the closest index for the given x in this line layout.
-    ///
-    /// This ignores y, so it only makes sense for a layout that is known to occupy a single
-    /// visual line. Wrapped layouts must use [`Self::closest_index_for_position`], which also
-    /// reports the caret affinity that a wrap boundary needs.
-    pub(crate) fn closest_index_for_x(&self, x: Pixels, last_layout: &LastLayout) -> usize {
+    /// Get the closest index for the given x in a single-line layout.
+    pub(crate) fn closest_index_for_x(&self, x: Pixels) -> usize {
         let mut acc_len = 0;
-        let x_offset = last_layout.alignment_offset(self.longest_width);
-        let x = x - x_offset;
 
         for (i, line) in self.wrapped_lines.iter().enumerate() {
             let line_indent = self.line_indent(i);
@@ -1001,9 +971,6 @@ impl LineLayout {
     }
 
     /// Resolve `pos` to the wrapped sub-line under it.
-    ///
-    /// Returns the sub-line index, the byte offset that sub-line starts at within this line
-    /// layout, and `pos.x` translated into that sub-line's own coordinate space.
     fn wrapped_line_at(
         &self,
         pos: Point<Pixels>,
@@ -1011,12 +978,11 @@ impl LineLayout {
     ) -> Option<(usize, usize, Pixels)> {
         let mut offset = 0;
         let mut line_top = px(0.);
-        let x_offset = last_layout.alignment_offset(self.longest_width);
 
         for (i, line) in self.wrapped_lines.iter().enumerate() {
             let line_bottom = line_top + last_layout.line_height;
             if pos.y >= line_top && pos.y < line_bottom {
-                return Some((i, offset, pos.x - x_offset - self.line_indent(i)));
+                return Some((i, offset, pos.x - self.line_indent(i)));
             }
 
             offset += line.len;
@@ -1026,16 +992,7 @@ impl LineLayout {
         None
     }
 
-    /// Get the index for the given position (x, y) in this line layout.
-    ///
-    /// The `pos` is relative to the top-left corner of this line layout, start from (0, 0).
-    ///
-    /// Returns a local byte index in this line layout (start from 0) together with the caret
-    /// affinity to use for it: `true` when the index landed on the wrap boundary of a non-final
-    /// sub-line. That boundary offset is shared by the end of one visual line and the start of
-    /// the next, so the affinity is what tells [`Self::position_for_index`] which of the two the
-    /// caret belongs to. Without it a click past the last glyph of a wrapped line would put a
-    /// visible caret on the following line.
+    /// Get the index and wrap-boundary affinity for `pos` relative to this line layout.
     pub(crate) fn closest_index_for_position(
         &self,
         pos: Point<Pixels>,
@@ -1047,37 +1004,6 @@ impl LineLayout {
         let line_end_affinity = i + 1 < self.wrapped_lines.len() && ix == line.len;
 
         Some((offset + ix, line_end_affinity))
-    }
-
-    /// How many columns the given position sits past the end of the line under it.
-    ///
-    /// Past the end of a line there is no glyph to hit-test against, so a position out
-    /// there resolves to the line end and loses how far right it really was. The extra
-    /// distance is reported here in whole spaces, letting a columnar selection keep its
-    /// width over a short row. Only the final visual line of a wrapped layout has that
-    /// trailing space; a continuation line ends at a wrap boundary, where the next glyph
-    /// merely lives on the following row.
-    ///
-    /// The `pos` is relative to the top-left corner of this line layout, start from (0, 0).
-    pub(crate) fn columns_past_line_end(
-        &self,
-        pos: Point<Pixels>,
-        last_layout: &LastLayout,
-    ) -> usize {
-        let Some((i, _, x)) = self.wrapped_line_at(pos, last_layout) else {
-            return 0;
-        };
-
-        if i + 1 < self.wrapped_lines.len() || last_layout.space_width <= px(0.) {
-            return 0;
-        }
-
-        let past_end = x - self.wrapped_lines[i].width;
-        if past_end <= px(0.) {
-            return 0;
-        }
-
-        (past_end / last_layout.space_width).round() as usize
     }
 
     pub(crate) fn index_for_position(
@@ -1101,52 +1027,17 @@ impl LineLayout {
         size(width, self.wrapped_lines.len() * line_height)
     }
 
-    /// Paint only the glyph background quads of this line.
-    ///
-    /// gpui's [`ShapedLine::paint`] does not draw backgrounds, so every line painted with
-    /// [`Self::paint`] needs this called first, with the same origin and align width.
-    pub(crate) fn paint_background(
-        &self,
-        pos: Point<Pixels>,
-        line_height: Pixels,
-        text_align: TextAlign,
-        align_width: Option<Pixels>,
-        window: &mut Window,
-        cx: &mut App,
-    ) {
-        // Painting a background walks every glyph and pushes a scene layer, so skip the
-        // whole pass for lines that have no background color to paint.
-        if !self.has_background {
-            return;
-        }
-
-        for (ix, line) in self.wrapped_lines.iter().enumerate() {
-            _ = line.paint_background(
-                pos + point(self.line_indent(ix), ix * line_height),
-                line_height,
-                text_align,
-                align_width,
-                window,
-                cx,
-            );
-        }
-    }
-
     pub(crate) fn paint(
         &self,
         pos: Point<Pixels>,
         line_height: Pixels,
-        text_align: TextAlign,
-        align_width: Option<Pixels>,
         window: &mut Window,
         cx: &mut App,
     ) {
         for (ix, line) in self.wrapped_lines.iter().enumerate() {
-            _ = line.paint(
+            line.paint(
                 pos + point(self.line_indent(ix), ix * line_height),
                 line_height,
-                text_align,
-                align_width,
                 window,
                 cx,
             );
@@ -1571,11 +1462,8 @@ mod tests {
             lines: Rc::new(vec![]),
             line_height,
             wrap_width: None,
-            line_number_width: px(0.),
             space_width: px(0.),
             cursor_bounds: None,
-            text_align: TextAlign::Left,
-            content_width: px(0.),
         }
     }
 
@@ -1865,11 +1753,8 @@ mod tests {
             lines: Rc::new(vec![]),
             line_height: px(20.0),
             wrap_width: Some(px(10.)),
-            line_number_width: px(0.),
             space_width: px(0.),
             cursor_bounds: None,
-            text_align: TextAlign::Left,
-            content_width: px(0.),
         };
 
         assert_eq!(

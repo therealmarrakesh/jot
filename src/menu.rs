@@ -1,6 +1,6 @@
 use super::*;
 use crate::base::actions::{Cancel, Confirm, SelectDown, SelectLeft, SelectRight, SelectUp};
-use crate::base::{MotionStatus, Presence, Transition, transition_with_status};
+use crate::base::{MotionStatus, transition_from};
 use windows::Win32::System::DataExchange::IsClipboardFormatAvailable;
 use windows::Win32::System::Ole::CF_UNICODETEXT;
 use windows::Win32::UI::WindowsAndMessaging::SPI_GETMENUSHOWDELAY;
@@ -73,14 +73,6 @@ pub(crate) fn key_bindings() -> Vec<KeyBinding> {
     ]
 }
 
-fn open_transition() -> Transition {
-    Transition::new(OPEN_DURATION).easing(DECELERATE)
-}
-
-fn fade_transition() -> Transition {
-    Transition::new(FADE_DURATION).easing(Easing::Linear)
-}
-
 pub(crate) type ActionFn = fn() -> Box<dyn Action>;
 
 #[derive(Clone, Copy)]
@@ -110,7 +102,7 @@ pub(crate) enum MenuEvent {
     Closed,
 }
 
-fn context_menu(editor: &TextareaState) -> (Vec<CommandButton>, Vec<Entry>) {
+fn context_menu(editor: &EditorState) -> (Vec<CommandButton>, Vec<Entry>) {
     let selection = !editor.selected_range().is_empty();
     let button = |label, glyph, enabled, action| CommandButton {
         command: Command::new(label, enabled, action),
@@ -250,7 +242,7 @@ impl MenuKind {
             .map_or(self, |ix| Self::ALL[ix])
     }
 
-    fn entries(self, editor: &TextareaState, cx: &App) -> Vec<Entry> {
+    fn entries(self, editor: &EditorState, cx: &App) -> Vec<Entry> {
         match self {
             Self::File => vec![
                 Entry::command("&New tab", || Box::new(NewTab)),
@@ -441,23 +433,37 @@ impl Motion {
 
     fn sample(&mut self, window: &mut Window, cx: &mut App) -> bool {
         if !self.closing {
-            self.unroll = Presence::new(ElementId::from(("jot-menu-unroll", self.serial)), true)
-                .transition(open_transition())
-                .sample(window, cx)
-                .progress;
+            self.unroll = transition_from(
+                ("jot-menu-unroll", self.serial),
+                0.0_f32,
+                1.0_f32,
+                OPEN_DURATION,
+                DECELERATE,
+                window,
+                cx,
+            )
+            .value;
         }
         let appear = if self.fade_in {
-            Presence::new(ElementId::from(("jot-menu-appear", self.serial)), true)
-                .transition(fade_transition())
-                .sample(window, cx)
-                .progress
+            transition_from(
+                ("jot-menu-appear", self.serial),
+                0.0_f32,
+                1.0_f32,
+                FADE_DURATION,
+                Easing::Linear,
+                window,
+                cx,
+            )
+            .value
         } else {
             1.
         };
-        let fade = transition_with_status(
-            ElementId::from(("jot-menu-fade", self.serial)),
+        let fade = transition_from(
+            ("jot-menu-fade", self.serial),
+            1.0_f32,
             if self.closing { 0. } else { 1. },
-            fade_transition(),
+            FADE_DURATION,
+            Easing::Linear,
             window,
             cx,
         );
@@ -808,7 +814,7 @@ impl MenuBar {
         }
     }
 
-    fn editor(&self, cx: &App) -> Option<Entity<TextareaState>> {
+    fn editor(&self, cx: &App) -> Option<Entity<EditorState>> {
         self.jot
             .upgrade()
             .map(|jot| jot.read(cx).active_editor().clone())
@@ -850,7 +856,7 @@ impl MenuBar {
 
     pub(crate) fn open_context_menu(
         &mut self,
-        editor: &Entity<TextareaState>,
+        editor: &Entity<EditorState>,
         anchor: Point<Pixels>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -879,7 +885,7 @@ impl MenuBar {
 
     pub(crate) fn open_flyout_above(
         &mut self,
-        editor: &Entity<TextareaState>,
+        editor: &Entity<EditorState>,
         entries: Vec<Entry>,
         target: Bounds<Pixels>,
         return_focus: FocusHandle,

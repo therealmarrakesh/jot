@@ -1,49 +1,16 @@
-use gpui::{Context, Pixels, Task, px};
+use gpui::{Context, Task};
 use std::time::Duration;
 
-#[cfg(not(target_os = "windows"))]
-static INTERVAL: Duration = Duration::from_millis(500);
-#[cfg(not(target_os = "windows"))]
-static PAUSE_DELAY: Duration = Duration::from_millis(300);
-
-#[cfg(target_os = "windows")]
-fn interval() -> Option<Duration> {
+fn blink_interval() -> Option<Duration> {
     let millis = unsafe { windows::Win32::UI::WindowsAndMessaging::GetCaretBlinkTime() };
     (millis != 0 && millis != u32::MAX).then(|| Duration::from_millis(millis.into()))
 }
 
-#[cfg(not(target_os = "windows"))]
-fn interval() -> Option<Duration> {
-    Some(INTERVAL)
-}
-
-#[cfg(target_os = "windows")]
-fn pause_delay() -> Option<Duration> {
-    interval()
-}
-
-#[cfg(not(target_os = "windows"))]
-fn pause_delay() -> Option<Duration> {
-    Some(PAUSE_DELAY)
-}
-
-// On Windows, Linux, we should use integer to avoid blurry cursor.
-#[cfg(not(target_os = "macos"))]
-pub(super) const CURSOR_WIDTH: Pixels = px(2.);
-#[cfg(target_os = "macos")]
-pub(super) const CURSOR_WIDTH: Pixels = px(1.5);
-
-/// To manage the Input cursor blinking.
-///
-/// It will start blinking with a interval of 500ms.
-/// Every loop will notify the view to update the `visible`, and Input will observe this update to touch repaint.
-///
-/// The input painter will check if this in visible state, then it will draw the cursor.
+/// Manages cursor blinking according to Windows' caret blink interval.
 pub(crate) struct BlinkCursor {
     visible: bool,
     paused: bool,
     epoch: usize,
-
     _task: Task<()>,
 }
 
@@ -57,14 +24,11 @@ impl BlinkCursor {
         }
     }
 
-    /// Start the blinking
     pub(crate) fn start(&mut self, cx: &mut Context<Self>) {
         self.visible = false;
         self.blink(self.epoch, cx);
     }
 
-    /// Stop the blinking and clear the blink state, so the next [`Self::start`]
-    /// begins from a visible cursor instead of resuming a stale pause.
     pub(crate) fn stop(&mut self, cx: &mut Context<Self>) {
         self.epoch = 0;
         self.paused = false;
@@ -79,17 +43,14 @@ impl BlinkCursor {
     }
 
     fn blink(&mut self, epoch: usize, cx: &mut Context<Self>) {
-        // A task from an earlier blink lifecycle must not mutate the current state.
         if epoch != self.epoch {
             return;
         }
-
         if self.paused {
             self.visible = true;
             return;
         }
-
-        let Some(interval) = interval() else {
+        let Some(interval) = blink_interval() else {
             self.visible = true;
             self._task = Task::ready(());
             cx.notify();
@@ -99,7 +60,6 @@ impl BlinkCursor {
         self.visible = !self.visible;
         cx.notify();
 
-        // Schedule the next blink
         let epoch = self.next_epoch();
         self._task = cx.spawn(async move |this, cx| {
             cx.background_executor().timer(interval).await;
@@ -110,17 +70,9 @@ impl BlinkCursor {
     }
 
     pub(crate) fn visible(&self) -> bool {
-        // Keep showing the cursor if paused
         self.paused || self.visible
     }
 
-    /// Show the cursor immediately and restart the idle delay before blinking resumes.
-    ///
-    /// This is a no-op on a cursor that is not blinking. `epoch` is zero only
-    /// before the first [`Self::start`] and after [`Self::stop`], so a zero
-    /// epoch means the input is not focused, and there is no cursor on screen
-    /// to keep visible. Pausing it anyway would start a blink loop that no blur
-    /// is left to stop, and every blink repaints the view that the input is in.
     pub(crate) fn pause(&mut self, cx: &mut Context<Self>) {
         if self.epoch == 0 {
             return;
@@ -130,21 +82,18 @@ impl BlinkCursor {
         self.visible = true;
         cx.notify();
 
-        // Every pause replaces the pending timer, keeping repeated input visible.
         let epoch = self.next_epoch();
-        let Some(delay) = pause_delay() else {
+        let Some(delay) = blink_interval() else {
             self._task = Task::ready(());
             return;
         };
         self._task = cx.spawn(async move |this, cx| {
             cx.background_executor().timer(delay).await;
-
             if let Some(this) = this.upgrade() {
                 this.update(cx, |this, cx| {
                     if epoch != this.epoch {
                         return;
                     }
-
                     this.paused = false;
                     this.blink(epoch, cx);
                 });

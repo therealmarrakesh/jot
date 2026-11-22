@@ -1,5 +1,5 @@
 use super::*;
-use crate::base::{Sequence, Transition, TransitionId};
+use crate::base::{MotionStatus, transition_from};
 
 const TAB_WIDTH: f32 = 240.;
 const TAB_MIN_WIDTH: f32 = 80.;
@@ -220,7 +220,7 @@ impl TabStrip {
 }
 
 fn slide(
-    id: impl Into<TransitionId>,
+    id: impl Into<ElementId>,
     seed: f32,
     target: f32,
     snap: bool,
@@ -228,10 +228,8 @@ fn slide(
     cx: &mut App,
 ) -> (f32, bool) {
     let duration = if snap { Duration::ZERO } else { SLIDE_DURATION };
-    let sample = Sequence::new(id, seed)
-        .with_step(target, Transition::new(duration).easing(SLIDE_EASING))
-        .sample(window, cx);
-    (sample.value().round(), !sample.is_finished())
+    let sample = transition_from(id, seed, target, duration, SLIDE_EASING, window, cx);
+    (sample.value.round(), sample.status == MotionStatus::Running)
 }
 
 pub(crate) fn window_listeners(register: impl FnOnce(&mut Window) + 'static) -> impl IntoElement {
@@ -375,7 +373,7 @@ impl Jot {
             None => (None, Rope::new(), document::Format::default()),
         };
         let editor = cx.new(|cx| {
-            let mut state = TextareaState::new(window, cx)
+            let mut state = EditorState::multi_line(window, cx)
                 .soft_wrap(word_wrap)
                 .viewport_wheel_step()
                 .default_rope(text);
@@ -1014,7 +1012,7 @@ impl Jot {
 mod tests {
     use super::*;
 
-    #[::core::prelude::v1::test]
+    #[test]
     fn slot_index_rounds_at_tab_midpoint_and_clamps() {
         assert_eq!(slot_index(0., 100., 3), 0);
         assert_eq!(slot_index(49., 100., 3), 0);
@@ -1025,7 +1023,7 @@ mod tests {
         assert_eq!(slot_index(-50., 100., 3), 0);
     }
 
-    #[::core::prelude::v1::test]
+    #[test]
     fn visible_clips_covered_tab_edges() {
         assert_eq!(visible(0., 100., None), (0., 100.));
         assert_eq!(visible(0., 100., Some((120., 200.))), (0., 100.));
@@ -1034,7 +1032,7 @@ mod tests {
         assert_eq!(visible(0., 100., Some((-10., 120.))), (100., 100.));
     }
 
-    #[::core::prelude::v1::test]
+    #[test]
     fn strip_measure_and_reveal_handle_fit_and_overflow() {
         let mut strip = TabStrip::new();
         strip.column = 600.;

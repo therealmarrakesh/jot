@@ -22,9 +22,7 @@ use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use crate::base::Easing;
 use crate::base::actions::Cancel;
-use crate::base::input::{
-    self, InputEvent, PrepaintCaretGeometry, Rope, RopeExt as _, Textarea, TextareaState,
-};
+use crate::base::input::{self, EditorState, InputEvent, Rope, RopeExt as _};
 use menu::MenuBar;
 use std::cell::Cell;
 use std::ops::Range;
@@ -93,7 +91,6 @@ pub(crate) const EDITOR_PADDINGS: Edges<Pixels> = Edges {
     bottom: px(EDITOR_PADDING_BOTTOM),
     left: px(EDITOR_PADDING_LEFT),
 };
-const CARET_WIDTH: f32 = 1.;
 const CARET_HEIGHT: f32 = 18.;
 const ZOOM_STEP: f32 = 0.1;
 const ZOOM_MIN: f32 = 0.1;
@@ -422,36 +419,6 @@ fn time_date() -> String {
     format!("{} {}", text(&time, time_len), text(&date, date_len))
 }
 
-fn caret_canvas(
-    geometry: impl Fn(&App) -> Option<PrepaintCaretGeometry> + 'static,
-    height: Pixels,
-    shown: bool,
-) -> impl IntoElement {
-    canvas(
-        |_, _, _| {},
-        move |_, _, window, cx| {
-            if !shown {
-                return;
-            }
-            let Some(geometry) = geometry(cx) else {
-                return;
-            };
-            let caret = Bounds::new(
-                caret_origin(&geometry, window),
-                size(px(CARET_WIDTH), height),
-            );
-            window.with_content_mask(
-                Some(ContentMask {
-                    bounds: geometry.input_bounds(),
-                }),
-                |window| window.paint_quad(fill(caret, rgb(palette(cx).caret))),
-            );
-        },
-    )
-    .absolute()
-    .size_full()
-}
-
 pub(crate) fn text_width(window: &Window, text: &str, family: &'static str, size: f32) -> f32 {
     let run = TextRun {
         len: text.len(),
@@ -468,13 +435,8 @@ pub(crate) fn text_width(window: &Window, text: &str, family: &'static str, size
         .ceil()
 }
 
-fn caret_origin(geometry: &PrepaintCaretGeometry, window: &Window) -> Point<Pixels> {
-    let origin = geometry.cursor_bounds().origin;
-    window.pixel_snap_point(point(origin.x, origin.y + geometry.scroll_offset().y))
-}
-
 struct TabData {
-    editor: Entity<TextareaState>,
+    editor: Entity<EditorState>,
     zoom: f32,
     path: Option<PathBuf>,
     format: document::Format,
@@ -605,7 +567,7 @@ impl Jot {
         jot
     }
 
-    fn active_editor(&self) -> &Entity<TextareaState> {
+    fn active_editor(&self) -> &Entity<EditorState> {
         &self.tabs[self.active].data.editor
     }
 
@@ -742,26 +704,6 @@ impl Jot {
 
     fn new_tab(&mut self, _: &NewTab, window: &mut Window, cx: &mut Context<Self>) {
         self.add_tab(window, cx);
-    }
-
-    fn caret(&self, window: &Window, cx: &App) -> impl IntoElement {
-        let editor = self.active_editor().clone();
-        let height = self.caret_height();
-        let shown =
-            editor.read(cx).show_cursor(window, cx) && !self.menu_bar.read(cx).access_active();
-
-        caret_canvas(
-            move |cx| {
-                let editor = editor.read(cx);
-                editor
-                    .selected_range()
-                    .is_empty()
-                    .then(|| editor.prepaint_caret_geometry())
-                    .flatten()
-            },
-            height,
-            shown,
-        )
     }
 
     fn insert_time_date(&mut self, _: &TimeDate, window: &mut Window, cx: &mut Context<Self>) {
@@ -924,11 +866,10 @@ impl Jot {
             cx.propagate();
             return;
         }
-        let Some(geometry) = editor.read(cx).prepaint_caret_geometry() else {
+        let Some(caret) = editor.read(cx).caret_bounds() else {
             return;
         };
-        let caret = caret_origin(&geometry, window);
-        let anchor = point(caret.x + px(CARET_WIDTH), caret.y + self.caret_height());
+        let anchor = point(caret.right(), caret.bottom());
         self.open_context_menu(anchor, window, cx);
     }
 
@@ -947,10 +888,15 @@ impl Jot {
     fn editor(
         &self,
         find: Option<impl IntoElement>,
-        window: &Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let p = palette(cx);
+        let editor = self.active_editor().clone();
+        {
+            let state = editor.read(cx);
+            state.caret_height.set(self.caret_height());
+            state.caret_hidden.set(self.menu_bar.read(cx).access_active());
+        }
         div()
             .id("editor-area")
             .relative()
@@ -987,9 +933,8 @@ impl Jot {
                             .text_size(px(EDITOR_FONT_SIZE * self.zoom()))
                             .line_height(px(self.line_height()))
                             .text_color(rgba(p.text_primary))
-                            .child(Textarea::new(self.active_editor())),
-                    )
-                    .child(self.caret(window, cx)),
+                            .child(editor),
+                    ),
             )
             .children(find)
     }
@@ -1102,7 +1047,7 @@ impl Render for Jot {
                     .size_full()
                     .child(self.title_bar(&strip, window, cx))
                     .child(self.render_menu_bar(p))
-                    .child(self.editor(find, window, cx))
+                    .child(self.editor(find, cx))
                     .children(status_metrics.map(|metrics| self.status_bar(metrics, cx))),
             )
             .children(dialogs)

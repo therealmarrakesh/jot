@@ -2,8 +2,8 @@ use super::*;
 use field::{BODY_LINE, BODY_SIZE, text_field};
 use gpui::futures::channel::oneshot;
 use crate::base::actions::{Cancel, Confirm};
-use crate::base::input::{InputState, Position};
-use crate::base::{MotionStatus, Presence, Transition, transition_with_status};
+use crate::base::input::{EditorState, Position};
+use crate::base::{MotionStatus, transition_from};
 
 gpui::actions!(jot_dialog, [FocusNext, FocusPrev]);
 
@@ -73,25 +73,41 @@ struct OpenDialog {
 
 impl OpenDialog {
     fn sample(&mut self, window: &mut Window, cx: &mut App) -> bool {
-        let shown = Presence::new(ElementId::from(("jot-dialog-show", self.serial)), true)
-            .transition(Transition::new(SHOW_DURATION).easing(DECELERATE))
-            .sample(window, cx)
-            .progress;
-        let faded_in = Presence::new(ElementId::from(("jot-dialog-fade-in", self.serial)), true)
-            .transition(Transition::new(FADE_DURATION).easing(Easing::Linear))
-            .sample(window, cx)
-            .progress;
-        let hidden = transition_with_status(
-            ElementId::from(("jot-dialog-hide", self.serial)),
+        let shown = transition_from(
+            ("jot-dialog-show", self.serial),
+            0.0_f32,
+            1.0_f32,
+            SHOW_DURATION,
+            DECELERATE,
+            window,
+            cx,
+        )
+        .value;
+        let faded_in = transition_from(
+            ("jot-dialog-fade-in", self.serial),
+            0.0_f32,
+            1.0_f32,
+            FADE_DURATION,
+            Easing::Linear,
+            window,
+            cx,
+        )
+        .value;
+        let hidden = transition_from(
+            ("jot-dialog-hide", self.serial),
+            0.0_f32,
             if self.closing { 1. } else { 0. },
-            Transition::new(HIDE_DURATION).easing(DECELERATE),
+            HIDE_DURATION,
+            DECELERATE,
             window,
             cx,
         );
-        let fade_out = transition_with_status(
-            ElementId::from(("jot-dialog-fade-out", self.serial)),
+        let fade_out = transition_from(
+            ("jot-dialog-fade-out", self.serial),
+            1.0_f32,
             if self.closing { 0. } else { 1. },
-            Transition::new(FADE_DURATION).easing(Easing::Linear),
+            FADE_DURATION,
+            Easing::Linear,
             window,
             cx,
         );
@@ -106,13 +122,14 @@ pub(crate) struct Dialogs {
     open: Vec<OpenDialog>,
     serial: usize,
     focus: FocusHandle,
-    line: Entity<InputState>,
+    line: Entity<EditorState>,
 }
 
 impl Dialogs {
     pub(crate) fn new(window: &mut Window, cx: &mut Context<Jot>) -> Self {
         let line = cx.new(|cx| {
-            InputState::new(window, cx).validate(|text, _| text.chars().all(|c| c.is_ascii_digit()))
+            EditorState::single_line(window, cx)
+                .validate(|text, _| text.chars().all(|c| c.is_ascii_digit()))
         });
         line.read(cx).focus_handle(cx);
         Self {

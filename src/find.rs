@@ -1,7 +1,7 @@
 use super::*;
 use field::{BODY_SIZE, CONTROL_HEIGHT, CONTROL_RADIUS, OVERLAY_RADIUS, text_field};
-use crate::base::input::InputState;
-use crate::base::{MotionStatus, Presence, Transition, transition_with_status};
+use crate::base::input::EditorState;
+use crate::base::{MotionStatus, transition_from};
 use menu::Entry;
 
 const QUERY_CONTEXT: &str = "JotFindQuery";
@@ -342,8 +342,8 @@ pub(crate) struct FindBar {
     match_case: bool,
     wrap_around: bool,
     focus: FocusHandle,
-    query: Entity<InputState>,
-    replacement: Entity<InputState>,
+    query: Entity<EditorState>,
+    replacement: Entity<EditorState>,
     notice: Option<SharedString>,
     notice_timer: Task<()>,
     matcher: Option<Matcher>,
@@ -353,8 +353,8 @@ pub(crate) struct FindBar {
 
 impl FindBar {
     pub(crate) fn new(window: &mut Window, cx: &mut Context<Jot>) -> Self {
-        let query = cx.new(|cx| InputState::new(window, cx).placeholder("Find"));
-        let replacement = cx.new(|cx| InputState::new(window, cx).placeholder("Replace"));
+        let query = cx.new(|cx| EditorState::single_line(window, cx).placeholder("Find"));
+        let replacement = cx.new(|cx| EditorState::single_line(window, cx).placeholder("Replace"));
         Self {
             visible: false,
             closing: false,
@@ -413,26 +413,32 @@ impl FindBar {
         if !self.visible {
             return None;
         }
-        let shown = Presence::new(ElementId::from(("jot-find-show", self.serial)), true)
-            .transition(
-                Transition::new(EXPAND_DURATION).easing(Easing::CubicBezier {
-                    x1: 0.1,
-                    y1: 0.9,
-                    x2: 0.2,
-                    y2: 1.,
-                }),
-            )
-            .sample(window, cx)
-            .progress;
-        let hidden = transition_with_status(
-            ElementId::from(("jot-find-hide", self.serial)),
+        let shown = transition_from(
+            ("jot-find-show", self.serial),
+            0.0_f32,
+            1.0_f32,
+            EXPAND_DURATION,
+            Easing::CubicBezier {
+                x1: 0.1,
+                y1: 0.9,
+                x2: 0.2,
+                y2: 1.,
+            },
+            window,
+            cx,
+        )
+        .value;
+        let hidden = transition_from(
+            ("jot-find-hide", self.serial),
+            0.0_f32,
             if self.closing { 1. } else { 0. },
-            Transition::new(CONTRACT_DURATION).easing(Easing::CubicBezier {
+            CONTRACT_DURATION,
+            Easing::CubicBezier {
                 x1: 0.7,
                 y1: 0.,
                 x2: 1.,
                 y2: 0.5,
-            }),
+            },
             window,
             cx,
         );
@@ -1022,7 +1028,7 @@ mod tests {
         matcher
     }
 
-    #[::core::prelude::v1::test]
+    #[test]
     fn chunked_search_matches_across_block_boundaries() {
         let text = Rope::from("alpha beta alpha gamma alpha");
         let matcher = chunked_matcher("alpha", true, 4);
@@ -1051,7 +1057,7 @@ mod tests {
         );
     }
 
-    #[::core::prelude::v1::test]
+    #[test]
     fn case_insensitive_unicode_folding_matches_across_chunk_boundary() {
         // Kelvin sign U+212A (3 UTF-8 bytes) folds to ASCII 'k' (1 byte).
         let text = Rope::from("abc\u{212A}def");
@@ -1063,7 +1069,7 @@ mod tests {
         assert_eq!(matcher.previous(&text, text.len(), 0, &mut buffer), Some(3..6));
     }
 
-    #[::core::prelude::v1::test]
+    #[test]
     fn previous_finds_rightmost_overlapping_match() {
         let text = Rope::from("aaaa");
         let matcher = chunked_matcher("aa", true, 2);
@@ -1074,7 +1080,7 @@ mod tests {
         assert_eq!(matcher.previous(&text, 0, 0, &mut buffer), None);
     }
 
-    #[::core::prelude::v1::test]
+    #[test]
     fn cursor_after_replace_all_handles_inside_and_around_matches() {
         let ranges = vec![0..3, 8..11]; // "foo bar foo"
         assert_eq!(cursor_after_replace_all(0, &ranges, 1), 0);
@@ -1088,7 +1094,7 @@ mod tests {
         assert_eq!(cursor_after_replace_all(11, &ranges, 1), 7);
     }
 
-    #[::core::prelude::v1::test]
+    #[test]
     fn merge_edits_combines_nearby_and_splits_distant_ranges() {
         let gap = ".".repeat(MERGE_GAP + 10);
         let source = format!("aa bb{gap}aa");

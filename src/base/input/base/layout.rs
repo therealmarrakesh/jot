@@ -1,6 +1,6 @@
 use std::{ops::Range, rc::Rc};
 
-use gpui::{Bounds, Half, Pixels, TextAlign, px};
+use gpui::{Bounds, Pixels};
 
 use super::display_map::LineLayout;
 
@@ -14,28 +14,14 @@ pub(super) struct LastLayout {
     pub(super) lines: Rc<Vec<LineLayout>>,
     pub(super) line_height: Pixels,
     pub(super) wrap_width: Option<Pixels>,
-    pub(super) line_number_width: Pixels,
-    /// Width of one space in the editor font.
-    ///
-    /// Past the end of a line there are no glyphs to hit-test against, so this is the
-    /// step used to measure how far past the end a pointer sits.
+    /// Width of one space in the editor font, used to paint selected newlines.
     pub(super) space_width: Pixels,
     pub(super) cursor_bounds: Option<Bounds<Pixels>>,
-    pub(super) text_align: TextAlign,
-    pub(super) content_width: Pixels,
 }
 
 impl LastLayout {
     pub(crate) fn line(&self, row: usize) -> Option<&LineLayout> {
         let pos = self.visible_buffer_lines.binary_search(&row).ok()?;
         self.lines.get(pos)
-    }
-
-    pub(super) fn alignment_offset(&self, line_width: Pixels) -> Pixels {
-        match self.text_align {
-            TextAlign::Left => px(0.),
-            TextAlign::Center => (self.content_width - line_width).half().max(px(0.)),
-            TextAlign::Right => (self.content_width - line_width).max(px(0.)),
-        }
     }
 }

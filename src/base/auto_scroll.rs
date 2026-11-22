@@ -1,4 +1,5 @@
-use std::sync::{Arc, Mutex};
+use std::cell::Cell;
+use std::rc::Rc;
 use std::time::Duration;
 
 use gpui::{AsyncApp, Bounds, Context, Pixels, Point, Task, WeakEntity, px};
@@ -8,9 +9,7 @@ use gpui::{AsyncApp, Bounds, Context, Pixels, Point, Task, WeakEntity, px};
 /// Delta convention: positive moves toward the bottom and negative moves
 /// toward the top.
 pub struct AutoScroll {
-    /// Shared between the main thread and the background task.
-    /// Writing `None` is the stop signal; the task exits on its next tick.
-    shared: Arc<Mutex<Option<Pixels>>>,
+    delta: Rc<Cell<Option<Pixels>>>,
     task: Option<Task<()>>,
     /// Last drag position, available to the interaction that owns selection.
     pub last_drag_position: Option<Point<Pixels>>,
@@ -19,7 +18,7 @@ pub struct AutoScroll {
 impl Default for AutoScroll {
     fn default() -> Self {
         Self {
-            shared: Arc::new(Mutex::new(None)),
+            delta: Rc::new(Cell::new(None)),
             task: None,
             last_drag_position: None,
         }
@@ -27,21 +26,15 @@ impl Default for AutoScroll {
 }
 
 impl AutoScroll {
-    /// Returns the current scroll delta.
     pub fn delta(&self) -> Option<Pixels> {
-        *self.shared.lock().unwrap()
+        self.delta.get()
     }
 
     /// Computes the scroll delta for a pointer Y position within the viewport.
     pub fn compute_delta(y: Pixels, bounds: Bounds<Pixels>) -> Option<Pixels> {
         const MIN_SPEED: f32 = 12.0;
         const MAX_SPEED: f32 = 64.0;
-        // Trigger starts this far inside the bounds so scrolling works even in
-        // full-screen where the mouse can't travel far outside the element.
         const INNER_ZONE: f32 = 16.0;
-        // Distance from the bounds edge to reach MAX_SPEED.
-        // Total ramp = INNER_ZONE + OUTER_RAMP, giving a single smooth curve
-        // with no flat sections or discontinuities.
         const OUTER_RAMP: f32 = 80.0;
 
         let bottom_trigger = bounds.bottom() - px(INNER_ZONE);
@@ -58,17 +51,13 @@ impl AutoScroll {
         }
     }
 
-    /// Updates the scroll delta and starts the background task when needed.
-    ///
-    /// `tick` is called each frame (~60 fps) with the current delta.
-    /// It should perform the actual scroll action for this entity.
     pub fn set<T, F>(&mut self, delta: Option<Pixels>, cx: &mut Context<T>, tick: F)
     where
         T: 'static,
-        F: Fn(Pixels, &mut T, &mut Context<T>) + Send + 'static,
+        F: Fn(Pixels, &mut T, &mut Context<T>) + 'static,
     {
         let was_idle = self.task.is_none();
-        *self.shared.lock().unwrap() = delta;
+        self.delta.set(delta);
 
         if delta.is_none() {
             self.task = None;
@@ -76,25 +65,25 @@ impl AutoScroll {
         }
 
         if was_idle {
-            let shared = Arc::clone(&self.shared);
+            let shared = Rc::clone(&self.delta);
             self.task = Some(cx.spawn(Self::task_loop(shared, tick)));
         }
     }
 
     fn task_loop<T, F>(
-        shared: Arc<Mutex<Option<Pixels>>>,
+        shared: Rc<Cell<Option<Pixels>>>,
         tick: F,
     ) -> impl AsyncFnOnce(WeakEntity<T>, &mut AsyncApp) + 'static
     where
         T: 'static,
-        F: Fn(Pixels, &mut T, &mut Context<T>) + Send + 'static,
+        F: Fn(Pixels, &mut T, &mut Context<T>) + 'static,
     {
         async move |this: WeakEntity<T>, cx: &mut AsyncApp| {
             loop {
                 cx.background_executor()
                     .timer(Duration::from_millis(16))
                     .await;
-                let Some(delta) = *shared.lock().unwrap() else {
+                let Some(delta) = shared.get() else {
                     break;
                 };
                 let alive = this
@@ -110,14 +99,12 @@ impl AutoScroll {
         }
     }
 
-    /// Returns whether automatic scrolling is active.
     pub fn is_active(&self) -> bool {
-        self.delta().is_some()
+        self.delta.get().is_some()
     }
 
-    /// Stops automatic scrolling and clears the last drag position.
     pub fn stop(&mut self) {
-        *self.shared.lock().unwrap() = None;
+        self.delta.set(None);
         self.task = None;
         self.last_drag_position = None;
     }
@@ -144,7 +131,7 @@ mod tests {
     #[test]
     fn stop_clears_delta_and_drag_position() {
         let mut scroll = AutoScroll::default();
-        *scroll.shared.lock().unwrap() = Some(px(20.));
+        scroll.delta.set(Some(px(20.)));
         scroll.last_drag_position = Some(point(px(1.), px(2.)));
 
         scroll.stop();

@@ -56,33 +56,15 @@ impl InputLine {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn paint(
         &self,
         pos: Point<Pixels>,
         height: Pixels,
-        align: TextAlign,
-        width: Option<Pixels>,
         window: &mut Window,
         cx: &mut App,
     ) {
         if let Content::Text(line) = &self.content {
-            let _ = line.paint(pos, height, align, width, window, cx);
-        }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn paint_background(
-        &self,
-        pos: Point<Pixels>,
-        height: Pixels,
-        align: TextAlign,
-        width: Option<Pixels>,
-        window: &mut Window,
-        cx: &mut App,
-    ) {
-        if let Content::Text(line) = &self.content {
-            let _ = line.paint_background(pos, height, align, width, window, cx);
+            let _ = line.paint(pos, height, TextAlign::Left, None, window, cx);
         }
     }
 }
