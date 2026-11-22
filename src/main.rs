@@ -409,12 +409,11 @@ pub(crate) fn text_width(window: &Window, text: &str, family: &'static str, size
         len: text.len(),
         font: font(family),
         color: black(),
-        background_color: None,
         underline: None,
     };
     window
         .text_system()
-        .shape_line(SharedString::new(text), px(size), &[run], None)
+        .layout_line(text, px(size), &[run])
         .width
         .as_f32()
         .ceil()
@@ -1224,15 +1223,14 @@ mod large_file_smoke {
         // TextWrapper: no-wrap
         let mut wrapper_nowrap = TextWrapper::new(font("Consolas"), px(14.0), None);
         let t0 = Instant::now();
-        wrapper_nowrap.update_for_bench(&loaded.text, &(0..0), &loaded.text, 0, &mut |_, _, _| Vec::new());
+        wrapper_nowrap.update_for_bench(&loaded.text, &(0..0), &loaded.text, 0, &mut |_, _, _| {});
         let nowrap_ms = t0.elapsed().as_secs_f64() * 1000.0;
         println!("wrap (no-wrap):       {nowrap_ms:8.2} ms  ({} display rows)", wrapper_nowrap.len());
 
         // TextWrapper: word-wrap at 900px (~110 ASCII chars per row, ascii_fit_len = 110)
         let mut wrapper_wrap = TextWrapper::new(font("Consolas"), px(14.0), Some(px(900.0)));
         let t0 = Instant::now();
-        wrapper_wrap.update_for_bench(&loaded.text, &(0..0), &loaded.text, 110, &mut |line, _, _| {
-            let mut out = Vec::new();
+        wrapper_wrap.update_for_bench(&loaded.text, &(0..0), &loaded.text, 110, &mut |line, _, out| {
             let mut i = 110;
             while i < line.len() {
                 let b = line.floor_char_boundary(i);
@@ -1241,7 +1239,6 @@ mod large_file_smoke {
                 }
                 i += 110;
             }
-            out
         });
         let wrap_ms = t0.elapsed().as_secs_f64() * 1000.0;
         println!("wrap (word-wrap):     {wrap_ms:8.2} ms  ({} display rows)", wrapper_wrap.len());
@@ -1252,7 +1249,7 @@ mod large_file_smoke {
         edited.insert(mid, "X");
         let insert_rope = crate::base::input::Rope::from("X");
         let t0 = Instant::now();
-        wrapper_wrap.update_for_bench(&edited, &(mid..mid), &insert_rope, 110, &mut |_, _, _| Vec::new());
+        wrapper_wrap.update_for_bench(&edited, &(mid..mid), &insert_rope, 110, &mut |_, _, _| {});
         let edit_ms = t0.elapsed().as_secs_f64() * 1000.0;
         println!("incremental edit:     {edit_ms:8.2} ms");
 

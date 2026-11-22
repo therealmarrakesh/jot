@@ -8,10 +8,10 @@ pub(crate) mod blink_cursor;
 mod change;
 #[path = "base/cursor.rs"]
 mod cursor;
-#[path = "editor/display_map/mod.rs"]
-mod display_map;
+#[path = "base/text_wrapper.rs"]
+mod text_wrapper;
 #[cfg(test)]
-pub(crate) use display_map::{TextWrapper, WrapDisplayPoint};
+pub(crate) use text_wrapper::{TextWrapper, WrapDisplayPoint};
 #[path = "base/element.rs"]
 mod element;
 #[path = "editor/indent.rs"]
@@ -34,7 +34,6 @@ pub(crate) fn init(cx: &mut App) {
 }
 
 pub(crate) use cursor::Selection;
-pub(crate) use display_map::WrappingIndent;
 pub(crate) use indent::TabSize;
 pub(crate) use rope_ext::{Point, Position, RopeExt};
 pub(crate) use ropey::{Rope, RopeBuilder};

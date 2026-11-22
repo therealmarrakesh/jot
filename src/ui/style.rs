@@ -1,7 +1,7 @@
 use crate::ui::{
     AbsoluteLength, App, Background, Bounds, ContentMask, Corners, CursorStyle, DefiniteLength,
-    Edges, Font, FontFallbacks, FontFeatures, FontStyle, FontWeight, Hsla, Length, Pixels, Point,
-    Rgba, SharedString, Size, Styled, TextRun, Window, black, phi, point, quad, rems,
+    Edges, Font, FontStyle, FontWeight, Hsla, Length, Pixels, Point, Rgba, SharedString, Size,
+    Styled, Window, black, phi, point, quad, rems,
 };
 use crate::ui::refineable::{IsEmpty, Refineable};
 
@@ -348,10 +348,6 @@ pub(crate) struct TextStyle {
     pub(crate) color: Hsla,
     /// The font family to use
     pub(crate) font_family: SharedString,
-    /// The font features to use
-    pub(crate) font_features: FontFeatures,
-    /// The fallback fonts to use
-    pub(crate) font_fallbacks: Option<FontFallbacks>,
     /// The font size to use, in pixels or rems.
     pub(crate) font_size: AbsoluteLength,
     /// The line height to use, in pixels or fractions
@@ -360,8 +356,6 @@ pub(crate) struct TextStyle {
     pub(crate) font_weight: FontWeight,
     /// The font style, e.g. italic
     pub(crate) font_style: FontStyle,
-    /// The background color of the text
-    pub(crate) background_color: Option<Hsla>,
     /// The underline style of the text
     pub(crate) underline: Option<UnderlineStyle>,
     /// How to handle whitespace in the text
@@ -376,13 +370,10 @@ pub(crate) struct TextStyle {
 pub(crate) struct TextStyleRefinement {
     pub(crate) color: Option<Hsla>,
     pub(crate) font_family: Option<SharedString>,
-    pub(crate) font_features: Option<FontFeatures>,
-    pub(crate) font_fallbacks: Option<FontFallbacks>,
     pub(crate) font_size: Option<AbsoluteLength>,
     pub(crate) line_height: Option<DefiniteLength>,
     pub(crate) font_weight: Option<FontWeight>,
     pub(crate) font_style: Option<FontStyle>,
-    pub(crate) background_color: Option<Hsla>,
     pub(crate) underline: Option<UnderlineStyle>,
     pub(crate) white_space: Option<WhiteSpace>,
     pub(crate) text_align: Option<TextAlign>,
@@ -410,13 +401,10 @@ impl IsEmpty for TextStyleRefinement {
     fn is_empty(&self) -> bool {
         self.color.is_none()
             && self.font_family.is_none()
-            && self.font_features.is_none()
-            && self.font_fallbacks.is_none()
             && self.font_size.is_none()
             && self.line_height.is_none()
             && self.font_weight.is_none()
             && self.font_style.is_none()
-            && self.background_color.is_none()
             && self.underline.is_none()
             && self.white_space.is_none()
             && self.text_align.is_none()
@@ -429,13 +417,10 @@ impl From<TextStyleRefinement> for TextStyle {
         Self {
             color: v.color.unwrap_or_default(),
             font_family: v.font_family.unwrap_or_default(),
-            font_features: v.font_features.unwrap_or_default(),
-            font_fallbacks: v.font_fallbacks,
             font_size: v.font_size.unwrap_or_default(),
             line_height: v.line_height.unwrap_or_default(),
             font_weight: v.font_weight.unwrap_or_default(),
             font_style: v.font_style.unwrap_or_default(),
-            background_color: v.background_color,
             underline: v.underline,
             white_space: v.white_space.unwrap_or_default(),
             text_align: v.text_align.unwrap_or_default(),
@@ -449,13 +434,10 @@ impl Refineable for TextStyle {
     fn refine(&mut self, r: &Self::Refinement) {
         if let Some(v) = &r.color { self.color = *v; }
         if let Some(v) = &r.font_family { self.font_family = v.clone(); }
-        if let Some(v) = &r.font_features { self.font_features = v.clone(); }
-        if let Some(v) = &r.font_fallbacks { self.font_fallbacks = Some(v.clone()); }
         if let Some(v) = &r.font_size { self.font_size = *v; }
         if let Some(v) = &r.line_height { self.line_height = *v; }
         if let Some(v) = &r.font_weight { self.font_weight = *v; }
         if let Some(v) = &r.font_style { self.font_style = *v; }
-        if let Some(v) = &r.background_color { self.background_color = Some(*v); }
         if let Some(v) = &r.underline { self.underline = Some(*v); }
         if let Some(v) = &r.white_space { self.white_space = *v; }
         if let Some(v) = &r.text_align { self.text_align = *v; }
@@ -468,13 +450,10 @@ impl Refineable for TextStyleRefinement {
     fn refine(&mut self, r: &Self::Refinement) {
         if let Some(v) = &r.color { self.color = Some(*v); }
         if let Some(v) = &r.font_family { self.font_family = Some(v.clone()); }
-        if let Some(v) = &r.font_features { self.font_features = Some(v.clone()); }
-        if let Some(v) = &r.font_fallbacks { self.font_fallbacks = Some(v.clone()); }
         if let Some(v) = &r.font_size { self.font_size = Some(*v); }
         if let Some(v) = &r.line_height { self.line_height = Some(*v); }
         if let Some(v) = &r.font_weight { self.font_weight = Some(*v); }
         if let Some(v) = &r.font_style { self.font_style = Some(*v); }
-        if let Some(v) = &r.background_color { self.background_color = Some(*v); }
         if let Some(v) = &r.underline { self.underline = Some(*v); }
         if let Some(v) = &r.white_space { self.white_space = Some(*v); }
         if let Some(v) = &r.text_align { self.text_align = Some(*v); }
@@ -486,15 +465,11 @@ impl Default for TextStyle {
     fn default() -> Self {
         TextStyle {
             color: black(),
-            // todo(linux) make this configurable or choose better default
             font_family: ".SystemUIFont".into(),
-            font_features: FontFeatures::default(),
-            font_fallbacks: None,
             font_size: rems(1.).into(),
             line_height: phi(),
             font_weight: FontWeight::default(),
             font_style: FontStyle::default(),
-            background_color: None,
             underline: None,
             white_space: WhiteSpace::Normal,
             text_align: TextAlign::default(),
@@ -508,8 +483,6 @@ impl TextStyle {
     pub(crate) fn font(&self) -> Font {
         Font {
             family: self.font_family.clone(),
-            features: self.font_features.clone(),
-            fallbacks: self.font_fallbacks.clone(),
             weight: self.font_weight,
             style: self.font_style,
         }
@@ -518,23 +491,6 @@ impl TextStyle {
     /// Returns the rounded line height in pixels.
     pub(crate) fn line_height_in_pixels(&self, rem_size: Pixels) -> Pixels {
         self.line_height.to_pixels(self.font_size, rem_size).round()
-    }
-
-    /// Convert this text style into a [`TextRun`], for the given length of the text.
-    pub(crate) fn to_run(&self, len: usize) -> TextRun {
-        TextRun {
-            len,
-            font: Font {
-                family: self.font_family.clone(),
-                features: self.font_features.clone(),
-                fallbacks: self.font_fallbacks.clone(),
-                weight: self.font_weight,
-                style: self.font_style,
-            },
-            color: self.color,
-            background_color: self.background_color,
-            underline: self.underline,
-        }
     }
 }
 

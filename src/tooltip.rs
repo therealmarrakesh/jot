@@ -517,22 +517,17 @@ fn popup(cx: &mut App) -> Option<overlay::Overlay<TooltipView>> {
 }
 
 fn measure(text: &SharedString, window: &mut Window) -> Size<Pixels> {
-    let runs = [TextRun {
-        len: text.len(),
-        font: font(SMALL_FONT),
-        color: black(),
-        background_color: None,
-        underline: None,
-    }];
     let chrome = 2. * (PADDING_X + BORDER);
     let wrap = MAX_WIDTH - chrome;
-    let Ok(lines) =
-        window
-            .text_system()
-            .shape_text(text.clone(), px(FONT_SIZE), &runs, Some(px(wrap)), None)
-    else {
-        return size(px(MAX_WIDTH), px(SINGLE_HEIGHT));
-    };
+    let lines = window.text_system().shape_text(
+        text.clone(),
+        px(FONT_SIZE),
+        &font(SMALL_FONT),
+        black(),
+        None,
+        Some(px(wrap)),
+        None,
+    );
     let count: usize = lines
         .iter()
         .map(|line| line.wrap_boundaries().len() + 1)

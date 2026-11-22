@@ -15,17 +15,17 @@ use windows::Win32::UI::WindowsAndMessaging::{SPI_GETWHEELSCROLLCHARS, SPI_GETWH
 
 use super::rope_ext::Bias;
 use super::{
-    TabSize, WrappingIndent,
+    TabSize,
     blink_cursor::BlinkCursor,
     change::Change,
     cursor::CursorSelection,
-    display_map::TextWrapper,
     element::{
         EditorScrollbar, EditorScrollbarSnapshot, LongestLineKey, RIGHT_MARGIN, TextElement,
         clamp_horizontal_scroll_offset,
     },
     layout::LastLayout,
     movement::MoveDirection,
+    text_wrapper::TextWrapper,
     undo_manager::{EditIntent, UndoManager},
 };
 use crate::base::AutoScroll;
@@ -148,7 +148,6 @@ pub(crate) struct EditorState {
     pub(super) undo_manager: UndoManager,
     pub(super) document_revision: u64,
     pub(super) soft_wrap: bool,
-    pub(super) wrapping_indent: WrappingIndent,
     pub(super) blink_cursor: Entity<BlinkCursor>,
     pub(super) selection: CursorSelection,
     pub(super) selected_word_range: Option<CursorSelection>,
@@ -218,7 +217,6 @@ impl EditorState {
             undo_manager,
             document_revision: 0,
             soft_wrap: true,
-            wrapping_indent: WrappingIndent::default(),
             blink_cursor,
             selection: CursorSelection::default(),
             selected_word_range: None,

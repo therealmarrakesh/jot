@@ -6,13 +6,13 @@ use crate::ui::{
     UnderlineStyle, Window, fill, point, px, relative, rgb, rgba, size,
 };
 use ropey::Rope;
-use std::{ops::Range, rc::Rc};
+use std::{borrow::Cow, ops::Range, rc::Rc};
 
 use crate::base::{
     Scrollbar,
     input::{
         RopeExt as _,
-        display_map::{InputLine, LineLayout},
+        text_wrapper::{BufferLineLayout, InputLine},
     },
 };
 use crate::theme::palette;
@@ -371,7 +371,7 @@ impl TextElement {
         {
             let mut offset = line_offset;
             for (row, shaped) in line.wrapped_lines.iter().enumerate() {
-                let end = offset + shaped.len;
+                let end = offset + shaped.len();
                 if !shaped.is_shaped() {
                     offset = end;
                     y += last_layout.line_height;
@@ -386,7 +386,7 @@ impl TextElement {
                     let left = indent + shaped.x_for_index(start_ix.min(end) - offset);
                     let right = indent
                         + if newline {
-                            shaped.width + last_layout.space_width
+                            shaped.width() + last_layout.space_width
                         } else {
                             shaped.x_for_index(end_ix - offset)
                         };
@@ -495,15 +495,15 @@ impl TextElement {
         font_size: Pixels,
         runs: &[TextRun],
         window: &mut Window,
-    ) -> Vec<LineLayout> {
+    ) -> Vec<BufferLineLayout> {
         if state.is_single_line() {
             let text: SharedString = display_text.to_string().into();
             let aligned_runs = align_runs_to_char_boundaries(&text, runs);
             let line_runs = aligned_runs.as_deref().unwrap_or(runs);
-            let shaped_line = window
-                .text_system()
-                .shape_line(text, font_size, line_runs, None);
-            return vec![LineLayout::new().lines(crate::ui::smallvec::smallvec![shaped_line])];
+            let shaped_line = window.text_system().shape_line(text, font_size, line_runs);
+            return vec![
+                BufferLineLayout::new().lines(crate::ui::smallvec::smallvec![shaped_line]),
+            ];
         }
 
         if state.text.len() == 0 {
@@ -514,11 +514,10 @@ impl TextElement {
                     line.to_string().into(),
                     font_size,
                     &line_runs,
-                    None,
                 );
                 placeholder_lines.push(shaped_line);
             }
-            return vec![LineLayout::new().lines(placeholder_lines)];
+            return vec![BufferLineLayout::new().lines(placeholder_lines)];
         }
 
         let mut lines = Vec::with_capacity(last_layout.visible_buffer_lines.len());
@@ -557,7 +556,7 @@ impl TextElement {
                         align_runs_to_char_boundaries(&sub_line, &line_runs).unwrap_or(line_runs);
                     let shaped_line = window
                         .text_system()
-                        .shape_line(sub_line, font_size, &line_runs, None);
+                        .shape_line(sub_line, font_size, &line_runs);
                     wrapped_lines.push(InputLine::from(shaped_line));
                 } else {
                     wrapped_lines.push(InputLine::unshaped(range.len()));
@@ -577,7 +576,7 @@ impl TextElement {
             };
 
             lines.push(
-                LineLayout::new()
+                BufferLineLayout::new()
                     .inline_lines(wrapped_lines)
                     .wrap_indent(wrap_indent),
             );
@@ -646,31 +645,22 @@ impl Element for TextElement {
         let style = window.text_style();
         let font = style.font();
         let text_size = style.font_size.to_pixels(window.rem_size());
-        let space_width = {
-            let font_id = window.text_system().resolve_font(&font);
-            window.text_system().layout_width(font_id, text_size, ' ')
-        };
+        let space_width = window.text_system().space_width(&font, text_size);
 
         let mut bounds = bounds;
-        let (wrap_width, wrapping_indent) = {
+        let wrap_width = {
             let state = self.state.read(cx);
-            let wrap_width = if state.is_multi_line() && state.soft_wrap {
+            if state.is_multi_line() && state.soft_wrap {
                 Some(bounds.size.width - RIGHT_MARGIN)
             } else {
                 None
-            };
-            (wrap_width, state.wrapping_indent)
+            }
         };
 
         self.state.update(cx, |state, cx| {
-            state.text_wrapper.prepare_layout(
-                &state.text,
-                font,
-                text_size,
-                wrap_width,
-                wrapping_indent,
-                cx,
-            );
+            state
+                .text_wrapper
+                .prepare_layout(&state.text, font, text_size, wrap_width, cx);
         });
 
         let p = palette(cx);
@@ -715,7 +705,6 @@ impl Element for TextElement {
             len: display_text.len(),
             font: style.font(),
             color: text_color,
-            background_color: None,
             underline: None,
         };
         let marked_underline = Some(UnderlineStyle {
@@ -760,22 +749,10 @@ impl Element for TextElement {
             longest_line_width = match cached {
                 Some((_, width)) => width,
                 None => {
-                    let longest_line: SharedString = longest_line.to_string().into();
+                    let longest_line: Cow<str> = longest_line.into();
                     window
                         .text_system()
-                        .shape_line(
-                            longest_line.clone(),
-                            text_size,
-                            &[TextRun {
-                                len: longest_line.len(),
-                                font: key.font.clone(),
-                                color: crate::ui::black(),
-                                background_color: None,
-                                underline: None,
-                            }],
-                            wrap_width,
-                        )
-                        .width
+                        .measure_line_width(&longest_line, &key.font, text_size)
                 }
             };
             state

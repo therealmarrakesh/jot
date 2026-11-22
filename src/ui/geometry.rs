@@ -2310,11 +2310,6 @@ impl Pixels {
     pub(crate) fn scale(&self, factor: f32) -> ScaledPixels {
         ScaledPixels(self.0 * factor)
     }
-
-    /// Returns the absolute value of the `Pixels`.
-    pub(crate) fn abs(&self) -> Self {
-        Self(self.0.abs())
-    }
 }
 
 impl Eq for Pixels {}

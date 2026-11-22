@@ -26,8 +26,6 @@ use crate::ui::*;
 struct FontInfo {
     font_family_h: HSTRING,
     font_face: IDWriteFontFace3,
-    features: IDWriteTypography,
-    fallbacks: Option<IDWriteFontFallback>,
     font_collection: IDWriteFontCollection1,
 }
 
@@ -58,7 +56,7 @@ struct DirectWriteState {
     gpu_state: Option<GPUState>,
     system_font_collection: IDWriteFontCollection1,
     fonts: Vec<FontInfo>,
-    font_to_font_id: HashMap<Font, FontId>,
+    font_to_font_id: HashMap<Font, Option<FontId>>,
     font_info_cache: HashMap<usize, FontId>,
     layout_line_scratch: Vec<u16>,
 }
@@ -194,16 +192,15 @@ impl DirectWriteTextSystem {
 }
 
 impl DirectWriteTextSystem {
-    pub(crate) fn font_id(&self, font: &Font) -> Result<FontId> {
-        if let Some(font_id) = self.state.read().font_to_font_id.get(font) {
-            return Ok(*font_id);
+    pub(crate) fn font_id(&self, font: &Font) -> Option<FontId> {
+        if let Some(&font_id) = self.state.read().font_to_font_id.get(font) {
+            return font_id;
         }
         let mut lock = self.state.write();
-        if let Some(font_id) = lock.font_to_font_id.get(font) {
-            return Ok(*font_id);
+        if let Some(&font_id) = lock.font_to_font_id.get(font) {
+            return font_id;
         }
         lock.select_and_cache_font(&self.components, font)
-            .with_context(|| format!("Failed to select font: {:?}", font))
     }
 
     pub(crate) fn font_metrics(&self, font_id: FontId) -> FontMetrics {
@@ -250,8 +247,6 @@ impl DirectWriteState {
                 DirectWriteState::make_font_from_font_collection(
                     font,
                     &this.system_font_collection,
-                    &components.factory,
-                    &this.system_font_collection,
                     &components.system_ui_font_name,
                 )
             }?;
@@ -278,97 +273,24 @@ impl DirectWriteState {
                 self.system_font_collection = collection;
             }
             font_id = select_font(self, font);
-        };
-        let font_id = font_id?;
+        }
         self.font_to_font_id.insert(font.clone(), font_id);
-        Some(font_id)
-    }
-
-    fn generate_font_fallbacks(
-        fallbacks: &FontFallbacks,
-        factory: &IDWriteFactory5,
-        system_font_collection: &IDWriteFontCollection1,
-    ) -> Result<Option<IDWriteFontFallback>> {
-        let fallback_list = fallbacks.fallback_list();
-        if fallback_list.is_empty() {
-            return Ok(None);
-        }
-        unsafe {
-            let builder = factory.CreateFontFallbackBuilder()?;
-            let font_set = &system_font_collection.GetFontSet()?;
-            let mut unicode_ranges = Vec::new();
-            for family_name in fallback_list {
-                let family_name = HSTRING::from(family_name);
-                let Some(fonts) = font_set
-                    .GetMatchingFonts(
-                        &family_name,
-                        DWRITE_FONT_WEIGHT_NORMAL,
-                        DWRITE_FONT_STRETCH_NORMAL,
-                        DWRITE_FONT_STYLE_NORMAL,
-                    )
-                    .log_err()
-                else {
-                    continue;
-                };
-                let Ok(font_face) = fonts.GetFontFaceReference(0) else {
-                    continue;
-                };
-                let font = font_face.CreateFontFace()?;
-                let mut count = 0;
-                font.GetUnicodeRanges(None, &mut count).ok();
-                if count == 0 {
-                    continue;
-                }
-                unicode_ranges.clear();
-                unicode_ranges.resize_with(count as usize, DWRITE_UNICODE_RANGE::default);
-                let Some(_) = font
-                    .GetUnicodeRanges(Some(&mut unicode_ranges), &mut count)
-                    .log_err()
-                else {
-                    continue;
-                };
-                builder.AddMapping(
-                    &unicode_ranges,
-                    &[family_name.as_ptr()],
-                    None,
-                    None,
-                    None,
-                    1.0,
-                )?;
-            }
-            let system_fallbacks = factory.GetSystemFontFallback()?;
-            builder.AddMappings(&system_fallbacks)?;
-            Ok(Some(builder.CreateFontFallback()?))
-        }
-    }
-
-    unsafe fn generate_font_features(
-        factory: &IDWriteFactory5,
-        font_features: &FontFeatures,
-    ) -> Result<IDWriteTypography> {
-        let direct_write_features = unsafe { factory.CreateTypography()? };
-        apply_font_features(&direct_write_features, font_features)?;
-        Ok(direct_write_features)
+        font_id
     }
 
     unsafe fn make_font_from_font_collection(
         &Font {
             ref family,
-            ref features,
-            ref fallbacks,
             weight,
             style,
         }: &Font,
         collection: &IDWriteFontCollection1,
-        factory: &IDWriteFactory5,
-        system_font_collection: &IDWriteFontCollection1,
         system_ui_font_name: &SharedString,
     ) -> Option<FontInfo> {
-        const SYSTEM_UI_FONT_NAME: &str = ".SystemUIFont";
-        let family = if family == SYSTEM_UI_FONT_NAME {
+        let family = if family == ".SystemUIFont" {
             system_ui_font_name
         } else {
-            crate::ui::font_name_with_fallbacks_shared(family, system_ui_font_name)
+            family
         };
         let fontset = unsafe { collection.GetFontSet().log_err()? };
         let font_family_h = HSTRING::from(family.as_str());
@@ -387,21 +309,11 @@ impl DirectWriteState {
             let res = maybe!({
                 let font_face_ref = unsafe { font.GetFontFaceReference(index).log_err()? };
                 let font_face = unsafe { font_face_ref.CreateFontFace().log_err()? };
-                let direct_write_features =
-                    unsafe { Self::generate_font_features(factory, features).log_err()? };
-                let fallbacks = fallbacks.as_ref().and_then(|fallbacks| {
-                    Self::generate_font_fallbacks(fallbacks, factory, system_font_collection)
-                        .log_err()
-                        .flatten()
-                });
-                let font_info = FontInfo {
+                Some(FontInfo {
                     font_family_h: font_family_h.clone(),
                     font_face,
-                    features: direct_write_features,
-                    fallbacks,
                     font_collection: collection.clone(),
-                };
-                Some(font_info)
+                })
             });
             if res.is_some() {
                 return res;
@@ -433,23 +345,15 @@ impl DirectWriteState {
             let text_layout = {
                 let first_run = &font_runs[0];
                 let font_info = &self.fonts[first_run.font_id.0];
-                let collection = &font_info.font_collection;
-                let format: IDWriteTextFormat1 = components
-                    .factory
-                    .CreateTextFormat(
-                        &font_info.font_family_h,
-                        collection,
-                        font_info.font_face.GetWeight(),
-                        font_info.font_face.GetStyle(),
-                        DWRITE_FONT_STRETCH_NORMAL,
-                        font_size.as_f32(),
-                        &components.locale,
-                    )?
-                    .cast()?;
-                if let Some(ref fallbacks) = font_info.fallbacks {
-                    format.SetFontFallback(fallbacks)?;
-                }
-
+                let format = components.factory.CreateTextFormat(
+                    &font_info.font_family_h,
+                    &font_info.font_collection,
+                    font_info.font_face.GetWeight(),
+                    font_info.font_face.GetStyle(),
+                    DWRITE_FONT_STRETCH_NORMAL,
+                    font_size.as_f32(),
+                    &components.locale,
+                )?;
                 let layout = components.factory.CreateTextLayout(
                     text_wide,
                     &format,
@@ -458,14 +362,7 @@ impl DirectWriteState {
                 )?;
                 let current_text = &text[utf8_offset..(utf8_offset + first_run.len)];
                 utf8_offset += first_run.len;
-                let current_text_utf16_length = current_text.encode_utf16().count() as u32;
-                let text_range = DWRITE_TEXT_RANGE {
-                    startPosition: utf16_offset,
-                    length: current_text_utf16_length,
-                };
-                layout.SetTypography(&font_info.features, text_range)?;
-                utf16_offset += current_text_utf16_length;
-
+                utf16_offset += current_text.encode_utf16().count() as u32;
                 layout
             };
 
@@ -501,7 +398,6 @@ impl DirectWriteState {
                 text_layout.SetFontSize(font_size, text_range)?;
                 text_layout.SetFontStyle(font_info.font_face.GetStyle(), text_range)?;
                 text_layout.SetFontWeight(font_info.font_face.GetWeight(), text_range)?;
-                text_layout.SetTypography(&font_info.features, text_range)?;
 
                 break_ligatures = !break_ligatures;
             }
@@ -1300,8 +1196,8 @@ impl IDWriteTextRenderer_Impl for TextRenderer_Impl {
                 || {
                     let font = font_face_to_font(font_face, &self.locale)
                         .ok_or_else(|| Error::new(DWRITE_E_NOFONT, "Failed to create font"))?;
-                    let font_id = match context.text_system.font_to_font_id.get(&font) {
-                        Some(&font_id) => font_id,
+                    let font_id = match context.text_system.font_to_font_id.get(&font).copied().flatten() {
+                        Some(font_id) => font_id,
                         None => context
                             .text_system
                             .select_and_cache_font(context.components, &font)
@@ -1507,72 +1403,9 @@ fn font_face_to_font(font_face: &IDWriteFontFace3, locale: &HSTRING) -> Option<F
     let style = unsafe { font_face.GetStyle() };
     Some(Font {
         family: family_name.into(),
-        features: FontFeatures::default(),
         weight: font_weight_from_dwrite(weight),
         style: font_style_from_dwrite(style),
-        fallbacks: None,
     })
-}
-
-// https://learn.microsoft.com/en-us/windows/win32/api/dwrite/ne-dwrite-dwrite_font_feature_tag
-fn apply_font_features(
-    direct_write_features: &IDWriteTypography,
-    features: &FontFeatures,
-) -> Result<()> {
-    let tag_values = features.tag_value_list();
-
-    // All of these features are enabled by default by DirectWrite.
-    // If you want to (and can) peek into the source of DirectWrite
-    let mut feature_liga = make_direct_write_feature("liga", 1);
-    let mut feature_clig = make_direct_write_feature("clig", 1);
-    let mut feature_calt = make_direct_write_feature("calt", 1);
-
-    for (tag, value) in tag_values {
-        if tag.as_str() == "liga" && *value == 0 {
-            feature_liga.parameter = 0;
-            continue;
-        }
-        if tag.as_str() == "clig" && *value == 0 {
-            feature_clig.parameter = 0;
-            continue;
-        }
-        if tag.as_str() == "calt" && *value == 0 {
-            feature_calt.parameter = 0;
-            continue;
-        }
-
-        unsafe {
-            direct_write_features.AddFontFeature(make_direct_write_feature(tag, *value))?;
-        }
-    }
-    unsafe {
-        direct_write_features.AddFontFeature(feature_liga)?;
-        direct_write_features.AddFontFeature(feature_clig)?;
-        direct_write_features.AddFontFeature(feature_calt)?;
-    }
-
-    Ok(())
-}
-
-#[inline]
-const fn make_direct_write_feature(feature_name: &str, parameter: u32) -> DWRITE_FONT_FEATURE {
-    let tag = make_direct_write_tag(feature_name);
-    DWRITE_FONT_FEATURE {
-        nameTag: tag,
-        parameter,
-    }
-}
-
-#[inline]
-const fn make_open_type_tag(tag_name: &str) -> u32 {
-    let bytes = tag_name.as_bytes();
-    debug_assert!(bytes.len() == 4);
-    u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
-}
-
-#[inline]
-const fn make_direct_write_tag(tag_name: &str) -> DWRITE_FONT_FEATURE_TAG {
-    DWRITE_FONT_FEATURE_TAG(make_open_type_tag(tag_name))
 }
 
 #[inline]

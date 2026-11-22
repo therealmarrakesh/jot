@@ -146,7 +146,7 @@ impl TextLayout {
                 .line_height
                 .to_pixels(font_size.into(), window.rem_size()),
         );
-        let runs = vec![text_style.to_run(text.len())];
+        let font = text_style.font();
 
         window.request_measured_layout(Default::default(), {
             let element_state = self.clone();
@@ -168,26 +168,15 @@ impl TextLayout {
                     return size;
                 }
 
-                let Some(lines) = window
-                    .text_system()
-                    .shape_text(
-                        text.clone(),
-                        font_size,
-                        &runs,
-                        wrap_width,
-                        text_style.line_clamp,
-                    )
-                    .log_err()
-                else {
-                    element_state.0.borrow_mut().replace(TextLayoutInner {
-                        lines: Default::default(),
-                        line_height,
-                        wrap_width,
-                        size: Some(Size::default()),
-                        bounds: None,
-                    });
-                    return Size::default();
-                };
+                let lines = window.text_system().shape_text(
+                    text.clone(),
+                    font_size,
+                    &font,
+                    text_style.color,
+                    text_style.underline,
+                    wrap_width,
+                    text_style.line_clamp,
+                );
 
                 let mut size: Size<Pixels> = Size::default();
                 for line in &lines {
@@ -233,15 +222,6 @@ impl TextLayout {
         let mut line_origin = bounds.origin;
         let text_style = window.text_style();
         for line in &element_state.lines {
-            line.paint_background(
-                line_origin,
-                line_height,
-                text_style.text_align,
-                Some(bounds),
-                window,
-                cx,
-            )
-            .log_err();
             line.paint(
                 line_origin,
                 line_height,

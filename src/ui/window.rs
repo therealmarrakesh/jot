@@ -878,7 +878,7 @@ pub(crate) struct Window {
     pub(crate) removed: bool,
     pub(crate) platform_window: WindowsWindow,
     sprite_atlas: Arc<DirectXAtlas>,
-    text_system: Arc<WindowTextSystem>,
+    text_system: WindowTextSystem,
     rem_size: Pixels,
     rem_size_override_stack: SmallVec<[Pixels; 8]>,
     pub(crate) viewport_size: Size<Pixels>,
@@ -1090,7 +1090,7 @@ impl Window {
         let content_size = platform_window.content_size();
         let scale_factor = platform_window.scale_factor();
         let appearance = platform_window.appearance();
-        let text_system = Arc::new(WindowTextSystem::new(cx.text_system().clone()));
+        let text_system = WindowTextSystem::new(cx.text_system().clone());
         let invalidator = WindowInvalidator::new(handle.window_id());
         let active = Rc::new(Cell::new(platform_window.is_active()));
         let hovered = Rc::new(Cell::new(platform_window.is_hovered()));
@@ -1400,7 +1400,7 @@ impl Window {
     }
 
     /// Accessor for the text system.
-    pub(crate) fn text_system(&self) -> &Arc<WindowTextSystem> {
+    pub(crate) fn text_system(&self) -> &WindowTextSystem {
         &self.text_system
     }
 

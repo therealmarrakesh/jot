@@ -2,7 +2,7 @@ use std::{ops::Range, rc::Rc};
 
 use crate::ui::{Bounds, Pixels};
 
-use super::display_map::LineLayout;
+use super::text_wrapper::BufferLineLayout;
 
 #[derive(Clone)]
 pub(super) struct LastLayout {
@@ -10,7 +10,7 @@ pub(super) struct LastLayout {
     pub(super) visible_line_byte_offsets: Vec<usize>,
     pub(super) visible_top: Pixels,
     pub(super) visible_range_offset: Range<usize>,
-    pub(super) lines: Rc<Vec<LineLayout>>,
+    pub(super) lines: Rc<Vec<BufferLineLayout>>,
     pub(super) line_height: Pixels,
     pub(super) wrap_width: Option<Pixels>,
     /// Width of one space in the editor font, used to paint selected newlines.
@@ -19,7 +19,7 @@ pub(super) struct LastLayout {
 }
 
 impl LastLayout {
-    pub(crate) fn line(&self, row: usize) -> Option<&LineLayout> {
+    pub(crate) fn line(&self, row: usize) -> Option<&BufferLineLayout> {
         let pos = self.visible_buffer_lines.binary_search(&row).ok()?;
         self.lines.get(pos)
     }
