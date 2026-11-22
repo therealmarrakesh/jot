@@ -456,7 +456,7 @@ impl WindowsPlatform {
                 let vsync_provider = VSyncProvider::new();
                 loop {
                     let signal_source = vsync_provider.wait_for_vsync();
-                    let signal_at = PlatformFrameSignal::capture(scheduler::Instant::now);
+                    let signal_at = PlatformFrameSignal::capture(gpui::scheduler::Instant::now);
                     if stop.load(Ordering::Acquire) {
                         break;
                     }

@@ -271,9 +271,9 @@ gpui::actions!(
     ]
 );
 
-#[derive(Action, Clone, PartialEq, Eq)]
-#[action(namespace = jot, no_json)]
+#[derive(Clone, PartialEq, Eq)]
 struct SelectTab(usize);
+gpui::impl_action!(jot, SelectTab);
 
 struct ViewSettings {
     status_bar: bool,

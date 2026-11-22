@@ -342,7 +342,7 @@ fn etagere_point_to_device(value: etagere::Point) -> Point<DevicePixels> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{ImageId, RenderImageParams};
+    use gpui::{FontId, GlyphId, RenderGlyphParams};
     use std::borrow::Cow;
     use windows::Win32::{
         Foundation::HMODULE,
@@ -373,9 +373,14 @@ mod tests {
     }
 
     fn make_image_key(image_id: usize) -> AtlasKey {
-        AtlasKey::Image(RenderImageParams {
-            image_id: ImageId(image_id),
-            frame_index: 0,
+        AtlasKey::Glyph(RenderGlyphParams {
+            font_id: FontId(0),
+            glyph_id: GlyphId(image_id as u32),
+            font_size: gpui::px(14.0),
+            subpixel_variant: gpui::Point::default(),
+            scale_factor: 1.0,
+            is_emoji: true,
+            subpixel_rendering: false,
         })
     }
 

@@ -21,11 +21,7 @@ pub fn apply_system_reduce_motion(cx: &mut App) {
 }
 
 fn is_test_scheduler(cx: &App) -> bool {
-    cx.background_executor()
-        .scheduler_executor()
-        .scheduler()
-        .as_test()
-        .is_some()
+    cx.background_executor().is_test()
 }
 
 fn apply_preference(preference: Option<bool>, cx: &mut App) {

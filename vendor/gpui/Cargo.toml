@@ -1,0 +1,113 @@
+[package]
+edition = "2024"
+name = "gpui"
+version = "0.3.9"
+build = "build.rs"
+publish = false
+autolib = false
+autobins = false
+autoexamples = false
+autotests = false
+autobenches = false
+license = "Apache-2.0"
+
+[features]
+default = ["windows-manifest"]
+font-kit = []
+inspector = ["gpui_macros/inspector"]
+leak-detection = []
+profiler = []
+screen-capture = []
+stacker = []
+test-support = []
+wayland = []
+windows-manifest = ["dep:embed-resource"]
+x11 = []
+
+[lib]
+name = "gpui"
+path = "src/gpui.rs"
+doctest = false
+
+[dependencies]
+anyhow = "1.0.86"
+async-channel = { version = "2.5", default-features = false, features = ["std"] }
+async-task = "4.7"
+bitflags = "2.6.0"
+collections = { package = "gpui-pre-collections", version = "=0.3.9" }
+ctor = "1.0.12"
+derive_more = { version = "2.1", features = ["deref", "deref_mut", "from_str", "add", "add_assign", "mul", "mul_assign", "not"] }
+etagere = "0.2"
+futures = "0.3.34"
+gpui_macros = { package = "gpui-pre-macros", version = "=0.3.9" }
+gpui_util = { package = "gpui-pre-util", version = "=0.3.9" }
+heapless = "0.9.2"
+itertools = "0.14.0"
+log = { version = "0.4", default-features = false, features = ["std"] }
+lyon = "1.0"
+num_cpus = "1.13"
+parking = "2.0.0"
+parking_lot = "0.12.1"
+pin-project = "1.1.10"
+pollster = "0.4.0"
+rand = { version = "0.9", default-features = false, features = ["std", "std_rng", "os_rng", "small_rng", "thread_rng"] }
+raw-window-handle = "0.6"
+refineable = { package = "gpui-pre-refineable", version = "=0.3.9" }
+regex = { version = "1.5", features = ["std", "perf"] }
+seahash = "4.1"
+slotmap = "1.0.6"
+smallvec = { version = "1.6", features = ["union", "const_new"] }
+spin = { version = "0.10", default-features = false, features = ["mutex", "spin_mutex", "lock_api"] }
+strum = { version = "0.28", features = ["derive"] }
+sum_tree = { package = "gpui-pre-sum-tree", version = "=0.3.9" }
+taffy = { version = "0.13.0", default-features = false, features = ["std", "taffy_tree", "flexbox", "grid", "block_layout", "float_layout", "content_size"] }
+thiserror = "2.0.12"
+uuid = { version = "1.1", features = ["v4"] }
+waker-fn = "1.2.0"
+
+[build-dependencies]
+embed-resource = { version = "3.0", optional = true }
+
+[target.'cfg(target_os = "windows")'.dependencies.windows]
+version = "0.62"
+features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_IO",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Ole",
+    "Win32_System_Threading",
+    "Win32_System_Variant",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+    "Win32_UI_Shell_PropertiesSystem",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_Power",
+    "Win32_System_RemoteDesktop",
+    "Win32_System_WindowsProgramming",
+]
+
+[lints.clippy]
+dbg_macro = "deny"
+declare_interior_mutable_const = "deny"
+disallowed_methods = "deny"
+large_enum_variant = "allow"
+let_underscore_future = "allow"
+nonminimal_bool = "allow"
+redundant_clone = "deny"
+single_range_in_vec_init = "allow"
+todo = "deny"
+too_many_arguments = "allow"
+type_complexity = "allow"
+
+[lints.clippy.style]
+level = "allow"
+priority = -1
+
+[lints.rust.unexpected_cfgs]
+level = "allow"
+priority = 0

@@ -218,22 +218,6 @@ impl Element for BrushTransition {
         self.element
             .paint(id, inspector_id, bounds, request_layout, hitbox, window, cx)
     }
-
-    fn a11y_role(&self) -> Option<accesskit::Role> {
-        self.element.a11y_role()
-    }
-
-    fn write_a11y_info(&self, node: &mut accesskit::Node) {
-        self.element.write_a11y_info(node)
-    }
-
-    fn a11y_synthetic_children(
-        &mut self,
-        (_, prepaint): &mut Self::PrepaintState,
-        builder: &mut A11ySubtreeBuilder,
-    ) {
-        Element::a11y_synthetic_children(&mut self.element, prepaint, builder)
-    }
 }
 
 impl IntoElement for BrushTransition {

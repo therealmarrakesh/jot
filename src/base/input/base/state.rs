@@ -69,14 +69,14 @@ pub(crate) enum ScrollPadding {
     SurroundingLines,
 }
 
-#[derive(Action, Clone, PartialEq, Eq)]
-#[action(namespace = input, no_json)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Enter {
     /// Is confirm with secondary.
     pub secondary: bool,
     /// Whether the Shift modifier was held when Enter was pressed.
     pub shift: bool,
 }
+gpui::impl_action!(input, Enter);
 
 impl Enter {
     /// Returns true if `action` is a primary `Enter` action (`secondary: false`),

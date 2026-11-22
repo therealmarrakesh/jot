@@ -14,10 +14,9 @@ use crate::base::{
 use gpui::{
     Anchor, App, Axis, Background, BorderStyle, Bounds, ContentMask, CursorStyle, Edges, Element,
     ElementId, EntityId, GlobalElementId, Hitbox, HitboxBehavior, Hsla, InspectorElementId,
-    IntoElement, LayoutId, ListState, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    PaintQuad, Pixels, Point, Position, ScrollHandle, ScrollWheelEvent, Size, Style,
-    TouchDragEvent, TouchPhase, UniformListScrollHandle, Window, fill, point,
-    prelude::FluentBuilder, px, relative, size,
+    IntoElement, LayoutId, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point,
+    Position, ScrollHandle, ScrollWheelEvent, Size, Style, TouchDragEvent, TouchPhase, Window,
+    fill, point, prelude::FluentBuilder, px, relative, size,
 };
 
 /// The width of the scrollbar (THUMB_ACTIVE_INSET * 2 + THUMB_ACTIVE_WIDTH)
@@ -98,51 +97,6 @@ impl ScrollbarHandle for ScrollHandle {
 
     fn content_size(&self) -> Size<Pixels> {
         (self.max_offset() + self.bounds().size.into()).into()
-    }
-}
-
-impl ScrollbarHandle for UniformListScrollHandle {
-    fn viewport_bounds(&self) -> Bounds<Pixels> {
-        self.0.borrow().base_handle.bounds()
-    }
-
-    fn offset(&self) -> Point<Pixels> {
-        self.0.borrow().base_handle.offset()
-    }
-
-    fn set_offset(&self, offset: Point<Pixels>) {
-        self.0.borrow_mut().base_handle.set_offset(offset)
-    }
-
-    fn content_size(&self) -> Size<Pixels> {
-        let base_handle = &self.0.borrow().base_handle;
-        (base_handle.max_offset() + base_handle.bounds().size.into()).into()
-    }
-}
-
-impl ScrollbarHandle for ListState {
-    fn viewport_bounds(&self) -> Bounds<Pixels> {
-        ListState::viewport_bounds(self)
-    }
-
-    fn offset(&self) -> Point<Pixels> {
-        self.scroll_px_offset_for_scrollbar()
-    }
-
-    fn set_offset(&self, offset: Point<Pixels>) {
-        self.set_offset_from_scrollbar(offset);
-    }
-
-    fn content_size(&self) -> Size<Pixels> {
-        self.viewport_bounds().size + self.max_offset_for_scrollbar().into()
-    }
-
-    fn start_drag(&self) {
-        self.scrollbar_drag_started();
-    }
-
-    fn end_drag(&self) {
-        self.scrollbar_drag_ended();
     }
 }
 

@@ -90,7 +90,6 @@ pub struct WindowsWindowState {
     fullscreen: Cell<Option<StyleAndBounds>>,
     initial_placement: Cell<Option<WindowOpenStatus>>,
     hwnd: HWND,
-    pub(crate) a11y: RefCell<Option<A11yState>>,
 }
 
 pub(crate) struct WindowsWindowInner {
@@ -207,7 +206,6 @@ impl WindowsWindowState {
             invalidate_devices,
             draw_coordinator,
             direct_manipulation,
-            a11y: RefCell::new(None),
         })
     }
 
@@ -1049,14 +1047,6 @@ impl PlatformWindow for WindowsWindow {
             .log_err();
     }
 
-    #[cfg(any(test, feature = "test-support"))]
-    fn render_to_image(&self, scene: &Scene) -> anyhow::Result<image::RgbaImage> {
-        self.state
-            .renderer
-            .borrow_mut()
-            .render_to_image(scene, self.state.background_appearance.get())
-    }
-
     fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas> {
         self.state.renderer.borrow().sprite_atlas()
     }
@@ -1083,69 +1073,6 @@ impl PlatformWindow for WindowsWindow {
     fn play_system_bell(&self) {
         // MB_OK: The sound specified as the Windows Default Beep sound.
         let _ = unsafe { MessageBeep(MB_OK) };
-    }
-
-    fn a11y_init(&self, callbacks: gpui::A11yCallbacks) {
-        let action_handler = A11yActionHandler(callbacks.action);
-        let is_focused = unsafe { GetForegroundWindow() } == self.0.hwnd;
-
-        let adapter = accesskit_windows::Adapter::new(
-            accesskit_windows::HWND(self.0.hwnd.0),
-            is_focused,
-            action_handler,
-        );
-
-        let activation_handler = A11yActivationHandler {
-            callback: callbacks.activation,
-        };
-
-        *self.state.a11y.borrow_mut() = Some(A11yState {
-            adapter,
-            activation_handler,
-        });
-    }
-
-    fn a11y_tree_update(&self, tree_update: accesskit::TreeUpdate) {
-        let events = {
-            let mut a11y = self.state.a11y.borrow_mut();
-            a11y.as_mut()
-                .and_then(|a11y| a11y.adapter.update_if_active(|| tree_update))
-        };
-        // The borrow must be dropped before raising events, because
-        // `events.raise()` calls `UiaRaiseAutomationPropertyChangedEvent`
-        // which may send a nested `WM_GETOBJECT` back into this window
-        // procedure, re-entering `handle_wm_getobject` which also borrows
-        // `self.state.a11y`.
-        if let Some(events) = events {
-            events.raise();
-        }
-    }
-
-    fn a11y_update_window_bounds(&self) {
-        // Windows UIA handles window bounds tracking automatically.
-    }
-}
-
-pub(crate) struct A11yState {
-    pub(crate) adapter: accesskit_windows::Adapter,
-    pub(crate) activation_handler: A11yActivationHandler,
-}
-
-pub(crate) struct A11yActivationHandler {
-    callback: Box<dyn Fn() -> Option<accesskit::TreeUpdate> + Send + 'static>,
-}
-
-impl accesskit::ActivationHandler for A11yActivationHandler {
-    fn request_initial_tree(&mut self) -> Option<accesskit::TreeUpdate> {
-        (self.callback)()
-    }
-}
-
-struct A11yActionHandler(Box<dyn Fn(accesskit::ActionRequest) + Send + 'static>);
-
-impl accesskit::ActionHandler for A11yActionHandler {
-    fn do_action(&mut self, request: accesskit::ActionRequest) {
-        (self.0)(request);
     }
 }
 
