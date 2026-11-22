@@ -1,18 +1,14 @@
 use std::{
     borrow::Cow,
     cmp::Ordering,
-    env,
-    ffi::OsStr,
     fmt::{self, Debug},
     future::Future,
     hash::{Hash, Hasher},
     ops::AddAssign,
     panic::Location,
-    path::PathBuf,
     pin::Pin,
-    sync::{Arc, OnceLock},
+    sync::Arc,
     task::{Context, Poll},
-    time::Instant,
 };
 
 pub mod arc_cow {
@@ -160,63 +156,14 @@ pub mod arc_cow {
     }
 }
 
-const CREATE_NO_WINDOW: u32 = 0x0800_0000_u32;
-
-pub fn new_std_command(program: impl AsRef<OsStr>) -> std::process::Command {
-    use std::os::windows::process::CommandExt;
-
-    let mut command = std::process::Command::new(program);
-    command.creation_flags(CREATE_NO_WINDOW);
-    command
-}
-
-pub fn get_powershell() -> Option<String> {
-    fn find_in_path(exe: &str) -> Option<PathBuf> {
-        let path_var = env::var_os("PATH")?;
-        env::split_paths(&path_var)
-            .map(|dir| dir.join(exe))
-            .find(|candidate| candidate.is_file())
-    }
-
-    fn find_windows_powershell() -> Option<PathBuf> {
-        let system_root = PathBuf::from(env::var_os("SystemRoot")?);
-        let powershell = system_root.join("System32\\WindowsPowerShell\\v1.0\\powershell.exe");
-        powershell.is_file().then_some(powershell)
-    }
-
-    static POWERSHELL: std::sync::LazyLock<Option<String>> = std::sync::LazyLock::new(|| {
-        find_in_path("pwsh.exe")
-            .or_else(|| find_in_path("powershell.exe"))
-            .or_else(find_windows_powershell)
-            .map(|p| p.to_string_lossy().trim().to_owned())
-    });
-
-    (*POWERSHELL).clone()
-}
-
 pub fn post_inc<T: From<u8> + AddAssign<T> + Copy>(value: &mut T) -> T {
     let prev = *value;
     *value += T::from(1);
     prev
 }
 
-pub fn measure<R>(label: &str, f: impl FnOnce() -> R) -> R {
-    static ZED_MEASUREMENTS: OnceLock<bool> = OnceLock::new();
-    let zed_measurements = ZED_MEASUREMENTS.get_or_init(|| {
-        env::var("ZED_MEASUREMENTS")
-            .map(|measurements| measurements == "1" || measurements == "true")
-            .unwrap_or(false)
-    });
-
-    if *zed_measurements {
-        let start = Instant::now();
-        let result = f();
-        let elapsed = start.elapsed();
-        eprintln!("{}: {:?}", label, elapsed);
-        result
-    } else {
-        f()
-    }
+pub fn measure<R>(_label: &str, f: impl FnOnce() -> R) -> R {
+    f()
 }
 
 #[macro_export]

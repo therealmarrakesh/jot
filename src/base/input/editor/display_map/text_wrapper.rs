@@ -606,7 +606,6 @@ impl TextWrapper {
                                 color: gpui::black(),
                                 background_color: None,
                                 underline: None,
-                                strikethrough: None,
                             }],
                             None,
                         )

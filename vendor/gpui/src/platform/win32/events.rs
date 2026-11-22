@@ -8,7 +8,6 @@ use windows::{
         Graphics::Gdi::*,
         System::SystemServices::*,
         UI::{
-            Controls::*,
             HiDpi::*,
             Input::{Ime::*, KeyboardAndMouse::*},
             WindowsAndMessaging::*,
@@ -20,10 +19,13 @@ use windows::{
 use crate::platform::win32::*;
 use gpui::*;
 
+const WM_MOUSELEAVE: u32 = 0x02A3;
+const WM_NCMOUSELEAVE: u32 = 0x02A2;
+const HOVER_DEFAULT: u32 = 0xFFFF_FFFF;
+
 pub(crate) const WM_GPUI_CURSOR_STYLE_CHANGED: u32 = WM_USER + 1;
 pub(crate) const WM_GPUI_CLOSE_ONE_WINDOW: u32 = WM_USER + 2;
 pub(crate) const WM_GPUI_TASK_DISPATCHED_ON_MAIN_THREAD: u32 = WM_USER + 3;
-pub(crate) const WM_GPUI_DOCK_MENU_ACTION: u32 = WM_USER + 4;
 pub(crate) const WM_GPUI_FORCE_UPDATE_WINDOW: u32 = WM_USER + 5;
 pub(crate) const WM_GPUI_KEYBOARD_LAYOUT_CHANGED: u32 = WM_USER + 6;
 pub(crate) const WM_GPUI_GPU_DEVICE_LOST: u32 = WM_USER + 7;

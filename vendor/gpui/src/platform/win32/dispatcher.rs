@@ -6,24 +6,20 @@ use std::{
     time::Duration,
 };
 
-use crate::anyhow::Context;
 use gpui::gpui_util::ResultExt;
 use windows::Win32::{
     Foundation::{FILETIME, LPARAM, WPARAM},
-    Media::{timeBeginPeriod, timeEndPeriod},
     System::Threading::{
-        CloseThreadpoolTimer, CreateThreadpoolTimer, GetCurrentThread, PTP_CALLBACK_INSTANCE,
-        PTP_TIMER, SetThreadPriority, SetThreadpoolTimer, THREAD_PRIORITY_TIME_CRITICAL,
-        TP_CALLBACK_ENVIRON_V3, TP_CALLBACK_PRIORITY, TP_CALLBACK_PRIORITY_HIGH,
-        TP_CALLBACK_PRIORITY_LOW, TP_CALLBACK_PRIORITY_NORMAL, TrySubmitThreadpoolCallback,
+        CloseThreadpoolTimer, CreateThreadpoolTimer, PTP_CALLBACK_INSTANCE, PTP_TIMER,
+        SetThreadpoolTimer, TP_CALLBACK_ENVIRON_V3, TP_CALLBACK_PRIORITY,
+        TP_CALLBACK_PRIORITY_HIGH, TP_CALLBACK_PRIORITY_LOW, TP_CALLBACK_PRIORITY_NORMAL,
+        TrySubmitThreadpoolCallback,
     },
     UI::WindowsAndMessaging::PostMessageW,
 };
 
 use crate::platform::win32::{HWND, SafeHwnd, WM_GPUI_TASK_DISPATCHED_ON_MAIN_THREAD};
-use gpui::{
-    PlatformDispatcher, Priority, PriorityQueueSender, RunnableVariant, TimerResolutionGuard,
-};
+use gpui::{PlatformDispatcher, Priority, PriorityQueueSender, RunnableVariant};
 
 pub(crate) struct WindowsDispatcher {
     pub(crate) wake_posted: AtomicBool,
@@ -101,9 +97,6 @@ impl PlatformDispatcher for WindowsDispatcher {
 
     fn dispatch(&self, runnable: RunnableVariant, priority: Priority) {
         let priority = match priority {
-            Priority::RealtimeAudio => {
-                panic!("RealtimeAudio priority should use spawn_realtime, not dispatch")
-            }
             Priority::High => TP_CALLBACK_PRIORITY_HIGH,
             Priority::Medium => TP_CALLBACK_PRIORITY_NORMAL,
             Priority::Low => TP_CALLBACK_PRIORITY_LOW,
@@ -142,29 +135,6 @@ impl PlatformDispatcher for WindowsDispatcher {
 
     fn dispatch_after(&self, duration: Duration, runnable: RunnableVariant) {
         self.dispatch_on_threadpool_after(runnable, duration);
-    }
-
-    fn spawn_realtime(&self, f: Box<dyn FnOnce() + Send>) {
-        std::thread::spawn(move || {
-            // SAFETY: always safe to call
-            let thread_handle = unsafe { GetCurrentThread() };
-
-            // SAFETY: thread_handle is a valid handle to the current thread
-            unsafe { SetThreadPriority(thread_handle, THREAD_PRIORITY_TIME_CRITICAL) }
-                .context("thread priority")
-                .log_err();
-
-            f();
-        });
-    }
-
-    fn increase_timer_resolution(&self) -> TimerResolutionGuard {
-        unsafe {
-            timeBeginPeriod(1);
-        }
-        gpui::gpui_util::defer(Box::new(|| unsafe {
-            timeEndPeriod(1);
-        }))
     }
 }
 

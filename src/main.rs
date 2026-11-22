@@ -459,7 +459,6 @@ pub(crate) fn text_width(window: &Window, text: &str, family: &'static str, size
         color: black(),
         background_color: None,
         underline: None,
-        strikethrough: None,
     };
     window
         .text_system()
@@ -1188,7 +1187,7 @@ fn main() {
     }
 
     let platform = Rc::new(
-        gpui::WindowsPlatform::new(false).expect("Failed to initialize Windows platform"),
+        gpui::WindowsPlatform::new().expect("Failed to initialize Windows platform"),
     );
     Application::with_platform(platform).run(move |cx| {
         base::init(cx);
@@ -1218,7 +1217,6 @@ fn main() {
         .detach();
 
         theme::apply(cx.window_appearance(), cx);
-        cx.set_text_rendering_mode(TextRenderingMode::Grayscale);
 
         cx.set_global(ViewSettings {
             status_bar: true,

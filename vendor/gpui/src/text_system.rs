@@ -12,7 +12,7 @@ pub use line_wrapper::*;
 
 use crate::{
     Bounds, DevicePixels, Hsla, Pixels, PlatformTextSystem, Point, Result, SharedString, Size,
-    StrikethroughStyle, TextRenderingMode, UnderlineStyle, px,
+    UnderlineStyle, px,
 };
 use crate::anyhow::{Context as _, anyhow};
 use crate::collections::{FxHashMap, FxHashSet};
@@ -313,11 +313,6 @@ impl TextSystem {
         self.missing_glyph_reporter.reset();
     }
 
-    #[cfg(test)]
-    pub(crate) fn report_missing_glyphs_in_test(&self, missing_glyphs: Vec<MissingGlyph>) {
-        self.missing_glyph_reporter.report(missing_glyphs);
-    }
-
     /// Get the FontId for the configure font family and style.
     fn font_id(&self, font: &Font) -> Result<FontId> {
         fn clone_font_id_result(font_id: &Result<FontId>) -> Result<FontId> {
@@ -572,17 +567,6 @@ impl TextSystem {
     pub(crate) fn glyph_dilation_for_color(&self, color: Hsla) -> u8 {
         self.platform_text_system.glyph_dilation_for_color(color)
     }
-
-    /// Returns the text rendering mode recommended by the platform for the given font and size.
-    /// The return value will never be [`TextRenderingMode::PlatformDefault`].
-    pub(crate) fn recommended_rendering_mode(
-        &self,
-        font_id: FontId,
-        font_size: Pixels,
-    ) -> TextRenderingMode {
-        self.platform_text_system
-            .recommended_rendering_mode(font_id, font_size)
-    }
 }
 
 /// The GPUI text layout subsystem.
@@ -645,7 +629,6 @@ impl WindowTextSystem {
             if let Some(last_run) = decoration_runs.last_mut()
                 && last_run.color == run.color
                 && last_run.underline == run.underline
-                && last_run.strikethrough == run.strikethrough
                 && last_run.background_color == run.background_color
             {
                 last_run.len += run.len as u32;
@@ -656,7 +639,6 @@ impl WindowTextSystem {
                 color: run.color,
                 background_color: run.background_color,
                 underline: run.underline,
-                strikethrough: run.strikethrough,
             });
         }
 
@@ -693,7 +675,6 @@ impl WindowTextSystem {
             if let Some(last_run) = decoration_runs.last_mut()
                 && last_run.color == run.color
                 && last_run.underline == run.underline
-                && last_run.strikethrough == run.strikethrough
                 && last_run.background_color == run.background_color
             {
                 last_run.len += run.len as u32;
@@ -704,7 +685,6 @@ impl WindowTextSystem {
                 color: run.color,
                 background_color: run.background_color,
                 underline: run.underline,
-                strikethrough: run.strikethrough,
             });
         }
 
@@ -771,7 +751,6 @@ impl WindowTextSystem {
                 let decoration_changed = if let Some(last_run) = decoration_runs.last_mut()
                     && last_run.color == run.color
                     && last_run.underline == run.underline
-                    && last_run.strikethrough == run.strikethrough
                     && last_run.background_color == run.background_color
                 {
                     last_run.len += run_len_within_line as u32;
@@ -782,7 +761,6 @@ impl WindowTextSystem {
                         color: run.color,
                         background_color: run.background_color,
                         underline: run.underline,
-                        strikethrough: run.strikethrough,
                     });
                     true
                 };
@@ -891,7 +869,6 @@ impl WindowTextSystem {
             let decoration_changed = if let Some(last_run) = last_run
                 && last_run.color == run.color
                 && last_run.underline == run.underline
-                && last_run.strikethrough == run.strikethrough
             // we do not consider differing background color relevant, as it does not affect glyphs
             // && last_run.background_color == run.background_color
             {
@@ -973,7 +950,6 @@ impl WindowTextSystem {
             let decoration_changed = if let Some(last_run) = last_run
                 && last_run.color == run.color
                 && last_run.underline == run.underline
-                && last_run.strikethrough == run.strikethrough
             // we do not consider differing background color relevant, as it does not affect glyphs
             // && last_run.background_color == run.background_color
             {
@@ -1035,7 +1011,6 @@ impl WindowTextSystem {
             let decoration_changed = if let Some(last_run) = last_run
                 && last_run.color == run.color
                 && last_run.underline == run.underline
-                && last_run.strikethrough == run.strikethrough
             // we do not consider differing background color relevant, as it does not affect glyphs
             // && last_run.background_color == run.background_color
             {
@@ -1232,8 +1207,6 @@ pub struct TextRun {
     pub background_color: Option<Hsla>,
     /// The underline style (if any)
     pub underline: Option<UnderlineStyle>,
-    /// The strikethrough style (if any)
-    pub strikethrough: Option<StrikethroughStyle>,
 }
 
 /// An identifier for a specific glyph, as returned by [`WindowTextSystem::layout_line`].
@@ -1255,7 +1228,6 @@ pub struct RenderGlyphParams {
     pub subpixel_variant: Point<u8>,
     pub scale_factor: f32,
     pub is_emoji: bool,
-    pub subpixel_rendering: bool,
     pub dilation: u8,
 }
 
@@ -1269,7 +1241,6 @@ impl Hash for RenderGlyphParams {
         self.subpixel_variant.hash(state);
         self.scale_factor.to_bits().hash(state);
         self.is_emoji.hash(state);
-        self.subpixel_rendering.hash(state);
         self.dilation.hash(state);
     }
 }
@@ -1430,63 +1401,5 @@ pub fn font_name_with_fallbacks_shared<'a>(
         ".ZedSans" | "Zed Plex Sans" => const { &SharedString::new_static("IBM Plex Sans") },
         ".ZedMono" | "Zed Plex Mono" => const { &SharedString::new_static("Lilex") },
         _ => name,
-    }
-}
-
-#[cfg(test)]
-mod missing_glyph_tests {
-    use super::*;
-    use futures::FutureExt as _;
-
-    #[test]
-    fn bounds_retained_missing_glyphs() {
-        let (reporter, mut receiver) = missing_glyph_channel();
-        reporter.report(
-            (0..MAX_REPORTED_MISSING_GLYPHS)
-                .map(|index| {
-                    MissingGlyph::new(index.to_string().into(), FallbackFontClass::Proportional)
-                })
-                .collect(),
-        );
-        assert!(receiver.recv().now_or_never().unwrap().is_ok());
-
-        let newest = MissingGlyph::new("newest".into(), FallbackFontClass::Monospace);
-        reporter.report(vec![newest.clone()]);
-        assert!(receiver.recv().now_or_never().unwrap().is_ok());
-
-        let state = &receiver.state;
-        assert_eq!(state.reported.len(), MAX_REPORTED_MISSING_GLYPHS);
-        assert_eq!(state.reported_order.len(), MAX_REPORTED_MISSING_GLYPHS);
-        assert!(state.reported.contains(&newest));
-    }
-
-    #[test]
-    fn dropping_receiver_closes_and_clears_reports() {
-        let (reporter, receiver) = missing_glyph_channel();
-        reporter.report(vec![missing_glyph("missing")]);
-
-        drop(receiver);
-
-        assert!(reporter.sender.is_closed());
-        assert!(reporter.sender.is_empty());
-    }
-
-    fn missing_glyph_channel() -> (MissingGlyphReporter, MissingGlyphReceiver) {
-        let (sender, receiver) = crate::futures::channel::mpsc::bounded(MAX_REPORTED_MISSING_GLYPHS);
-        let generation = Arc::<AtomicUsize>::default();
-        let reporter = MissingGlyphReporter {
-            generation: generation.clone(),
-            sender,
-        };
-        let receiver = MissingGlyphReceiver {
-            state: MissingGlyphState::default(),
-            generation,
-            receiver,
-        };
-        (reporter, receiver)
-    }
-
-    fn missing_glyph(grapheme: &'static str) -> MissingGlyph {
-        MissingGlyph::new(grapheme.into(), FallbackFontClass::Proportional)
     }
 }

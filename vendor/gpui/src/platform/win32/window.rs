@@ -10,7 +10,6 @@ use std::{
 };
 
 use crate::anyhow::{Context as _, Result};
-use gpui::futures::channel::oneshot::{self, Receiver};
 use gpui::gpui_util::ResultExt;
 use crate::smallvec::SmallVec;
 use windows::{
@@ -21,7 +20,7 @@ use windows::{
         System::{
             Com::*, Diagnostics::Debug::MessageBeep, LibraryLoader::*, Ole::*, SystemServices::*,
         },
-        UI::{Controls::*, HiDpi::*, Input::KeyboardAndMouse::*, Shell::*, WindowsAndMessaging::*},
+        UI::{HiDpi::*, Input::KeyboardAndMouse::*, Shell::*, WindowsAndMessaging::*},
     },
     core::*,
 };
@@ -704,100 +703,6 @@ impl PlatformWindow for WindowsWindow {
         self.state.input_handler.take()
     }
 
-    fn prompt(
-        &self,
-        level: PromptLevel,
-        msg: &str,
-        detail: Option<&str>,
-        answers: &[PromptButton],
-    ) -> Option<Receiver<usize>> {
-        let (mut done_tx, done_rx) = oneshot::channel();
-        let msg = msg.to_string();
-        let detail_string = detail.map(|detail| detail.to_string());
-        let answers = answers.to_vec();
-        let dialog = crate::platform::win32::dialog::show_dialog(
-            Some(self.0.dialog_owner.clone()),
-            &self.0.executor,
-            move |handle| {
-                unsafe {
-                    let mut config = TASKDIALOGCONFIG::default();
-                    config.cbSize = std::mem::size_of::<TASKDIALOGCONFIG>() as _;
-                    config.hwndParent = handle;
-                    config.dwFlags = TDF_ALLOW_DIALOG_CANCELLATION;
-                    let title;
-                    let main_icon;
-                    match level {
-                        PromptLevel::Info => {
-                            title = windows::core::w!("Info");
-                            main_icon = TD_INFORMATION_ICON;
-                        }
-                        PromptLevel::Warning => {
-                            title = windows::core::w!("Warning");
-                            main_icon = TD_WARNING_ICON;
-                        }
-                        PromptLevel::Critical => {
-                            title = windows::core::w!("Critical");
-                            main_icon = TD_ERROR_ICON;
-                        }
-                    };
-                    config.pszWindowTitle = title;
-                    config.Anonymous1.pszMainIcon = main_icon;
-                    let instruction = HSTRING::from(msg);
-                    config.pszMainInstruction = PCWSTR::from_raw(instruction.as_ptr());
-                    let hints_encoded;
-                    if let Some(ref hints) = detail_string {
-                        hints_encoded = HSTRING::from(hints);
-                        config.pszContent = PCWSTR::from_raw(hints_encoded.as_ptr());
-                    };
-                    let mut button_id_map = Vec::with_capacity(answers.len());
-                    let mut buttons = Vec::new();
-                    let mut btn_encoded = Vec::new();
-                    for (index, btn) in answers.iter().enumerate() {
-                        let encoded = HSTRING::from(btn.label().as_ref());
-                        let button_id = match btn {
-                            PromptButton::Ok(_) => IDOK.0,
-                            PromptButton::Cancel(_) => IDCANCEL.0,
-                            // the first few low integer values are reserved for known buttons
-                            // so for simplicity we just go backwards from -1
-                            PromptButton::Other(_) => -(index as i32) - 1,
-                        };
-                        button_id_map.push(button_id);
-                        buttons.push(TASKDIALOG_BUTTON {
-                            nButtonID: button_id,
-                            pszButtonText: PCWSTR::from_raw(encoded.as_ptr()),
-                        });
-                        btn_encoded.push(encoded);
-                    }
-                    config.cButtons = buttons.len() as _;
-                    config.pButtons = buttons.as_ptr();
-
-                    config.pfCallback = Some(crate::platform::win32::dialog::task_dialog_callback);
-                    config.lpCallbackData = button_id_map.contains(&IDCANCEL.0) as isize;
-                    let mut res = std::mem::zeroed();
-                    TaskDialogIndirect(&config, Some(&mut res), None, None)
-                        .context("unable to create task dialog")?;
-                    Ok(button_id_map.iter().position(|&button_id| button_id == res))
-                }
-            },
-        );
-        self.0
-            .executor
-            .spawn(async move {
-                if let gpui::futures::future::Either::Left((result, _)) =
-                    gpui::futures::future::select(dialog, done_tx.cancellation()).await
-                    && let Some(Some(clicked)) = result
-                        .context("native dialog thread stopped")
-                        .and_then(|result| result)
-                        .log_err()
-                {
-                    done_tx.send(clicked).ok();
-                }
-            })
-            .detach();
-
-        Some(done_rx)
-    }
-
     fn activate(&self) {
         let hwnd = self.0.hwnd;
         let this = self.0.clone();
@@ -887,10 +792,6 @@ impl PlatformWindow for WindowsWindow {
 
     fn background_appearance(&self) -> WindowBackgroundAppearance {
         self.state.background_appearance.get()
-    }
-
-    fn is_subpixel_rendering_supported(&self) -> bool {
-        true
     }
 
     fn set_title(&mut self, title: &str) {
@@ -1033,10 +934,6 @@ impl PlatformWindow for WindowsWindow {
 
     fn get_raw_handle(&self) -> HWND {
         self.0.hwnd
-    }
-
-    fn gpu_specs(&self) -> Option<GpuSpecs> {
-        self.state.renderer.borrow().gpu_specs().log_err()
     }
 
     fn update_ime_position(&self, bounds: Bounds<Pixels>) {
@@ -1336,7 +1233,7 @@ enum WindowOpenState {
     Windowed,
 }
 
-const WINDOW_CLASS_NAME: PCWSTR = w!("Zed::Window");
+const WINDOW_CLASS_NAME: PCWSTR = w!("Jot::Window");
 
 fn register_window_class(icon_handle: HICON) {
     static ONCE: Once = Once::new();
@@ -1425,7 +1322,7 @@ fn get_module_handle() -> HMODULE {
         let mut h_module = std::mem::zeroed();
         GetModuleHandleExW(
             GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-            windows::core::w!("ZedModule"),
+            windows::core::w!("JotModule"),
             &mut h_module,
         )
         .expect("Unable to get module handle"); // this should never fail
@@ -1601,61 +1498,5 @@ fn set_non_rude_hwnd(hwnd: HWND, non_rude: bool) {
         unsafe { SetPropW(hwnd, w!("NonRudeHWND"), Some(HANDLE(1 as _))) }.log_err();
     } else {
         unsafe { RemovePropW(hwnd, w!("NonRudeHWND")) }.log_err();
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::ClickState;
-    use gpui::{DevicePixels, MouseButton, point};
-    use std::time::Duration;
-
-    #[test]
-    fn test_double_click_interval() {
-        let state = ClickState::new();
-        assert_eq!(
-            state.update(MouseButton::Left, point(DevicePixels(0), DevicePixels(0))),
-            1
-        );
-        assert_eq!(
-            state.update(MouseButton::Right, point(DevicePixels(0), DevicePixels(0))),
-            1
-        );
-        assert_eq!(
-            state.update(MouseButton::Left, point(DevicePixels(0), DevicePixels(0))),
-            1
-        );
-        assert_eq!(
-            state.update(MouseButton::Left, point(DevicePixels(0), DevicePixels(0))),
-            2
-        );
-        state
-            .last_click
-            .update(|it| it - Duration::from_millis(700));
-        assert_eq!(
-            state.update(MouseButton::Left, point(DevicePixels(0), DevicePixels(0))),
-            1
-        );
-    }
-
-    #[test]
-    fn test_double_click_spatial_tolerance() {
-        let state = ClickState::new();
-        assert_eq!(
-            state.update(MouseButton::Left, point(DevicePixels(-3), DevicePixels(0))),
-            1
-        );
-        assert_eq!(
-            state.update(MouseButton::Left, point(DevicePixels(0), DevicePixels(3))),
-            2
-        );
-        assert_eq!(
-            state.update(MouseButton::Right, point(DevicePixels(3), DevicePixels(2))),
-            1
-        );
-        assert_eq!(
-            state.update(MouseButton::Right, point(DevicePixels(10), DevicePixels(0))),
-            1
-        );
     }
 }

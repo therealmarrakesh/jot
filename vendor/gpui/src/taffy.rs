@@ -1,29 +1,23 @@
 use crate::{
-    AbsoluteLength, App, Bounds, DefiniteLength, Edges, GridTemplate, Length, Pixels, Point, Size,
-    Style, Window, size,
+    AbsoluteLength, App, Bounds, DefiniteLength, Edges, Length, Pixels, Point, Size, Style, Window,
+    size,
     util::{
         ceil_to_device_pixel, round_half_toward_zero, round_stroke_to_device_pixel,
         round_to_device_pixel,
     },
 };
 use crate::collections::{FxHashMap, FxHashSet};
-use std::{fmt::Debug, ops::Range};
+use std::fmt::Debug;
 use taffy::{
     TaffyTree, TraversePartialTree as _,
     geometry::{Point as TaffyPoint, Rect as TaffyRect, Size as TaffySize},
-    prelude::{max_content, min_content},
     style::AvailableSpace as TaffyAvailableSpace,
     tree::NodeId,
 };
 
-#[cfg(feature = "stacker")]
-type StackSafe<T> = stacksafe::StackSafe<T>;
-#[cfg(not(feature = "stacker"))]
-type StackSafe<T> = T;
-
 type MeasureFn =
     dyn FnMut(Size<Option<Pixels>>, Size<AvailableSpace>, &mut Window, &mut App) -> Size<Pixels>;
-type NodeMeasureFn = StackSafe<Box<MeasureFn>>;
+type NodeMeasureFn = Box<MeasureFn>;
 
 struct NodeContext {
     measure: NodeMeasureFn,
@@ -97,8 +91,6 @@ impl TaffyLayoutEngine {
     ) -> LayoutId {
         let taffy_style = style.to_taffy(rem_size, scale_factor);
         let measure = Box::new(measure) as Box<MeasureFn>;
-        #[cfg(feature = "stacker")]
-        let measure = StackSafe::new(measure);
 
         self.taffy
             .new_leaf_with_context(taffy_style, NodeContext { measure })
@@ -183,7 +175,6 @@ impl TaffyLayoutEngine {
         Ok(edges)
     }
 
-    #[cfg_attr(feature = "stacker", stacksafe::stacksafe)]
     pub fn compute_layout(
         &mut self,
         id: LayoutId,
@@ -438,48 +429,6 @@ trait ToTaffy<Output> {
 
 impl ToTaffy<taffy::style::Style> for Style {
     fn to_taffy(&self, rem_size: Pixels, scale_factor: f32) -> taffy::style::Style {
-        use taffy::style_helpers::{fr, length, minmax, repeat};
-
-        fn to_grid_line(
-            placement: &Range<crate::GridPlacement>,
-        ) -> taffy::Line<taffy::GridPlacement> {
-            taffy::Line {
-                start: placement.start.into(),
-                end: placement.end.into(),
-            }
-        }
-
-        fn to_grid_repeat<T: taffy::style::CheapCloneStr>(
-            unit: &Option<GridTemplate>,
-        ) -> Vec<taffy::GridTemplateComponent<T>> {
-            unit.map(|template| {
-                match template.min_size {
-                    // grid-template-*: repeat(<number>, minmax(0, 1fr));
-                    crate::GridTemplateMinSize::Zero => {
-                        vec![repeat(
-                            template.repeat,
-                            vec![minmax(length(0.0_f32), fr(1.0_f32))],
-                        )]
-                    }
-                    // grid-template-*: repeat(<number>, minmax(min-content, 1fr));
-                    crate::GridTemplateMinSize::MinContent => {
-                        vec![repeat(
-                            template.repeat,
-                            vec![minmax(min_content(), fr(1.0_f32))],
-                        )]
-                    }
-                    // grid-template-*: repeat(<number>, minmax(0, max-content))
-                    crate::GridTemplateMinSize::MaxContent => {
-                        vec![repeat(
-                            template.repeat,
-                            vec![minmax(length(0.0_f32), max_content())],
-                        )]
-                    }
-                }
-            })
-            .unwrap_or_default()
-        }
-
         taffy::style::Style {
             display: self.display.into(),
             overflow: self.overflow.into(),
@@ -503,18 +452,6 @@ impl ToTaffy<taffy::style::Style> for Style {
             flex_basis: self.flex_basis.to_taffy(rem_size, scale_factor),
             flex_grow: self.flex_grow,
             flex_shrink: self.flex_shrink,
-            grid_template_rows: to_grid_repeat(&self.grid_rows),
-            grid_template_columns: to_grid_repeat(&self.grid_cols),
-            grid_row: self
-                .grid_location
-                .as_ref()
-                .map(|location| to_grid_line(&location.row))
-                .unwrap_or_default(),
-            grid_column: self
-                .grid_location
-                .as_ref()
-                .map(|location| to_grid_line(&location.column))
-                .unwrap_or_default(),
             ..Default::default()
         }
     }
@@ -739,38 +676,5 @@ impl From<Size<Pixels>> for Size<AvailableSpace> {
             width: AvailableSpace::Definite(size.width),
             height: AvailableSpace::Definite(size.height),
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn border_widths_to_taffy_use_stroke_snapping() {
-        let border_widths = Edges {
-            top: Pixels(0.0).into(),
-            right: Pixels(0.4).into(),
-            bottom: Pixels(0.5).into(),
-            left: Pixels(1.6).into(),
-        };
-        let taffy_border = border_widths_to_taffy(&border_widths, Pixels(16.0), 1.0);
-
-        assert_eq!(
-            taffy_border.top,
-            taffy::style::LengthPercentage::length(0.0)
-        );
-        assert_eq!(
-            taffy_border.right,
-            taffy::style::LengthPercentage::length(1.0)
-        );
-        assert_eq!(
-            taffy_border.bottom,
-            taffy::style::LengthPercentage::length(1.0)
-        );
-        assert_eq!(
-            taffy_border.left,
-            taffy::style::LengthPercentage::length(2.0)
-        );
     }
 }

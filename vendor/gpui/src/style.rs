@@ -5,10 +5,10 @@ use std::{
 };
 
 use crate::{
-    AbsoluteLength, App, Background, BackgroundTag, BorderStyle, Bounds, ContentMask, Corners,
-    CursorStyle, DefiniteLength, DevicePixels, Edges, Font, FontFallbacks, FontFeatures, FontStyle,
-    FontWeight, GridLocation, Hsla, Length, Pixels, Point, Rgba, SharedString, Size, Styled,
-    TextRun, Window, black, phi, point, px, quad, rems, size,
+    AbsoluteLength, App, Background, BorderStyle, Bounds, ContentMask, Corners, CursorStyle,
+    DefiniteLength, DevicePixels, Edges, Font, FontFallbacks, FontFeatures, FontStyle, FontWeight,
+    Hsla, Length, Pixels, Point, Rgba, SharedString, Size, Styled, TextRun, Window, black, phi,
+    point, px, quad, rems, size,
 };
 use crate::collections::HashSet;
 use crate::refineable::{IsEmpty, Refineable};
@@ -135,102 +135,6 @@ impl ObjectFit {
     }
 }
 
-/// The minimum size of a column or row in a grid layout
-#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Default)]
-pub enum GridTemplateMinSize {
-    /// The column or row size may be 0
-    #[default]
-    Zero,
-    /// The column or row size can be determined by the min content
-    MinContent,
-    /// The column or row size can be determined by the max content
-    MaxContent,
-}
-
-/// A simplified representation of the grid-template-* value
-#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Default)]
-pub struct GridTemplate {
-    /// How this template directive should be repeated
-    pub repeat: u16,
-    /// The minimum size in the repeat(<>, minmax(_, 1fr)) equation
-    pub min_size: GridTemplateMinSize,
-}
-
-#[derive(Clone, Default)]
-pub struct GridTemplateRefinement {
-    pub repeat: Option<u16>,
-    pub min_size: Option<GridTemplateMinSize>,
-}
-
-impl GridTemplateRefinement {
-    pub fn is_some(&self) -> bool {
-        self.repeat.is_some() || self.min_size.is_some()
-    }
-}
-
-impl IsEmpty for GridTemplateRefinement {
-    fn is_empty(&self) -> bool {
-        self.repeat.is_none() && self.min_size.is_none()
-    }
-}
-
-impl From<GridTemplateRefinement> for GridTemplate {
-    fn from(v: GridTemplateRefinement) -> Self {
-        Self {
-            repeat: v.repeat.unwrap_or_default(),
-            min_size: v.min_size.unwrap_or_default(),
-        }
-    }
-}
-
-impl Refineable for GridTemplate {
-    type Refinement = GridTemplateRefinement;
-    fn refine(&mut self, r: &Self::Refinement) {
-        if let Some(v) = r.repeat { self.repeat = v; }
-        if let Some(v) = r.min_size { self.min_size = v; }
-    }
-    fn refined(mut self, r: Self::Refinement) -> Self {
-        if let Some(v) = r.repeat { self.repeat = v; }
-        if let Some(v) = r.min_size { self.min_size = v; }
-        self
-    }
-    fn is_superset_of(&self, r: &Self::Refinement) -> bool {
-        if let Some(v) = r.repeat && self.repeat != v { return false; }
-        if let Some(v) = r.min_size && self.min_size != v { return false; }
-        true
-    }
-    fn subtract(&self, r: &Self::Refinement) -> Self::Refinement {
-        GridTemplateRefinement {
-            repeat: if r.repeat == Some(self.repeat) { None } else { Some(self.repeat) },
-            min_size: if r.min_size == Some(self.min_size) { None } else { Some(self.min_size) },
-        }
-    }
-}
-
-impl Refineable for GridTemplateRefinement {
-    type Refinement = GridTemplateRefinement;
-    fn refine(&mut self, r: &Self::Refinement) {
-        if let Some(v) = r.repeat { self.repeat = Some(v); }
-        if let Some(v) = r.min_size { self.min_size = Some(v); }
-    }
-    fn refined(mut self, r: Self::Refinement) -> Self {
-        if let Some(v) = r.repeat { self.repeat = Some(v); }
-        if let Some(v) = r.min_size { self.min_size = Some(v); }
-        self
-    }
-    fn is_superset_of(&self, r: &Self::Refinement) -> bool {
-        if r.repeat.is_some() && self.repeat != r.repeat { return false; }
-        if r.min_size.is_some() && self.min_size != r.min_size { return false; }
-        true
-    }
-    fn subtract(&self, r: &Self::Refinement) -> Self::Refinement {
-        GridTemplateRefinement {
-            repeat: if self.repeat == r.repeat { None } else { self.repeat },
-            min_size: if self.min_size == r.min_size { None } else { self.min_size },
-        }
-    }
-}
-
 /// The CSS styling that can be applied to an element via the `Styled` trait
 #[derive(Clone, Debug)]
 pub struct Style {
@@ -322,15 +226,6 @@ pub struct Style {
     /// The opacity of this element
     pub opacity: Option<f32>,
 
-    /// The grid columns of this element
-    pub grid_cols: Option<GridTemplate>,
-
-    /// The row span of this element
-    pub grid_rows: Option<GridTemplate>,
-
-    /// The grid location of this element
-    pub grid_location: Option<GridLocation>,
-
     /// Whether to draw a red debugging outline around this element
     #[cfg(debug_assertions)]
     pub debug: bool,
@@ -375,9 +270,6 @@ pub struct StyleRefinement {
     pub text: TextStyleRefinement,
     pub mouse_cursor: Option<CursorStyle>,
     pub opacity: Option<f32>,
-    pub grid_cols: Option<GridTemplate>,
-    pub grid_rows: Option<GridTemplate>,
-    pub grid_location: Option<GridLocation>,
     #[cfg(debug_assertions)]
     pub debug: Option<bool>,
     #[cfg(debug_assertions)]
@@ -438,10 +330,7 @@ impl IsEmpty for StyleRefinement {
             && self.box_shadow.is_none()
             && self.text.is_empty()
             && self.mouse_cursor.is_none()
-            && self.opacity.is_none()
-            && self.grid_cols.is_none()
-            && self.grid_rows.is_none()
-            && self.grid_location.is_none();
+            && self.opacity.is_none();
         #[cfg(debug_assertions)]
         let base = base && self.debug.is_none() && self.debug_below.is_none();
         base
@@ -484,9 +373,6 @@ impl From<StyleRefinement> for Style {
             text: v.text,
             mouse_cursor: v.mouse_cursor,
             opacity: v.opacity,
-            grid_cols: v.grid_cols,
-            grid_rows: v.grid_rows,
-            grid_location: v.grid_location,
             #[cfg(debug_assertions)]
             debug: v.debug.unwrap_or_default(),
             #[cfg(debug_assertions)]
@@ -531,9 +417,6 @@ impl Refineable for Style {
         self.text.refine(&r.text);
         if let Some(v) = &r.mouse_cursor { self.mouse_cursor = Some(*v); }
         if let Some(v) = &r.opacity { self.opacity = Some(*v); }
-        if let Some(v) = &r.grid_cols { self.grid_cols = Some(*v); }
-        if let Some(v) = &r.grid_rows { self.grid_rows = Some(*v); }
-        if let Some(v) = &r.grid_location { self.grid_location = Some(v.clone()); }
         #[cfg(debug_assertions)]
         if let Some(v) = &r.debug { self.debug = *v; }
         #[cfg(debug_assertions)]
@@ -577,9 +460,6 @@ impl Refineable for Style {
         if !self.text.is_superset_of(&r.text) { return false; }
         if r.mouse_cursor.is_some() && self.mouse_cursor != r.mouse_cursor { return false; }
         if r.opacity.is_some() && self.opacity != r.opacity { return false; }
-        if r.grid_cols.is_some() && self.grid_cols != r.grid_cols { return false; }
-        if r.grid_rows.is_some() && self.grid_rows != r.grid_rows { return false; }
-        if r.grid_location.is_some() && self.grid_location != r.grid_location { return false; }
         #[cfg(debug_assertions)]
         if let Some(v) = &r.debug && &self.debug != v { return false; }
         #[cfg(debug_assertions)]
@@ -621,9 +501,6 @@ impl Refineable for Style {
             text: self.text.subtract(&r.text),
             mouse_cursor: if self.mouse_cursor == r.mouse_cursor { None } else { self.mouse_cursor },
             opacity: if self.opacity == r.opacity { None } else { self.opacity },
-            grid_cols: if self.grid_cols == r.grid_cols { None } else { self.grid_cols },
-            grid_rows: if self.grid_rows == r.grid_rows { None } else { self.grid_rows },
-            grid_location: if self.grid_location == r.grid_location { None } else { self.grid_location.clone() },
             #[cfg(debug_assertions)]
             debug: if r.debug == Some(self.debug) { None } else { Some(self.debug) },
             #[cfg(debug_assertions)]
@@ -668,9 +545,6 @@ impl Refineable for StyleRefinement {
         self.text.refine(&r.text);
         if let Some(v) = &r.mouse_cursor { self.mouse_cursor = Some(*v); }
         if let Some(v) = &r.opacity { self.opacity = Some(*v); }
-        if let Some(v) = &r.grid_cols { self.grid_cols = Some(*v); }
-        if let Some(v) = &r.grid_rows { self.grid_rows = Some(*v); }
-        if let Some(v) = &r.grid_location { self.grid_location = Some(v.clone()); }
         #[cfg(debug_assertions)]
         if let Some(v) = &r.debug { self.debug = Some(*v); }
         #[cfg(debug_assertions)]
@@ -714,9 +588,6 @@ impl Refineable for StyleRefinement {
         if !self.text.is_superset_of(&r.text) { return false; }
         if r.mouse_cursor.is_some() && self.mouse_cursor != r.mouse_cursor { return false; }
         if r.opacity.is_some() && self.opacity != r.opacity { return false; }
-        if r.grid_cols.is_some() && self.grid_cols != r.grid_cols { return false; }
-        if r.grid_rows.is_some() && self.grid_rows != r.grid_rows { return false; }
-        if r.grid_location.is_some() && self.grid_location != r.grid_location { return false; }
         #[cfg(debug_assertions)]
         if r.debug.is_some() && self.debug != r.debug { return false; }
         #[cfg(debug_assertions)]
@@ -758,9 +629,6 @@ impl Refineable for StyleRefinement {
             text: self.text.subtract(&r.text),
             mouse_cursor: if self.mouse_cursor == r.mouse_cursor { None } else { self.mouse_cursor },
             opacity: if self.opacity == r.opacity { None } else { self.opacity },
-            grid_cols: if self.grid_cols == r.grid_cols { None } else { self.grid_cols },
-            grid_rows: if self.grid_rows == r.grid_rows { None } else { self.grid_rows },
-            grid_location: if self.grid_location == r.grid_location { None } else { self.grid_location.clone() },
             #[cfg(debug_assertions)]
             debug: if self.debug == r.debug { None } else { self.debug },
             #[cfg(debug_assertions)]
@@ -772,13 +640,6 @@ impl Refineable for StyleRefinement {
 impl Styled for StyleRefinement {
     fn style(&mut self) -> &mut StyleRefinement {
         self
-    }
-}
-
-impl StyleRefinement {
-    /// The grid location of this element
-    pub fn grid_location_mut(&mut self) -> &mut GridLocation {
-        self.grid_location.get_or_insert_default()
     }
 }
 
@@ -903,8 +764,6 @@ pub struct TextStyle {
     pub background_color: Option<Hsla>,
     /// The underline style of the text
     pub underline: Option<UnderlineStyle>,
-    /// The strikethrough style of the text
-    pub strikethrough: Option<StrikethroughStyle>,
     /// How to handle whitespace in the text
     pub white_space: WhiteSpace,
     /// The text should be truncated if it overflows the width of the element
@@ -927,7 +786,6 @@ pub struct TextStyleRefinement {
     pub font_style: Option<FontStyle>,
     pub background_color: Option<Hsla>,
     pub underline: Option<UnderlineStyle>,
-    pub strikethrough: Option<StrikethroughStyle>,
     pub white_space: Option<WhiteSpace>,
     pub text_overflow: Option<TextOverflow>,
     pub text_align: Option<TextAlign>,
@@ -963,7 +821,6 @@ impl IsEmpty for TextStyleRefinement {
             && self.font_style.is_none()
             && self.background_color.is_none()
             && self.underline.is_none()
-            && self.strikethrough.is_none()
             && self.white_space.is_none()
             && self.text_overflow.is_none()
             && self.text_align.is_none()
@@ -984,7 +841,6 @@ impl From<TextStyleRefinement> for TextStyle {
             font_style: v.font_style.unwrap_or_default(),
             background_color: v.background_color,
             underline: v.underline,
-            strikethrough: v.strikethrough,
             white_space: v.white_space.unwrap_or_default(),
             text_overflow: v.text_overflow,
             text_align: v.text_align.unwrap_or_default(),
@@ -1006,7 +862,6 @@ impl Refineable for TextStyle {
         if let Some(v) = &r.font_style { self.font_style = *v; }
         if let Some(v) = &r.background_color { self.background_color = Some(*v); }
         if let Some(v) = &r.underline { self.underline = Some(*v); }
-        if let Some(v) = &r.strikethrough { self.strikethrough = Some(*v); }
         if let Some(v) = &r.white_space { self.white_space = *v; }
         if let Some(v) = &r.text_overflow { self.text_overflow = Some(v.clone()); }
         if let Some(v) = &r.text_align { self.text_align = *v; }
@@ -1027,7 +882,6 @@ impl Refineable for TextStyle {
         if let Some(v) = &r.font_style && &self.font_style != v { return false; }
         if r.background_color.is_some() && self.background_color != r.background_color { return false; }
         if r.underline.is_some() && self.underline != r.underline { return false; }
-        if r.strikethrough.is_some() && self.strikethrough != r.strikethrough { return false; }
         if let Some(v) = &r.white_space && &self.white_space != v { return false; }
         if r.text_overflow.is_some() && self.text_overflow != r.text_overflow { return false; }
         if let Some(v) = &r.text_align && &self.text_align != v { return false; }
@@ -1046,7 +900,6 @@ impl Refineable for TextStyle {
             font_style: if r.font_style == Some(self.font_style) { None } else { Some(self.font_style) },
             background_color: if self.background_color == r.background_color { None } else { self.background_color },
             underline: if self.underline == r.underline { None } else { self.underline },
-            strikethrough: if self.strikethrough == r.strikethrough { None } else { self.strikethrough },
             white_space: if r.white_space == Some(self.white_space) { None } else { Some(self.white_space) },
             text_overflow: if self.text_overflow == r.text_overflow { None } else { self.text_overflow.clone() },
             text_align: if r.text_align == Some(self.text_align) { None } else { Some(self.text_align) },
@@ -1068,7 +921,6 @@ impl Refineable for TextStyleRefinement {
         if let Some(v) = &r.font_style { self.font_style = Some(*v); }
         if let Some(v) = &r.background_color { self.background_color = Some(*v); }
         if let Some(v) = &r.underline { self.underline = Some(*v); }
-        if let Some(v) = &r.strikethrough { self.strikethrough = Some(*v); }
         if let Some(v) = &r.white_space { self.white_space = Some(*v); }
         if let Some(v) = &r.text_overflow { self.text_overflow = Some(v.clone()); }
         if let Some(v) = &r.text_align { self.text_align = Some(*v); }
@@ -1089,7 +941,6 @@ impl Refineable for TextStyleRefinement {
         if r.font_style.is_some() && self.font_style != r.font_style { return false; }
         if r.background_color.is_some() && self.background_color != r.background_color { return false; }
         if r.underline.is_some() && self.underline != r.underline { return false; }
-        if r.strikethrough.is_some() && self.strikethrough != r.strikethrough { return false; }
         if r.white_space.is_some() && self.white_space != r.white_space { return false; }
         if r.text_overflow.is_some() && self.text_overflow != r.text_overflow { return false; }
         if r.text_align.is_some() && self.text_align != r.text_align { return false; }
@@ -1108,7 +959,6 @@ impl Refineable for TextStyleRefinement {
             font_style: if self.font_style == r.font_style { None } else { self.font_style },
             background_color: if self.background_color == r.background_color { None } else { self.background_color },
             underline: if self.underline == r.underline { None } else { self.underline },
-            strikethrough: if self.strikethrough == r.strikethrough { None } else { self.strikethrough },
             white_space: if self.white_space == r.white_space { None } else { self.white_space },
             text_overflow: if self.text_overflow == r.text_overflow { None } else { self.text_overflow.clone() },
             text_align: if self.text_align == r.text_align { None } else { self.text_align },
@@ -1131,7 +981,6 @@ impl Default for TextStyle {
             font_style: FontStyle::default(),
             background_color: None,
             underline: None,
-            strikethrough: None,
             white_space: WhiteSpace::Normal,
             text_overflow: None,
             text_align: TextAlign::default(),
@@ -1167,10 +1016,6 @@ impl TextStyle {
             self.underline = Some(underline);
         }
 
-        if let Some(strikethrough) = style.strikethrough {
-            self.strikethrough = Some(strikethrough);
-        }
-
         self
     }
 
@@ -1204,7 +1049,6 @@ impl TextStyle {
             color: self.color,
             background_color: self.background_color,
             underline: self.underline,
-            strikethrough: self.strikethrough,
         }
     }
 }
@@ -1228,9 +1072,6 @@ pub struct HighlightStyle {
     /// The underline style of the text
     pub underline: Option<UnderlineStyle>,
 
-    /// The underline style of the text
-    pub strikethrough: Option<StrikethroughStyle>,
-
     /// Similar to the CSS `opacity` property, this will cause the text to be less vibrant.
     pub fade_out: Option<f32>,
 }
@@ -1244,7 +1085,6 @@ impl Hash for HighlightStyle {
         self.font_style.hash(state);
         self.background_color.hash(state);
         self.underline.hash(state);
-        self.strikethrough.hash(state);
         state.write_u32(u32::from_be_bytes(
             self.fade_out.map(|f| f.to_be_bytes()).unwrap_or_default(),
         ));
@@ -1347,20 +1187,7 @@ impl Style {
 
         let background_color = self.background.as_ref().and_then(Fill::color);
         if background_color.is_some_and(|color| !color.is_transparent()) {
-            let mut border_color = match background_color {
-                Some(color) => match color.tag {
-                    BackgroundTag::Solid
-                    | BackgroundTag::PatternSlash
-                    | BackgroundTag::Checkerboard => color.solid,
-
-                    BackgroundTag::LinearGradient => color
-                        .colors
-                        .first()
-                        .map(|stop| stop.color)
-                        .unwrap_or_default(),
-                },
-                None => Hsla::default(),
-            };
+            let mut border_color = background_color.map(|color| color.0).unwrap_or_default();
             border_color.a = 0.;
             window.paint_quad(quad(
                 bounds,
@@ -1444,9 +1271,6 @@ impl Default for Style {
             text: TextStyleRefinement::default(),
             mouse_cursor: None,
             opacity: None,
-            grid_rows: None,
-            grid_cols: None,
-            grid_location: None,
 
             #[cfg(debug_assertions)]
             debug: false,
@@ -1463,26 +1287,23 @@ pub struct UnderlineStyle {
     pub thickness: Pixels,
     /// The color of the underline.
     pub color: Option<Hsla>,
-    /// Whether the underline should be wavy, like in a spell checker.
-    pub wavy: bool,
 }
 
 #[derive(Clone, Default)]
 pub struct UnderlineStyleRefinement {
     pub thickness: Option<Pixels>,
     pub color: Option<Hsla>,
-    pub wavy: Option<bool>,
 }
 
 impl UnderlineStyleRefinement {
     pub fn is_some(&self) -> bool {
-        self.thickness.is_some() || self.color.is_some() || self.wavy.is_some()
+        self.thickness.is_some() || self.color.is_some()
     }
 }
 
 impl IsEmpty for UnderlineStyleRefinement {
     fn is_empty(&self) -> bool {
-        self.thickness.is_none() && self.color.is_none() && self.wavy.is_none()
+        self.thickness.is_none() && self.color.is_none()
     }
 }
 
@@ -1491,7 +1312,6 @@ impl From<UnderlineStyleRefinement> for UnderlineStyle {
         Self {
             thickness: v.thickness.unwrap_or_default(),
             color: v.color,
-            wavy: v.wavy.unwrap_or_default(),
         }
     }
 }
@@ -1501,20 +1321,17 @@ impl Refineable for UnderlineStyle {
     fn refine(&mut self, r: &Self::Refinement) {
         if let Some(v) = r.thickness { self.thickness = v; }
         if let Some(v) = r.color { self.color = Some(v); }
-        if let Some(v) = r.wavy { self.wavy = v; }
     }
     fn refined(mut self, r: Self::Refinement) -> Self { self.refine(&r); self }
     fn is_superset_of(&self, r: &Self::Refinement) -> bool {
         if let Some(v) = r.thickness && self.thickness != v { return false; }
         if r.color.is_some() && self.color != r.color { return false; }
-        if let Some(v) = r.wavy && self.wavy != v { return false; }
         true
     }
     fn subtract(&self, r: &Self::Refinement) -> Self::Refinement {
         UnderlineStyleRefinement {
             thickness: if r.thickness == Some(self.thickness) { None } else { Some(self.thickness) },
             color: if self.color == r.color { None } else { self.color },
-            wavy: if r.wavy == Some(self.wavy) { None } else { Some(self.wavy) },
         }
     }
 }
@@ -1524,94 +1341,15 @@ impl Refineable for UnderlineStyleRefinement {
     fn refine(&mut self, r: &Self::Refinement) {
         if let Some(v) = r.thickness { self.thickness = Some(v); }
         if let Some(v) = r.color { self.color = Some(v); }
-        if let Some(v) = r.wavy { self.wavy = Some(v); }
     }
     fn refined(mut self, r: Self::Refinement) -> Self { self.refine(&r); self }
     fn is_superset_of(&self, r: &Self::Refinement) -> bool {
         if r.thickness.is_some() && self.thickness != r.thickness { return false; }
         if r.color.is_some() && self.color != r.color { return false; }
-        if r.wavy.is_some() && self.wavy != r.wavy { return false; }
         true
     }
     fn subtract(&self, r: &Self::Refinement) -> Self::Refinement {
         UnderlineStyleRefinement {
-            thickness: if self.thickness == r.thickness { None } else { self.thickness },
-            color: if self.color == r.color { None } else { self.color },
-            wavy: if self.wavy == r.wavy { None } else { self.wavy },
-        }
-    }
-}
-
-/// The properties that can be applied to a strikethrough.
-#[derive(Copy, Clone, Default, Debug, PartialEq, Eq, Hash)]
-pub struct StrikethroughStyle {
-    /// The thickness of the strikethrough.
-    pub thickness: Pixels,
-    /// The color of the strikethrough.
-    pub color: Option<Hsla>,
-}
-
-#[derive(Clone, Default)]
-pub struct StrikethroughStyleRefinement {
-    pub thickness: Option<Pixels>,
-    pub color: Option<Hsla>,
-}
-
-impl StrikethroughStyleRefinement {
-    pub fn is_some(&self) -> bool {
-        self.thickness.is_some() || self.color.is_some()
-    }
-}
-
-impl IsEmpty for StrikethroughStyleRefinement {
-    fn is_empty(&self) -> bool {
-        self.thickness.is_none() && self.color.is_none()
-    }
-}
-
-impl From<StrikethroughStyleRefinement> for StrikethroughStyle {
-    fn from(v: StrikethroughStyleRefinement) -> Self {
-        Self {
-            thickness: v.thickness.unwrap_or_default(),
-            color: v.color,
-        }
-    }
-}
-
-impl Refineable for StrikethroughStyle {
-    type Refinement = StrikethroughStyleRefinement;
-    fn refine(&mut self, r: &Self::Refinement) {
-        if let Some(v) = r.thickness { self.thickness = v; }
-        if let Some(v) = r.color { self.color = Some(v); }
-    }
-    fn refined(mut self, r: Self::Refinement) -> Self { self.refine(&r); self }
-    fn is_superset_of(&self, r: &Self::Refinement) -> bool {
-        if let Some(v) = r.thickness && self.thickness != v { return false; }
-        if r.color.is_some() && self.color != r.color { return false; }
-        true
-    }
-    fn subtract(&self, r: &Self::Refinement) -> Self::Refinement {
-        StrikethroughStyleRefinement {
-            thickness: if r.thickness == Some(self.thickness) { None } else { Some(self.thickness) },
-            color: if self.color == r.color { None } else { self.color },
-        }
-    }
-}
-
-impl Refineable for StrikethroughStyleRefinement {
-    type Refinement = StrikethroughStyleRefinement;
-    fn refine(&mut self, r: &Self::Refinement) {
-        if let Some(v) = r.thickness { self.thickness = Some(v); }
-        if let Some(v) = r.color { self.color = Some(v); }
-    }
-    fn refined(mut self, r: Self::Refinement) -> Self { self.refine(&r); self }
-    fn is_superset_of(&self, r: &Self::Refinement) -> bool {
-        if r.thickness.is_some() && self.thickness != r.thickness { return false; }
-        if r.color.is_some() && self.color != r.color { return false; }
-        true
-    }
-    fn subtract(&self, r: &Self::Refinement) -> Self::Refinement {
-        StrikethroughStyleRefinement {
             thickness: if self.thickness == r.thickness { None } else { self.thickness },
             color: if self.color == r.color { None } else { self.color },
         }
@@ -1674,7 +1412,6 @@ impl From<&TextStyle> for HighlightStyle {
             font_style: Some(other.font_style),
             background_color: other.background_color,
             underline: other.underline,
-            strikethrough: other.strikethrough,
             fade_out: None,
         }
     }
@@ -1707,7 +1444,6 @@ impl HighlightStyle {
             font_style: other.font_style.or(self.font_style),
             background_color: other.background_color.or(self.background_color),
             underline: other.underline.or(self.underline),
-            strikethrough: other.strikethrough.or(self.strikethrough),
             fade_out: other
                 .fade_out
                 .map(|source_fade| {
@@ -1904,8 +1640,6 @@ pub enum Display {
     /// The children will follow the flexbox layout algorithm
     #[default]
     Flex,
-    /// The children will follow the CSS Grid layout algorithm
-    Grid,
     /// The children will not be laid out, and will follow absolute positioning
     None,
 }
@@ -2051,7 +1785,6 @@ impl From<Display> for taffy::style::Display {
         match value {
             Display::Block => Self::Block,
             Display::Flex => Self::Flex,
-            Display::Grid => Self::Grid,
             Display::None => Self::None,
         }
     }
@@ -2095,205 +1828,5 @@ impl From<Position> for taffy::style::Position {
             Position::Relative => Self::Relative,
             Position::Absolute => Self::Absolute,
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::{blue, green, px, red, yellow};
-
-    use super::*;
-
-    use util_macros::perf;
-
-    #[perf]
-    fn test_basic_highlight_style_combination() {
-        let style_a = HighlightStyle::default();
-        let style_b = HighlightStyle::default();
-        let style_a = style_a.highlight(style_b);
-        assert_eq!(
-            style_a,
-            HighlightStyle::default(),
-            "Combining empty styles should not produce a non-empty style."
-        );
-
-        let mut style_b = HighlightStyle {
-            color: Some(red()),
-            strikethrough: Some(StrikethroughStyle {
-                thickness: px(2.),
-                color: Some(blue()),
-            }),
-            fade_out: Some(0.),
-            font_style: Some(FontStyle::Italic),
-            font_weight: Some(FontWeight(300.)),
-            background_color: Some(yellow()),
-            underline: Some(UnderlineStyle {
-                thickness: px(2.),
-                color: Some(red()),
-                wavy: true,
-            }),
-        };
-        let expected_style = style_b;
-
-        let style_a = style_a.highlight(style_b);
-        assert_eq!(
-            style_a, expected_style,
-            "Blending an empty style with another style should return the other style"
-        );
-
-        let style_b = style_b.highlight(Default::default());
-        assert_eq!(
-            style_b, expected_style,
-            "Blending a style with an empty style should not change the style."
-        );
-
-        let mut style_c = expected_style;
-
-        let style_d = HighlightStyle {
-            color: Some(blue().alpha(0.7)),
-            strikethrough: Some(StrikethroughStyle {
-                thickness: px(4.),
-                color: Some(crate::red()),
-            }),
-            fade_out: Some(0.),
-            font_style: Some(FontStyle::Oblique),
-            font_weight: Some(FontWeight(800.)),
-            background_color: Some(green()),
-            underline: Some(UnderlineStyle {
-                thickness: px(4.),
-                color: None,
-                wavy: false,
-            }),
-        };
-
-        let expected_style = HighlightStyle {
-            color: Some(red().blend(blue().alpha(0.7))),
-            strikethrough: Some(StrikethroughStyle {
-                thickness: px(4.),
-                color: Some(red()),
-            }),
-            // TODO this does not seem right
-            fade_out: Some(0.),
-            font_style: Some(FontStyle::Oblique),
-            font_weight: Some(FontWeight(800.)),
-            background_color: Some(green()),
-            underline: Some(UnderlineStyle {
-                thickness: px(4.),
-                color: None,
-                wavy: false,
-            }),
-        };
-
-        let style_c = style_c.highlight(style_d);
-        assert_eq!(
-            style_c, expected_style,
-            "Blending styles should blend properties where possible and override all others"
-        );
-    }
-
-    #[perf]
-    fn test_combine_highlights() {
-        assert_eq!(
-            combine_highlights(
-                [
-                    (0..5, green().into()),
-                    (4..10, FontWeight::BOLD.into()),
-                    (15..20, yellow().into()),
-                ],
-                [
-                    (2..6, FontStyle::Italic.into()),
-                    (1..3, blue().into()),
-                    (21..23, red().into()),
-                ]
-            )
-            .collect::<Vec<_>>(),
-            [
-                (
-                    0..1,
-                    HighlightStyle {
-                        color: Some(green()),
-                        ..Default::default()
-                    }
-                ),
-                (
-                    1..2,
-                    HighlightStyle {
-                        color: Some(blue()),
-                        ..Default::default()
-                    }
-                ),
-                (
-                    2..3,
-                    HighlightStyle {
-                        color: Some(blue()),
-                        font_style: Some(FontStyle::Italic),
-                        ..Default::default()
-                    }
-                ),
-                (
-                    3..4,
-                    HighlightStyle {
-                        color: Some(green()),
-                        font_style: Some(FontStyle::Italic),
-                        ..Default::default()
-                    }
-                ),
-                (
-                    4..5,
-                    HighlightStyle {
-                        color: Some(green()),
-                        font_weight: Some(FontWeight::BOLD),
-                        font_style: Some(FontStyle::Italic),
-                        ..Default::default()
-                    }
-                ),
-                (
-                    5..6,
-                    HighlightStyle {
-                        font_weight: Some(FontWeight::BOLD),
-                        font_style: Some(FontStyle::Italic),
-                        ..Default::default()
-                    }
-                ),
-                (
-                    6..10,
-                    HighlightStyle {
-                        font_weight: Some(FontWeight::BOLD),
-                        ..Default::default()
-                    }
-                ),
-                (
-                    15..20,
-                    HighlightStyle {
-                        color: Some(yellow()),
-                        ..Default::default()
-                    }
-                ),
-                (
-                    21..23,
-                    HighlightStyle {
-                        color: Some(red()),
-                        ..Default::default()
-                    }
-                )
-            ]
-        );
-    }
-
-    #[perf]
-    fn test_text_style_refinement() {
-        let mut style = Style::default();
-        style.refine(&StyleRefinement::default().text_size(px(20.0)));
-        style.refine(&StyleRefinement::default().font_weight(FontWeight::SEMIBOLD));
-
-        assert_eq!(
-            Some(AbsoluteLength::from(px(20.0))),
-            style.text_style().unwrap().font_size
-        );
-
-        assert_eq!(
-            Some(FontWeight::SEMIBOLD),
-            style.text_style().unwrap().font_weight
-        );
     }
 }

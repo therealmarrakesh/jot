@@ -19,12 +19,9 @@ use windows::{
     Win32::{
         Foundation::*,
         System::{Com::*, Threading::GetCurrentThreadId},
-        UI::{
-            Controls::{TASKDIALOG_NOTIFICATIONS, TDN_BUTTON_CLICKED},
-            WindowsAndMessaging::*,
-        },
+        UI::WindowsAndMessaging::*,
     },
-    core::{BOOL, HRESULT, w},
+    core::{BOOL, w},
 };
 
 use crate::platform::win32::SafeHwnd;
@@ -211,26 +208,6 @@ fn cancellation_requested() -> bool {
     })
 }
 
-pub(crate) unsafe extern "system" fn task_dialog_callback(
-    _: HWND,
-    notification: TASKDIALOG_NOTIFICATIONS,
-    button: WPARAM,
-    _: LPARAM,
-    has_cancel_button: isize,
-) -> HRESULT {
-    // WM_CLOSE requires TDF_ALLOW_DIALOG_CANCELLATION, which also enables Esc/X.
-    // Only allow those user gestures when the prompt offered a Cancel button.
-    if notification == TDN_BUTTON_CLICKED
-        && button.0 == IDCANCEL.0 as usize
-        && has_cancel_button == 0
-        && !cancellation_requested()
-    {
-        S_FALSE
-    } else {
-        S_OK
-    }
-}
-
 unsafe extern "system" fn close_dialog(hwnd: HWND, _: LPARAM) -> BOOL {
     // Shell dialogs can open further modal dialogs. Close only dialog windows
     // on this dedicated thread, not hidden COM infrastructure windows.
@@ -241,100 +218,4 @@ unsafe extern "system" fn close_dialog(hwnd: HWND, _: LPARAM) -> BOOL {
         unsafe { PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0)).log_err() };
     }
     TRUE
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use futures::FutureExt as _;
-
-    #[test]
-    fn task_dialog_cancellation_requires_cancel_button_or_internal_request() {
-        let cancellation = Cancellation::default();
-        CANCELLATION.with(|slot| slot.replace(Some(cancellation.clone())));
-        for internally_cancelled in [false, true] {
-            cancellation
-                .requested
-                .store(internally_cancelled, Ordering::Release);
-            for has_cancel_button in [false, true] {
-                for button in [IDCANCEL.0, IDOK.0, -1] {
-                    let result = unsafe {
-                        task_dialog_callback(
-                            HWND::default(),
-                            TDN_BUTTON_CLICKED,
-                            WPARAM(button as usize),
-                            LPARAM(0),
-                            has_cancel_button as isize,
-                        )
-                    };
-                    let should_veto =
-                        button == IDCANCEL.0 && !has_cancel_button && !internally_cancelled;
-                    assert_eq!(result, if should_veto { S_FALSE } else { S_OK });
-                }
-            }
-        }
-        CANCELLATION.with(|slot| slot.take());
-    }
-
-    #[test]
-    fn closing_owner_cancels_every_outstanding_dialog() {
-        let owner = DialogOwner::new(HWND::default());
-        let first = Cancellation::new(Some(&owner));
-        let second = Cancellation::new(Some(&owner));
-        assert!(!first.is_requested());
-        assert!(!second.is_requested());
-
-        owner.close();
-        owner.close();
-
-        assert!(first.is_requested());
-        assert!(second.is_requested());
-        assert!(Cancellation::new(Some(&owner)).is_requested());
-    }
-
-    #[test]
-    fn closed_owner_waits_for_active_dialog_but_queued_requests_stay_cancelled() {
-        let owner = DialogOwner::new(HWND::default());
-        let active = owner.serialization.try_lock().expect("first dialog");
-        let queued = Cancellation::new(Some(&owner));
-
-        owner.close();
-        assert!(owner.when_idle().now_or_never().is_none());
-        drop(active);
-        assert!(owner.when_idle().now_or_never().is_some());
-
-        let _guard = owner.serialization.try_lock().expect("queued request");
-        assert!(queued.is_requested());
-    }
-
-    #[test]
-    fn cancelling_one_request_does_not_cancel_its_owner_or_other_requests() {
-        let owner = DialogOwner::new(HWND::default());
-        let first = Cancellation::new(Some(&owner));
-        let second = Cancellation::new(Some(&owner));
-        first.requested.store(true, Ordering::Release);
-        assert!(first.is_requested());
-        assert!(!second.is_requested());
-        assert!(!owner.closed.load(Ordering::Acquire));
-    }
-
-    #[test]
-    fn dialogs_serialize_per_owner() {
-        let owner = DialogOwner::new(HWND::default());
-        let other_owner = DialogOwner::new(HWND::default());
-        let guard = owner.serialization.try_lock().expect("first dialog");
-
-        assert!(owner.serialization.try_lock().is_none());
-        assert!(other_owner.serialization.try_lock().is_some());
-        drop(guard);
-        assert!(owner.serialization.try_lock().is_some());
-    }
-
-    #[test]
-    fn ownerless_request_can_be_cancelled_without_a_window() {
-        let cancellation = Cancellation::new(None);
-        assert!(!cancellation.is_requested());
-        cancellation.requested.store(true, Ordering::Release);
-        assert!(cancellation.is_requested());
-    }
 }

@@ -167,7 +167,6 @@ struct DirectXAtlasTextures {
     device_context: ID3D11DeviceContext,
     monochrome_textures: AtlasTextureList<DirectXAtlasTexture>,
     polychrome_textures: AtlasTextureList<DirectXAtlasTexture>,
-    subpixel_textures: AtlasTextureList<DirectXAtlasTexture>,
 }
 
 struct DirectXAtlasTexture {
@@ -186,7 +185,6 @@ impl DirectXAtlas {
             device_context: device_context.clone(),
             monochrome_textures: Default::default(),
             polychrome_textures: Default::default(),
-            subpixel_textures: Default::default(),
         })))
     }
 
@@ -214,7 +212,6 @@ impl DirectXAtlas {
             textures.device_context = device_context.clone();
             textures.monochrome_textures = AtlasTextureList::default();
             textures.polychrome_textures = AtlasTextureList::default();
-            textures.subpixel_textures = AtlasTextureList::default();
         });
     }
 }
@@ -258,7 +255,6 @@ impl AtlasBackend for DirectXAtlasTextures {
         let textures = match id.kind {
             AtlasTextureKind::Monochrome => &mut self.monochrome_textures,
             AtlasTextureKind::Polychrome => &mut self.polychrome_textures,
-            AtlasTextureKind::Subpixel => &mut self.subpixel_textures,
         };
 
         let Some(texture_slot) = textures.textures.get_mut(id.index as usize) else {
@@ -287,7 +283,6 @@ impl DirectXAtlasTextures {
             let textures = match texture_kind {
                 AtlasTextureKind::Monochrome => &mut self.monochrome_textures,
                 AtlasTextureKind::Polychrome => &mut self.polychrome_textures,
-                AtlasTextureKind::Subpixel => &mut self.subpixel_textures,
             };
 
             if let Some(tile) = textures
@@ -333,11 +328,6 @@ impl DirectXAtlasTextures {
                 bind_flag = D3D11_BIND_SHADER_RESOURCE;
                 bytes_per_pixel = 4;
             }
-            AtlasTextureKind::Subpixel => {
-                pixel_format = DXGI_FORMAT_R8G8B8A8_UNORM;
-                bind_flag = D3D11_BIND_SHADER_RESOURCE;
-                bytes_per_pixel = 4;
-            }
         }
         let texture_desc = D3D11_TEXTURE2D_DESC {
             Width: size.width.0 as u32,
@@ -367,7 +357,6 @@ impl DirectXAtlasTextures {
         let texture_list = match kind {
             AtlasTextureKind::Monochrome => &mut self.monochrome_textures,
             AtlasTextureKind::Polychrome => &mut self.polychrome_textures,
-            AtlasTextureKind::Subpixel => &mut self.subpixel_textures,
         };
         let index = texture_list.free_list.pop();
         let view = unsafe {
@@ -401,7 +390,6 @@ impl DirectXAtlasTextures {
         let textures = match id.kind {
             AtlasTextureKind::Monochrome => &self.monochrome_textures,
             AtlasTextureKind::Polychrome => &self.polychrome_textures,
-            AtlasTextureKind::Subpixel => &self.subpixel_textures,
         };
         textures.textures.get(id.index as usize)?.as_ref()
     }
@@ -469,90 +457,5 @@ impl DirectXAtlasTexture {
 
     fn is_unreferenced(&mut self) -> bool {
         self.live_atlas_keys == 0
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use gpui::{FontId, GlyphId, RenderGlyphParams};
-    use std::borrow::Cow;
-    use windows::Win32::{
-        Foundation::HMODULE,
-        Graphics::{
-            Direct3D::D3D_DRIVER_TYPE_WARP,
-            Direct3D11::{D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION, D3D11CreateDevice},
-        },
-    };
-
-    fn create_atlas() -> Option<DirectXAtlas> {
-        let mut device: Option<ID3D11Device> = None;
-        let mut device_context: Option<ID3D11DeviceContext> = None;
-        unsafe {
-            D3D11CreateDevice(
-                None,
-                D3D_DRIVER_TYPE_WARP,
-                HMODULE::default(),
-                D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-                None,
-                D3D11_SDK_VERSION,
-                Some(&mut device),
-                None,
-                Some(&mut device_context),
-            )
-        }
-        .ok()?;
-        Some(DirectXAtlas::new(&device?, &device_context?))
-    }
-
-    fn make_image_key(image_id: usize) -> AtlasKey {
-        AtlasKey::Glyph(RenderGlyphParams {
-            font_id: FontId(0),
-            glyph_id: GlyphId(image_id as u32),
-            font_size: gpui::px(14.0),
-            subpixel_variant: gpui::Point::default(),
-            scale_factor: 1.0,
-            is_emoji: true,
-            subpixel_rendering: false,
-        })
-    }
-
-    fn insert_tile(atlas: &DirectXAtlas, key: AtlasKey, size: Size<DevicePixels>) -> AtlasTile {
-        atlas
-            .get_or_insert_with(key, &mut || {
-                let byte_count = (size.width.0 as usize) * (size.height.0 as usize) * 4;
-                Ok(Some((size, Cow::Owned(vec![0u8; byte_count]))))
-            })
-            .expect("allocation should succeed")
-            .expect("callback returns Some")
-    }
-
-    #[test]
-    fn test_remove_deallocates_tile_space_for_reuse() {
-        let Some(atlas) = create_atlas() else {
-            return;
-        };
-
-        let small = Size {
-            width: DevicePixels(64),
-            height: DevicePixels(64),
-        };
-        let big = Size {
-            width: DevicePixels(700),
-            height: DevicePixels(700),
-        };
-
-        let keeper_key = make_image_key(1);
-        let big_key_a = make_image_key(2);
-        let big_key_b = make_image_key(3);
-
-        let keeper_tile = insert_tile(&atlas, keeper_key, small);
-        let tile_a = insert_tile(&atlas, big_key_a.clone(), big);
-        assert_eq!(keeper_tile.texture_id, tile_a.texture_id);
-
-        atlas.remove(&big_key_a);
-
-        let tile_b = insert_tile(&atlas, big_key_b, big);
-        assert_eq!(tile_b.texture_id, keeper_tile.texture_id);
     }
 }

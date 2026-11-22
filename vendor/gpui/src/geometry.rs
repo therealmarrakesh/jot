@@ -5,14 +5,13 @@
 use crate::anyhow::{Context as _, anyhow};
 use core::fmt::Debug;
 use crate::refineable::{IsEmpty, Refineable};
-use std::ops::{AddAssign, DivAssign, Range, SubAssign};
+use std::ops::{AddAssign, DivAssign, SubAssign};
 use std::{
     cmp::{self, PartialOrd},
     fmt::{self, Display},
     hash::Hash,
     ops::{Add, Div, Mul, MulAssign, Neg, Sub},
 };
-use taffy::prelude::{TaffyGridLine, TaffyGridSpan};
 
 use crate::{App, DisplayId};
 
@@ -4236,37 +4235,6 @@ impl From<()> for Length {
     }
 }
 
-/// A location in a grid layout.
-#[derive(Clone, PartialEq, Debug, Default)]
-pub struct GridLocation {
-    /// The rows this item uses within the grid.
-    pub row: Range<GridPlacement>,
-    /// The columns this item uses within the grid.
-    pub column: Range<GridPlacement>,
-}
-
-/// The placement of an item within a grid layout's column or row.
-#[derive(Clone, Copy, PartialEq, Debug, Default)]
-pub enum GridPlacement {
-    /// The grid line index to place this item.
-    Line(i16),
-    /// The number of grid lines to span.
-    Span(u16),
-    /// Automatically determine the placement, equivalent to Span(1)
-    #[default]
-    Auto,
-}
-
-impl From<GridPlacement> for taffy::GridPlacement {
-    fn from(placement: GridPlacement) -> Self {
-        match placement {
-            GridPlacement::Line(index) => taffy::GridPlacement::from_line_index(index),
-            GridPlacement::Span(span) => taffy::GridPlacement::from_span(span),
-            GridPlacement::Auto => taffy::GridPlacement::Auto,
-        }
-    }
-}
-
 /// Provides a trait for types that can calculate half of their value.
 ///
 /// The `Half` trait is used for types that can be evenly divided, returning a new instance of the same type
@@ -4413,44 +4381,5 @@ where
             && self.top_right.is_zero()
             && self.bottom_right.is_zero()
             && self.bottom_left.is_zero()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_bounds_intersects() {
-        let bounds1 = Bounds {
-            origin: Point { x: 0.0, y: 0.0 },
-            size: Size {
-                width: 5.0,
-                height: 5.0,
-            },
-        };
-        let bounds2 = Bounds {
-            origin: Point { x: 4.0, y: 4.0 },
-            size: Size {
-                width: 5.0,
-                height: 5.0,
-            },
-        };
-        let bounds3 = Bounds {
-            origin: Point { x: 10.0, y: 10.0 },
-            size: Size {
-                width: 5.0,
-                height: 5.0,
-            },
-        };
-
-        // Test Case 1: Intersecting bounds
-        assert!(bounds1.intersects(&bounds2));
-
-        // Test Case 2: Non-Intersecting bounds
-        assert!(!bounds1.intersects(&bounds3));
-
-        // Test Case 3: Bounds intersecting with themselves
-        assert!(bounds1.intersects(&bounds1));
     }
 }

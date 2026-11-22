@@ -28,7 +28,6 @@ pub trait Clock: Send + Sync {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum Priority {
-    RealtimeAudio,
     High,
     #[default]
     Medium,
@@ -41,7 +40,6 @@ impl Priority {
             Priority::High => 60,
             Priority::Medium => 30,
             Priority::Low => 10,
-            Priority::RealtimeAudio => 0,
         }
     }
 }
@@ -81,8 +79,6 @@ pub trait Scheduler: Send + Sync {
         runnable: Runnable<RunnableMeta>,
         priority: Priority,
     );
-
-    fn spawn_realtime(&self, f: Box<dyn FnOnce() + Send>);
 
     fn schedule_background(&self, runnable: Runnable<RunnableMeta>) {
         self.schedule_background_with_priority(runnable, Priority::default());
@@ -363,36 +359,6 @@ impl BackgroundExecutor {
                 spawned: SpawnTime(Instant::now()),
             })
             .spawn(move |_| future, schedule);
-        runnable.schedule();
-        Task(TaskState::Spawned(task))
-    }
-
-    #[track_caller]
-    pub fn spawn_realtime<F>(&self, future: F) -> Task<F::Output>
-    where
-        F: Future + Send + 'static,
-        F::Output: Send + 'static,
-    {
-        let location = Location::caller();
-        let (tx, rx) = mpsc::sync_channel::<Runnable<RunnableMeta>>(1);
-
-        self.scheduler.spawn_realtime(Box::new(move || {
-            while let Ok(runnable) = rx.recv() {
-                runnable.run();
-            }
-        }));
-
-        let (runnable, task) = crate::async_task::Builder::new()
-            .metadata(RunnableMeta {
-                location,
-                spawned: SpawnTime(Instant::now()),
-            })
-            .spawn(
-                move |_| future,
-                move |runnable| {
-                    let _ = tx.send(runnable);
-                },
-            );
         runnable.schedule();
         Task(TaskState::Spawned(task))
     }

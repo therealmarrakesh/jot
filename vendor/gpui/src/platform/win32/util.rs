@@ -1,18 +1,14 @@
 use std::sync::{Mutex, OnceLock, PoisonError};
 
-use crate::anyhow::Context;
 use gpui::gpui_util::ResultExt;
 use windows::{
     Win32::{
         Foundation::*,
         Graphics::Dwm::*,
-        System::{
-            LibraryLoader::LoadLibraryA,
-            Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW},
-        },
+        System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW},
         UI::WindowsAndMessaging::*,
     },
-    core::{BOOL, PCSTR, w},
+    core::{BOOL, w},
 };
 
 use crate::platform::win32::*;
@@ -190,20 +186,4 @@ fn system_appearance() -> Result<WindowAppearance> {
     } else {
         Ok(WindowAppearance::Light)
     }
-}
-
-pub(crate) fn with_dll_library<R, F>(dll_name: PCSTR, f: F) -> Result<R>
-where
-    F: FnOnce(HMODULE) -> Result<R>,
-{
-    let library = unsafe {
-        LoadLibraryA(dll_name).with_context(|| format!("Loading dll: {}", dll_name.display()))?
-    };
-    let result = f(library);
-    unsafe {
-        FreeLibrary(library)
-            .with_context(|| format!("Freeing dll: {}", dll_name.display()))
-            .log_err();
-    }
-    result
 }

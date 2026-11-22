@@ -4,6 +4,7 @@ use std::{
 };
 
 use crate::anyhow::{Context, Result};
+#[cfg(debug_assertions)]
 use gpui::gpui_util::ResultExt;
 use windows::{
     Win32::{
@@ -30,8 +31,6 @@ const MAX_INSTANCE_BUFFER_SIZE: usize = 256 * 1024 * 1024;
 pub(crate) struct FontInfo {
     pub gamma_ratios: [f32; 4],
     pub grayscale_enhanced_contrast: f32,
-    pub subpixel_enhanced_contrast: f32,
-    pub is_bgr: bool,
 }
 
 pub(crate) struct DirectXRenderer {
@@ -78,9 +77,7 @@ struct DirectXResources {
 struct DirectXRenderPipelines {
     shadow_pipeline: PipelineState<Shadow>,
     quad_pipeline: PipelineState<Quad>,
-    underline_pipeline: PipelineState<Underline>,
     mono_sprites: PipelineState<MonochromeSprite>,
-    subpixel_sprites: PipelineState<SubpixelSprite>,
     poly_sprites: PipelineState<PolychromeSprite>,
 }
 
@@ -205,9 +202,7 @@ impl DirectXRenderer {
                 gamma_ratios: self.font_info.gamma_ratios,
                 viewport_size: [resources.viewport.Width, resources.viewport.Height],
                 grayscale_enhanced_contrast: self.font_info.grayscale_enhanced_contrast,
-                subpixel_enhanced_contrast: self.font_info.subpixel_enhanced_contrast,
-                is_bgr: self.font_info.is_bgr as u32,
-                _pad: [0; 3],
+                _pad: 0,
             }],
         )?;
         unsafe {
@@ -359,29 +354,21 @@ impl DirectXRenderer {
             match batch {
                 PrimitiveBatch::Shadows(range) => self.draw_shadows(range.start, range.len()),
                 PrimitiveBatch::Quads(range) => self.draw_quads(range.start, range.len()),
-                PrimitiveBatch::Underlines(range) => self.draw_underlines(range.start, range.len()),
                 PrimitiveBatch::MonochromeSprites { texture_id, range } => {
                     self.draw_monochrome_sprites(texture_id, range.start, range.len())
-                }
-                PrimitiveBatch::SubpixelSprites { texture_id, range } => {
-                    self.draw_subpixel_sprites(texture_id, range.start, range.len())
                 }
                 PrimitiveBatch::PolychromeSprites { texture_id, range } => {
                     self.draw_polychrome_sprites(texture_id, range.start, range.len())
                 }
-                PrimitiveBatch::Surfaces(range) => self.draw_surfaces(&scene.surfaces[range]),
             }
             .with_context(|| {
                 format!(
                     "scene too large:\
-                    {} shadows, {} quads, {} underlines, {} mono, {} subpixel, {} poly, {} surfaces",
+                    {} shadows, {} quads, {} mono, {} poly",
                     scene.shadows.len(),
                     scene.quads.len(),
-                    scene.underlines.len(),
                     scene.monochrome_sprites.len(),
-                    scene.subpixel_sprites.len(),
                     scene.polychrome_sprites.len(),
-                    scene.surfaces.len(),
                 )
             })?;
         }
@@ -451,27 +438,11 @@ impl DirectXRenderer {
             )?;
         }
 
-        if !scene.underlines.is_empty() {
-            self.pipelines.underline_pipeline.update_buffer(
-                &devices.device,
-                &devices.device_context,
-                &scene.underlines,
-            )?;
-        }
-
         if !scene.monochrome_sprites.is_empty() {
             self.pipelines.mono_sprites.update_buffer(
                 &devices.device,
                 &devices.device_context,
                 &scene.monochrome_sprites,
-            )?;
-        }
-
-        if !scene.subpixel_sprites.is_empty() {
-            self.pipelines.subpixel_sprites.update_buffer(
-                &devices.device,
-                &devices.device_context,
-                &scene.subpixel_sprites,
             )?;
         }
 
@@ -518,22 +489,6 @@ impl DirectXRenderer {
         )
     }
 
-    fn draw_underlines(&mut self, start: usize, len: usize) -> Result<()> {
-        if len == 0 {
-            return Ok(());
-        }
-        let devices = self.devices.as_ref().context("devices missing")?;
-        self.pipelines.underline_pipeline.draw_range(
-            &devices.device_context,
-            self.globals
-                .batch_params_buffer
-                .as_ref()
-                .context("batch params buffer missing")?,
-            start as u32,
-            len as u32,
-        )
-    }
-
     fn draw_monochrome_sprites(
         &mut self,
         texture_id: AtlasTextureId,
@@ -548,32 +503,6 @@ impl DirectXRenderer {
             return Ok(());
         };
         self.pipelines.mono_sprites.draw_range_with_texture(
-            &devices.device_context,
-            &texture_view,
-            self.globals
-                .batch_params_buffer
-                .as_ref()
-                .context("batch params buffer missing")?,
-            slice::from_ref(&self.globals.sampler),
-            start as u32,
-            len as u32,
-        )
-    }
-
-    fn draw_subpixel_sprites(
-        &mut self,
-        texture_id: AtlasTextureId,
-        start: usize,
-        len: usize,
-    ) -> Result<()> {
-        if len == 0 {
-            return Ok(());
-        }
-        let devices = self.devices.as_ref().context("devices missing")?;
-        let Some(texture_view) = self.atlas.get_texture_view(texture_id) else {
-            return Ok(());
-        };
-        self.pipelines.subpixel_sprites.draw_range_with_texture(
             &devices.device_context,
             &texture_view,
             self.globals
@@ -612,43 +541,6 @@ impl DirectXRenderer {
         )
     }
 
-    fn draw_surfaces(&mut self, surfaces: &[PaintSurface]) -> Result<()> {
-        if surfaces.is_empty() {
-            return Ok(());
-        }
-        Ok(())
-    }
-
-    pub(crate) fn gpu_specs(&self) -> Result<GpuSpecs> {
-        let devices = self.devices.as_ref().context("devices missing")?;
-        let desc = unsafe { devices.adapter.GetDesc1() }?;
-        let is_software_emulated = (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32) != 0;
-        let device_name = String::from_utf16_lossy(&desc.Description)
-            .trim_matches(char::from(0))
-            .to_string();
-        let driver_name = match desc.VendorId {
-            0x10DE => "NVIDIA Corporation".to_string(),
-            0x1002 => "AMD Corporation".to_string(),
-            0x8086 => "Intel Corporation".to_string(),
-            id => format!("Unknown Vendor (ID: {:#X})", id),
-        };
-        let driver_version = match desc.VendorId {
-            0x10DE => nvidia::get_driver_version(),
-            0x1002 => amd::get_driver_version(),
-            // For Intel and other vendors, we use the DXGI API to get the driver version.
-            _ => dxgi::get_driver_version(&devices.adapter),
-        }
-        .context("Failed to get gpu driver info")
-        .log_err()
-        .unwrap_or("Unknown Driver".to_string());
-        Ok(GpuSpecs {
-            is_software_emulated,
-            device_name,
-            driver_name,
-            driver_info: driver_version,
-        })
-    }
-
     pub(crate) fn get_font_info() -> &'static FontInfo {
         static CACHED_FONT_INFO: OnceLock<FontInfo> = OnceLock::new();
         CACHED_FONT_INFO.get_or_init(|| unsafe {
@@ -658,8 +550,6 @@ impl DirectXRenderer {
             FontInfo {
                 gamma_ratios: gpui::get_gamma_correction_ratios(render_params.GetGamma()),
                 grayscale_enhanced_contrast: render_params.GetGrayscaleEnhancedContrast(),
-                subpixel_enhanced_contrast: render_params.GetEnhancedContrast(),
-                is_bgr: render_params.GetPixelGeometry() == DWRITE_PIXEL_GEOMETRY_BGR,
             }
         })
     }
@@ -732,26 +622,12 @@ impl DirectXRenderPipelines {
             64,
             create_blend_state(device)?,
         )?;
-        let underline_pipeline = PipelineState::new(
-            device,
-            "underline_pipeline",
-            ShaderModule::Underline,
-            4,
-            create_blend_state(device)?,
-        )?;
         let mono_sprites = PipelineState::new(
             device,
             "monochrome_sprite_pipeline",
             ShaderModule::MonochromeSprite,
             512,
             create_blend_state(device)?,
-        )?;
-        let subpixel_sprites = PipelineState::new(
-            device,
-            "subpixel_sprite_pipeline",
-            ShaderModule::SubpixelSprite,
-            512,
-            create_blend_state_for_subpixel_rendering(device)?,
         )?;
         let poly_sprites = PipelineState::new(
             device,
@@ -764,9 +640,7 @@ impl DirectXRenderPipelines {
         Ok(Self {
             shadow_pipeline,
             quad_pipeline,
-            underline_pipeline,
             mono_sprites,
-            subpixel_sprites,
             poly_sprites,
         })
     }
@@ -832,9 +706,7 @@ struct GlobalParams {
     gamma_ratios: [f32; 4],
     viewport_size: [f32; 2],
     grayscale_enhanced_contrast: f32,
-    subpixel_enhanced_contrast: f32,
-    is_bgr: u32,
-    _pad: [u32; 3],
+    _pad: u32,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -1130,27 +1002,6 @@ fn create_blend_state(device: &ID3D11Device) -> Result<ID3D11BlendState> {
 }
 
 #[inline]
-fn create_blend_state_for_subpixel_rendering(device: &ID3D11Device) -> Result<ID3D11BlendState> {
-    let mut desc = D3D11_BLEND_DESC::default();
-    desc.RenderTarget[0].BlendEnable = true.into();
-    desc.RenderTarget[0].BlendOp = D3D11_BLEND_OP_ADD;
-    desc.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
-    desc.RenderTarget[0].SrcBlend = D3D11_BLEND_SRC1_COLOR;
-    desc.RenderTarget[0].DestBlend = D3D11_BLEND_INV_SRC1_COLOR;
-    // It does not make sense to draw transparent subpixel-rendered text, since it cannot be meaningfully alpha-blended onto anything else.
-    desc.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ONE;
-    desc.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_ZERO;
-    desc.RenderTarget[0].RenderTargetWriteMask =
-        D3D11_COLOR_WRITE_ENABLE_ALL.0 as u8 & !D3D11_COLOR_WRITE_ENABLE_ALPHA.0 as u8;
-
-    unsafe {
-        let mut state = None;
-        device.CreateBlendState(&desc, Some(&mut state))?;
-        Ok(state.unwrap())
-    }
-}
-
-#[inline]
 fn create_vertex_shader(device: &ID3D11Device, bytes: &[u8]) -> Result<ID3D11VertexShader> {
     unsafe {
         let mut shader = None;
@@ -1290,9 +1141,7 @@ pub(crate) mod shader_resources {
     pub(crate) enum ShaderModule {
         Quad,
         Shadow,
-        Underline,
         MonochromeSprite,
-        SubpixelSprite,
         PolychromeSprite,
         EmojiRasterization,
     }
@@ -1344,17 +1193,9 @@ pub(crate) mod shader_resources {
                     ShaderTarget::Vertex => SHADOW_VERTEX_BYTES,
                     ShaderTarget::Fragment => SHADOW_FRAGMENT_BYTES,
                 },
-                ShaderModule::Underline => match target {
-                    ShaderTarget::Vertex => UNDERLINE_VERTEX_BYTES,
-                    ShaderTarget::Fragment => UNDERLINE_FRAGMENT_BYTES,
-                },
                 ShaderModule::MonochromeSprite => match target {
                     ShaderTarget::Vertex => MONOCHROME_SPRITE_VERTEX_BYTES,
                     ShaderTarget::Fragment => MONOCHROME_SPRITE_FRAGMENT_BYTES,
-                },
-                ShaderModule::SubpixelSprite => match target {
-                    ShaderTarget::Vertex => SUBPIXEL_SPRITE_VERTEX_BYTES,
-                    ShaderTarget::Fragment => SUBPIXEL_SPRITE_FRAGMENT_BYTES,
                 },
                 ShaderModule::PolychromeSprite => match target {
                     ShaderTarget::Vertex => POLYCHROME_SPRITE_VERTEX_BYTES,
@@ -1444,195 +1285,10 @@ pub(crate) mod shader_resources {
             match self {
                 ShaderModule::Quad => "quad",
                 ShaderModule::Shadow => "shadow",
-                ShaderModule::Underline => "underline",
                 ShaderModule::MonochromeSprite => "monochrome_sprite",
-                ShaderModule::SubpixelSprite => "subpixel_sprite",
                 ShaderModule::PolychromeSprite => "polychrome_sprite",
                 ShaderModule::EmojiRasterization => "emoji_rasterization",
             }
         }
-    }
-}
-
-mod nvidia {
-    use std::{
-        ffi::CStr,
-        os::raw::{c_char, c_int, c_uint},
-    };
-
-    use crate::anyhow::Result;
-    use windows::{Win32::System::LibraryLoader::GetProcAddress, core::s};
-
-    use crate::platform::win32::with_dll_library;
-
-    // https://github.com/NVIDIA/nvapi/blob/7cb76fce2f52de818b3da497af646af1ec16ce27/nvapi_lite_common.h#L180
-    const NVAPI_SHORT_STRING_MAX: usize = 64;
-
-    // https://github.com/NVIDIA/nvapi/blob/7cb76fce2f52de818b3da497af646af1ec16ce27/nvapi_lite_common.h#L235
-    #[allow(non_camel_case_types)]
-    type NvAPI_ShortString = [c_char; NVAPI_SHORT_STRING_MAX];
-
-    // https://github.com/NVIDIA/nvapi/blob/7cb76fce2f52de818b3da497af646af1ec16ce27/nvapi_lite_common.h#L447
-    #[allow(non_camel_case_types)]
-    type NvAPI_SYS_GetDriverAndBranchVersion_t = unsafe extern "C" fn(
-        driver_version: *mut c_uint,
-        build_branch_string: *mut NvAPI_ShortString,
-    ) -> c_int;
-
-    pub(super) fn get_driver_version() -> Result<String> {
-        #[cfg(target_pointer_width = "64")]
-        let nvidia_dll_name = s!("nvapi64.dll");
-        #[cfg(target_pointer_width = "32")]
-        let nvidia_dll_name = s!("nvapi.dll");
-
-        with_dll_library(nvidia_dll_name, |nvidia_dll| unsafe {
-            let nvapi_query_addr = GetProcAddress(nvidia_dll, s!("nvapi_QueryInterface"))
-                .ok_or_else(|| crate::anyhow::anyhow!("Failed to get nvapi_QueryInterface address"))?;
-            let nvapi_query: extern "C" fn(u32) -> *mut () = std::mem::transmute(nvapi_query_addr);
-
-            // https://github.com/NVIDIA/nvapi/blob/7cb76fce2f52de818b3da497af646af1ec16ce27/nvapi_interface.h#L41
-            let nvapi_get_driver_version_ptr = nvapi_query(0x2926aaad);
-            if nvapi_get_driver_version_ptr.is_null() {
-                crate::anyhow::bail!("Failed to get NVIDIA driver version function pointer");
-            }
-            let nvapi_get_driver_version: NvAPI_SYS_GetDriverAndBranchVersion_t =
-                std::mem::transmute(nvapi_get_driver_version_ptr);
-
-            let mut driver_version: c_uint = 0;
-            let mut build_branch_string: NvAPI_ShortString = [0; NVAPI_SHORT_STRING_MAX];
-            let result = nvapi_get_driver_version(
-                &mut driver_version as *mut c_uint,
-                &mut build_branch_string as *mut NvAPI_ShortString,
-            );
-
-            if result != 0 {
-                crate::anyhow::bail!(
-                    "Failed to get NVIDIA driver version, error code: {}",
-                    result
-                );
-            }
-            let major = driver_version / 100;
-            let minor = driver_version % 100;
-            let branch_string = CStr::from_ptr(build_branch_string.as_ptr());
-            Ok(format!(
-                "{}.{} {}",
-                major,
-                minor,
-                branch_string.to_string_lossy()
-            ))
-        })
-    }
-}
-
-mod amd {
-    use std::os::raw::{c_char, c_int, c_void};
-
-    use crate::anyhow::Result;
-    use windows::{Win32::System::LibraryLoader::GetProcAddress, core::s};
-
-    use crate::platform::win32::with_dll_library;
-
-    // https://github.com/GPUOpen-LibrariesAndSDKs/AGS_SDK/blob/5d8812d703d0335741b6f7ffc37838eeb8b967f7/ags_lib/inc/amd_ags.h#L145
-    const AGS_CURRENT_VERSION: i32 = (6 << 22) | (3 << 12);
-
-    // https://github.com/GPUOpen-LibrariesAndSDKs/AGS_SDK/blob/5d8812d703d0335741b6f7ffc37838eeb8b967f7/ags_lib/inc/amd_ags.h#L204
-    // This is an opaque type, using struct to represent it properly for FFI
-    #[repr(C)]
-    struct AGSContext {
-        _private: [u8; 0],
-    }
-
-    #[repr(C)]
-    pub struct AGSGPUInfo {
-        pub driver_version: *const c_char,
-        pub radeon_software_version: *const c_char,
-        pub num_devices: c_int,
-        pub devices: *mut c_void,
-    }
-
-    // https://github.com/GPUOpen-LibrariesAndSDKs/AGS_SDK/blob/5d8812d703d0335741b6f7ffc37838eeb8b967f7/ags_lib/inc/amd_ags.h#L429
-    #[allow(non_camel_case_types)]
-    type agsInitialize_t = unsafe extern "C" fn(
-        version: c_int,
-        config: *const c_void,
-        context: *mut *mut AGSContext,
-        gpu_info: *mut AGSGPUInfo,
-    ) -> c_int;
-
-    // https://github.com/GPUOpen-LibrariesAndSDKs/AGS_SDK/blob/5d8812d703d0335741b6f7ffc37838eeb8b967f7/ags_lib/inc/amd_ags.h#L436
-    #[allow(non_camel_case_types)]
-    type agsDeInitialize_t = unsafe extern "C" fn(context: *mut AGSContext) -> c_int;
-
-    pub(super) fn get_driver_version() -> Result<String> {
-        #[cfg(target_pointer_width = "64")]
-        let amd_dll_name = s!("amd_ags_x64.dll");
-        #[cfg(target_pointer_width = "32")]
-        let amd_dll_name = s!("amd_ags_x86.dll");
-
-        with_dll_library(amd_dll_name, |amd_dll| unsafe {
-            let ags_initialize_addr = GetProcAddress(amd_dll, s!("agsInitialize"))
-                .ok_or_else(|| crate::anyhow::anyhow!("Failed to get agsInitialize address"))?;
-            let ags_deinitialize_addr = GetProcAddress(amd_dll, s!("agsDeInitialize"))
-                .ok_or_else(|| crate::anyhow::anyhow!("Failed to get agsDeInitialize address"))?;
-
-            let ags_initialize: agsInitialize_t = std::mem::transmute(ags_initialize_addr);
-            let ags_deinitialize: agsDeInitialize_t = std::mem::transmute(ags_deinitialize_addr);
-
-            let mut context: *mut AGSContext = std::ptr::null_mut();
-            let mut gpu_info: AGSGPUInfo = AGSGPUInfo {
-                driver_version: std::ptr::null(),
-                radeon_software_version: std::ptr::null(),
-                num_devices: 0,
-                devices: std::ptr::null_mut(),
-            };
-
-            let result = ags_initialize(
-                AGS_CURRENT_VERSION,
-                std::ptr::null(),
-                &mut context,
-                &mut gpu_info,
-            );
-            if result != 0 {
-                crate::anyhow::bail!("Failed to initialize AMD AGS, error code: {}", result);
-            }
-
-            // Vulkan actually returns this as the driver version
-            let software_version = if !gpu_info.radeon_software_version.is_null() {
-                std::ffi::CStr::from_ptr(gpu_info.radeon_software_version)
-                    .to_string_lossy()
-                    .into_owned()
-            } else {
-                "Unknown Radeon Software Version".to_string()
-            };
-
-            let driver_version = if !gpu_info.driver_version.is_null() {
-                std::ffi::CStr::from_ptr(gpu_info.driver_version)
-                    .to_string_lossy()
-                    .into_owned()
-            } else {
-                "Unknown Radeon Driver Version".to_string()
-            };
-
-            ags_deinitialize(context);
-            Ok(format!("{} ({})", software_version, driver_version))
-        })
-    }
-}
-
-mod dxgi {
-    use windows::{
-        Win32::Graphics::Dxgi::{IDXGIAdapter1, IDXGIDevice},
-        core::Interface,
-    };
-
-    pub(super) fn get_driver_version(adapter: &IDXGIAdapter1) -> crate::anyhow::Result<String> {
-        let number = unsafe { adapter.CheckInterfaceSupport(&IDXGIDevice::IID as _) }?;
-        Ok(format!(
-            "{}.{}.{}.{}",
-            number >> 48,
-            (number >> 32) & 0xFFFF,
-            (number >> 16) & 0xFFFF,
-            number & 0xFFFF
-        ))
     }
 }

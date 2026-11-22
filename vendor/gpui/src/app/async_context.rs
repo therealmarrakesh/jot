@@ -1,11 +1,9 @@
 use crate::{
     AnyView, AnyWindowHandle, App, AppCell, AppContext, BackgroundExecutor, BorrowAppContext,
-    Entity, EntityId, EventEmitter, Focusable, ForegroundExecutor, Global, GpuiBorrow,
-    PromptButton, PromptLevel, Render, Reservation, Result, Subscription, Task, VisualContext,
-    Window, WindowHandle,
+    Entity, EntityId, EventEmitter, Focusable, ForegroundExecutor, Global, GpuiBorrow, Render,
+    Reservation, Result, Subscription, Task, VisualContext, Window, WindowHandle,
 };
 use crate::anyhow::{Context as _, bail};
-use crate::futures::channel::oneshot;
 use crate::futures::future::FutureExt;
 use std::{future::Future, rc::Weak};
 
@@ -378,26 +376,6 @@ impl AsyncWindowContext {
         let mut cx = self.clone();
         self.foreground_executor
             .spawn(async move { f(&mut cx).await }.boxed_local())
-    }
-
-    /// Present a platform dialog.
-    /// The provided message will be presented, along with buttons for each answer.
-    /// When a button is clicked, the returned Receiver will receive the index of the clicked button.
-    pub fn prompt<T>(
-        &mut self,
-        level: PromptLevel,
-        message: &str,
-        detail: Option<&str>,
-        answers: &[T],
-    ) -> oneshot::Receiver<usize>
-    where
-        T: Clone + Into<PromptButton>,
-    {
-        self.app
-            .update_window(self.window, |_, window, cx| {
-                window.prompt(level, message, detail, answers, cx)
-            })
-            .unwrap_or_else(|_| oneshot::channel().1)
     }
 }
 

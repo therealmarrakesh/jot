@@ -15,7 +15,7 @@ use gpui::{
     Anchor, App, Axis, Background, BorderStyle, Bounds, ContentMask, CursorStyle, Edges, Element,
     ElementId, EntityId, GlobalElementId, Hitbox, HitboxBehavior, Hsla,
     IntoElement, LayoutId, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point,
-    Position, ScrollHandle, ScrollWheelEvent, Size, Style, TouchDragEvent, TouchPhase, Window,
+    Position, ScrollHandle, ScrollWheelEvent, Size, Style, Window,
     fill, point, prelude::FluentBuilder, px, relative, size,
 };
 
@@ -1600,59 +1600,6 @@ impl Element for Scrollbar {
                                     ));
                                     cx.notify(view_id);
                                 }
-                            }
-                        }
-                    });
-
-                    // A thumb follows the finger, unlike content panning. Claim
-                    // this touch before the window turns it into wheel deltas.
-                    window.on_mouse_event({
-                        let state = scrollbar_state.clone();
-                        let scroll_handle = self.scroll_handle.clone();
-                        let max_fps_duration = Duration::from_secs_f64(1. / self.max_fps as f64);
-                        move |event: &TouchDragEvent, phase, window, cx| {
-                            if !phase.bubble() {
-                                return;
-                            }
-                            if event.phase == TouchPhase::Started {
-                                if !is_visible
-                                    || window.default_prevented()
-                                    || !thumb_bounds.contains(&event.start_position)
-                                {
-                                    return;
-                                }
-                                scroll_handle.start_drag();
-                                state.set(state.get().with_drag_pos(
-                                    axis,
-                                    event.start_position - thumb_bounds.origin,
-                                ));
-                            } else if state.get().dragged_axis != Some(axis) {
-                                return;
-                            }
-                            if event.phase != TouchPhase::Cancelled {
-                                scroll_handle.set_offset(active_geometry.drag_offset(
-                                    axis,
-                                    event.position,
-                                    state.get().drag_pos,
-                                    scroll_handle.offset(),
-                                ));
-                            }
-                            if matches!(event.phase, TouchPhase::Ended | TouchPhase::Cancelled) {
-                                scroll_handle.end_drag();
-                                state.set(state.get().with_unset_drag_pos(Instant::now()));
-                            }
-                            window.prevent_default();
-                            cx.stop_propagation();
-                            if event.phase == TouchPhase::Moved {
-                                state.notify_drag(
-                                    Instant::now(),
-                                    max_fps_duration,
-                                    view_id,
-                                    window,
-                                    cx,
-                                );
-                            } else {
-                                cx.notify(view_id);
                             }
                         }
                     });

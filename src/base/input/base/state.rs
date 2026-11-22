@@ -128,7 +128,6 @@ actions!(
         SelectToEnd,
         SelectToPreviousWordStart,
         SelectToNextWordEnd,
-        ShowCharacterPalette,
         Copy,
         Cut,
         Paste,
@@ -265,8 +264,6 @@ pub(crate) fn init(cx: &mut App) {
         #[cfg(not(target_os = "macos"))]
         KeyBinding::new("ctrl-shift-right", SelectToNextWordEnd, Some(CONTEXT)),
         #[cfg(target_os = "macos")]
-        KeyBinding::new("ctrl-cmd-space", ShowCharacterPalette, Some(CONTEXT)),
-        #[cfg(target_os = "macos")]
         KeyBinding::new("cmd-a", SelectAll, Some(CONTEXT)),
         #[cfg(not(target_os = "macos"))]
         KeyBinding::new("ctrl-a", SelectAll, Some(CONTEXT)),
@@ -336,15 +333,6 @@ impl ColumnarPoint {
             columns_past_line_end,
         }
     }
-}
-
-/// The document and selections a paste was asked to replace, taken when the
-/// `Paste` action ran so a clipboard read that resolves later can tell
-/// whether it still applies. See [`InputBaseState::paste_target`].
-#[derive(Debug, PartialEq)]
-struct PasteTarget {
-    document_revision: u64,
-    selections: Vec<CursorSelection>,
 }
 
 /// Caret positioning geometry from the input's latest prepaint.
@@ -676,7 +664,7 @@ impl<M: InputModeKind> InputBaseState<M> {
 
     /// Build the engine. Each mode's own `new` sets its layout on top of this.
     fn new_in_mode(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let focus_handle = cx.focus_handle().tab_stop(true);
+        let focus_handle = cx.focus_handle();
         let blink_cursor = cx.new(|_| BlinkCursor::new());
         let undo_manager = UndoManager::new();
 
@@ -1983,15 +1971,6 @@ impl<M: InputModeKind> InputBaseState<M> {
         cx.notify();
     }
 
-    pub(super) fn show_character_palette(
-        &mut self,
-        _: &ShowCharacterPalette,
-        window: &mut Window,
-        _: &mut Context<Self>,
-    ) {
-        window.show_character_palette();
-    }
-
     /// The text of every non-empty selection, in document order.
     fn selected_texts(&self) -> Vec<String> {
         let mut selections: Vec<CursorSelection> = self
@@ -2036,45 +2015,6 @@ impl<M: InputModeKind> InputBaseState<M> {
         }
         if let Some(clipboard) = cx.read_from_clipboard() {
             self.insert_clipboard(clipboard, window, cx);
-            return;
-        }
-        // The synchronous read is empty on platforms whose clipboard is
-        // asynchronous and permission-gated (the web), so fall back to the
-        // real read. It has to start here, still inside the user activation
-        // that dispatched `Paste`, or the browser refuses the read.
-        let read = cx.read_from_clipboard_async();
-        let target = self.paste_target();
-        cx.spawn_in(window, async move |this, cx| match read.await {
-            Ok(Some(clipboard)) => {
-                this.update_in(cx, |this, window, cx| {
-                    // The read can sit behind a permission prompt for as
-                    // long as the user likes. If they edited, moved the
-                    // caret or left the input meanwhile, the paste would
-                    // land where they no longer mean it to; drop it, as the
-                    // browser's own paste event only reaches the focused
-                    // input too.
-                    if this.is_editable()
-                        && this.focus_handle.is_focused(window)
-                        && this.paste_target() == target
-                    {
-                        this.insert_clipboard(clipboard, window, cx);
-                    }
-                })
-                .ok();
-            }
-            Ok(None) => {}
-            Err(_) => {}
-        })
-        .detach();
-    }
-
-    /// Where a paste would go right now: the document as edited so far and
-    /// the selections it would replace. Two equal targets mean an edit made
-    /// for one still applies to the other.
-    fn paste_target(&self) -> PasteTarget {
-        PasteTarget {
-            document_revision: self.document_revision,
-            selections: self.selections.iter().copied().collect(),
         }
     }
 
@@ -3397,7 +3337,6 @@ impl<M: InputModeKind> Render for InputBaseState<M> {
             .on_action(window.listener_for(&entity, InputBaseState::move_to_next_word))
             .on_action(window.listener_for(&entity, InputBaseState::select_to_start))
             .on_action(window.listener_for(&entity, InputBaseState::select_to_end))
-            .on_action(window.listener_for(&entity, InputBaseState::show_character_palette))
             .on_action(window.listener_for(&entity, InputBaseState::copy))
             .on_mouse_down(
                 MouseButton::Left,

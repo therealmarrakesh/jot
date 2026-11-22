@@ -2,20 +2,12 @@
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
-    println!("cargo::rustc-check-cfg=cfg(gles)");
-    println!("cargo::rustc-check-cfg=cfg(gpui_leak_detection)");
-    println!("cargo::rerun-if-env-changed=GPUI_LEAK_DETECTION");
-    let requested_by_environment =
-        std::env::var_os("GPUI_LEAK_DETECTION").is_some_and(|value| !value.is_empty());
-    if requested_by_environment || std::env::var_os("CARGO_FEATURE_LEAK_DETECTION").is_some() {
-        println!("cargo::rustc-cfg=gpui_leak_detection");
-    }
 
-    #[cfg(all(target_os = "windows", not(debug_assertions)))]
+    #[cfg(not(debug_assertions))]
     shader_compilation::compile_shaders();
 }
 
-#[cfg(all(target_os = "windows", not(debug_assertions)))]
+#[cfg(not(debug_assertions))]
 mod shader_compilation {
     use std::{
         fs,
@@ -38,9 +30,7 @@ mod shader_compilation {
         let modules = [
             "quad",
             "shadow",
-            "underline",
             "monochrome_sprite",
-            "subpixel_sprite",
             "polychrome_sprite",
         ];
 

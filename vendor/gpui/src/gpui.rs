@@ -12,12 +12,10 @@ pub mod anyhow;
 mod app;
 
 mod arena;
-mod assets;
 pub mod async_task;
 mod bounds_tree;
 pub mod collections;
 mod color;
-pub mod colors;
 mod element;
 mod elements;
 mod executor;
@@ -32,7 +30,6 @@ mod shared_string;
 pub mod slotmap;
 pub mod smallvec;
 mod geometry;
-mod gestures;
 mod global;
 mod input;
 mod interactive;
@@ -48,7 +45,6 @@ mod style;
 mod styled;
 mod subscription;
 pub mod sync;
-mod tab_stop;
 mod taffy;
 mod text_system;
 mod util;
@@ -104,13 +100,11 @@ pub use action::*;
 pub use crate::anyhow::Result;
 pub use app::*;
 pub(crate) use arena::*;
-pub use assets::*;
 pub use color::*;
 pub use element::*;
 pub use elements::*;
 pub use executor::*;
 pub use geometry::*;
-pub use gestures::*;
 pub use global::*;
 pub use gpui_util::arc_cow::ArcCow;
 pub use shared_string::*;
@@ -129,7 +123,6 @@ use std::{any::Any, future::Future};
 pub use style::*;
 pub use styled::*;
 pub use subscription::*;
-pub(crate) use tab_stop::*;
 use taffy::TaffyLayoutEngine;
 pub use taffy::{AvailableSpace, LayoutId};
 pub use text_system::*;
@@ -255,12 +248,4 @@ where
         self.borrow_mut().default_global::<G>();
         self.update_global(f)
     }
-}
-
-#[derive(Default, Debug, Clone)]
-pub struct GpuSpecs {
-    pub is_software_emulated: bool,
-    pub device_name: String,
-    pub driver_name: String,
-    pub driver_info: String,
 }

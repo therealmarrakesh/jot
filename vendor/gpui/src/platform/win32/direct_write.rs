@@ -1,8 +1,4 @@
-use std::{
-    borrow::Cow,
-    ffi::{c_uint, c_void},
-    mem::ManuallyDrop,
-};
+use std::{borrow::Cow, ffi::c_void, mem::ManuallyDrop};
 
 use crate::anyhow::{Context, Result};
 use gpui::collections::HashMap;
@@ -47,7 +43,6 @@ struct DirectWriteComponents {
     builder: IDWriteFontSetBuilder1,
     text_renderer: TextRendererWrapper,
     system_ui_font_name: SharedString,
-    system_subpixel_rendering: bool,
 }
 
 impl Drop for DirectWriteComponents {
@@ -181,7 +176,6 @@ impl DirectWriteTextSystem {
 
         let gpu_state = directx_devices.map(GPUState::new).transpose()?;
 
-        let system_subpixel_rendering = get_system_subpixel_rendering();
         let system_ui_font_name = get_system_ui_font_name();
         let components = DirectWriteComponents {
             locale,
@@ -190,7 +184,6 @@ impl DirectWriteTextSystem {
             builder,
             text_renderer,
             system_ui_font_name,
-            system_subpixel_rendering,
         };
 
         let system_font_collection = unsafe {
@@ -296,18 +289,6 @@ impl PlatformTextSystem for DirectWriteTextSystem {
                 font_size,
                 ..Default::default()
             })
-    }
-
-    fn recommended_rendering_mode(
-        &self,
-        _font_id: FontId,
-        _font_size: Pixels,
-    ) -> TextRenderingMode {
-        if self.components.system_subpixel_rendering {
-            TextRenderingMode::Subpixel
-        } else {
-            TextRenderingMode::Grayscale
-        }
     }
 }
 
@@ -729,12 +710,6 @@ impl DirectWriteState {
             m => m,
         };
 
-        let antialias_mode = if params.subpixel_rendering {
-            DWRITE_TEXT_ANTIALIAS_MODE_CLEARTYPE
-        } else {
-            DWRITE_TEXT_ANTIALIAS_MODE_GRAYSCALE
-        };
-
         let glyph_analysis = unsafe {
             components.factory.CreateGlyphRunAnalysis(
                 &glyph_run,
@@ -742,7 +717,7 @@ impl DirectWriteState {
                 rendering_mode,
                 DWRITE_MEASURING_MODE_NATURAL,
                 grid_fit_mode,
-                antialias_mode,
+                DWRITE_TEXT_ANTIALIAS_MODE_GRAYSCALE,
                 baseline_origin_x,
                 baseline_origin_y,
             )
@@ -756,14 +731,7 @@ impl DirectWriteState {
         params: &RenderGlyphParams,
     ) -> Result<Bounds<DevicePixels>> {
         let glyph_analysis = self.create_glyph_run_analysis(components, params)?;
-
-        let texture_type = if params.subpixel_rendering {
-            DWRITE_TEXTURE_CLEARTYPE_3x1
-        } else {
-            DWRITE_TEXTURE_ALIASED_1x1
-        };
-
-        let bounds = unsafe { glyph_analysis.GetAlphaTextureBounds(texture_type)? };
+        let bounds = unsafe { glyph_analysis.GetAlphaTextureBounds(DWRITE_TEXTURE_ALIASED_1x1)? };
 
         if bounds.right < bounds.left {
             Ok(Bounds {
@@ -828,59 +796,19 @@ impl DirectWriteState {
         glyph_bounds: Bounds<DevicePixels>,
     ) -> Result<Vec<u8>> {
         let glyph_analysis = self.create_glyph_run_analysis(components, params)?;
-        if !params.subpixel_rendering {
-            let mut bitmap_data =
-                vec![0u8; glyph_bounds.size.width.0 as usize * glyph_bounds.size.height.0 as usize];
-            unsafe {
-                glyph_analysis.CreateAlphaTexture(
-                    DWRITE_TEXTURE_ALIASED_1x1,
-                    &RECT {
-                        left: glyph_bounds.origin.x.0,
-                        top: glyph_bounds.origin.y.0,
-                        right: glyph_bounds.size.width.0 + glyph_bounds.origin.x.0,
-                        bottom: glyph_bounds.size.height.0 + glyph_bounds.origin.y.0,
-                    },
-                    &mut bitmap_data,
-                )?;
-            }
-
-            return Ok(bitmap_data);
-        }
-
-        let width = glyph_bounds.size.width.0 as usize;
-        let height = glyph_bounds.size.height.0 as usize;
-        let pixel_count = width * height;
-
-        let mut bitmap_data = vec![0u8; pixel_count * 4];
-
+        let mut bitmap_data =
+            vec![0u8; glyph_bounds.size.width.0 as usize * glyph_bounds.size.height.0 as usize];
         unsafe {
             glyph_analysis.CreateAlphaTexture(
-                DWRITE_TEXTURE_CLEARTYPE_3x1,
+                DWRITE_TEXTURE_ALIASED_1x1,
                 &RECT {
                     left: glyph_bounds.origin.x.0,
                     top: glyph_bounds.origin.y.0,
                     right: glyph_bounds.size.width.0 + glyph_bounds.origin.x.0,
                     bottom: glyph_bounds.size.height.0 + glyph_bounds.origin.y.0,
                 },
-                &mut bitmap_data[..pixel_count * 3],
+                &mut bitmap_data,
             )?;
-        }
-
-        // The output buffer expects RGBA data, so pad the alpha channel with zeros.
-        for pixel_ix in (0..pixel_count).rev() {
-            let src = pixel_ix * 3;
-            let dst = pixel_ix * 4;
-            (
-                bitmap_data[dst],
-                bitmap_data[dst + 1],
-                bitmap_data[dst + 2],
-                bitmap_data[dst + 3],
-            ) = (
-                bitmap_data[src],
-                bitmap_data[src + 1],
-                bitmap_data[src + 2],
-                0,
-            );
         }
 
         Ok(bitmap_data)
@@ -1880,23 +1808,6 @@ fn get_name(string: IDWriteLocalizedStrings, locale: &HSTRING) -> Result<String>
     Ok(String::from_utf16_lossy(&name_vec[..name_length]))
 }
 
-fn get_system_subpixel_rendering() -> bool {
-    let mut value = c_uint::default();
-    let result = unsafe {
-        SystemParametersInfoW(
-            SPI_GETFONTSMOOTHINGTYPE,
-            0,
-            Some((&mut value) as *mut c_uint as *mut c_void),
-            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS::default(),
-        )
-    };
-    if result.log_err().is_some() {
-        value == FE_FONTSMOOTHINGCLEARTYPE
-    } else {
-        true
-    }
-}
-
 fn get_system_ui_font_name() -> SharedString {
     unsafe {
         let mut info: LOGFONTW = std::mem::zeroed();
@@ -1960,212 +1871,3 @@ fn is_color_glyph(
 }
 
 const DEFAULT_LOCALE_NAME: PCWSTR = windows::core::w!("en-US");
-
-#[cfg(test)]
-mod tests {
-    use super::{DirectWriteState, DirectWriteTextSystem, GPUState, GlyphLayerTexture};
-    use crate::platform::win32::direct_write::ClusterAnalyzer;
-    use crate::platform::win32::directx_devices::DirectXDevices;
-    use crate::anyhow::Result;
-    use gpui::{
-        DevicePixels, Font, PlatformTextSystem, RenderGlyphParams, Rgba, bounds, point, px, size,
-    };
-    use std::ffi::c_void;
-    use windows::Win32::Graphics::Direct3D11::{
-        D3D11_BIND_RENDER_TARGET, D3D11_RENDER_TARGET_VIEW_DESC, D3D11_RENDER_TARGET_VIEW_DESC_0,
-        D3D11_RTV_DIMENSION_TEXTURE2D, D3D11_SUBRESOURCE_DATA, D3D11_TEX2D_RTV,
-        D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
-    };
-    use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
-
-    #[test]
-    fn test_cluster_map() {
-        let cluster_map = [0];
-        let mut analyzer = ClusterAnalyzer::new(&cluster_map, 1);
-        let next = analyzer.next();
-        assert_eq!(next, Some((1, 1)));
-        let next = analyzer.next();
-        assert_eq!(next, None);
-
-        let cluster_map = [0, 1, 2];
-        let mut analyzer = ClusterAnalyzer::new(&cluster_map, 3);
-        let next = analyzer.next();
-        assert_eq!(next, Some((1, 1)));
-        let next = analyzer.next();
-        assert_eq!(next, Some((1, 1)));
-        let next = analyzer.next();
-        assert_eq!(next, Some((1, 1)));
-        let next = analyzer.next();
-        assert_eq!(next, None);
-        // 👨‍👩‍👧‍👦👩‍💻
-        let cluster_map = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 4, 4, 4, 4];
-        let mut analyzer = ClusterAnalyzer::new(&cluster_map, 5);
-        let next = analyzer.next();
-        assert_eq!(next, Some((11, 4)));
-        let next = analyzer.next();
-        assert_eq!(next, Some((5, 1)));
-        let next = analyzer.next();
-        assert_eq!(next, None);
-        // 👩‍💻
-        let cluster_map = [0, 0, 0, 0, 0];
-        let mut analyzer = ClusterAnalyzer::new(&cluster_map, 1);
-        let next = analyzer.next();
-        assert_eq!(next, Some((5, 1)));
-        let next = analyzer.next();
-        assert_eq!(next, None);
-    }
-
-    #[test]
-    fn color_emoji_rasterization_is_stable_across_batches() -> Result<()> {
-        let devices = DirectXDevices::new()?;
-        let text_system = DirectWriteTextSystem::new(Some(&devices))?;
-
-        let font = Font {
-            family: "Segoe UI Emoji".into(),
-            ..Default::default()
-        };
-        let font_id = text_system.font_id(&font)?;
-
-        let mut params_list = Vec::new();
-        for ch in ['🫠', '🥹', '🧗', '🏋', '🚀', '🥺'] {
-            let Some(glyph_id) = text_system.glyph_for_char(font_id, ch) else {
-                crate::log::info!("no glyph found for {ch}");
-                continue;
-            };
-            let params = RenderGlyphParams {
-                font_id,
-                glyph_id,
-                font_size: px(48.0),
-                subpixel_variant: point(0u8, 0u8),
-                scale_factor: 1.0,
-                is_emoji: true,
-                subpixel_rendering: false,
-                dilation: 0,
-            };
-            let raster_bounds = text_system.glyph_raster_bounds(&params)?;
-            if raster_bounds.size.width.0 == 0 || raster_bounds.size.height.0 == 0 {
-                crate::log::info!("raster bounds are empty for {ch}");
-                continue;
-            }
-            params_list.push((params, raster_bounds));
-        }
-        assert!(!params_list.is_empty());
-
-        let first: Vec<_> = params_list
-            .iter()
-            .map(|(params, bounds)| text_system.rasterize_glyph(params, *bounds))
-            .collect::<Result<_>>()?;
-
-        // Churn the texture heap with further rasterization passes. If the color
-        // compositing leaks leftover texture data (the render target is not cleared),
-        // the second batch can pick up different contents and differ from the first.
-        // With an explicit clear both batches are deterministic and identical.
-        for _ in 0..3 {
-            for (params, bounds) in &params_list {
-                text_system.rasterize_glyph(params, *bounds)?;
-            }
-        }
-        let second: Vec<_> = params_list
-            .iter()
-            .map(|(params, bounds)| text_system.rasterize_glyph(params, *bounds))
-            .collect::<Result<_>>()?;
-
-        assert_eq!(
-            first, second,
-            "color glyph rasterization changed between batches; \
-             render target contents are leaking into the glyph bitmaps"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn color_emoji_composites_over_cleared_texture() -> Result<()> {
-        let devices = DirectXDevices::new()?;
-        let gpu_state = GPUState::new(&devices)?;
-
-        const SIZE: u32 = 32;
-        // Seed the render target with solid red so that any texel which the
-        // compositing pass fails to clear/overwrite remains identifiable after
-        // the readback.
-        let poison = {
-            let mut v = vec![0u8; (SIZE * SIZE * 4) as usize];
-            for pixel in v.chunks_exact_mut(4) {
-                pixel[2] = 255;
-                pixel[3] = 255;
-            }
-            v
-        };
-        let desc = D3D11_TEXTURE2D_DESC {
-            Width: SIZE,
-            Height: SIZE,
-            MipLevels: 1,
-            ArraySize: 1,
-            Format: DXGI_FORMAT_B8G8R8A8_UNORM,
-            SampleDesc: DXGI_SAMPLE_DESC {
-                Count: 1,
-                Quality: 0,
-            },
-            Usage: D3D11_USAGE_DEFAULT,
-            BindFlags: D3D11_BIND_RENDER_TARGET.0 as u32,
-            CPUAccessFlags: 0,
-            MiscFlags: 0,
-        };
-        let initial_data = D3D11_SUBRESOURCE_DATA {
-            pSysMem: poison.as_ptr() as *const c_void,
-            SysMemPitch: SIZE * 4,
-            SysMemSlicePitch: 0,
-        };
-        let texture = unsafe {
-            let mut texture = None;
-            gpu_state
-                .device
-                .CreateTexture2D(&desc, Some(&initial_data), Some(&mut texture))?;
-            texture.unwrap()
-        };
-        let render_target_view = unsafe {
-            let desc = D3D11_RENDER_TARGET_VIEW_DESC {
-                Format: DXGI_FORMAT_B8G8R8A8_UNORM,
-                ViewDimension: D3D11_RTV_DIMENSION_TEXTURE2D,
-                Anonymous: D3D11_RENDER_TARGET_VIEW_DESC_0 {
-                    Texture2D: D3D11_TEX2D_RTV { MipSlice: 0 },
-                },
-            };
-            let mut rtv = None;
-            gpu_state
-                .device
-                .CreateRenderTargetView(&texture, Some(&desc), Some(&mut rtv))?;
-            rtv.unwrap()
-        };
-
-        // A single opaque layer in the top-left corner; the bottom-right corner
-        // of the texture is covered by no layer at all.
-        let layer_alpha = vec![255u8; 4 * 4];
-        let layer = GlyphLayerTexture::new(
-            &gpu_state,
-            Rgba {
-                r: 1.0,
-                g: 1.0,
-                b: 1.0,
-                a: 1.0,
-            },
-            bounds(point(0, 0), size(4, 4)),
-            &layer_alpha,
-        )?;
-
-        let rasterized = DirectWriteState::composite_color_layers(
-            &gpu_state,
-            std::slice::from_ref(&layer),
-            size(DevicePixels(SIZE as i32), DevicePixels(SIZE as i32)),
-            &texture,
-            &Some(render_target_view),
-        )?;
-
-        let corner = (SIZE as usize - 1 + (SIZE as usize - 1) * SIZE as usize) * 4;
-        assert_eq!(
-            &rasterized[corner..corner + 4],
-            &[0, 0, 0, 0],
-            "uncovered texel retained the poison from the uninitialized render target"
-        );
-        Ok(())
-    }
-}

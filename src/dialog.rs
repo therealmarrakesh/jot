@@ -114,7 +114,7 @@ impl Dialogs {
         let line = cx.new(|cx| {
             InputState::new(window, cx).validate(|text, _| text.chars().all(|c| c.is_ascii_digit()))
         });
-        line.read(cx).focus_handle(cx).tab_index(0).tab_stop(true);
+        line.read(cx).focus_handle(cx);
         Self {
             open: Vec::new(),
             serial: 0,
@@ -139,7 +139,7 @@ impl Dialogs {
         self.hide();
         self.serial += 1;
         let buttons = (0..kind.buttons().len())
-            .map(|ix| cx.focus_handle().tab_index(ix as isize + 1).tab_stop(true))
+            .map(|_| cx.focus_handle())
             .collect();
         self.open.push(OpenDialog {
             kind,

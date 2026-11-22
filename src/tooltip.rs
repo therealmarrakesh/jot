@@ -525,7 +525,6 @@ fn measure(text: &SharedString, window: &mut Window) -> Size<Pixels> {
         color: black(),
         background_color: None,
         underline: None,
-        strikethrough: None,
     }];
     let chrome = 2. * (PADDING_X + BORDER);
     let wrap = MAX_WIDTH - chrome;

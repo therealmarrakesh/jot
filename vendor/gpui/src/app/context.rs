@@ -181,20 +181,6 @@ impl<'a, T: 'static> Context<'a, T> {
         subscription
     }
 
-    /// Register a callback to be invoked when the application is about to restart.
-    pub fn on_app_restart(
-        &self,
-        mut on_restart: impl FnMut(&mut T, &mut App) + 'static,
-    ) -> Subscription
-    where
-        T: 'static,
-    {
-        let handle = self.weak_entity();
-        self.app.on_app_restart(move |cx| {
-            handle.update(cx, |entity, cx| on_restart(entity, cx)).ok();
-        })
-    }
-
     /// Arrange for the given function to be invoked whenever the application is quit.
     /// The future returned from this callback will be polled for up to [crate::SHUTDOWN_TIMEOUT] until the app fully quits.
     pub fn on_app_quit<Fut>(
@@ -481,24 +467,6 @@ impl<'a, T: 'static> Context<'a, T> {
     ) -> Subscription {
         let view = self.weak_entity();
         let (subscription, activate) = window.display_observers.insert(
-            (),
-            Box::new(move |window, cx| {
-                view.update(cx, |view, cx| callback(view, window, cx))
-                    .is_ok()
-            }),
-        );
-        activate();
-        subscription
-    }
-
-    /// Registers a callback to be invoked when the window button layout changes.
-    pub fn observe_button_layout_changed(
-        &self,
-        window: &mut Window,
-        mut callback: impl FnMut(&mut T, &mut Window, &mut Context<T>) + 'static,
-    ) -> Subscription {
-        let view = self.weak_entity();
-        let (subscription, activate) = window.button_layout_observers.insert(
             (),
             Box::new(move |window, cx| {
                 view.update(cx, |view, cx| callback(view, window, cx))

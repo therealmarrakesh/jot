@@ -983,12 +983,10 @@ impl<M: InputModeKind> Element for TextElement<M> {
             color: text_color,
             background_color: None,
             underline: None,
-            strikethrough: None,
         };
         let marked_underline = Some(UnderlineStyle {
             thickness: px(1.),
             color: Some(text_color),
-            wavy: false,
         });
 
         let ime_marked_range = state.ime_marked_range.as_ref().map(|m| m.start..m.end);
@@ -1042,7 +1040,6 @@ impl<M: InputModeKind> Element for TextElement<M> {
                                 color: gpui::black(),
                                 background_color: None,
                                 underline: None,
-                                strikethrough: None,
                             }],
                             wrap_width,
                         )

@@ -83,37 +83,3 @@ fn retrieve_duration(counts: u64, ticks_per_second: u64) -> Duration {
     let ticks_per_microsecond = ticks_per_second / 1_000_000;
     Duration::from_micros(counts / ticks_per_microsecond)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn successful_compositor_wait_reports_native_callback() {
-        let provider = VSyncProvider {
-            interval: Duration::ZERO,
-            f: Box::new(|| {
-                std::thread::sleep(VSYNC_INTERVAL_THRESHOLD * 2);
-                true
-            }),
-        };
-
-        assert_eq!(
-            provider.wait_for_vsync(),
-            FrameRequestSource::NativeCallback
-        );
-    }
-
-    #[test]
-    fn failed_compositor_wait_reports_local_schedule_even_after_threshold() {
-        let provider = VSyncProvider {
-            interval: Duration::ZERO,
-            f: Box::new(|| {
-                std::thread::sleep(VSYNC_INTERVAL_THRESHOLD * 2);
-                false
-            }),
-        };
-
-        assert_eq!(provider.wait_for_vsync(), FrameRequestSource::LocalSchedule);
-    }
-}

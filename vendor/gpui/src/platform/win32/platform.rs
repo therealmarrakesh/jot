@@ -1,7 +1,5 @@
 use std::{
     cell::{Cell, RefCell},
-    ffi::{OsStr, OsString},
-    os::windows::ffi::{OsStrExt as _, OsStringExt as _},
     path::{Path, PathBuf},
     rc::{Rc, Weak},
     sync::{
@@ -12,7 +10,7 @@ use std::{
 
 use crate::anyhow::{Context as _, Result, anyhow};
 use gpui::futures::channel::oneshot::Receiver;
-use gpui::gpui_util::{ResultExt, get_powershell, new_std_command};
+use gpui::gpui_util::ResultExt;
 use gpui::sync::RwLock;
 use crate::smallvec::SmallVec;
 use windows::{
@@ -23,10 +21,7 @@ use windows::{
             Com::*,
             LibraryLoader::*,
             Ole::*,
-            Power::*,
             Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW},
-            SystemServices::POWER_REQUEST_CONTEXT_VERSION,
-            Threading::{POWER_REQUEST_CONTEXT_SIMPLE_STRING, REASON_CONTEXT, REASON_CONTEXT_0},
         },
         UI::{Input::KeyboardAndMouse::*, Shell::*, WindowsAndMessaging::*},
     },
@@ -50,31 +45,21 @@ impl TrackedWindow {
 pub struct WindowsPlatform {
     inner: Rc<WindowsPlatformInner>,
     raw_window_handles: Arc<RwLock<SmallVec<[TrackedWindow; 4]>>>,
-    /// The windowing mode to start in, applied when `run` starts. Windowed when unset.
-    initial_windowing: RefCell<Option<WindowingRequest>>,
-    /// Set to stop the current `VSyncProvider` thread, which runs while windowed.
     vsync_stop: RefCell<Option<Arc<AtomicBool>>>,
-    // The below members will never change throughout the entire lifecycle of the app.
-    /// Created with `headless()`: never windowed, and without a real text system.
-    headless: bool,
     icon: HICON,
     background_executor: BackgroundExecutor,
     foreground_executor: ForegroundExecutor,
     text_system: Arc<dyn PlatformTextSystem>,
-    direct_write_text_system: Option<Arc<DirectWriteTextSystem>>,
-    drop_target_helper: Option<IDropTargetHelper>,
-    /// Flag to instruct the `VSyncProvider` thread to invalidate the directx devices
-    /// as resizing them has failed, causing us to have lost at least the render target.
+    direct_write_text_system: Arc<DirectWriteTextSystem>,
+    drop_target_helper: IDropTargetHelper,
     invalidate_devices: Arc<AtomicBool>,
     handle: HWND,
-    suspend_resume_notification: RefCell<Option<HPOWERNOTIFY>>,
     disable_direct_composition: bool,
 }
 
 struct WindowsPlatformInner {
     state: WindowsPlatformState,
     raw_window_handles: std::sync::Weak<RwLock<SmallVec<[TrackedWindow; 4]>>>,
-    // The below members will never change throughout the entire lifecycle of the app.
     validation_number: usize,
     main_receiver: PriorityQueueReceiver<RunnableVariant>,
     dispatcher: Arc<WindowsDispatcher>,
@@ -82,28 +67,16 @@ struct WindowsPlatformInner {
 
 pub(crate) struct WindowsPlatformState {
     callbacks: PlatformCallbacks,
-    menus: RefCell<Vec<OwnedMenu>>,
-    // NOTE: standard cursor handles don't need to close.
     pub(crate) current_cursor: Cell<Option<HCURSOR>>,
-    /// Shared with each window so `WM_SETCURSOR` can read it directly.
     pub(crate) cursor_visible: Arc<AtomicBool>,
-    /// Shared with each window to coordinate draws across windows on the UI
-    /// thread; see [`DrawCoordinator`].
     pub(crate) draw_coordinator: Rc<DrawCoordinator>,
     directx_devices: RefCell<Option<DirectXDevices>>,
 }
 
 #[derive(Default)]
 struct PlatformCallbacks {
-    open_urls: Cell<Option<Box<dyn FnMut(Vec<String>)>>>,
     quit: Cell<Option<Box<dyn FnMut() -> bool>>>,
-    reopen: Cell<Option<Box<dyn FnMut()>>>,
-    app_menu_action: Cell<Option<Box<dyn FnMut(&dyn Action)>>>,
-    will_open_app_menu: Cell<Option<Box<dyn FnMut()>>>,
-    validate_app_menu_command: Cell<Option<Box<dyn FnMut(&dyn Action) -> bool>>>,
     keyboard_layout_change: Cell<Option<Box<dyn FnMut()>>>,
-    system_sleep: Cell<Option<Box<dyn FnMut()>>>,
-    system_wake: Cell<Option<Box<dyn FnMut()>>>,
     displays_changed: Cell<Option<Box<dyn FnMut()>>>,
 }
 
@@ -118,77 +91,19 @@ impl WindowsPlatformState {
             cursor_visible: Arc::new(AtomicBool::new(true)),
             draw_coordinator: Rc::new(DrawCoordinator::new()),
             directx_devices: RefCell::new(directx_devices),
-            menus: RefCell::new(Vec::new()),
         }
-    }
-}
-
-struct PowerRequest {
-    handle: HANDLE,
-    // `PowerCreateRequest` retains a pointer into the reason string for the
-    // lifetime of the handle, so the UTF-16 buffer must outlive the request.
-    _reason: Vec<u16>,
-}
-
-unsafe impl Send for PowerRequest {}
-
-impl PowerRequest {
-    fn prevent_idle_sleep(reason: &str) -> Result<Self> {
-        let mut reason = reason.encode_utf16().chain([0]).collect::<Vec<_>>();
-        let context = REASON_CONTEXT {
-            Version: POWER_REQUEST_CONTEXT_VERSION,
-            Flags: POWER_REQUEST_CONTEXT_SIMPLE_STRING,
-            Reason: REASON_CONTEXT_0 {
-                SimpleReasonString: PWSTR(reason.as_mut_ptr()),
-            },
-        };
-        let handle = unsafe { PowerCreateRequest(&context) }
-            .context("Failed to create a Windows power request")?;
-        if let Err(error) = unsafe { PowerSetRequest(handle, PowerRequestSystemRequired) } {
-            unsafe { CloseHandle(handle) }
-                .context("Failed to close the Windows power request")
-                .log_err();
-            return Err(error).context("Failed to set the Windows power request");
-        }
-        Ok(Self {
-            handle,
-            _reason: reason,
-        })
-    }
-}
-
-impl Drop for PowerRequest {
-    fn drop(&mut self) {
-        unsafe { PowerClearRequest(self.handle, PowerRequestSystemRequired) }
-            .context("Failed to clear the Windows power request")
-            .log_err();
-        unsafe { CloseHandle(self.handle) }
-            .context("Failed to close the Windows power request")
-            .log_err();
     }
 }
 
 impl WindowsPlatform {
-    pub fn new(headless: bool) -> Result<Self> {
+    pub fn new() -> Result<Self> {
         unsafe {
             OleInitialize(None).context("unable to initialize Windows OLE")?;
         }
-        // A platform that can become windowed needs the real text system from the start: the app
-        // keeps the one it's created with. It gets DirectX devices when it becomes windowed.
-        let (text_system, direct_write_text_system) = if !headless {
-            let dw_text_system = Arc::new(
-                DirectWriteTextSystem::new(None).context("Error creating DirectWriteTextSystem")?,
-            );
-            (
-                dw_text_system.clone() as Arc<dyn PlatformTextSystem>,
-                Some(dw_text_system),
-            )
-        } else {
-            (
-                Arc::new(gpui::NoopTextSystem::new()) as Arc<dyn PlatformTextSystem>,
-                None,
-            )
-        };
+        let direct_write_text_system = Arc::new(
+            DirectWriteTextSystem::new(None).context("Error creating DirectWriteTextSystem")?,
+        );
+        let text_system: Arc<dyn PlatformTextSystem> = direct_write_text_system.clone();
 
         let (main_sender, main_receiver) = PriorityQueueReceiver::new();
         let validation_number = {
@@ -209,9 +124,6 @@ impl WindowsPlatform {
             directx_devices: None,
             dispatcher: None,
         };
-        // A hidden top-level window rather than a message-only one, since only
-        // top-level windows receive system broadcasts such as `WM_DISPLAYCHANGE`
-        // and `WM_ENDSESSION`, which the app needs even with no windows open.
         let result = unsafe {
             CreateWindowExW(
                 WS_EX_TOOLWINDOW,
@@ -243,33 +155,22 @@ impl WindowsPlatform {
         let background_executor = BackgroundExecutor::new(dispatcher.clone());
         let foreground_executor = ForegroundExecutor::new(dispatcher);
 
-        let drop_target_helper: Option<IDropTargetHelper> = if !headless {
-            Some(unsafe {
-                CoCreateInstance(&CLSID_DragDropHelper, None, CLSCTX_INPROC_SERVER)
-                    .context("Error creating drop target helper.")?
-            })
-        } else {
-            None
+        let drop_target_helper: IDropTargetHelper = unsafe {
+            CoCreateInstance(&CLSID_DragDropHelper, None, CLSCTX_INPROC_SERVER)
+                .context("Error creating drop target helper.")?
         };
-        let icon = if !headless {
-            load_icon().unwrap_or_default()
-        } else {
-            HICON::default()
-        };
+        let icon = load_icon().unwrap_or_default();
 
         Ok(Self {
             inner,
             handle,
             raw_window_handles,
-            initial_windowing: RefCell::new(None),
             vsync_stop: RefCell::new(None),
-            headless,
             icon,
             background_executor,
             foreground_executor,
             text_system,
             direct_write_text_system,
-            suspend_resume_notification: RefCell::new(None),
             disable_direct_composition,
             drop_target_helper,
             invalidate_devices: Arc::new(AtomicBool::new(false)),
@@ -300,7 +201,7 @@ impl WindowsPlatform {
             executor: self.foreground_executor.clone(),
             current_cursor: self.inner.state.current_cursor.get(),
             cursor_visible: self.inner.state.cursor_visible.clone(),
-            drop_target_helper: self.drop_target_helper.clone().unwrap(),
+            drop_target_helper: self.drop_target_helper.clone(),
             validation_number: self.inner.validation_number,
             main_receiver: self.inner.main_receiver.clone(),
             platform_window_handle: self.handle,
@@ -323,62 +224,17 @@ impl WindowsPlatform {
             .map(|hwnd| hwnd.as_raw())
     }
 
-    fn is_windowed(&self) -> bool {
-        self.inner.state.directx_devices.borrow().is_some()
-    }
-
-    /// Connects in the initial windowing mode, before the app finishes launching.
-    ///
-    /// # Panics
-    ///
-    /// Panics if DirectX can't be initialized, since the app can't start. Starts headless if this
-    /// process can't show windows, for example when started over SSH.
-    fn connect_initially(&self) {
-        let request = self
-            .initial_windowing
-            .borrow_mut()
-            .take()
-            .unwrap_or_else(|| WindowingRequest::Windowed(GraphicalEnvironment::detect()));
-        let WindowingRequest::Windowed(environment) = request else {
-            return;
-        };
-        if let Err(error) = check_can_show_windows(&environment) {
-            crate::log::info!("starting headless: {error:#}");
-            return;
-        }
-        self.attach_gpu()
-            .unwrap_or_else(|error| panic!("failed to initialize DirectX: {error:#}"));
-    }
-
     /// Creates the DirectX devices that windows draw with, and starts vsync.
     fn attach_gpu(&self) -> Result<()> {
         let devices = DirectXDevices::new().context("Creating DirectX devices")?;
-        if let Some(text_system) = &self.direct_write_text_system {
-            text_system.handle_gpu_lost(&devices)?;
-        }
+        self.direct_write_text_system.handle_gpu_lost(&devices)?;
         *self.inner.state.directx_devices.borrow_mut() = Some(devices);
         self.begin_vsync_thread();
         Ok(())
     }
 
-    /// Stops vsync and releases the DirectX devices. No window may be open.
-    fn detach_gpu(&self) {
-        if let Some(stop) = self.vsync_stop.borrow_mut().take() {
-            // Not joined: the thread can be sending this thread a message. It exits after its
-            // next vsync, and drops its reference to the devices then.
-            stop.store(true, Ordering::Release);
-        }
-        if let Some(text_system) = &self.direct_write_text_system {
-            text_system.release_gpu();
-        }
-        self.inner.state.directx_devices.borrow_mut().take();
-    }
-
     fn begin_vsync_thread(&self) {
         let Some(directx_devices) = self.inner.state.directx_devices.borrow().clone() else {
-            return;
-        };
-        let Some(direct_write_text_system) = &self.direct_write_text_system else {
             return;
         };
         let stop = Arc::new(AtomicBool::new(false));
@@ -387,7 +243,7 @@ impl WindowsPlatform {
         let platform_window: SafeHwnd = self.handle.into();
         let validation_number = self.inner.validation_number;
         let all_windows = Arc::downgrade(&self.raw_window_handles);
-        let text_system = Arc::downgrade(direct_write_text_system);
+        let text_system = Arc::downgrade(&self.direct_write_text_system);
         let invalidate_devices = self.invalidate_devices.clone();
 
         std::thread::Builder::new()
@@ -455,39 +311,6 @@ fn translate_accelerator(msg: &MSG) -> Option<()> {
     (result.0 == 0).then_some(())
 }
 
-fn encode_restart_arguments(arguments: &[OsString]) -> OsString {
-    // `Start-Process` accepts a single native command line, so quote each argument according to
-    // the Windows argv parsing rules before passing the complete string through the environment.
-    let mut encoded = Vec::new();
-
-    for (index, argument) in arguments.iter().enumerate() {
-        if index > 0 {
-            encoded.push(b' ' as u16);
-        }
-        encoded.push(b'"' as u16);
-
-        let mut backslash_count = 0;
-        for code_unit in argument.encode_wide() {
-            if code_unit == b'\\' as u16 {
-                backslash_count += 1;
-            } else {
-                if code_unit == b'"' as u16 {
-                    encoded.extend(std::iter::repeat_n(b'\\' as u16, backslash_count * 2 + 1));
-                } else {
-                    encoded.extend(std::iter::repeat_n(b'\\' as u16, backslash_count));
-                }
-                backslash_count = 0;
-                encoded.push(code_unit);
-            }
-        }
-
-        encoded.extend(std::iter::repeat_n(b'\\' as u16, backslash_count * 2));
-        encoded.push(b'"' as u16);
-    }
-
-    OsString::from_wide(&encoded)
-}
-
 impl Platform for WindowsPlatform {
     fn background_executor(&self) -> BackgroundExecutor {
         self.background_executor.clone()
@@ -521,23 +344,9 @@ impl Platform for WindowsPlatform {
             .set(Some(callback));
     }
 
-    fn on_thermal_state_change(&self, _callback: Box<dyn FnMut()>) {}
-
-    fn thermal_state(&self) -> ThermalState {
-        ThermalState::Nominal
-    }
-
-    fn prevent_idle_sleep(&self, reason: &str) -> Task<Result<ActivityGuard>> {
-        Task::ready(
-            PowerRequest::prevent_idle_sleep(reason)
-                .map(|request| ActivityGuard::new(move || drop(request))),
-        )
-    }
-
     fn run(&self, on_finish_launching: Box<dyn 'static + FnOnce()>) {
-        if !self.headless {
-            self.connect_initially();
-        }
+        self.attach_gpu()
+            .unwrap_or_else(|error| panic!("failed to initialize DirectX: {error:#}"));
         on_finish_launching();
 
         let mut msg = MSG::default();
@@ -564,108 +373,7 @@ impl Platform for WindowsPlatform {
             .detach();
     }
 
-    fn set_initial_windowing(&self, request: WindowingRequest) {
-        *self.initial_windowing.borrow_mut() = Some(request);
-    }
-
-    fn request_windowing(&self, request: WindowingRequest) -> Task<Result<()>> {
-        if self.headless {
-            return Task::ready(Err(anyhow!(
-                "a platform created headless can't switch windowing modes"
-            )));
-        }
-        let windowed = self.is_windowed();
-        Task::ready(match request {
-            WindowingRequest::Headless if !windowed => Err(anyhow!("already headless")),
-            WindowingRequest::Headless => {
-                self.detach_gpu();
-                Ok(())
-            }
-            WindowingRequest::Windowed(_) if windowed => Err(anyhow!("already windowed")),
-            WindowingRequest::Windowed(environment) => {
-                check_can_show_windows(&environment).and_then(|()| self.attach_gpu())
-            }
-        })
-    }
-
-    fn graphical_environment(&self) -> Option<GraphicalEnvironment> {
-        self.is_windowed().then(GraphicalEnvironment::detect)
-    }
-
-    fn restart(&self, binary_path: Option<PathBuf>, arguments: Vec<OsString>) {
-        let pid = std::process::id();
-        let Some(app_path) = binary_path.or(self.app_path().log_err()) else {
-            return;
-        };
-        let script = r#"
-            $pidToWaitFor = $env:ZED_RESTART_PID
-            $exePath = $env:ZED_RESTART_EXECUTABLE
-            $argumentList = $env:ZED_RESTART_ARGUMENTS
-
-            [Environment]::SetEnvironmentVariable("ZED_RESTART_PID", $null)
-            [Environment]::SetEnvironmentVariable("ZED_RESTART_EXECUTABLE", $null)
-            [Environment]::SetEnvironmentVariable("ZED_RESTART_ARGUMENTS", $null)
-
-            while ($true) {
-                $process = Get-Process -Id $pidToWaitFor -ErrorAction SilentlyContinue
-                if (-not $process) {
-                    if ([string]::IsNullOrEmpty($argumentList)) {
-                        Start-Process -FilePath $exePath
-                    } else {
-                        Start-Process -FilePath $exePath -ArgumentList $argumentList
-                    }
-                    break
-                }
-                Start-Sleep -Seconds 0.1
-            }
-            "#;
-
-        // Defer spawning to the foreground executor so it runs after the
-        // current `AppCell` borrow is released. On Windows, `Command::spawn()`
-        // can pump the Win32 message loop (via `CreateProcessW`), which
-        // re-enters message handling possibly resulting in another mutable
-        // borrow of the `AppCell` ending up with a double borrow panic
-        let Some(powershell) = get_powershell() else {
-            crate::log::error!("failed to restart: PowerShell is unavailable");
-            return;
-        };
-        self.foreground_executor
-            .spawn(async move {
-                let mut command = new_std_command(powershell);
-                let arguments = encode_restart_arguments(&arguments);
-                command
-                    .arg("-command")
-                    .arg(script)
-                    .env("ZED_RESTART_PID", pid.to_string())
-                    .env("ZED_RESTART_EXECUTABLE", app_path)
-                    .env("ZED_RESTART_ARGUMENTS", arguments);
-                #[allow(
-                    clippy::disallowed_methods,
-                    reason = "We are restarting ourselves, using std command thus is fine"
-                )]
-                let restart_process = command.spawn();
-
-                match restart_process {
-                    Ok(_) => unsafe { PostQuitMessage(0) },
-                    Err(e) => crate::log::error!("failed to spawn restart script: {:?}", e),
-                }
-            })
-            .detach();
-    }
-
     fn activate(&self, _ignoring_other_apps: bool) {}
-
-    fn hide(&self) {}
-
-    // todo(windows)
-    fn hide_other_apps(&self) {
-        unimplemented!()
-    }
-
-    // todo(windows)
-    fn unhide_other_apps(&self) {
-        unimplemented!()
-    }
 
     fn displays(&self) -> Vec<Rc<dyn PlatformDisplay>> {
         WindowsDisplay::displays()
@@ -683,11 +391,6 @@ impl Platform for WindowsPlatform {
             .set(Some(callback));
     }
 
-    #[cfg(feature = "screen-capture")]
-    fn is_screen_capture_supported(&self) -> bool {
-        true
-    }
-
     fn active_window(&self) -> Option<AnyWindowHandle> {
         let active_window_hwnd = unsafe { GetActiveWindow() };
         self.window_from_hwnd(active_window_hwnd)
@@ -699,9 +402,6 @@ impl Platform for WindowsPlatform {
         handle: AnyWindowHandle,
         options: WindowParams,
     ) -> Result<Box<dyn PlatformWindow>> {
-        if !self.is_windowed() {
-            return Err(anyhow!("cannot open windows while headless"));
-        }
         let window = WindowsWindow::new(handle, options, self.generate_creation_info())?;
         let handle = window.get_raw_handle();
         self.raw_window_handles.write().push(TrackedWindow {
@@ -719,24 +419,6 @@ impl Platform for WindowsPlatform {
     fn set_window_appearance(&self, appearance: Option<WindowAppearance>) {
         set_appearance_override(appearance);
         self.post_message(WM_GPUI_APPEARANCE_CHANGED, WPARAM(0), LPARAM(0));
-    }
-
-    fn open_url(&self, url: &str) {
-        if url.is_empty() {
-            return;
-        }
-        let url_string = url.to_string();
-        self.background_executor()
-            .spawn(async move {
-                open_target(&url_string)
-                    .with_context(|| format!("Opening url: {}", url_string))
-                    .log_err();
-            })
-            .detach();
-    }
-
-    fn on_open_urls(&self, callback: Box<dyn FnMut(Vec<String>)>) {
-        self.inner.state.callbacks.open_urls.set(Some(callback));
     }
 
     fn prompt_for_paths(
@@ -773,129 +455,8 @@ impl Platform for WindowsPlatform {
         })
     }
 
-    fn can_select_mixed_files_and_dirs(&self) -> bool {
-        // The FOS_PICKFOLDERS flag toggles between "only files" and "only folders".
-        false
-    }
-
-    fn reveal_path(&self, path: &Path) {
-        if path.as_os_str().is_empty() {
-            return;
-        }
-        let path = path.to_path_buf();
-        self.background_executor()
-            .spawn(async move {
-                open_target_in_explorer(&path)
-                    .with_context(|| format!("Revealing path {} in explorer", path.display()))
-                    .log_err();
-            })
-            .detach();
-    }
-
-    fn open_with_system(&self, path: &Path) {
-        if path.as_os_str().is_empty() {
-            return;
-        }
-        let path = path.to_path_buf();
-        self.background_executor()
-            .spawn(async move {
-                open_target(&path)
-                    .with_context(|| format!("Opening {} with system", path.display()))
-                    .log_err();
-            })
-            .detach();
-    }
-
     fn on_quit(&self, callback: Box<dyn FnMut() -> bool>) {
         self.inner.state.callbacks.quit.set(Some(callback));
-    }
-
-    fn on_reopen(&self, callback: Box<dyn FnMut()>) {
-        self.inner.state.callbacks.reopen.set(Some(callback));
-    }
-
-    fn on_system_sleep(&self, callback: Box<dyn FnMut()>) {
-        self.inner.state.callbacks.system_sleep.set(Some(callback));
-    }
-
-    fn on_system_wake(&self, callback: Box<dyn FnMut()>) {
-        self.inner.state.callbacks.system_wake.set(Some(callback));
-        let mut notification = self.suspend_resume_notification.borrow_mut();
-        if notification.is_none() {
-            *notification = unsafe {
-                // SAFETY: self.handle is the platform window receiving WM_POWERBROADCAST.
-                RegisterSuspendResumeNotification(
-                    HANDLE(self.handle.0),
-                    DEVICE_NOTIFY_WINDOW_HANDLE,
-                )
-                .log_err()
-            };
-        }
-    }
-
-    fn set_app_identity(&self, identifier: &str, _name: &str) {
-        let identifier_utf16 = windows::core::HSTRING::from(identifier);
-        // SAFETY: `identifier_utf16` outlives the call and is null-terminated.
-        if let Err(error) = unsafe {
-            windows::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID(
-                windows::core::PCWSTR(identifier_utf16.as_ptr()),
-            )
-        } {
-            crate::log::warn!("failed to set the process AppUserModelID: {error}");
-        }
-    }
-
-    fn show_system_notification(&self, _notification: gpui::SystemNotification) {}
-
-    fn dismiss_system_notification(&self, _tag: &str) {}
-
-    fn on_system_notification_response(
-        &self,
-        _callback: Box<dyn FnMut(gpui::SystemNotificationResponse)>,
-    ) {
-    }
-
-    fn set_menus(&self, menus: Vec<Menu>, _keymap: &Keymap) {
-        *self.inner.state.menus.borrow_mut() = menus.into_iter().map(|menu| menu.owned()).collect();
-    }
-
-    fn get_menus(&self) -> Option<Vec<OwnedMenu>> {
-        Some(self.inner.state.menus.borrow().clone())
-    }
-
-    fn set_dock_menu(&self, _menus: Vec<MenuItem>, _keymap: &Keymap) {}
-
-    fn on_app_menu_action(&self, callback: Box<dyn FnMut(&dyn Action)>) {
-        self.inner
-            .state
-            .callbacks
-            .app_menu_action
-            .set(Some(callback));
-    }
-
-    fn on_will_open_app_menu(&self, callback: Box<dyn FnMut()>) {
-        self.inner
-            .state
-            .callbacks
-            .will_open_app_menu
-            .set(Some(callback));
-    }
-
-    fn on_validate_app_menu_command(&self, callback: Box<dyn FnMut(&dyn Action) -> bool>) {
-        self.inner
-            .state
-            .callbacks
-            .validate_app_menu_command
-            .set(Some(callback));
-    }
-
-    fn app_path(&self) -> Result<PathBuf> {
-        Ok(std::env::current_exe()?)
-    }
-
-    // todo(windows)
-    fn path_for_auxiliary_executable(&self, _name: &str) -> Result<PathBuf> {
-        crate::anyhow::bail!("not yet implemented");
     }
 
     fn set_cursor_style(&self, style: CursorStyle) {
@@ -946,32 +507,6 @@ impl Platform for WindowsPlatform {
     fn read_from_clipboard(&self) -> Option<ClipboardItem> {
         read_from_clipboard()
     }
-
-    fn write_credentials(&self, _url: &str, _username: &str, _password: &[u8]) -> Task<Result<()>> {
-        Task::ready(Err(anyhow!("credentials unimplemented")))
-    }
-
-    fn read_credentials(&self, _url: &str) -> Task<Result<Option<(String, Vec<u8>)>>> {
-        Task::ready(Ok(None))
-    }
-
-    fn delete_credentials(&self, _url: &str) -> Task<Result<()>> {
-        Task::ready(Ok(()))
-    }
-
-    fn register_url_scheme(&self, _: &str) -> Task<crate::anyhow::Result<()>> {
-        Task::ready(Err(anyhow!("register_url_scheme unimplemented")))
-    }
-
-    fn perform_dock_menu_action(&self, _action: usize) {}
-
-    fn update_jump_list(
-        &self,
-        _menus: Vec<MenuItem>,
-        _entries: Vec<SmallVec<[PathBuf; 2]>>,
-    ) -> Task<Vec<SmallVec<[PathBuf; 2]>>> {
-        Task::ready(Vec::new())
-    }
 }
 
 impl WindowsPlatformInner {
@@ -1016,11 +551,9 @@ impl WindowsPlatformInner {
         let handled = match msg {
             WM_GPUI_CLOSE_ONE_WINDOW
             | WM_GPUI_TASK_DISPATCHED_ON_MAIN_THREAD
-            | WM_GPUI_DOCK_MENU_ACTION
             | WM_GPUI_KEYBOARD_LAYOUT_CHANGED
             | WM_GPUI_DISPLAYS_CHANGED
             | WM_GPUI_GPU_DEVICE_LOST => self.handle_gpui_events(msg, wparam, lparam),
-            WM_POWERBROADCAST => self.handle_power_broadcast(wparam),
             WM_DISPLAYCHANGE => self.handle_display_change(handle),
             WM_QUERYENDSESSION => Some(1),
             WM_ENDSESSION if wparam.0 != 0 => self.handle_end_session(),
@@ -1044,7 +577,6 @@ impl WindowsPlatformInner {
                 Some(0)
             }
             WM_GPUI_TASK_DISPATCHED_ON_MAIN_THREAD => self.run_foreground_task(),
-            WM_GPUI_DOCK_MENU_ACTION => self.handle_dock_action_event(lparam.0 as _),
             WM_GPUI_KEYBOARD_LAYOUT_CHANGED => self.handle_keyboard_layout_change(),
             WM_GPUI_DISPLAYS_CHANGED => self.handle_displays_changed(),
             WM_GPUI_GPU_DEVICE_LOST => self.handle_device_lost(lparam),
@@ -1175,10 +707,6 @@ impl WindowsPlatformInner {
         Some(0)
     }
 
-    fn handle_dock_action_event(&self, _action_idx: usize) -> Option<isize> {
-        Some(0)
-    }
-
     fn handle_keyboard_layout_change(&self) -> Option<isize> {
         self.with_callback(
             |callbacks| &callbacks.keyboard_layout_change,
@@ -1187,24 +715,10 @@ impl WindowsPlatformInner {
         Some(0)
     }
 
-    fn handle_power_broadcast(&self, wparam: WPARAM) -> Option<isize> {
-        match wparam.0 as u32 {
-            PBT_APMSUSPEND => {
-                self.with_callback(|callbacks| &callbacks.system_sleep, |callback| callback());
-            }
-            PBT_APMRESUMEAUTOMATIC => {
-                self.with_callback(|callbacks| &callbacks.system_wake, |callback| callback());
-            }
-            _ => {}
-        }
-        Some(1)
-    }
-
     fn handle_device_lost(&self, lparam: LPARAM) -> Option<isize> {
         let directx_devices = lparam.0 as *const DirectXDevices;
         let directx_devices = unsafe { &*directx_devices };
         let mut current = self.state.directx_devices.borrow_mut();
-        // The platform may have switched to headless while the device was being recovered.
         if current.is_some() {
             *current = Some(directx_devices.clone());
         }
@@ -1219,10 +733,6 @@ impl Drop for WindowsPlatform {
             stop.store(true, Ordering::Release);
         }
         unsafe {
-            if let Some(notification) = self.suspend_resume_notification.borrow_mut().take() {
-                // SAFETY: notification was returned by RegisterSuspendResumeNotification.
-                UnregisterSuspendResumeNotification(notification).log_err();
-            }
             DestroyWindow(self.handle)
                 .context("Destroying platform window")
                 .log_err();
@@ -1257,69 +767,6 @@ struct PlatformWindowCreateContext {
     main_receiver: Option<PriorityQueueReceiver<RunnableVariant>>,
     directx_devices: Option<DirectXDevices>,
     dispatcher: Option<Arc<WindowsDispatcher>>,
-}
-
-fn open_target(target: impl AsRef<OsStr>) -> Result<()> {
-    let target = target.as_ref();
-    let ret = unsafe {
-        ShellExecuteW(
-            None,
-            windows::core::w!("open"),
-            &HSTRING::from(target),
-            None,
-            None,
-            SW_SHOWDEFAULT,
-        )
-    };
-    if ret.0 as isize <= 32 {
-        Err(crate::anyhow::anyhow!(
-            "Unable to open target: {}",
-            std::io::Error::last_os_error()
-        ))
-    } else {
-        Ok(())
-    }
-}
-
-fn open_target_in_explorer(target: &Path) -> Result<()> {
-    let dir = target.parent().context("No parent folder found")?;
-    let desktop = unsafe { SHGetDesktopFolder()? };
-
-    let mut dir_item = std::ptr::null_mut();
-    unsafe {
-        desktop.ParseDisplayName(
-            HWND::default(),
-            None,
-            &HSTRING::from(dir),
-            None,
-            &mut dir_item,
-            std::ptr::null_mut(),
-        )?;
-    }
-
-    let mut file_item = std::ptr::null_mut();
-    unsafe {
-        desktop.ParseDisplayName(
-            HWND::default(),
-            None,
-            &HSTRING::from(target),
-            None,
-            &mut file_item,
-            std::ptr::null_mut(),
-        )?;
-    }
-
-    let highlight = [file_item as *const _];
-    unsafe { SHOpenFolderAndSelectItems(dir_item as _, Some(&highlight), 0) }.or_else(|err| {
-        if err.code().0 == ERROR_FILE_NOT_FOUND.0 as i32 {
-            // On some systems, the above call mysteriously fails with "file not
-            // found" even though the file is there.  In these cases, ShellExecute()
-            // seems to work as a fallback (although it won't select the file).
-            open_target(dir).context("Opening target parent folder")
-        } else {
-            Err(crate::anyhow::anyhow!("Can not open target path: {}", err))
-        }
-    })
 }
 
 fn file_open_dialog(
@@ -1560,49 +1007,6 @@ fn check_device_lost(device: &ID3D11Device) -> bool {
     }
 }
 
-/// Checks that this process can show windows in the session `environment` names.
-fn check_can_show_windows(environment: &GraphicalEnvironment) -> Result<()> {
-    let current = GraphicalEnvironment::detect().session_id;
-    if let (Some(requested), Some(current)) = (environment.session_id, current)
-        && requested != current
-    {
-        return Err(anyhow!(
-            "windows can only be shown in this process's session ({current}), not session \
-             {requested}"
-        ));
-    }
-    if !is_window_station_visible() {
-        return Err(anyhow!(
-            "this process's window station is not interactive, so it can't show windows"
-        ));
-    }
-    Ok(())
-}
-
-/// Whether this process's window station has a visible desktop. A service's, or an SSH login's,
-/// doesn't.
-fn is_window_station_visible() -> bool {
-    use windows::Win32::System::StationsAndDesktops::{
-        GetProcessWindowStation, GetUserObjectInformationW, UOI_FLAGS, USEROBJECTFLAGS,
-    };
-
-    let Ok(station) = (unsafe { GetProcessWindowStation() }) else {
-        return false;
-    };
-    let mut flags = USEROBJECTFLAGS::default();
-    // SAFETY: `flags` is valid for writes of the size passed.
-    let result = unsafe {
-        GetUserObjectInformationW(
-            HANDLE(station.0),
-            UOI_FLAGS,
-            Some(&mut flags as *mut USEROBJECTFLAGS as *mut std::ffi::c_void),
-            std::mem::size_of::<USEROBJECTFLAGS>() as u32,
-            None,
-        )
-    };
-    result.is_ok() && flags.dwFlags & WSF_VISIBLE as u32 != 0
-}
-
 fn handle_gpu_device_lost(
     directx_devices: &mut DirectXDevices,
     platform_window: HWND,
@@ -1658,7 +1062,7 @@ fn handle_gpu_device_lost(
     Ok(())
 }
 
-const PLATFORM_WINDOW_CLASS_NAME: PCWSTR = w!("Zed::PlatformWindow");
+const PLATFORM_WINDOW_CLASS_NAME: PCWSTR = w!("Jot::PlatformWindow");
 
 fn register_platform_window_class() {
     let wc = WNDCLASSW {
@@ -1729,63 +1133,4 @@ unsafe extern "system" fn window_procedure(
     }
 
     result
-}
-
-/// Copies the username and secret out of a credential returned by `CredReadW`.
-///
-/// Both `UserName` and `CredentialBlob` are optional in Credential Manager and
-/// come back as null pointers when absent, so they are treated as empty here.
-///
-/// # Safety
-///
-#[cfg(test)]
-mod tests {
-    use std::ffi::{OsStr, OsString};
-
-    use crate::platform::win32::{read_from_clipboard, write_to_clipboard};
-    use gpui::ClipboardItem;
-
-    use super::encode_restart_arguments;
-
-    #[test]
-    fn test_encode_restart_arguments() {
-        assert_eq!(encode_restart_arguments(&[]), OsStr::new(""));
-        assert_eq!(
-            encode_restart_arguments(&[
-                OsString::from("--user-data-dir"),
-                OsString::from(r"C:\Zed Data"),
-            ]),
-            OsStr::new(r#""--user-data-dir" "C:\Zed Data""#)
-        );
-        assert_eq!(
-            encode_restart_arguments(&[OsString::from(r"C:\")]),
-            OsStr::new(r#""C:\\""#)
-        );
-    }
-
-    #[test]
-    fn test_clipboard() {
-        let item = ClipboardItem::new_string("你好，我是张小白".to_string());
-        write_to_clipboard(item.clone());
-        assert_eq!(read_from_clipboard(), Some(item));
-
-        let item = ClipboardItem::new_string("12345".to_string());
-        write_to_clipboard(item.clone());
-        assert_eq!(read_from_clipboard(), Some(item));
-
-        let item = ClipboardItem::new_string_with_json_metadata("abcdef".to_string(), vec![3, 4]);
-        write_to_clipboard(item.clone());
-        assert_eq!(read_from_clipboard(), Some(item));
-
-        let item =
-            ClipboardItem::new_string_with_json_metadata("before\0after".to_string(), vec![12]);
-        write_to_clipboard(item);
-        assert_eq!(
-            read_from_clipboard(),
-            Some(ClipboardItem::new_string_with_json_metadata(
-                "before after".to_string(),
-                vec![12],
-            )),
-        );
-    }
 }
