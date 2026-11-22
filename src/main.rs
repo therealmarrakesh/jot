@@ -246,6 +246,9 @@ gpui::actions!(
         SaveAs,
         SaveAll,
         CloseTab,
+        NextTab,
+        PrevTab,
+        SelectLastTab,
         CloseWindow,
         Exit,
         Find,
@@ -267,6 +270,10 @@ gpui::actions!(
     ]
 );
 
+#[derive(Action, Clone, PartialEq, Eq)]
+#[action(namespace = jot, no_json)]
+struct SelectTab(usize);
+
 struct ViewSettings {
     status_bar: bool,
     word_wrap: bool,
@@ -284,6 +291,19 @@ fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("ctrl-shift-s", SaveAs, Some(CONTEXT)),
         KeyBinding::new("ctrl-alt-s", SaveAll, Some(CONTEXT)),
         KeyBinding::new("ctrl-w", CloseTab, Some(CONTEXT)),
+        KeyBinding::new("ctrl-tab", NextTab, Some(CONTEXT)),
+        KeyBinding::new("ctrl-shift-tab", PrevTab, Some(CONTEXT)),
+        KeyBinding::new("ctrl-pagedown", NextTab, Some(CONTEXT)),
+        KeyBinding::new("ctrl-pageup", PrevTab, Some(CONTEXT)),
+        KeyBinding::new("ctrl-1", SelectTab(0), Some(CONTEXT)),
+        KeyBinding::new("ctrl-2", SelectTab(1), Some(CONTEXT)),
+        KeyBinding::new("ctrl-3", SelectTab(2), Some(CONTEXT)),
+        KeyBinding::new("ctrl-4", SelectTab(3), Some(CONTEXT)),
+        KeyBinding::new("ctrl-5", SelectTab(4), Some(CONTEXT)),
+        KeyBinding::new("ctrl-6", SelectTab(5), Some(CONTEXT)),
+        KeyBinding::new("ctrl-7", SelectTab(6), Some(CONTEXT)),
+        KeyBinding::new("ctrl-8", SelectTab(7), Some(CONTEXT)),
+        KeyBinding::new("ctrl-9", SelectLastTab, Some(CONTEXT)),
         KeyBinding::new("ctrl-shift-w", CloseWindow, Some(CONTEXT)),
         KeyBinding::new("ctrl-f", Find, Some(CONTEXT)),
         KeyBinding::new("f3", FindNext, Some(CONTEXT)),
@@ -294,6 +314,7 @@ fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("shift-f10", ShowContextMenu, Some(CONTEXT)),
         KeyBinding::new("menu", ShowContextMenu, Some(CONTEXT)),
         KeyBinding::new("ctrl-=", ZoomIn, Some(CONTEXT)),
+        KeyBinding::new("ctrl-+", ZoomIn, Some(CONTEXT)),
         KeyBinding::new("ctrl--", ZoomOut, Some(CONTEXT)),
         KeyBinding::new("ctrl-0", ResetZoom, Some(CONTEXT)),
     ]
@@ -788,6 +809,37 @@ impl Jot {
         self.close_tab(self.active, window, cx);
     }
 
+    fn next_tab(&mut self, _: &NextTab, window: &mut Window, cx: &mut Context<Self>) {
+        if self.dialogs.is_open() || self.tabs.len() <= 1 {
+            return;
+        }
+        let next = (self.active + 1) % self.tabs.len();
+        self.activate_tab(next, window, cx);
+    }
+
+    fn prev_tab(&mut self, _: &PrevTab, window: &mut Window, cx: &mut Context<Self>) {
+        if self.dialogs.is_open() || self.tabs.len() <= 1 {
+            return;
+        }
+        let prev = (self.active + self.tabs.len() - 1) % self.tabs.len();
+        self.activate_tab(prev, window, cx);
+    }
+
+    fn select_tab(&mut self, action: &SelectTab, window: &mut Window, cx: &mut Context<Self>) {
+        if self.dialogs.is_open() || action.0 >= self.tabs.len() || action.0 == self.active {
+            return;
+        }
+        self.activate_tab(action.0, window, cx);
+    }
+
+    fn select_last_tab(&mut self, _: &SelectLastTab, window: &mut Window, cx: &mut Context<Self>) {
+        let last = self.tabs.len().saturating_sub(1);
+        if self.dialogs.is_open() || last == self.active {
+            return;
+        }
+        self.activate_tab(last, window, cx);
+    }
+
     fn title_bar(
         &self,
         strip: &tabs::StripFrame,
@@ -846,9 +898,11 @@ impl Jot {
                             "theme",
                             "Switch theme",
                             if p.dark { SUN_GLYPH } else { MOON_GLYPH },
-                            px(THEME_GLYPH_SIZE),
-                            size(px(THEME_BUTTON_WIDTH), px(MENU_BAR_HEIGHT)),
-                            px(field::CONTROL_RADIUS),
+                            field::IconButtonStyle {
+                                glyph_size: px(THEME_GLYPH_SIZE),
+                                size: size(px(THEME_BUTTON_WIDTH), px(MENU_BAR_HEIGHT)),
+                                radius: px(field::CONTROL_RADIUS),
+                            },
                             true,
                         )
                         .flex_none()
@@ -904,6 +958,24 @@ impl Jot {
             .flex_1()
             .min_h(px(self.editor_min_height()))
             .bg(rgb(p.editor))
+            .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
+                if !event.modifiers.control
+                    || this.dialogs.is_open()
+                    || this.menu_bar.read(cx).is_open()
+                {
+                    return;
+                }
+                let dy = match event.delta {
+                    ScrollDelta::Lines(lines) => lines.y,
+                    ScrollDelta::Pixels(pixels) => pixels.y.as_f32(),
+                };
+                if dy > 0. {
+                    this.set_zoom(this.zoom() + ZOOM_STEP, cx);
+                } else if dy < 0. {
+                    this.set_zoom(this.zoom() - ZOOM_STEP, cx);
+                }
+                cx.stop_propagation();
+            }))
             .child(
                 div()
                     .relative()
@@ -1006,6 +1078,10 @@ impl Render for Jot {
             .on_action(cx.listener(Self::close_window))
             .on_action(cx.listener(Self::new_tab))
             .on_action(cx.listener(Self::close_active_tab))
+            .on_action(cx.listener(Self::next_tab))
+            .on_action(cx.listener(Self::prev_tab))
+            .on_action(cx.listener(Self::select_tab))
+            .on_action(cx.listener(Self::select_last_tab))
             .on_action(cx.listener(Self::open))
             .on_action(cx.listener(Self::save))
             .on_action(cx.listener(Self::save_as))

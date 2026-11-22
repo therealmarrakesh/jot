@@ -344,9 +344,11 @@ fn strip_button(
         id,
         tip,
         glyph,
-        px(glyph_size),
-        size(px(BUTTON_WIDTH), px(BUTTON_HEIGHT)),
-        px(field::CONTROL_RADIUS),
+        field::IconButtonStyle {
+            glyph_size: px(glyph_size),
+            size: size(px(BUTTON_WIDTH), px(BUTTON_HEIGHT)),
+            radius: px(field::CONTROL_RADIUS),
+        },
         enabled,
     )
 }

@@ -114,14 +114,19 @@ pub(crate) fn button(
         })
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct IconButtonStyle {
+    pub(crate) glyph_size: Pixels,
+    pub(crate) size: gpui::Size<Pixels>,
+    pub(crate) radius: Pixels,
+}
+
 pub(crate) fn icon_button(
     p: Palette,
     id: impl Into<ElementId>,
     tip: impl Into<SharedString>,
     glyph: &'static str,
-    glyph_size: Pixels,
-    size: gpui::Size<Pixels>,
-    radius: Pixels,
+    style: IconButtonStyle,
     enabled: bool,
 ) -> brush::BrushTransition {
     div()
@@ -130,13 +135,13 @@ pub(crate) fn icon_button(
         .flex()
         .items_center()
         .justify_center()
-        .w(size.width)
-        .h(size.height)
-        .rounded(radius)
+        .w(style.size.width)
+        .h(style.size.height)
+        .rounded(style.radius)
         .cursor_default()
         .font_family(ICON_FONT)
-        .text_size(glyph_size)
-        .line_height(glyph_size)
+        .text_size(style.glyph_size)
+        .line_height(style.glyph_size)
         .text_color(rgba(if enabled {
             p.text_primary
         } else {

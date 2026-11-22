@@ -850,9 +850,11 @@ fn icon_button(
         id,
         tip,
         glyph,
-        u(size),
-        gpui::size(u(ICON_BUTTON_SIZE), u(ICON_BUTTON_SIZE)),
-        u(CONTROL_RADIUS),
+        field::IconButtonStyle {
+            glyph_size: u(size),
+            size: gpui::size(u(ICON_BUTTON_SIZE), u(ICON_BUTTON_SIZE)),
+            radius: u(CONTROL_RADIUS),
+        },
         true,
     )
 }

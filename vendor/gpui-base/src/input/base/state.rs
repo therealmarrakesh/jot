@@ -1946,6 +1946,9 @@ impl<M: InputModeKind> InputBaseState<M> {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if event.modifiers.control {
+            return;
+        }
         let line_height = self
             .last_layout
             .as_ref()
