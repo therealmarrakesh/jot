@@ -1,25 +1,22 @@
-//! Clean-room DirectWrite text shaping, line layout, hit-testing, wrapping metrics,
-//! and UAX #14 line-break analysis (`IDWriteTextAnalyzer::AnalyzeLineBreakpoints`).
+//! Clean-room DirectWrite text shaping, line layout, hit-testing, and generational UI-label cache.
+
+mod wrap;
+
+pub(crate) use wrap::{Boundary, CharWidths, MAX_WRAP_INDENT, line_break_opportunities};
 
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
-use std::rc::Rc;
 
 use windows::Win32::Graphics::DirectWrite::{
-    DWRITE_BREAK_CONDITION_CAN_BREAK, DWRITE_BREAK_CONDITION_MAY_NOT_BREAK,
-    DWRITE_BREAK_CONDITION_MUST_BREAK, DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL,
-    DWRITE_FONT_STYLE, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT, DWRITE_HIT_TEST_METRICS,
-    DWRITE_LINE_BREAKPOINT, DWRITE_LINE_METRICS, DWRITE_NUMBER_SUBSTITUTION_METHOD_NONE,
-    DWRITE_READING_DIRECTION, DWRITE_READING_DIRECTION_LEFT_TO_RIGHT, DWRITE_SCRIPT_ANALYSIS,
+    DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE,
+    DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT, DWRITE_HIT_TEST_METRICS, DWRITE_LINE_METRICS,
     DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_TEXT_METRICS,
     DWRITE_TEXT_RANGE, DWRITE_TRIMMING, DWRITE_TRIMMING_GRANULARITY_CHARACTER,
     DWRITE_WORD_WRAPPING_NO_WRAP, DWRITE_WORD_WRAPPING_WRAP, DWriteCreateFactory, IDWriteFactory5,
-    IDWriteNumberSubstitution, IDWriteTextAnalysisSink, IDWriteTextAnalysisSink_Impl,
-    IDWriteTextAnalysisSource, IDWriteTextAnalysisSource_Impl, IDWriteTextAnalyzer,
     IDWriteTextFormat, IDWriteTextLayout,
 };
-use windows::core::{BOOL, HSTRING, PCWSTR, implement};
+use windows::core::{BOOL, HSTRING};
 
 use crate::ui::anyhow::Result;
 use crate::ui::app::App;
@@ -30,7 +27,6 @@ use crate::ui::smallvec::SmallVec;
 use crate::ui::types::SharedString;
 use crate::ui::window::Window;
 
-pub(crate) const MAX_WRAP_INDENT: u32 = 32;
 const MAX_LAYOUT_CACHE: usize = 512;
 
 #[derive(Copy, Clone, Debug, PartialEq, PartialOrd)]
@@ -108,17 +104,11 @@ pub(crate) struct TextRun {
     pub(crate) underline: Option<UnderlineStyle>,
 }
 
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub(crate) enum TextAlign {
     #[default]
     Left,
     Center,
-}
-
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct Boundary {
-    pub(crate) ix: usize,
-    pub(crate) next_indent: u32,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -276,12 +266,12 @@ pub(crate) struct LineLayout {
     pub(crate) width: Pixels,
 }
 
-/// Multi-line wrapped DirectWrite layout (used by tooltips, dialogs, and `TextLeaf`).
+/// Immutable multi-line wrapped DirectWrite layout (used by tooltips, dialogs, and `TextLeaf`).
 #[derive(Clone)]
 pub(crate) struct WrappedLine {
     pub(crate) width: Pixels,
     pub(crate) line_count: usize,
-    wrapped: bool,
+    layout_box_width: Option<Pixels>,
     wrap_breaks: Vec<usize>,
     pub(crate) ascent: Pixels,
     pub(crate) descent: Pixels,
@@ -318,149 +308,24 @@ impl WrappedLine {
         let Some(layout) = &self.layout else {
             return Ok(());
         };
-        if let Some(w) = align_width {
-            let effective_w = if self.wrapped { w.max(self.width) } else { w };
-            let _ = unsafe { layout.SetMaxWidth(effective_w.as_f32().max(1.0)) };
-            let dw_align = match align {
-                TextAlign::Left => DWRITE_TEXT_ALIGNMENT_LEADING,
-                TextAlign::Center => DWRITE_TEXT_ALIGNMENT_CENTER,
-            };
-            let _ = unsafe { layout.SetTextAlignment(dw_align) };
-        }
+        // Never mutate `IDWriteTextLayout` COM state at paint time (layouts are shared in the
+        // two-frame cache). Centering shifts the draw origin by the box delta.
+        let align_offset_x = match (align, align_width) {
+            (TextAlign::Center, Some(w)) => {
+                let ref_w = self.layout_box_width.unwrap_or(self.width);
+                (w - ref_w) * 0.5
+            }
+            _ => Pixels::ZERO,
+        };
         let glyph_height = self.ascent + self.descent;
         let top_padding = ((line_height - glyph_height) * 0.5).max(Pixels::ZERO);
         window.paint_dwrite_layout(
-            point(origin.x, origin.y + top_padding),
+            point(origin.x + align_offset_x, origin.y + top_padding),
             layout,
             color,
             &self.run_colors,
         );
         Ok(())
-    }
-}
-
-/// Cached printable-ASCII character width table for fast O(line_len) soft-wrapping.
-pub(crate) struct CharWidths {
-    font: Font,
-    font_size: Pixels,
-    ascii: [Pixels; 95], // 0x20..=0x7E
-    max_ascii: Pixels,
-    non_ascii: HashMap<char, Pixels>,
-}
-
-impl CharWidths {
-    fn new(font: Font, font_size: Pixels, dwrite: &DirectWriteCore) -> Self {
-        let mut ascii = [Pixels::ZERO; 95];
-        let mut max_ascii = Pixels::ZERO;
-        let format = dwrite.text_format(&font, font_size);
-        let mut buf = [0u16; 1];
-        for (i, byte) in (0x20u8..=0x7Eu8).enumerate() {
-            buf[0] = u16::from(byte);
-            let w = dwrite.measure_utf16(&buf, &format);
-            ascii[i] = w;
-            if w > max_ascii {
-                max_ascii = w;
-            }
-        }
-        Self {
-            font,
-            font_size,
-            ascii,
-            max_ascii,
-            non_ascii: HashMap::new(),
-        }
-    }
-
-    #[inline]
-    pub(crate) fn max_printable_ascii(&self) -> Pixels {
-        self.max_ascii
-    }
-
-    fn char_width(&mut self, ch: char, dwrite: &DirectWriteCore) -> Pixels {
-        let code = ch as u32;
-        if (0x20..=0x7E).contains(&code) {
-            return self.ascii[(code - 0x20) as usize];
-        }
-        if ch == '\t' {
-            return self.ascii[0] * 4.0;
-        }
-        if let Some(&w) = self.non_ascii.get(&ch) {
-            return w;
-        }
-        let format = dwrite.text_format(&self.font, self.font_size);
-        let mut buf = [0u16; 2];
-        let slice = ch.encode_utf16(&mut buf);
-        let w = dwrite.measure_utf16(slice, &format);
-        self.non_ascii.insert(ch, w);
-        w
-    }
-
-    /// Wraps `line` into `out` using UAX #14 DirectWrite break opportunities + cached char widths.
-    pub(crate) fn wrap_line_into(
-        &mut self,
-        line: &str,
-        wrap_width: Pixels,
-        dwrite: &DirectWriteCore,
-        out: &mut Vec<Boundary>,
-    ) {
-        out.clear();
-        if line.is_empty() || wrap_width <= Pixels::ZERO {
-            return;
-        }
-        let mut indent_chars: u32 = 0;
-        let mut indent_width = Pixels::ZERO;
-        for ch in line.chars() {
-            if ch == ' ' || ch == '\t' {
-                if indent_chars < MAX_WRAP_INDENT {
-                    indent_chars += 1;
-                    indent_width += self.char_width(ch, dwrite);
-                }
-            } else {
-                break;
-            }
-        }
-        if indent_width >= wrap_width * 0.5 {
-            indent_chars = 0;
-            indent_width = Pixels::ZERO;
-        }
-
-        let break_offsets = line_break_opportunities(line);
-
-        let mut row_start = 0usize;
-        let mut row_width = Pixels::ZERO;
-        let mut last_break_ix = 0usize;
-        let mut break_cursor = 0usize;
-
-        for (ix, ch) in line.char_indices() {
-            let char_end = ix + ch.len_utf8();
-            while break_cursor < break_offsets.len() && break_offsets[break_cursor] <= ix {
-                break_cursor += 1;
-            }
-            let w = self.char_width(ch, dwrite);
-            if row_width + w > wrap_width && ix > row_start {
-                let split_at = if last_break_ix > row_start {
-                    last_break_ix
-                } else {
-                    ix
-                };
-                out.push(Boundary {
-                    ix: split_at,
-                    next_indent: indent_chars,
-                });
-                row_start = split_at;
-                row_width = indent_width;
-                for c in line[split_at..char_end].chars() {
-                    row_width += self.char_width(c, dwrite);
-                }
-                last_break_ix = split_at;
-            } else {
-                row_width += w;
-            }
-            if break_cursor < break_offsets.len() && break_offsets[break_cursor] == char_end {
-                last_break_ix = char_end;
-                break_cursor += 1;
-            }
-        }
     }
 }
 
@@ -481,6 +346,19 @@ struct ShapedCacheKey {
     style: FontStyle,
     color_bits: [u32; 4],
     has_underline: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct WrappedCacheKey {
+    text: SharedString,
+    font_size_hundredths: u32,
+    family: SharedString,
+    weight: FontWeight,
+    style: FontStyle,
+    wrap_width_tenths: Option<u32>,
+    trim_width_tenths: Option<u32>,
+    line_clamp: Option<usize>,
+    align: TextAlign,
 }
 
 /// Low-level DirectWrite helper passed into `with_char_widths` callbacks.
@@ -520,7 +398,7 @@ impl DirectWriteCore {
         self.fonts.get(id.0).cloned().unwrap_or_default()
     }
 
-    fn text_format(&self, font: &Font, font_size: Pixels) -> IDWriteTextFormat {
+    pub(super) fn text_format(&self, font: &Font, font_size: Pixels) -> IDWriteTextFormat {
         let key = FormatKey {
             family: font.family.clone(),
             weight: font.weight,
@@ -553,7 +431,7 @@ impl DirectWriteCore {
         format
     }
 
-    fn measure_utf16(&self, utf16: &[u16], format: &IDWriteTextFormat) -> Pixels {
+    pub(super) fn measure_utf16(&self, utf16: &[u16], format: &IDWriteTextFormat) -> Pixels {
         if utf16.is_empty() {
             return Pixels::ZERO;
         }
@@ -608,6 +486,8 @@ struct TextSystemState {
     dw: DirectWriteCore,
     char_widths: HashMap<(Font, u32), CharWidths>,
     shaped_cache: HashMap<ShapedCacheKey, ShapedLine>,
+    prev_wrapped_cache: HashMap<WrappedCacheKey, SmallVec<[WrappedLine; 1]>>,
+    curr_wrapped_cache: HashMap<WrappedCacheKey, SmallVec<[WrappedLine; 1]>>,
 }
 
 impl TextSystem {
@@ -617,8 +497,16 @@ impl TextSystem {
                 dw: DirectWriteCore::new(),
                 char_widths: HashMap::new(),
                 shaped_cache: HashMap::new(),
+                prev_wrapped_cache: HashMap::new(),
+                curr_wrapped_cache: HashMap::new(),
             }),
         }
+    }
+
+    /// Rotates the two-frame generational cache for UI-label DirectWrite layouts.
+    pub(crate) fn finish_frame(&self) {
+        let mut state = self.state.borrow_mut();
+        state.prev_wrapped_cache = std::mem::take(&mut state.curr_wrapped_cache);
     }
 
     pub(crate) fn space_width(&self, font: &Font, font_size: Pixels) -> Pixels {
@@ -818,7 +706,15 @@ impl TextSystem {
         line_clamp: Option<usize>,
     ) -> SmallVec<[WrappedLine; 1]> {
         self.shape_text_trimmed(
-            text, font_size, font, color, underline, wrap_width, line_clamp, None,
+            text,
+            font_size,
+            font,
+            color,
+            underline,
+            wrap_width,
+            line_clamp,
+            None,
+            TextAlign::Left,
         )
     }
 
@@ -833,8 +729,29 @@ impl TextSystem {
         wrap_width: Option<Pixels>,
         line_clamp: Option<usize>,
         trim_width: Option<Pixels>,
+        align: TextAlign,
     ) -> SmallVec<[WrappedLine; 1]> {
-        let state = self.state.borrow();
+        let key = WrappedCacheKey {
+            text: text.clone(),
+            font_size_hundredths: (font_size.as_f32() * 100.0).round().max(1.0) as u32,
+            family: font.family.clone(),
+            weight: font.weight,
+            style: font.style,
+            wrap_width_tenths: wrap_width.map(|w| (w.as_f32().max(1.0) * 10.0).round() as u32),
+            trim_width_tenths: trim_width.map(|w| (w.as_f32().max(1.0) * 10.0).round() as u32),
+            line_clamp,
+            align,
+        };
+
+        let mut state = self.state.borrow_mut();
+        if let Some(cached) = state.curr_wrapped_cache.get(&key) {
+            return cached.clone();
+        }
+        if let Some(cached) = state.prev_wrapped_cache.remove(&key) {
+            state.curr_wrapped_cache.insert(key, cached.clone());
+            return cached;
+        }
+
         let format = state.dw.text_format(font, font_size);
         let ellipsis_sign = if trim_width.is_some() {
             unsafe { state.dw.factory.CreateEllipsisTrimmingSign(&format) }.ok()
@@ -849,9 +766,8 @@ impl TextSystem {
                 break;
             }
             let utf16: Vec<u16> = segment.encode_utf16().collect();
-            let max_w = wrap_width
-                .or(trim_width)
-                .map_or(f32::MAX, |w| w.as_f32().max(1.0));
+            let box_w = wrap_width.or(trim_width).map(|w| w.max(px(1.0)));
+            let max_w = box_w.map_or(f32::MAX, Pixels::as_f32);
             let layout = unsafe {
                 state
                     .dw
@@ -867,6 +783,13 @@ impl TextSystem {
                         DWRITE_WORD_WRAPPING_NO_WRAP
                     })
                 };
+                if box_w.is_some() {
+                    let dw_align = match align {
+                        TextAlign::Left => DWRITE_TEXT_ALIGNMENT_LEADING,
+                        TextAlign::Center => DWRITE_TEXT_ALIGNMENT_CENTER,
+                    };
+                    let _ = unsafe { layout.SetTextAlignment(dw_align) };
+                }
                 if let Some(sign) = &ellipsis_sign {
                     let trimming = DWRITE_TRIMMING {
                         granularity: DWRITE_TRIMMING_GRANULARITY_CHARACTER,
@@ -909,13 +832,17 @@ impl TextSystem {
             out.push(WrappedLine {
                 width,
                 line_count,
-                wrapped: wrap_width.is_some(),
+                layout_box_width: box_w,
                 wrap_breaks,
                 ascent,
                 descent,
                 layout,
                 run_colors: Vec::new(),
             });
+        }
+
+        if state.curr_wrapped_cache.len() < MAX_LAYOUT_CACHE {
+            state.curr_wrapped_cache.insert(key, out.clone());
         }
         out
     }
@@ -936,6 +863,12 @@ impl TextSystem {
             .entry(key)
             .or_insert_with(|| CharWidths::new(font.clone(), font_size, dw));
         f(font_id, widths, dw)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn wrapped_cache_counts(&self) -> (usize, usize) {
+        let state = self.state.borrow();
+        (state.curr_wrapped_cache.len(), state.prev_wrapped_cache.len())
     }
 }
 
@@ -983,212 +916,6 @@ pub(crate) fn utf16_to_utf8_offset(text: &str, utf16_offset: u32, is_ascii: bool
     text.len()
 }
 
-// ---------------------------------------------------------------------------
-// Clean-room UAX #14 line break opportunities via `IDWriteTextAnalyzer`
-// ---------------------------------------------------------------------------
-
-#[implement(IDWriteTextAnalysisSource)]
-struct BreakSource {
-    utf16: Rc<Vec<u16>>,
-    locale: HSTRING,
-}
-
-impl IDWriteTextAnalysisSource_Impl for BreakSource_Impl {
-    fn GetTextAtPosition(
-        &self,
-        textposition: u32,
-        textstring: *mut *mut u16,
-        textlength: *mut u32,
-    ) -> windows::core::Result<()> {
-        let pos = textposition as usize;
-        unsafe {
-            if pos >= self.utf16.len() {
-                *textstring = std::ptr::null_mut();
-                *textlength = 0;
-            } else {
-                *textstring = self.utf16.as_ptr().add(pos) as *mut u16;
-                *textlength = (self.utf16.len() - pos) as u32;
-            }
-        }
-        Ok(())
-    }
-
-    fn GetTextBeforePosition(
-        &self,
-        textposition: u32,
-        textstring: *mut *mut u16,
-        textlength: *mut u32,
-    ) -> windows::core::Result<()> {
-        let pos = (textposition as usize).min(self.utf16.len());
-        unsafe {
-            if pos == 0 {
-                *textstring = std::ptr::null_mut();
-                *textlength = 0;
-            } else {
-                *textstring = self.utf16.as_ptr() as *mut u16;
-                *textlength = pos as u32;
-            }
-        }
-        Ok(())
-    }
-
-    fn GetParagraphReadingDirection(&self) -> DWRITE_READING_DIRECTION {
-        DWRITE_READING_DIRECTION_LEFT_TO_RIGHT
-    }
-
-    fn GetLocaleName(
-        &self,
-        textposition: u32,
-        textlength: *mut u32,
-        localename: *mut *mut u16,
-    ) -> windows::core::Result<()> {
-        let pos = (textposition as usize).min(self.utf16.len());
-        unsafe {
-            *textlength = (self.utf16.len() - pos) as u32;
-            *localename = self.locale.as_ptr() as *mut u16;
-        }
-        Ok(())
-    }
-
-    fn GetNumberSubstitution(
-        &self,
-        textposition: u32,
-        textlength: *mut u32,
-        numbersubstitution: windows::core::OutRef<'_, IDWriteNumberSubstitution>,
-    ) -> windows::core::Result<()> {
-        let pos = (textposition as usize).min(self.utf16.len());
-        unsafe {
-            *textlength = (self.utf16.len() - pos) as u32;
-        }
-        let _ = DWRITE_NUMBER_SUBSTITUTION_METHOD_NONE;
-        let _ = numbersubstitution.write(None);
-        Ok(())
-    }
-}
-
-#[implement(IDWriteTextAnalysisSink)]
-struct BreakSink {
-    out: Rc<RefCell<Vec<DWRITE_LINE_BREAKPOINT>>>,
-}
-
-impl IDWriteTextAnalysisSink_Impl for BreakSink_Impl {
-    fn SetScriptAnalysis(
-        &self,
-        _textposition: u32,
-        _textlength: u32,
-        _scriptanalysis: *const DWRITE_SCRIPT_ANALYSIS,
-    ) -> windows::core::Result<()> {
-        Ok(())
-    }
-
-    fn SetLineBreakpoints(
-        &self,
-        textposition: u32,
-        textlength: u32,
-        linebreakpoints: *const DWRITE_LINE_BREAKPOINT,
-    ) -> windows::core::Result<()> {
-        let start = textposition as usize;
-        let len = textlength as usize;
-        let mut dst = self.out.borrow_mut();
-        if start + len <= dst.len() {
-            let src = unsafe { std::slice::from_raw_parts(linebreakpoints, len) };
-            dst[start..start + len].copy_from_slice(src);
-        }
-        Ok(())
-    }
-
-    fn SetBidiLevel(
-        &self,
-        _textposition: u32,
-        _textlength: u32,
-        _explicitlevel: u8,
-        _resolvedlevel: u8,
-    ) -> windows::core::Result<()> {
-        Ok(())
-    }
-
-    fn SetNumberSubstitution(
-        &self,
-        _textposition: u32,
-        _textlength: u32,
-        _numbersubstitution: windows::core::Ref<'_, IDWriteNumberSubstitution>,
-    ) -> windows::core::Result<()> {
-        Ok(())
-    }
-}
-
-thread_local! {
-    static TEXT_ANALYZER: RefCell<Option<IDWriteTextAnalyzer>> = const { RefCell::new(None) };
-}
-
-/// Returns UTF-8 byte offsets strictly inside `text` where UAX #14 allows a line break.
-pub(crate) fn line_break_opportunities(text: &str) -> Vec<usize> {
-    let mut out = Vec::new();
-    if text.is_empty() {
-        return out;
-    }
-    let analyzer = TEXT_ANALYZER.with(|slot| {
-        let mut slot = slot.borrow_mut();
-        if slot.is_none()
-            && let Ok(factory) =
-                unsafe { DWriteCreateFactory::<IDWriteFactory5>(DWRITE_FACTORY_TYPE_SHARED) }
-            && let Ok(a) = unsafe { factory.CreateTextAnalyzer() }
-        {
-            *slot = Some(a);
-        }
-        slot.clone()
-    });
-    let Some(analyzer) = analyzer else {
-        return out;
-    };
-
-    let utf16: Rc<Vec<u16>> = Rc::new(text.encode_utf16().collect());
-    let len = utf16.len();
-    let breakpoints = Rc::new(RefCell::new(vec![DWRITE_LINE_BREAKPOINT::default(); len]));
-    let source: IDWriteTextAnalysisSource = BreakSource {
-        utf16,
-        locale: HSTRING::from("en-us"),
-    }
-    .into();
-    let sink: IDWriteTextAnalysisSink = BreakSink {
-        out: breakpoints.clone(),
-    }
-    .into();
-
-    if unsafe { analyzer.AnalyzeLineBreakpoints(&source, 0, len as u32, &sink) }.is_err() {
-        return out;
-    }
-
-    let bp = breakpoints.borrow();
-    let can_break = DWRITE_BREAK_CONDITION_CAN_BREAK.0 as u8;
-    let may_not_break = DWRITE_BREAK_CONDITION_MAY_NOT_BREAK.0 as u8;
-    let must_break = DWRITE_BREAK_CONDITION_MUST_BREAK.0 as u8;
-    let mut u16_pos = 0usize;
-    for (byte_ix, ch) in text.char_indices() {
-        let char_u16 = ch.len_utf16();
-        let last_u16 = u16_pos + char_u16 - 1;
-        let next_u16 = u16_pos + char_u16;
-        let next_byte = byte_ix + ch.len_utf8();
-        if next_byte < text.len() && next_u16 < bp.len() {
-            let after = (bp[last_u16]._bitfield >> 2) & 0b11;
-            let before = bp[next_u16]._bitfield & 0b11;
-            let allowed = if after == must_break || before == must_break {
-                true
-            } else if after == may_not_break || before == may_not_break {
-                false
-            } else {
-                after == can_break || before == can_break
-            };
-            if allowed {
-                out.push(next_byte);
-            }
-        }
-        u16_pos = next_u16;
-    }
-    let _ = PCWSTR::null();
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1225,5 +952,70 @@ mod tests {
         assert!(breaks.contains(&6));
         assert!(line_break_opportunities("foo\u{00A0}bar").is_empty());
         assert_eq!(line_break_opportunities("foo-bar"), vec![4]);
+    }
+
+    #[test]
+    fn wrapped_text_two_frame_cache_promotes_and_evicts_and_isolates_alignment() {
+        use windows::core::Interface;
+
+        let ts = TextSystem::new();
+        let f = font("Segoe UI Variable Small");
+        let black = Rgba::new(0.0, 0.0, 0.0, 1.0);
+
+        let a = ts.shape_text_trimmed(
+            SharedString::new_static("Ln 1, Col 1"),
+            px(12.0),
+            &f,
+            black,
+            None,
+            None,
+            None,
+            None,
+            TextAlign::Left,
+        );
+        let b = ts.shape_text_trimmed(
+            SharedString::new_static("Ln 1, Col 1"),
+            px(12.0),
+            &f,
+            black,
+            None,
+            None,
+            None,
+            None,
+            TextAlign::Center,
+        );
+        // Distinct TextAlign produces distinct cached COM layouts.
+        assert_ne!(
+            a[0].layout.as_ref().unwrap().as_raw(),
+            b[0].layout.as_ref().unwrap().as_raw()
+        );
+        assert_eq!(ts.wrapped_cache_counts(), (2, 0));
+
+        // Rotate frame: entries move to prev. Re-querying `a` promotes it and reuses the COM object.
+        ts.finish_frame();
+        assert_eq!(ts.wrapped_cache_counts(), (0, 2));
+        let a2 = ts.shape_text_trimmed(
+            SharedString::new_static("Ln 1, Col 1"),
+            px(12.0),
+            &f,
+            black,
+            None,
+            None,
+            None,
+            None,
+            TextAlign::Left,
+        );
+        assert_eq!(
+            a[0].layout.as_ref().unwrap().as_raw(),
+            a2[0].layout.as_ref().unwrap().as_raw()
+        );
+        assert_eq!(ts.wrapped_cache_counts(), (1, 1));
+
+        // Next frame rotation evicts untouched `b` and keeps `a` in prev.
+        ts.finish_frame();
+        assert_eq!(ts.wrapped_cache_counts(), (0, 1));
+        // One more unused frame evicts `a` completely.
+        ts.finish_frame();
+        assert_eq!(ts.wrapped_cache_counts(), (0, 0));
     }
 }

@@ -1,10 +1,14 @@
-//! Clean-room Win32 window creation, Mica Alt framing, Snap Layouts hit-testing, IME,
-//! mouse/keyboard/wheel dispatch, and OLE file drag-and-drop.
+//! Clean-room Win32 window creation, Mica Alt framing, Snap Layouts hit-testing, consolidated
+//! lock-free HWND registry, re-entrant Win32 event queue, modal size/move timer, and `wnd_proc`.
 
-use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
-use std::path::PathBuf;
-use std::time::Instant;
+mod drop_target;
+mod input;
+
+pub(crate) use input::current_modifiers;
+
+use std::cell::RefCell;
+use std::collections::{HashMap, VecDeque};
+use std::rc::Rc;
 
 use windows::Win32::{
     Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
@@ -12,72 +16,62 @@ use windows::Win32::{
         Dwm::{
             DWM_SYSTEMBACKDROP_TYPE, DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE,
             DWMWA_SYSTEMBACKDROP_TYPE, DWMWA_TRANSITIONS_FORCEDISABLED,
-            DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE,
-            DWMWCP_DONOTROUND, DwmExtendFrameIntoClientArea, DwmSetWindowAttribute,
+            DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND,
+            DwmExtendFrameIntoClientArea, DwmSetWindowAttribute,
         },
         Gdi::{ScreenToClient, ValidateRect},
     },
     System::{
-        Com::{DVASPECT_CONTENT, FORMATETC, IDataObject, TYMED_HGLOBAL},
         LibraryLoader::GetModuleHandleW,
-        Memory::{GlobalLock, GlobalUnlock},
-        Ole::{
-            CF_HDROP, DROPEFFECT, DROPEFFECT_COPY, DROPEFFECT_NONE, IDropTarget, IDropTarget_Impl,
-            RegisterDragDrop, RevokeDragDrop,
-        },
+        Ole::{IDropTarget, RegisterDragDrop, RevokeDragDrop},
     },
     UI::{
         Controls::{MARGINS, WM_MOUSELEAVE},
         HiDpi::{GetDpiForWindow, GetSystemMetricsForDpi},
         Input::{
             Ime::{
-                CANDIDATEFORM, CFS_CANDIDATEPOS, CFS_POINT, COMPOSITIONFORM, GCS_COMPSTR,
-                GCS_CURSORPOS, GCS_RESULTSTR, ImmGetCompositionStringW, ImmGetContext,
-                ImmReleaseContext, ImmSetCandidateWindow, ImmSetCompositionWindow,
+                GCS_COMPSTR, GCS_CURSORPOS, GCS_RESULTSTR, ImmGetCompositionStringW, ImmGetContext,
+                ImmReleaseContext,
             },
             KeyboardAndMouse::{
-                GetDoubleClickTime, GetKeyState, ReleaseCapture, SetCapture, TME_LEAVE,
-                TME_NONCLIENT, TRACKMOUSEEVENT, TrackMouseEvent, VK_ADD, VK_APPS, VK_BACK,
-                VK_CONTROL, VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE, VK_F1, VK_F4, VK_F12, VK_HOME,
-                VK_LEFT, VK_LWIN, VK_MENU, VK_NEXT, VK_NUMPAD0, VK_NUMPAD9, VK_OEM_4, VK_OEM_6,
-                VK_OEM_MINUS, VK_OEM_PLUS, VK_PRIOR, VK_RETURN, VK_RIGHT, VK_RWIN, VK_SHIFT,
-                VK_SPACE, VK_SUBTRACT, VK_TAB, VK_UP, VIRTUAL_KEY,
+                ReleaseCapture, SetCapture, TME_LEAVE, TME_NONCLIENT, TRACKMOUSEEVENT,
+                TrackMouseEvent,
             },
         },
-        Shell::HDROP,
         WindowsAndMessaging::{
             CS_DBLCLKS, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW,
-            DestroyWindow, GetClientRect, GetCursorPos, GetSystemMetrics, GetWindowRect, HTCAPTION,
-            HTCLIENT, HTCLOSE, HTMAXBUTTON, HTMINBUTTON, HTTOP, HTTOPLEFT, HTTOPRIGHT, IDC_ARROW,
-            IDC_IBEAM, IsZoomed, LWA_ALPHA, LoadCursorW, LoadIconW, MINMAXINFO, NCCALCSIZE_PARAMS,
+            DestroyWindow, GetClientRect, GetCursorPos, GetWindowRect, HTCAPTION, HTCLIENT,
+            HTCLOSE, HTMAXBUTTON, HTMINBUTTON, HTTOP, HTTOPLEFT, HTTOPRIGHT, IDC_ARROW, IDC_IBEAM,
+            IsZoomed, KillTimer, LWA_ALPHA, LoadCursorW, LoadIconW, MINMAXINFO, NCCALCSIZE_PARAMS,
             PostMessageW, RegisterClassW, SC_CLOSE, SC_MAXIMIZE, SC_MINIMIZE, SC_RESTORE,
-            SM_CXDOUBLECLK, SM_CXFRAME, SM_CXPADDEDBORDER, SM_CYDOUBLECLK, SM_CYFRAME, SW_SHOW,
-            SW_SHOWNOACTIVATE, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOZORDER, SetCursor,
-            SetLayeredWindowAttributes, SetWindowPos, SetWindowTextW, ShowWindow,
-            USER_DEFAULT_SCREEN_DPI, WM_ACTIVATE, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE,
-            WM_DPICHANGED, WM_ENTERSIZEMOVE, WM_ERASEBKGND, WM_EXITSIZEMOVE, WM_GETMINMAXINFO,
-            WM_IME_COMPOSITION, WM_IME_ENDCOMPOSITION, WM_IME_STARTCOMPOSITION, WM_KEYDOWN,
-            WM_KEYUP, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN,
+            SM_CXFRAME, SM_CXPADDEDBORDER, SM_CYFRAME, SW_SHOW, SW_SHOWNOACTIVATE,
+            SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOZORDER, SetCursor, SetLayeredWindowAttributes,
+            SetTimer, SetWindowPos, SetWindowTextW, ShowWindow, USER_DEFAULT_SCREEN_DPI,
+            USER_TIMER_MINIMUM, WM_ACTIVATE, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_DPICHANGED,
+            WM_ENTERMENULOOP, WM_ENTERSIZEMOVE, WM_ERASEBKGND, WM_EXITMENULOOP, WM_EXITSIZEMOVE,
+            WM_GETMINMAXINFO, WM_IME_COMPOSITION, WM_IME_ENDCOMPOSITION, WM_IME_STARTCOMPOSITION,
+            WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN,
             WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_MOVE, WM_NCCALCSIZE,
             WM_NCHITTEST, WM_NCLBUTTONDOWN, WM_NCLBUTTONUP, WM_NCMOUSELEAVE, WM_NCMOUSEMOVE,
             WM_PAINT, WM_RBUTTONDBLCLK, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR,
             WM_SETTINGCHANGE, WM_SIZE, WM_SYSCHAR, WM_SYSCOMMAND, WM_SYSKEYDOWN, WM_SYSKEYUP,
-            WM_THEMECHANGED, WNDCLASSW, WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
-            WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT,
-            WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU, WS_THICKFRAME, WindowFromPoint,
+            WM_THEMECHANGED, WM_TIMER, WNDCLASSW, WS_EX_APPWINDOW, WS_EX_LAYERED,
+            WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+            WS_EX_TRANSPARENT, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU, WS_THICKFRAME,
+            WindowFromPoint,
         },
     },
 };
-use windows::core::{BOOL, HSTRING, PCWSTR, implement, w};
+use windows::core::{BOOL, HSTRING, PCWSTR, w};
 
 use crate::win32::WindowHwnd;
 
 use super::{
     ACTIVE_APP, CursorStyle, ExternalPaths, WindowAppearance, WindowBackgroundAppearance,
-    WindowControlArea, WindowKind, WindowOptions, WindowsDisplay, clear_window_min_size,
-    drive_frames, set_window_min_size, window_min_size,
+    WindowControlArea, WindowKind, WindowOptions, WindowsDisplay, drive_frames,
 };
 use crate::ui::anyhow::Result;
+use crate::ui::app::AppCell;
 use crate::ui::geometry::{Bounds, Pixels, Point, Size, point, px, size};
 use crate::ui::keymap::{Keystroke, Modifiers};
 use crate::ui::window::{
@@ -85,14 +79,152 @@ use crate::ui::window::{
     MouseUpEvent, ScrollDelta, ScrollWheelEvent, WindowId,
 };
 
+use drop_target::JotDropTarget;
+use input::{
+    ClickTracker, is_syskey_passthrough, read_ime_string, translate_vk, update_ime_candidate_pos,
+};
+
 const WINDOW_CLASS: PCWSTR = w!("JotD2DWindow");
 const DWMSBT_TABBEDWINDOW: i32 = 4;
+const SIZE_MOVE_TIMER_ID: usize = 1;
+
+#[derive(Copy, Clone, Debug)]
+struct HwndEntry {
+    window_id: WindowId,
+    is_overlay: bool,
+    hide_titlebar: bool,
+    min_size: Option<Size<Pixels>>,
+}
+
+/// State-changing Win32 notifications queued when `window_wnd_proc` is entered synchronously while
+/// `AppCell` is mutably borrowed (e.g., inside `SetWindowPos` or `ShowWindow`).
+pub(super) enum PendingWin32Event {
+    Resized {
+        hwnd: isize,
+        width: u32,
+        height: u32,
+    },
+    DpiChanged {
+        hwnd: isize,
+        scale: f32,
+    },
+    Activated {
+        hwnd: isize,
+        active: bool,
+    },
+    ThemeChanged {
+        hwnd: isize,
+    },
+    DroppedFiles {
+        window_id: WindowId,
+        paths: ExternalPaths,
+        client_px: (i32, i32),
+    },
+}
 
 thread_local! {
-    static HWND_TO_WINDOW: RefCell<HashMap<isize, WindowId>> = RefCell::new(HashMap::new());
-    /// Lock-free `(is_overlay, hide_titlebar)` per HWND so `WM_NCCALCSIZE` works even during
-    /// `CreateWindowExW`/`SetWindowPos`/`ShowWindow` while `AppCell` is mutably borrowed.
-    static HWND_FRAME_FLAGS: RefCell<HashMap<isize, (bool, bool)>> = RefCell::new(HashMap::new());
+    /// Single lock-free per-HWND metadata registry so `WM_NCCALCSIZE`, `WM_GETMINMAXINFO`, and
+    /// HWND → `WindowId` resolution stay consistent and clean up atomically on window destruction.
+    static HWND_REGISTRY: RefCell<HashMap<isize, HwndEntry>> = RefCell::new(HashMap::new());
+    static PENDING_WIN32_EVENTS: RefCell<VecDeque<PendingWin32Event>> =
+        const { RefCell::new(VecDeque::new()) };
+}
+
+pub(super) fn queue_pending_win32_event(event: PendingWin32Event) {
+    PENDING_WIN32_EVENTS.with(|q| q.borrow_mut().push_back(event));
+}
+
+pub(crate) fn set_window_min_size(hwnd: WindowHwnd, min_size: Option<Size<Pixels>>) {
+    HWND_REGISTRY.with(|map| {
+        if let Some(entry) = map.borrow_mut().get_mut(&(hwnd.raw().0 as isize)) {
+            entry.min_size = min_size;
+        }
+    });
+}
+
+fn hwnd_entry(hwnd: HWND) -> Option<HwndEntry> {
+    HWND_REGISTRY.with(|map| map.borrow().get(&(hwnd.0 as isize)).copied())
+}
+
+#[cfg(test)]
+pub(crate) fn has_hwnd_entry(hwnd: WindowHwnd) -> bool {
+    hwnd_entry(hwnd.raw()).is_some()
+}
+
+pub(super) fn drain_pending_win32_events(app_cell: &Rc<AppCell>) {
+    loop {
+        let next = PENDING_WIN32_EVENTS.with(|q| q.borrow_mut().pop_front());
+        let Some(event) = next else {
+            break;
+        };
+        let Ok(mut app) = app_cell.inner.try_borrow_mut() else {
+            PENDING_WIN32_EVENTS.with(|q| q.borrow_mut().push_front(event));
+            return;
+        };
+        match event {
+            PendingWin32Event::Resized {
+                hwnd,
+                width,
+                height,
+            } => {
+                if let Some(entry) = hwnd_entry(HWND(hwnd as *mut _)) {
+                    let _ = app.update_window_impl(entry.window_id, |_, window, cx| {
+                        let scale = window.native.scale_factor;
+                        window.native.logical_size =
+                            size(px(width as f32 / scale), px(height as f32 / scale));
+                        window.on_resize(width, height, scale, cx);
+                    });
+                }
+            }
+            PendingWin32Event::DpiChanged { hwnd, scale } => {
+                if let Some(entry) = hwnd_entry(HWND(hwnd as *mut _)) {
+                    let _ = app.update_window_impl(entry.window_id, |_, window, cx| {
+                        window.native.scale_factor = scale;
+                        let (w, h) = window.native.physical_size();
+                        window.native.logical_size =
+                            size(px(w as f32 / scale), px(h as f32 / scale));
+                        window.on_resize(w, h, scale, cx);
+                    });
+                }
+            }
+            PendingWin32Event::Activated { hwnd, active } => {
+                if let Some(entry) = hwnd_entry(HWND(hwnd as *mut _)) {
+                    let _ = app.update_window_impl(entry.window_id, |_, window, cx| {
+                        window.native.active = active;
+                        if active {
+                            cx.active_window = Some(window.window_id());
+                        } else if cx.active_window == Some(window.window_id()) {
+                            cx.active_window = None;
+                        }
+                        window.notify_activation_changed(cx);
+                    });
+                }
+            }
+            PendingWin32Event::ThemeChanged { hwnd } => {
+                if let Some(entry) = hwnd_entry(HWND(hwnd as *mut _)) {
+                    let _ = app.update_window_impl(entry.window_id, |_, window, cx| {
+                        let appearance = cx.window_appearance();
+                        window.apply_appearance(appearance, cx);
+                        crate::ui::reduce_motion::init(cx);
+                    });
+                }
+            }
+            PendingWin32Event::DroppedFiles {
+                window_id,
+                paths,
+                client_px,
+            } => {
+                let _ = app.update_window_impl(window_id, |_, window, cx| {
+                    let pos = point(
+                        px(client_px.0 as f32 / window.native.scale_factor),
+                        px(client_px.1 as f32 / window.native.scale_factor),
+                    );
+                    window.dispatch_file_drop(paths, pos, cx);
+                });
+            }
+        }
+        app.flush_effects();
+    }
 }
 
 pub(crate) fn register_window_class() -> Result<()> {
@@ -123,15 +255,13 @@ pub(crate) struct NativeWindow {
     pub(crate) origin: Point<Pixels>,
     pub(crate) active: bool,
     pub(crate) hovered: bool,
+    pub(crate) in_size_move: bool,
     pub(crate) cursor: CursorStyle,
     pub(crate) nc_button_down: Option<u32>,
     pub(crate) pending_surrogate: Option<u16>,
     pub(crate) suppress_next_char: bool,
     pub(crate) last_modifiers: Modifiers,
-    pub(crate) last_click_button: Option<MouseButton>,
-    pub(crate) last_click_pos: (i32, i32),
-    pub(crate) last_click_time: Option<Instant>,
-    pub(crate) click_count: usize,
+    clicks: ClickTracker,
     pub(crate) pressed_button: Option<MouseButton>,
     pub(crate) tracking_leave: bool,
     pub(crate) tracking_nc_leave: bool,
@@ -202,10 +332,22 @@ impl NativeWindow {
             .titlebar
             .as_ref()
             .is_none_or(|t| t.appears_transparent);
-        HWND_FRAME_FLAGS.with(|map| {
-            map.borrow_mut()
-                .insert(hwnd.0 as isize, (is_overlay, hide_titlebar));
+        HWND_REGISTRY.with(|map| {
+            map.borrow_mut().insert(
+                hwnd.0 as isize,
+                HwndEntry {
+                    window_id,
+                    is_overlay,
+                    hide_titlebar,
+                    min_size: if is_overlay {
+                        None
+                    } else {
+                        options.window_min_size
+                    },
+                },
+            );
         });
+
         let target_scale = options
             .display_id
             .and_then(WindowsDisplay::from_id)
@@ -214,7 +356,11 @@ impl NativeWindow {
             });
 
         if is_overlay {
-            set_dwm_u32(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND.0 as u32);
+            set_dwm_u32(
+                hwnd,
+                DWMWA_WINDOW_CORNER_PREFERENCE,
+                DWMWCP_DONOTROUND.0 as u32,
+            );
             set_dwm_u32(hwnd, DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE);
             set_dwm_u32(hwnd, DWMWA_TRANSITIONS_FORCEDISABLED, 1);
             unsafe {
@@ -223,9 +369,6 @@ impl NativeWindow {
         } else {
             configure_backdrop(hwnd, options.window_background);
             configure_dark_mode(hwnd, appearance);
-            if options.window_min_size.is_some() {
-                set_window_min_size(WindowHwnd::from_raw(hwnd), options.window_min_size);
-            }
         }
 
         if let Some(wb) = options.window_bounds {
@@ -258,15 +401,11 @@ impl NativeWindow {
         let scale_factor = final_dpi as f32 / USER_DEFAULT_SCREEN_DPI as f32;
 
         let drop_registered = if !is_overlay {
-            let target: IDropTarget = JotDropTarget { window_id }.into();
+            let target: IDropTarget = JotDropTarget { window_id, hwnd }.into();
             unsafe { RegisterDragDrop(hwnd, &target) }.is_ok()
         } else {
             false
         };
-
-        HWND_TO_WINDOW.with(|map| {
-            map.borrow_mut().insert(hwnd.0 as isize, window_id);
-        });
 
         let (logical_size, origin) = query_client_metrics(hwnd, scale_factor);
 
@@ -279,15 +418,13 @@ impl NativeWindow {
             origin,
             active: options.show && options.focus,
             hovered: false,
+            in_size_move: false,
             cursor: CursorStyle::Arrow,
             nc_button_down: None,
             pending_surrogate: None,
             suppress_next_char: false,
             last_modifiers: current_modifiers(),
-            last_click_button: None,
-            last_click_pos: (0, 0),
-            last_click_time: None,
-            click_count: 0,
+            clicks: ClickTracker::default(),
             pressed_button: None,
             tracking_leave: false,
             tracking_nc_leave: false,
@@ -365,13 +502,13 @@ impl NativeWindow {
     }
 
     pub(crate) fn destroy(&mut self) {
-        HWND_TO_WINDOW.with(|map| {
+        HWND_REGISTRY.with(|map| {
             map.borrow_mut().remove(&(self.hwnd.0 as isize));
         });
-        HWND_FRAME_FLAGS.with(|map| {
-            map.borrow_mut().remove(&(self.hwnd.0 as isize));
-        });
-        clear_window_min_size(self.hwnd);
+        if self.in_size_move {
+            let _ = unsafe { KillTimer(Some(self.hwnd), SIZE_MOVE_TIMER_ID) };
+            self.in_size_move = false;
+        }
         if self.drop_registered {
             unsafe {
                 let _ = RevokeDragDrop(self.hwnd);
@@ -383,31 +520,16 @@ impl NativeWindow {
         }
     }
 
-    fn record_click(&mut self, button: MouseButton, x: i32, y: i32) -> usize {
-        let now = Instant::now();
-        let dbl_ms = unsafe { GetDoubleClickTime() } as u128;
-        let tol_x = unsafe { GetSystemMetrics(SM_CXDOUBLECLK) } / 2;
-        let tol_y = unsafe { GetSystemMetrics(SM_CYDOUBLECLK) } / 2;
-        let same_spot = self.last_click_button == Some(button)
-            && self
-                .last_click_time
-                .is_some_and(|t| now.duration_since(t).as_millis() <= dbl_ms)
-            && (x - self.last_click_pos.0).abs() <= tol_x.max(4)
-            && (y - self.last_click_pos.1).abs() <= tol_y.max(4);
-        self.click_count = if same_spot { self.click_count + 1 } else { 1 };
-        self.last_click_button = Some(button);
-        self.last_click_pos = (x, y);
-        self.last_click_time = Some(now);
-        self.click_count
-    }
-
     fn client_point(&self, lparam: LPARAM) -> (i32, i32, Point<Pixels>) {
         let x = (lparam.0 & 0xFFFF) as i16 as i32;
         let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
         (
             x,
             y,
-            point(px(x as f32 / self.scale_factor), px(y as f32 / self.scale_factor)),
+            point(
+                px(x as f32 / self.scale_factor),
+                px(y as f32 / self.scale_factor),
+            ),
         )
     }
 
@@ -503,161 +625,6 @@ fn apply_cursor(style: CursorStyle) {
     }
 }
 
-pub(crate) fn current_modifiers() -> Modifiers {
-    let down = |vk: VIRTUAL_KEY| (unsafe { GetKeyState(i32::from(vk.0)) } as u16 & 0x8000) != 0;
-    Modifiers {
-        control: down(VK_CONTROL),
-        alt: down(VK_MENU),
-        shift: down(VK_SHIFT),
-        platform: down(VK_LWIN) || down(VK_RWIN),
-        function: false,
-    }
-}
-
-fn translate_vk(vk: u16, modifiers: Modifiers) -> Option<String> {
-    let v = VIRTUAL_KEY(vk);
-    let s = match v {
-        VK_BACK => "backspace",
-        VK_TAB => "tab",
-        VK_RETURN => "enter",
-        VK_ESCAPE => "escape",
-        VK_SPACE => "space",
-        VK_PRIOR => "pageup",
-        VK_NEXT => "pagedown",
-        VK_END => "end",
-        VK_HOME => "home",
-        VK_LEFT => "left",
-        VK_UP => "up",
-        VK_RIGHT => "right",
-        VK_DOWN => "down",
-        VK_DELETE => "delete",
-        VK_MENU => "alt",
-        VK_APPS => "menu",
-        VK_OEM_PLUS => {
-            if modifiers.shift {
-                "+"
-            } else {
-                "="
-            }
-        }
-        VK_ADD => "+",
-        VK_OEM_MINUS | VK_SUBTRACT => "-",
-        VK_OEM_4 => "[",
-        VK_OEM_6 => "]",
-        _ if (VK_F1.0..=VK_F12.0).contains(&vk) => {
-            return Some(format!("f{}", vk - VK_F1.0 + 1));
-        }
-        _ if (VK_NUMPAD0.0..=VK_NUMPAD9.0).contains(&vk) => {
-            return Some(((b'0' + (vk - VK_NUMPAD0.0) as u8) as char).to_string());
-        }
-        _ if (b'0' as u16..=b'9' as u16).contains(&vk) => {
-            return Some((vk as u8 as char).to_string());
-        }
-        _ if (b'A' as u16..=b'Z' as u16).contains(&vk) => {
-            return Some(((vk as u8 as char).to_ascii_lowercase()).to_string());
-        }
-        _ => return None,
-    };
-    Some(s.to_owned())
-}
-
-// ---------------------------------------------------------------------------
-// OLE Drop Target for dragging files onto Jot
-// ---------------------------------------------------------------------------
-
-#[implement(IDropTarget)]
-struct JotDropTarget {
-    window_id: WindowId,
-}
-
-impl IDropTarget_Impl for JotDropTarget_Impl {
-    fn DragEnter(
-        &self,
-        _pdataobj: windows::core::Ref<'_, IDataObject>,
-        _grfkeystate: windows::Win32::System::SystemServices::MODIFIERKEYS_FLAGS,
-        _pt: &windows::Win32::Foundation::POINTL,
-        pdweffect: *mut DROPEFFECT,
-    ) -> windows::core::Result<()> {
-        unsafe {
-            *pdweffect = DROPEFFECT_COPY;
-        }
-        Ok(())
-    }
-
-    fn DragOver(
-        &self,
-        _grfkeystate: windows::Win32::System::SystemServices::MODIFIERKEYS_FLAGS,
-        _pt: &windows::Win32::Foundation::POINTL,
-        pdweffect: *mut DROPEFFECT,
-    ) -> windows::core::Result<()> {
-        unsafe {
-            *pdweffect = DROPEFFECT_COPY;
-        }
-        Ok(())
-    }
-
-    fn DragLeave(&self) -> windows::core::Result<()> {
-        Ok(())
-    }
-
-    fn Drop(
-        &self,
-        pdataobj: windows::core::Ref<'_, IDataObject>,
-        _grfkeystate: windows::Win32::System::SystemServices::MODIFIERKEYS_FLAGS,
-        pt: &windows::Win32::Foundation::POINTL,
-        pdweffect: *mut DROPEFFECT,
-    ) -> windows::core::Result<()> {
-        let Some(data_obj) = pdataobj.as_ref() else {
-            unsafe {
-                *pdweffect = DROPEFFECT_NONE;
-            }
-            return Ok(());
-        };
-        let format = FORMATETC {
-            cfFormat: CF_HDROP.0,
-            ptd: std::ptr::null_mut(),
-            dwAspect: DVASPECT_CONTENT.0,
-            lindex: -1,
-            tymed: TYMED_HGLOBAL.0 as u32,
-        };
-        let Ok(medium) = (unsafe { data_obj.GetData(&format) }) else {
-            unsafe {
-                *pdweffect = DROPEFFECT_NONE;
-            }
-            return Ok(());
-        };
-        let mut paths = Vec::new();
-        unsafe {
-            let hglobal = medium.u.hGlobal;
-            let locked = GlobalLock(hglobal);
-            if !locked.is_null() {
-                crate::win32::with_file_names(HDROP(locked), |name| {
-                    paths.push(PathBuf::from(name));
-                });
-                let _ = GlobalUnlock(hglobal);
-            }
-            *pdweffect = DROPEFFECT_COPY;
-        }
-        if !paths.is_empty()
-            && let Some(app_cell) = ACTIVE_APP.with(|s| s.borrow().clone())
-            && let Ok(mut app) = app_cell.inner.try_borrow_mut()
-        {
-            let _ = app.update_window_impl(self.window_id, |_, window, cx| {
-                let mut client = POINT { x: pt.x, y: pt.y };
-                let _ = unsafe { ScreenToClient(window.native.hwnd, &mut client) };
-                let pos = point(
-                    px(client.x as f32 / window.native.scale_factor),
-                    px(client.y as f32 / window.native.scale_factor),
-                );
-                window.dispatch_file_drop(ExternalPaths(paths), pos, cx);
-            });
-            drop(app);
-            drive_frames(&app_cell);
-        }
-        Ok(())
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Main Win32 window procedure
 // ---------------------------------------------------------------------------
@@ -666,7 +633,7 @@ fn with_window_for_hwnd<R>(
     hwnd: HWND,
     f: impl FnOnce(&mut crate::ui::window::Window, &mut crate::ui::app::App) -> R,
 ) -> Option<R> {
-    let window_id = HWND_TO_WINDOW.with(|m| m.borrow().get(&(hwnd.0 as isize)).copied())?;
+    let window_id = hwnd_entry(hwnd)?.window_id;
     let app_cell = ACTIVE_APP.with(|s| s.borrow().clone())?;
     let mut app = app_cell.inner.try_borrow_mut().ok()?;
     let result = app
@@ -683,7 +650,7 @@ fn query_window_for_hwnd<R>(
     hwnd: HWND,
     f: impl FnOnce(&crate::ui::window::Window) -> R,
 ) -> Option<R> {
-    let window_id = HWND_TO_WINDOW.with(|m| m.borrow().get(&(hwnd.0 as isize)).copied())?;
+    let window_id = hwnd_entry(hwnd)?.window_id;
     let app_cell = ACTIVE_APP.with(|s| s.borrow().clone())?;
     let app = app_cell.inner.try_borrow().ok()?;
     let window = app.windows.get(&window_id)?.as_ref()?;
@@ -706,12 +673,11 @@ unsafe extern "system" fn window_wnd_proc(
 
         WM_PAINT => {
             let _ = unsafe { ValidateRect(Some(hwnd), None) };
-            let window_id = HWND_TO_WINDOW.with(|m| m.borrow().get(&(hwnd.0 as isize)).copied());
-            if let Some(id) = window_id
+            if let Some(entry) = hwnd_entry(hwnd)
                 && let Some(app_cell) = ACTIVE_APP.with(|s| s.borrow().clone())
                 && let Ok(mut app) = app_cell.inner.try_borrow_mut()
             {
-                let _ = app.update_window_impl(id, |root, window, cx| {
+                let _ = app.update_window_impl(entry.window_id, |root, window, cx| {
                     window.draw_frame(&root, cx);
                 });
             }
@@ -719,9 +685,8 @@ unsafe extern "system" fn window_wnd_proc(
         }
 
         WM_NCCALCSIZE if wparam.0 != 0 => {
-            let (is_overlay, hide_titlebar) = HWND_FRAME_FLAGS
-                .with(|m| m.borrow().get(&(hwnd.0 as isize)).copied())
-                .unwrap_or((false, true));
+            let (is_overlay, hide_titlebar) =
+                hwnd_entry(hwnd).map_or((false, true), |e| (e.is_overlay, e.hide_titlebar));
             if is_overlay {
                 return LRESULT(0);
             }
@@ -743,7 +708,7 @@ unsafe extern "system" fn window_wnd_proc(
         }
 
         WM_GETMINMAXINFO => {
-            if let Some(min_size) = window_min_size(hwnd) {
+            if let Some(min_size) = hwnd_entry(hwnd).and_then(|e| e.min_size) {
                 let dpi = unsafe { GetDpiForWindow(hwnd) }.max(USER_DEFAULT_SCREEN_DPI);
                 let scale = dpi as f32 / USER_DEFAULT_SCREEN_DPI as f32;
                 let (bx, by) = frame_thickness_for_dpi(dpi);
@@ -795,6 +760,9 @@ unsafe extern "system" fn window_wnd_proc(
 
         WM_NCMOUSEMOVE => {
             with_window_for_hwnd(hwnd, |window, cx| {
+                if window.native.in_size_move {
+                    return;
+                }
                 if !window.native.tracking_nc_leave {
                     let mut tme = TRACKMOUSEEVENT {
                         cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
@@ -824,8 +792,6 @@ unsafe extern "system" fn window_wnd_proc(
             with_window_for_hwnd(hwnd, |window, cx| {
                 window.native.tracking_nc_leave = false;
                 window.native.nc_button_down = None;
-                // Moving from titlebar/caption buttons into the client area fires `WM_NCMOUSELEAVE`
-                // while the pointer is still inside this window; only clear hover if truly outside.
                 if !window.native.tracking_leave && !cursor_is_over_hwnd(hwnd) {
                     window.native.hovered = false;
                     window.on_mouse_leave(cx);
@@ -911,6 +877,9 @@ unsafe extern "system" fn window_wnd_proc(
 
         WM_MOUSEMOVE => {
             with_window_for_hwnd(hwnd, |window, cx| {
+                if window.native.in_size_move {
+                    return;
+                }
                 if !window.native.tracking_leave {
                     let mut tme = TRACKMOUSEEVENT {
                         cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
@@ -939,8 +908,6 @@ unsafe extern "system" fn window_wnd_proc(
         WM_MOUSELEAVE => {
             with_window_for_hwnd(hwnd, |window, cx| {
                 window.native.tracking_leave = false;
-                // Moving from client area onto non-client caption/drag area fires `WM_MOUSELEAVE`
-                // while the pointer is still inside this window; only clear hover if truly outside.
                 if !window.native.tracking_nc_leave && !cursor_is_over_hwnd(hwnd) {
                     window.native.hovered = false;
                     window.on_mouse_leave(cx);
@@ -968,7 +935,7 @@ unsafe extern "system" fn window_wnd_proc(
             with_window_for_hwnd(hwnd, |window, cx| {
                 window.native.pressed_button = Some(button);
                 let (x, y, pos) = window.native.client_point(lparam);
-                let click_count = window.native.record_click(button, x, y);
+                let click_count = window.native.clicks.record(button, x, y);
                 window.dispatch_mouse_down(
                     MouseDownEvent {
                         button,
@@ -994,7 +961,7 @@ unsafe extern "system" fn window_wnd_proc(
                     window.native.pressed_button = None;
                 }
                 let (_, _, pos) = window.native.client_point(lparam);
-                let click_count = window.native.click_count.max(1);
+                let click_count = window.native.clicks.last_count();
                 window.dispatch_mouse_up(
                     MouseUpEvent {
                         button,
@@ -1015,7 +982,14 @@ unsafe extern "system" fn window_wnd_proc(
             let amount = crate::win32::wheel_scroll_amount(horizontal).unwrap_or(3) as f32;
             let modifiers = current_modifiers();
             let delta = if horizontal || modifiers.shift {
-                ScrollDelta::Lines(point(if horizontal { -notches * amount } else { notches * amount }, 0.0))
+                ScrollDelta::Lines(point(
+                    if horizontal {
+                        -notches * amount
+                    } else {
+                        notches * amount
+                    },
+                    0.0,
+                ))
             } else {
                 ScrollDelta::Lines(point(0.0, notches * amount))
             };
@@ -1069,7 +1043,7 @@ unsafe extern "system" fn window_wnd_proc(
             if handled {
                 return LRESULT(0);
             }
-            if msg == WM_SYSKEYDOWN && vk != VK_F4.0 && vk != VK_SPACE.0 {
+            if msg == WM_SYSKEYDOWN && !is_syskey_passthrough(vk) {
                 return LRESULT(0);
             }
             unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
@@ -1109,8 +1083,6 @@ unsafe extern "system" fn window_wnd_proc(
                     String::from_utf16(&[high, code]).ok()
                 } else {
                     window.native.pending_surrogate = None;
-                    // Ignore ASCII control characters (Ctrl+letters, Backspace, Enter, Escape, Tab)
-                    // which are handled as keybindings/actions.
                     if code < 0x20 || code == 0x7F {
                         return;
                     }
@@ -1166,11 +1138,18 @@ unsafe extern "system" fn window_wnd_proc(
             let w = (lparam.0 & 0xFFFF) as u32;
             let h = ((lparam.0 >> 16) & 0xFFFF) as u32;
             if w > 0 && h > 0 {
-                with_window_for_hwnd(hwnd, |window, cx| {
+                let delivered = with_window_for_hwnd(hwnd, |window, cx| {
                     let scale = window.native.scale_factor;
                     window.native.logical_size = size(px(w as f32 / scale), px(h as f32 / scale));
                     window.on_resize(w, h, scale, cx);
                 });
+                if delivered.is_none() && hwnd_entry(hwnd).is_some() {
+                    queue_pending_win32_event(PendingWin32Event::Resized {
+                        hwnd: hwnd.0 as isize,
+                        width: w,
+                        height: h,
+                    });
+                }
             }
             LRESULT(0)
         }
@@ -1186,7 +1165,8 @@ unsafe extern "system" fn window_wnd_proc(
 
         WM_DPICHANGED => {
             let new_dpi = (wparam.0 & 0xFFFF) as u32;
-            let scale = new_dpi.max(USER_DEFAULT_SCREEN_DPI) as f32 / USER_DEFAULT_SCREEN_DPI as f32;
+            let scale =
+                new_dpi.max(USER_DEFAULT_SCREEN_DPI) as f32 / USER_DEFAULT_SCREEN_DPI as f32;
             let suggested = unsafe { &*(lparam.0 as *const RECT) };
             unsafe {
                 let _ = SetWindowPos(
@@ -1199,18 +1179,24 @@ unsafe extern "system" fn window_wnd_proc(
                     SWP_NOZORDER | SWP_NOACTIVATE,
                 );
             }
-            with_window_for_hwnd(hwnd, |window, cx| {
+            let delivered = with_window_for_hwnd(hwnd, |window, cx| {
                 window.native.scale_factor = scale;
                 let (w, h) = window.native.physical_size();
                 window.native.logical_size = size(px(w as f32 / scale), px(h as f32 / scale));
                 window.on_resize(w, h, scale, cx);
             });
+            if delivered.is_none() && hwnd_entry(hwnd).is_some() {
+                queue_pending_win32_event(PendingWin32Event::DpiChanged {
+                    hwnd: hwnd.0 as isize,
+                    scale,
+                });
+            }
             LRESULT(0)
         }
 
         WM_ACTIVATE => {
             let active = (wparam.0 & 0xFFFF) != 0;
-            with_window_for_hwnd(hwnd, |window, cx| {
+            let delivered = with_window_for_hwnd(hwnd, |window, cx| {
                 window.native.active = active;
                 if active {
                     cx.active_window = Some(window.window_id());
@@ -1219,90 +1205,79 @@ unsafe extern "system" fn window_wnd_proc(
                 }
                 window.notify_activation_changed(cx);
             });
+            if delivered.is_none() && hwnd_entry(hwnd).is_some() {
+                queue_pending_win32_event(PendingWin32Event::Activated {
+                    hwnd: hwnd.0 as isize,
+                    active,
+                });
+            }
             LRESULT(0)
         }
 
         WM_SETTINGCHANGE | WM_THEMECHANGED => {
-            with_window_for_hwnd(hwnd, |window, cx| {
+            let delivered = with_window_for_hwnd(hwnd, |window, cx| {
                 let appearance = cx.window_appearance();
                 window.apply_appearance(appearance, cx);
                 crate::ui::reduce_motion::init(cx);
             });
+            if delivered.is_none() && hwnd_entry(hwnd).is_some() {
+                queue_pending_win32_event(PendingWin32Event::ThemeChanged {
+                    hwnd: hwnd.0 as isize,
+                });
+            }
             LRESULT(0)
         }
 
-        WM_ENTERSIZEMOVE | WM_EXITSIZEMOVE => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
+        WM_ENTERSIZEMOVE | WM_ENTERMENULOOP => {
+            with_window_for_hwnd(hwnd, |window, cx| {
+                window.native.in_size_move = true;
+                if window.native.hovered {
+                    window.on_mouse_leave(cx);
+                }
+            });
+            unsafe {
+                let _ = SetTimer(Some(hwnd), SIZE_MOVE_TIMER_ID, USER_TIMER_MINIMUM, None);
+                DefWindowProcW(hwnd, msg, wparam, lparam)
+            }
+        }
+
+        WM_TIMER if wparam.0 == SIZE_MOVE_TIMER_ID => {
+            if let Some(app_cell) = ACTIVE_APP.with(|s| s.borrow().clone()) {
+                if let Ok(app) = app_cell.inner.try_borrow() {
+                    let fg = app.foreground.clone();
+                    drop(app);
+                    fg.drain_ready();
+                }
+                if let Ok(mut app) = app_cell.inner.try_borrow_mut() {
+                    app.flush_effects();
+                }
+                drive_frames(&app_cell);
+            }
+            LRESULT(0)
+        }
+
+        WM_EXITSIZEMOVE | WM_EXITMENULOOP => {
+            let _ = unsafe { KillTimer(Some(hwnd), SIZE_MOVE_TIMER_ID) };
+            with_window_for_hwnd(hwnd, |window, _| {
+                window.native.in_size_move = false;
+                window.mark_dirty();
+            });
+            unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+        }
 
         WM_CLOSE => {
             let should_close = with_window_for_hwnd(hwnd, |window, cx| window.check_should_close(cx))
                 .unwrap_or(true);
-            if should_close {
-                let id = HWND_TO_WINDOW.with(|m| m.borrow().get(&(hwnd.0 as isize)).copied());
-                if let Some(id) = id
-                    && let Some(app_cell) = ACTIVE_APP.with(|s| s.borrow().clone())
-                    && let Ok(mut app) = app_cell.inner.try_borrow_mut()
-                {
-                    app.remove_window_by_id(id);
-                }
+            if should_close
+                && let Some(entry) = hwnd_entry(hwnd)
+                && let Some(app_cell) = ACTIVE_APP.with(|s| s.borrow().clone())
+                && let Ok(mut app) = app_cell.inner.try_borrow_mut()
+            {
+                app.remove_window_by_id(entry.window_id);
             }
             LRESULT(0)
         }
 
         _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
     }
-}
-
-fn read_ime_string(
-    himc: windows::Win32::UI::Input::Ime::HIMC,
-    flag: windows::Win32::UI::Input::Ime::IME_COMPOSITION_STRING,
-) -> Option<String> {
-    let bytes = unsafe { ImmGetCompositionStringW(himc, flag, None, 0) };
-    if bytes <= 0 {
-        return None;
-    }
-    let len = (bytes as usize) / 2;
-    let mut buf = vec![0u16; len];
-    let written = unsafe {
-        ImmGetCompositionStringW(himc, flag, Some(buf.as_mut_ptr().cast()), bytes as u32)
-    };
-    if written <= 0 {
-        return None;
-    }
-    String::from_utf16(&buf[..(written as usize) / 2]).ok()
-}
-
-fn update_ime_candidate_pos(
-    hwnd: HWND,
-    window: &mut crate::ui::window::Window,
-    cx: &mut crate::ui::app::App,
-) {
-    let Some(rect) = window.query_ime_caret_bounds(cx) else {
-        return;
-    };
-    let scale = window.native.scale_factor;
-    let pt = POINT {
-        x: (rect.origin.x.as_f32() * scale).round() as i32,
-        y: (rect.bottom().as_f32() * scale).round() as i32,
-    };
-    let himc = unsafe { ImmGetContext(hwnd) };
-    if himc.is_invalid() {
-        return;
-    }
-    let comp_form = COMPOSITIONFORM {
-        dwStyle: CFS_POINT,
-        ptCurrentPos: pt,
-        rcArea: RECT::default(),
-    };
-    let cand_form = CANDIDATEFORM {
-        dwIndex: 0,
-        dwStyle: CFS_CANDIDATEPOS,
-        ptCurrentPos: pt,
-        rcArea: RECT::default(),
-    };
-    unsafe {
-        let _ = ImmSetCompositionWindow(himc, &comp_form);
-        let _ = ImmSetCandidateWindow(himc, &cand_form);
-        let _ = ImmReleaseContext(hwnd, himc);
-    }
-    let _ = Cell::new(0);
 }

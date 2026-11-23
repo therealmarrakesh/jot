@@ -873,6 +873,7 @@ impl Element for TextLeaf {
         let nowrap = text_style.white_space == WhiteSpace::Nowrap;
         let truncate = text_style.text_overflow == Some(TextOverflow::Truncate);
         let line_clamp = text_style.line_clamp;
+        let align = text_style.text_align;
         let measured = self.measured.clone();
         *measured.borrow_mut() = None;
 
@@ -917,6 +918,7 @@ impl Element for TextLeaf {
                     wrap_width,
                     line_clamp,
                     trim_width,
+                    align,
                 );
                 let mut total_w = Pixels::ZERO;
                 let mut total_h = Pixels::ZERO;
@@ -971,6 +973,7 @@ impl Element for TextLeaf {
                         prev.wrap_width,
                         text_style.line_clamp,
                         Some(bound_w),
+                        text_style.text_align,
                     )
                     .into_vec();
             } else {
@@ -991,6 +994,7 @@ impl Element for TextLeaf {
                 wrap_width,
                 text_style.line_clamp,
                 trim_width,
+                text_style.text_align,
             )
             .into_vec();
     }

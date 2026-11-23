@@ -5,7 +5,6 @@ pub(crate) mod dialogs;
 pub(crate) mod window;
 
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -39,13 +38,13 @@ use windows::Win32::{
 };
 use windows::core::{PCWSTR, w};
 
-use crate::win32::WindowHwnd;
-
 use super::app::{App, AppCell};
 use super::geometry::{Bounds, Pixels, Size, point, px, size};
 use super::graphics::d2d_renderer::Direct2DDevices;
 use super::types::SharedString;
 use super::types::anyhow::{Context as _, Result};
+
+pub(crate) use window::set_window_min_size;
 
 pub(crate) const WM_APP_WAKE: u32 = WM_APP + 1;
 pub(crate) const WM_APP_VSYNC: u32 = WM_APP + 2;
@@ -221,24 +220,7 @@ impl ExternalPaths {
 }
 
 thread_local! {
-    static MIN_SIZES: RefCell<HashMap<isize, Option<Size<Pixels>>>> = RefCell::new(HashMap::new());
     pub(crate) static ACTIVE_APP: RefCell<Option<Rc<AppCell>>> = const { RefCell::new(None) };
-}
-
-pub(crate) fn set_window_min_size(hwnd: WindowHwnd, min_size: Option<Size<Pixels>>) {
-    MIN_SIZES.with(|map| {
-        map.borrow_mut().insert(hwnd.raw().0 as isize, min_size);
-    });
-}
-
-pub(crate) fn window_min_size(hwnd: HWND) -> Option<Size<Pixels>> {
-    MIN_SIZES.with(|map| map.borrow().get(&(hwnd.0 as isize)).copied().flatten())
-}
-
-pub(crate) fn clear_window_min_size(hwnd: HWND) {
-    MIN_SIZES.with(|map| {
-        map.borrow_mut().remove(&(hwnd.0 as isize));
-    });
 }
 
 /// Pacing thread that blocks in `Condvar` at 0% CPU until armed, then waits one `DwmFlush`
@@ -424,6 +406,7 @@ impl Drop for WindowsPlatform {
 }
 
 pub(crate) fn drive_frames(app_cell: &Rc<AppCell>) {
+    window::drain_pending_win32_events(app_cell);
     let ids: Vec<_> = {
         let Ok(app) = app_cell.inner.try_borrow() else {
             return;

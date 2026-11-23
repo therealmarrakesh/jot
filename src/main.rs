@@ -2210,6 +2210,108 @@ mod ui_regression_tests {
     }
 
     #[test]
+    fn hwnd_registry_cleanup_reentrant_queue_and_modal_size_move_timer() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+        use windows::Win32::{
+            Foundation::{LPARAM, WPARAM},
+            UI::WindowsAndMessaging::{
+                SendMessageW, WM_ACTIVATE, WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE, WM_TIMER,
+            },
+        };
+
+        let h = TestHarness::new();
+        let hwnd = h.read_jot(|j, _| j.hwnd);
+        assert!(
+            crate::ui::platform::window::has_hwnd_entry(hwnd),
+            "open window must be registered in HWND_REGISTRY"
+        );
+
+        // Bind ACTIVE_APP for direct SendMessageW testing, then restore on exit.
+        crate::ui::platform::ACTIVE_APP.with(|s| *s.borrow_mut() = Some(h.app_cell.clone()));
+
+        // 1. Re-entrant Win32 message while AppCell is mutably borrowed must be queued, not lost.
+        {
+            let _borrow = h.app_cell.inner.borrow_mut();
+            unsafe {
+                let _ = SendMessageW(
+                    hwnd.raw(),
+                    WM_ACTIVATE,
+                    Some(WPARAM(1)),
+                    Some(LPARAM(0)),
+                );
+            }
+        }
+        crate::ui::platform::drive_frames(&h.app_cell);
+        {
+            let app = h.app_cell.inner.borrow();
+            let win = app.windows.get(&h.handle.id).unwrap().as_ref().unwrap();
+            assert!(
+                win.is_window_active(),
+                "queued re-entrant WM_ACTIVATE must apply once drive_frames drains it"
+            );
+        }
+
+        // 2. Modal size/move loop timer pumps foreground tasks while dragging edges.
+        let ran = Arc::new(AtomicBool::new(false));
+        {
+            let ran_flag = ran.clone();
+            let app = h.app_cell.inner.borrow();
+            app.foreground
+                .spawn(async move {
+                    ran_flag.store(true, Ordering::SeqCst);
+                })
+                .detach();
+        }
+        unsafe {
+            let _ = SendMessageW(
+                hwnd.raw(),
+                WM_ENTERSIZEMOVE,
+                Some(WPARAM(0)),
+                Some(LPARAM(0)),
+            );
+        }
+        {
+            let app = h.app_cell.inner.borrow();
+            let win = app.windows.get(&h.handle.id).unwrap().as_ref().unwrap();
+            assert!(win.native.in_size_move);
+        }
+        unsafe {
+            let _ = SendMessageW(hwnd.raw(), WM_TIMER, Some(WPARAM(1)), Some(LPARAM(0)));
+        }
+        assert!(
+            ran.load(Ordering::SeqCst),
+            "WM_TIMER during modal size/move must drain ready foreground tasks"
+        );
+        unsafe {
+            let _ = SendMessageW(
+                hwnd.raw(),
+                WM_EXITSIZEMOVE,
+                Some(WPARAM(0)),
+                Some(LPARAM(0)),
+            );
+        }
+        {
+            let app = h.app_cell.inner.borrow();
+            let win = app.windows.get(&h.handle.id).unwrap().as_ref().unwrap();
+            assert!(!win.native.in_size_move);
+        }
+
+        // 3. Closing window cleans up HWND_REGISTRY atomically.
+        {
+            let mut app = h.app_cell.inner.borrow_mut();
+            app.remove_window_by_id(h.handle.id);
+        }
+        crate::ui::platform::ACTIVE_APP.with(|s| *s.borrow_mut() = None);
+        assert!(
+            !crate::ui::platform::window::has_hwnd_entry(hwnd),
+            "closing window must remove entry from HWND_REGISTRY"
+        );
+    }
+
+    #[test]
     fn real_win32_message_loop_wakes_timers_and_quits_cleanly() {
         let platform = Rc::new(
             crate::ui::WindowsPlatform::new().expect("WindowsPlatform::new failed"),
