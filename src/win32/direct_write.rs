@@ -1228,12 +1228,13 @@ impl IDWriteTextRenderer_Impl for TextRenderer_Impl {
                 "DirectWrite returned a null glyph advances array",
             )?
         };
-        let glyph_offsets = unsafe {
-            slice_from_nullable(
-                glyphrun.glyphOffsets,
-                glyph_count,
-                "DirectWrite returned a null glyph offsets array",
-            )?
+        // `DWRITE_GLYPH_RUN::glyphOffsets` is optional; DirectWrite passes NULL
+        // on its fast shaping path when all glyph advance/ascender offsets are 0
+        // (e.g. "100%" in Segoe UI Variable Small).
+        let glyph_offsets = if glyphrun.glyphOffsets.is_null() {
+            None
+        } else {
+            Some(unsafe { std::slice::from_raw_parts(glyphrun.glyphOffsets, glyph_count) })
         };
         let cluster_map = unsafe {
             slice_from_nullable(
@@ -1259,11 +1260,19 @@ impl IDWriteTextRenderer_Impl for TextRenderer_Impl {
                 let is_emoji =
                     color_font && is_color_glyph(font_face, id, &context.components.factory);
                 let this_glyph_idx = glyph_idx + cluster_glyph_idx;
+                let (advance_offset, ascender_offset) = glyph_offsets
+                    .map(|offsets| {
+                        (
+                            offsets[this_glyph_idx].advanceOffset,
+                            offsets[this_glyph_idx].ascenderOffset,
+                        )
+                    })
+                    .unwrap_or((0.0, 0.0));
                 glyphs.push(ShapedGlyph {
                     id,
                     position: point(
-                        px(context.width + glyph_offsets[this_glyph_idx].advanceOffset),
-                        px(-glyph_offsets[this_glyph_idx].ascenderOffset),
+                        px(context.width + advance_offset),
+                        px(-ascender_offset),
                     ),
                     index: context.index_converter.utf8_ix,
                     is_emoji,
