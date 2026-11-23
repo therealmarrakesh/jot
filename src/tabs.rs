@@ -263,14 +263,15 @@ pub(crate) fn window_listeners(register: impl FnOnce(&mut Window) + 'static) -> 
 }
 
 fn repeat(
-    cx: &mut Context<Jot>,
+    window_id: WindowId,
+    cx: &App,
     delay: Duration,
     interval: Duration,
-    mut tick: impl FnMut(&mut Jot, &mut Context<Jot>) -> bool + 'static,
+    mut tick: impl FnMut(&mut Jot, &mut App) -> bool + 'static,
 ) -> TimerHandle {
-    let this = cx.weak_entity();
     cx.every(delay, interval, move |cx| {
-        this.update(cx, |jot, cx| tick(jot, cx)).unwrap_or(false)
+        cx.with_jot(window_id, |jot, cx| tick(jot, cx))
+            .unwrap_or(false)
     })
 }
 
@@ -423,12 +424,12 @@ impl Jot {
         self.tabs.iter().position(|tab| tab.data.id == id)
     }
 
-    pub(crate) fn add_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn add_tab(&mut self, window: &mut Window, cx: &mut App) {
         let tab = Self::create_tab(None, window, cx);
         self.push_tab(tab, window, cx);
     }
 
-    pub(crate) fn push_tab(&mut self, mut tab: Tab, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn push_tab(&mut self, mut tab: Tab, window: &mut Window, cx: &mut App) {
         tab.slot = self.strip.key();
         self.tabs.push(tab);
         self.layout_tabs();
@@ -440,7 +441,7 @@ impl Jot {
         ix: usize,
         mut tab: Tab,
         window: &mut Window,
-        cx: &mut Context<Self>,
+        cx: &mut App,
     ) {
         tab.slot = self.tabs[ix].slot;
         let replaced = std::mem::replace(&mut self.tabs[ix], tab);
@@ -448,12 +449,12 @@ impl Jot {
         self.activate_tab(ix, window, cx);
     }
 
-    fn forget_tab(&mut self, id: TabId, cx: &mut Context<Self>) {
+    fn forget_tab(&mut self, id: TabId, cx: &mut App) {
         self.strip.depart(id);
         tab_drag::forget(id, cx);
     }
 
-    pub(crate) fn remove_tab(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn remove_tab(&mut self, ix: usize, window: &mut Window, cx: &mut App) {
         if self.tabs.len() == 1 {
             window.remove_window();
             return;
@@ -473,7 +474,7 @@ impl Jot {
         self.settle_after_removal(ix, window, cx);
     }
 
-    fn settle_after_removal(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+    fn settle_after_removal(&mut self, ix: usize, window: &mut Window, cx: &mut App) {
         if ix < self.active || self.active == self.tabs.len() {
             self.active -= 1;
         }
@@ -502,41 +503,33 @@ impl Jot {
         }
     }
 
-    fn scroll_tabs(&mut self, delta: f32, cx: &mut Context<Self>) -> bool {
+    fn scroll_tabs(&mut self, delta: f32, cx: &mut App) -> bool {
         let before = self.strip.scroll;
         self.strip.scroll_to(before + delta);
-        cx.notify();
+        self.notify(cx);
         self.strip.scroll != before
     }
 
-    fn thaw_tabs(&mut self, cx: &mut Context<Self>) {
+    fn thaw_tabs(&mut self, cx: &mut App) {
         if self.strip.frozen.take().is_some() {
             self.layout_tabs();
-            cx.notify();
+            self.notify(cx);
         }
     }
 
-    fn thaw_listener(&self, cx: &mut Context<Self>) -> CanvasNode {
+    fn thaw_listener(&self) -> CanvasNode {
         let area = self.strip.area.clone();
-        let jot = cx.weak_entity();
+        let window_id = self.window_id;
         window_listeners(move |window| {
-            let moved = jot.clone();
             window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
                 if phase == DispatchPhase::Bubble && !area.get().contains(&event.position) {
-                    moved.update(cx, |jot, cx| jot.thaw_tabs(cx)).ok();
+                    cx.with_jot(window_id, |jot, cx| jot.thaw_tabs(cx));
                 }
             });
         })
     }
 
-    pub(crate) fn drag_tab(
-        &mut self,
-        id: TabId,
-        x: f32,
-        grab: f32,
-        start: f32,
-        cx: &mut Context<Self>,
-    ) {
+    pub(crate) fn drag_tab(&mut self, id: TabId, x: f32, grab: f32, start: f32, cx: &mut App) {
         let Some(from) = self.tab_index(id) else {
             return;
         };
@@ -567,13 +560,13 @@ impl Jot {
         }
         self.strip.drag = Some(drag);
         self.layout_tabs();
-        cx.notify();
+        self.notify(cx);
     }
 
-    pub(crate) fn release_tab(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn release_tab(&mut self, cx: &mut App) {
         if self.strip.drag.take().is_some() {
             self.layout_tabs();
-            cx.notify();
+            self.notify(cx);
         }
     }
 
@@ -581,7 +574,7 @@ impl Jot {
         &mut self,
         id: TabId,
         window: &mut Window,
-        cx: &mut Context<Self>,
+        cx: &mut App,
     ) -> Option<TabData> {
         let ix = self.tab_index(id)?;
         let tab = self.tabs.remove(ix);
@@ -600,7 +593,7 @@ impl Jot {
         x: f32,
         grab: f32,
         window: &mut Window,
-        cx: &mut Context<Self>,
+        cx: &mut App,
     ) {
         let mut tab = Self::adopt_tab(data);
         tab.slot = self.strip.key();
@@ -626,7 +619,7 @@ impl Jot {
         data: TabData,
         ix: usize,
         window: &mut Window,
-        cx: &mut Context<Self>,
+        cx: &mut App,
     ) {
         let mut tab = Self::adopt_tab(data);
         let ix = ix.min(self.tabs.len());
@@ -641,7 +634,7 @@ impl Jot {
         id: TabId,
         ix: usize,
         window: &mut Window,
-        cx: &mut Context<Self>,
+        cx: &mut App,
     ) {
         self.strip.drag = None;
         if let Some(from) = self.tab_index(id) {
@@ -653,7 +646,7 @@ impl Jot {
         if let Some(ix) = self.tab_index(id) {
             self.activate_tab(ix, window, cx);
         }
-        cx.notify();
+        self.notify(cx);
     }
 
     pub(crate) fn sample_tabs(&mut self, window: &mut Window, cx: &mut App) -> StripFrame {
@@ -715,7 +708,7 @@ impl Jot {
         }
     }
 
-    fn tab(&self, ix: usize, left: f32, cx: &mut Context<Self>) -> Div {
+    fn tab(&self, ix: usize, left: f32, cx: &App) -> Div {
         let p = palette(cx);
         let tab = &self.tabs[ix];
         let id = tab.data.id;
@@ -757,10 +750,9 @@ impl Jot {
             })
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                    if let Some(ix) = this.tab_index(id)
-                        && let Some(owner) = tab_drag::owner(window)
-                    {
+                self.on(move |this, event: &MouseDownEvent, window, cx| {
+                    if let Some(ix) = this.tab_index(id) {
+                        let owner = tab_drag::owner(window);
                         this.activate_tab(ix, window, cx);
                         let grab = point(
                             event.position.x.as_f32() - left,
@@ -768,17 +760,17 @@ impl Jot {
                         );
                         let alone = this.tabs.len() == 1;
                         tab_drag::press(owner, id, ix, grab, event.position, alone, cx);
-                        cx.notify();
+                        this.notify(cx);
                     }
                 }),
             )
-            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+            .on_hover(self.on(move |this, hovered: &bool, _, cx| {
                 if *hovered {
                     this.strip.hovered = Some(id);
                 } else if this.strip.hovered == Some(id) {
                     this.strip.hovered = None;
                 }
-                cx.notify();
+                this.notify(cx);
             }))
             .child(
                 tab_face(p, active, trailing, name)
@@ -786,7 +778,7 @@ impl Jot {
                     .when(!active, |this| {
                         this.hover(move |style| style.bg(rgba(p.layer_hover)))
                     })
-                    .on_aux_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                    .on_aux_click(self.on(move |this, event: &ClickEvent, window, cx| {
                         if event.is_middle_click()
                             && let Some(ix) = this.tab_index(id)
                         {
@@ -797,12 +789,12 @@ impl Jot {
             .when(show_dot, |this| this.child(unsaved_dot(p, inset)))
             .when(separator, |this| this.child(tab_separator(p)))
             .when(show_close, |this| {
-                this.child(Self::close_button(p, id, inset, cx))
+                this.child(self.close_button(p, id, inset))
             })
             .tooltip(tip)
     }
 
-    fn close_button(p: Palette, id: TabId, inset: f32, cx: &mut Context<Self>) -> Div {
+    fn close_button(&self, p: Palette, id: TabId, inset: f32) -> Div {
         strip_button(
             p,
             ("close-tab", id),
@@ -815,18 +807,18 @@ impl Jot {
         .top(px(CLOSE_BUTTON_TOP - inset))
         .right(px(CLOSE_BUTTON_RIGHT - inset))
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-        .on_click(cx.listener(move |this, _, window, cx| {
+        .on_click(self.on(move |this, _, window, cx| {
             if let Some(ix) = this.tab_index(id) {
                 this.close_tab(ix, window, cx);
             }
         }))
     }
 
-    fn stop_repeat(&mut self, _: &MouseUpEvent, _: &mut Window, _: &mut Context<Self>) {
+    fn stop_repeat(&mut self, _: &MouseUpEvent, _: &mut Window, _: &mut App) {
         self.strip.repeat.cancel();
     }
 
-    fn new_tab_button(&self, cx: &mut Context<Self>) -> Div {
+    fn new_tab_button(&self, cx: &App) -> Div {
         let p = palette(cx);
         strip_button(
             p,
@@ -838,10 +830,10 @@ impl Jot {
         )
         .ml(px(self.strip.new_tab_gap()))
         .mt(px(BUTTON_TOP))
-        .on_click(cx.listener(|this, _, window, cx| this.add_tab(window, cx)))
+        .on_click(self.on(|this, _, window, cx| this.add_tab(window, cx)))
     }
 
-    fn scroll_button(&self, forward: bool, cx: &mut Context<Self>) -> Div {
+    fn scroll_button(&self, forward: bool, cx: &App) -> Div {
         let p = palette(cx);
         let target = self.strip.scroll;
         let enabled = if forward {
@@ -873,9 +865,10 @@ impl Jot {
             .when(enabled, |this| {
                 this.text_color(rgba(p.text_secondary)).on_mouse_down(
                     MouseButton::Left,
-                    cx.listener(move |this, _, _, cx| {
+                    self.on(move |this, _, _, cx| {
                         if this.scroll_tabs(step, cx) {
                             this.strip.repeat = repeat(
+                                this.window_id,
                                 cx,
                                 SCROLL_REPEAT_DELAY,
                                 SCROLL_REPEAT_INTERVAL,
@@ -885,8 +878,8 @@ impl Jot {
                     }),
                 )
             })
-            .on_mouse_up(MouseButton::Left, cx.listener(Self::stop_repeat))
-            .on_mouse_up_out(MouseButton::Left, cx.listener(Self::stop_repeat));
+            .on_mouse_up(MouseButton::Left, self.on(Self::stop_repeat))
+            .on_mouse_up_out(MouseButton::Left, self.on(Self::stop_repeat));
         div()
             .flex_none()
             .h_full()
@@ -895,7 +888,7 @@ impl Jot {
             .child(button)
     }
 
-    pub(crate) fn tab_strip(&self, sampled: &StripFrame, cx: &mut Context<Self>) -> Div {
+    pub(crate) fn tab_strip(&self, sampled: &StripFrame, cx: &App) -> Div {
         let p = palette(cx);
         let shift = sampled.shift;
         let viewport = sampled.viewport;
@@ -935,7 +928,7 @@ impl Jot {
             .flex()
             .h(px(TAB_HEIGHT))
             .when(self.strip.frozen.is_some(), |this| {
-                this.child(self.thaw_listener(cx))
+                this.child(self.thaw_listener())
             })
             .when(buttons, |this| this.child(self.scroll_button(false, cx)))
             .child(
@@ -947,28 +940,26 @@ impl Jot {
                     .w(px(viewport))
                     .overflow_hidden()
                     .when(overflow, |this| {
-                        this.on_scroll_wheel(cx.listener(
-                            |this, event: &ScrollWheelEvent, _, cx| {
-                                let viewport = this.strip.scroll_viewport();
-                                match event.delta {
-                                    ScrollDelta::Lines(lines) => {
-                                        let notches = if lines.y != 0. { lines.y } else { lines.x };
-                                        this.scroll_tabs(-notches * WHEEL_SHARE * viewport, cx);
-                                    }
-                                    ScrollDelta::Pixels(pixels) => {
-                                        let delta = if pixels.y != px(0.) {
-                                            pixels.y
-                                        } else {
-                                            pixels.x
-                                        };
-                                        let target = this.strip.scroll - delta.as_f32();
-                                        this.strip.snap_scroll = true;
-                                        this.strip.scroll_to(target);
-                                        cx.notify();
-                                    }
+                        this.on_scroll_wheel(self.on(|this, event: &ScrollWheelEvent, _, cx| {
+                            let viewport = this.strip.scroll_viewport();
+                            match event.delta {
+                                ScrollDelta::Lines(lines) => {
+                                    let notches = if lines.y != 0. { lines.y } else { lines.x };
+                                    this.scroll_tabs(-notches * WHEEL_SHARE * viewport, cx);
                                 }
-                            },
-                        ))
+                                ScrollDelta::Pixels(pixels) => {
+                                    let delta = if pixels.y != px(0.) {
+                                        pixels.y
+                                    } else {
+                                        pixels.x
+                                    };
+                                    let target = this.strip.scroll - delta.as_f32();
+                                    this.strip.snap_scroll = true;
+                                    this.strip.scroll_to(target);
+                                    this.notify(cx);
+                                }
+                            }
+                        }))
                     })
                     .children(ghosts)
                     .children(tabs)

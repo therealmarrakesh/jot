@@ -252,7 +252,7 @@ pub(crate) fn text_field(
                 .text_size(u(BODY_SIZE))
                 .line_height(u(BODY_LINE + 2.))
                 .text_color(rgba(p.text_primary))
-                .child(input.render(host.clone())),
+                .child(input.render(host)),
         )
         .child(bottom_edge(
             focused,
@@ -298,11 +298,10 @@ fn clear_button(p: Palette, id: usize, host: EditorHost, right: f32, s: f32) -> 
             cx.stop_propagation();
         })
         .on_click(move |_, window, cx| {
-            let h = host.clone();
             host.with_mut(cx, |input, cx| {
                 input.set_value("", cx);
                 input.focus_handle().focus(window, cx);
-                input.start_blink(&h, cx);
+                input.start_blink(&host, cx);
             });
             host.notify(cx);
         })

@@ -21,7 +21,7 @@ const BAR_FOCUS_OUTSET: Edges<f32> = Edges {
 };
 
 impl Jot {
-    fn menu_command_row(open: &OpenMenu, window: &Window, cx: &mut Context<Self>) -> Div {
+    fn menu_command_row(&self, open: &OpenMenu, window: &Window, cx: &App) -> Div {
         let p = palette(cx);
         let commands = &open.commands;
         let count = commands.len() as f32;
@@ -45,7 +45,7 @@ impl Jot {
                         .bg(rgb(p.menu_separator))
                 });
                 let button =
-                    Self::menu_command_button(p, ix, command, cell, ring == Some(ix), window, cx);
+                    self.menu_command_button(p, ix, command, cell, ring == Some(ix), window);
                 divider.into_iter().chain(Some(button))
             }))
             .child(
@@ -60,13 +60,13 @@ impl Jot {
     }
 
     fn menu_command_button(
+        &self,
         p: Palette,
         ix: usize,
         button: &CommandButton,
         cell: f32,
         focused: bool,
         window: &Window,
-        cx: &mut Context<Self>,
     ) -> Div {
         let face = cell - 2. * (COMMAND_GAP + COMMAND_INSET);
         let CommandButton { command, glyph } = button;
@@ -87,7 +87,7 @@ impl Jot {
             .pt(px(COMMAND_ROW - COMMAND_BUTTON + COMMAND_INSET))
             .px(px(COMMAND_GAP + COMMAND_INSET))
             .pb(px(COMMAND_INSET))
-            .on_click(cx.listener(move |this, _, window, cx| this.menu_run_command(ix, window, cx)))
+            .on_click(self.on(move |this, _, window, cx| this.menu_run_command(ix, window, cx)))
             .child(
                 div()
                     .id(("menu-command-face", ix))
@@ -134,7 +134,7 @@ impl Jot {
             )
     }
 
-    fn menu_trigger(&self, kind: MenuKind, window: &Window, cx: &mut Context<Self>) -> Div {
+    fn menu_trigger(&self, kind: MenuKind, window: &Window, cx: &App) -> Div {
         let p = palette(cx);
         let open = self
             .menu_bar
@@ -158,7 +158,7 @@ impl Jot {
             .pressed(move |style| style.bg(rgba(p.subtle_tertiary)))
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(move |this, _, window, cx| {
+                self.on(move |this, _, window, cx| {
                     window.prevent_default();
                     cx.stop_propagation();
                     if this.menu_bar.open_kind() == Some(kind) {
@@ -168,7 +168,7 @@ impl Jot {
                     }
                 }),
             )
-            .on_hover(cx.listener(move |this, hovered: &bool, window, cx| {
+            .on_hover(self.on(move |this, hovered: &bool, window, cx| {
                 if *hovered && this.menu_bar.open_kind().is_some_and(|open| open != kind) {
                     this.menu_open(kind, window, cx);
                 }
@@ -196,8 +196,8 @@ impl Jot {
         self.menu_bar.trigger_areas.record(kind.index(), trigger)
     }
 
-    fn menu_sync_key_tips(&self, window: &Window, cx: &mut Context<Self>) {
-        let owner = window.window_handle();
+    fn menu_sync_key_tips(&self, window: &Window, cx: &mut App) {
+        let owner = window.window_id();
         let tips = self.menu_bar.key_tips(window);
         if tips.is_empty() {
             if keytips::is_owner(owner, cx) {
@@ -210,7 +210,7 @@ impl Jot {
         cx.defer(move |cx| keytips::show(owner, origin, scale, tips, cx));
     }
 
-    fn menu_popup(&self, open: &OpenMenu, window: &Window, cx: &mut Context<Self>) -> Div {
+    fn menu_popup(&self, open: &OpenMenu, window: &Window, cx: &App) -> Div {
         let p = palette(cx);
         let panel = &open.panel;
         let width = panel.width;
@@ -239,7 +239,7 @@ impl Jot {
             .opacity(open.motion.opacity)
             .occlude()
             .cursor_default()
-            .on_mouse_down_out(cx.listener(|this, event: &MouseDownEvent, window, cx| {
+            .on_mouse_down_out(self.on(|this, event: &MouseDownEvent, window, cx| {
                 if !this.menu_bar.hit_areas.contains(event.position) {
                     this.menu_close(window, cx);
                 }
@@ -254,26 +254,21 @@ impl Jot {
                 div()
                     .size_full()
                     .when(has_commands, |this| {
-                        this.child(Self::menu_command_row(open, window, cx))
+                        this.child(self.menu_command_row(open, window, cx))
                     })
-                    .child(Self::menu_panel_rows(open, panel, None, bar, has_commands, cx)),
+                    .child(self.menu_panel_rows(open, panel, None, bar, has_commands, cx)),
             ))
             .children(submenu);
         self.menu_bar.hit_areas.record(MENU_AREA, panel)
     }
 
-    fn menu_submenu_popup(
-        &self,
-        open: &OpenMenu,
-        submenu: &OpenSubmenu,
-        cx: &mut Context<Self>,
-    ) -> Div {
+    fn menu_submenu_popup(&self, open: &OpenMenu, submenu: &OpenSubmenu, cx: &App) -> Div {
         let p = palette(cx);
         let sub_width = submenu.panel.width;
         let sub_height = submenu.panel.height();
         let hidden = sub_height * SUBMENU_CLOSED_RATIO * (1. - submenu.motion.unroll);
         let top = open.panel.row_top(submenu.ix) - BORDER - PADDING_Y;
-        let rows = Self::menu_panel_rows(open, &submenu.panel, Some(submenu.ix), 0., false, cx);
+        let rows = self.menu_panel_rows(open, &submenu.panel, Some(submenu.ix), 0., false, cx);
         let panel = div()
             .id("submenu")
             .absolute()
@@ -297,12 +292,13 @@ impl Jot {
     }
 
     fn menu_panel_rows(
+        &self,
         open: &OpenMenu,
         panel: &Panel,
         parent: Option<usize>,
         offset: f32,
         fade: bool,
-        cx: &mut Context<Self>,
+        cx: &App,
     ) -> Div {
         let p = palette(cx);
         let focus_visible = open.focus_visible && (parent.is_some() || !open.in_submenu());
@@ -345,25 +341,24 @@ impl Jot {
                             px(field::CONTROL_RADIUS),
                         ))
                     })
-                    .on_hover(cx.listener(move |this, hovered: &bool, window, cx| {
+                    .on_hover(self.on(move |this, hovered: &bool, window, cx| {
                         if *hovered {
                             this.menu_hover_row(path, window, cx);
                         }
                     }))
                     .on_click(
-                        cx.listener(move |this, _, window, cx| this.menu_activate(path, window, cx)),
+                        self.on(move |this, _, window, cx| this.menu_activate(path, window, cx)),
                     )
                     .child(face)
             }))
     }
 
-    pub(crate) fn render_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Div {
+    pub(crate) fn render_menu(&mut self, window: &mut Window, cx: &mut App) -> Div {
         let p = palette(cx);
-        if self.menu_bar.access || keytips::is_owner(window.window_handle(), cx) {
-            let this = cx.entity().downgrade();
+        if self.menu_bar.access || keytips::is_owner(window.window_id(), cx) {
+            let window_id = self.window_id;
             window.defer(cx, move |window, cx| {
-                this.update(cx, |jot, cx| jot.menu_sync_key_tips(window, cx))
-                    .ok();
+                cx.with_jot(window_id, |jot, cx| jot.menu_sync_key_tips(window, cx));
             });
         }
         if self
@@ -405,7 +400,7 @@ impl Jot {
             .font_family(TEXT_FONT)
             .text_size(px(LABEL_SIZE))
             .text_color(rgba(p.text_primary))
-            .on_command(cx.command_listener(Self::handle_menu_command))
+            .on_command(self.on_cmd(Self::handle_menu_command))
             .children(MenuKind::ALL.map(|kind| self.menu_trigger(kind, window, cx)))
             .children(flyout);
         self.menu_bar.hit_areas.record(BAR_AREA, bar)

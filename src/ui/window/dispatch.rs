@@ -114,7 +114,6 @@ impl Window {
             MouseMoveEvent {
                 position: point(px(-1e6), px(-1e6)),
                 pressed_button: self.native.pressed_button,
-                modifiers: crate::ui::platform::window::current_modifiers(),
             },
             cx,
         );
@@ -175,8 +174,14 @@ impl Window {
 
     pub(crate) fn dispatch_key_down(&mut self, event: KeyDownEvent, cx: &mut App) -> bool {
         self.last_input_was_keyboard = true;
-        if cx.run_keystroke_interceptors(&event, self) {
-            return true;
+        if let Some(mut interceptor) = self.keystroke_interceptor.take() {
+            let consumed = interceptor(&event, self, cx);
+            if self.keystroke_interceptor.is_none() {
+                self.keystroke_interceptor = Some(interceptor);
+            }
+            if consumed {
+                return true;
+            }
         }
 
         // Capture key listeners

@@ -58,14 +58,22 @@ fn card(p: Palette, text: SharedString, size: Size<Pixels>) -> Div {
         )
 }
 
-struct TooltipView {
+pub(crate) struct TooltipView {
     text: SharedString,
     size: Size<Pixels>,
     visible: bool,
 }
 
-impl Render for TooltipView {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl Into<UiNode> {
+impl TooltipView {
+    pub(crate) fn new(text: impl Into<SharedString>, size: Size<Pixels>, visible: bool) -> Self {
+        Self {
+            text: text.into(),
+            size,
+            visible,
+        }
+    }
+
+    pub(crate) fn render(&mut self, window: &mut Window, cx: &mut App) -> UiNode {
         let p = palette(cx);
         let opacity = animate(
             "tooltip-fade",
@@ -75,19 +83,23 @@ impl Render for TooltipView {
             window,
             cx,
         );
-        div().size_full().opacity(opacity).child(
-            div()
-                .absolute()
-                .left(px(SHADOW_SIDE))
-                .top(px(SHADOW_TOP))
-                .child(card(p, self.text.clone(), self.size)),
-        )
+        div()
+            .size_full()
+            .opacity(opacity)
+            .child(
+                div()
+                    .absolute()
+                    .left(px(SHADOW_SIDE))
+                    .top(px(SHADOW_TOP))
+                    .child(card(p, self.text.clone(), self.size)),
+            )
+            .into()
     }
 }
 
 #[derive(Clone, PartialEq, Eq)]
 struct Key {
-    window: AnyWindowHandle,
+    window: WindowId,
     id: ElementId,
 }
 
@@ -127,9 +139,9 @@ impl State {
 
 enum Report {
     Owner(Snap),
-    NoneIn(AnyWindowHandle),
+    NoneIn(WindowId),
     Gone(Key),
-    Suppress(AnyWindowHandle),
+    Suppress(WindowId),
     Dismiss,
     Timer(u64),
 }
@@ -187,8 +199,8 @@ struct Shown {
 
 #[derive(Default)]
 pub(crate) struct Tooltips {
-    popup: Option<overlay::Overlay<TooltipView>>,
-    owners: HashMap<AnyWindowHandle, Vec<Entry>>,
+    popup: Option<overlay::Overlay>,
+    owners: HashMap<WindowId, Vec<Entry>>,
     state: State,
     epoch: u64,
     pressed: bool,
@@ -211,7 +223,7 @@ pub(crate) fn register(
         .shared
         .tooltips
         .owners
-        .entry(window.window_handle())
+        .entry(window.window_id())
         .or_default();
     owners.retain(|entry| entry.id != id);
     owners.push(Entry { id, text, hitbox });
@@ -236,7 +248,7 @@ impl CustomWidget for Host {
         cx.shared
             .tooltips
             .owners
-            .insert(window.window_handle(), Vec::new());
+            .insert(window.window_id(), Vec::new());
         self.child.prepaint(window, cx);
     }
 
@@ -250,7 +262,7 @@ impl CustomWidget for Host {
         window.on_mouse_event(|_: &MouseDownEvent, phase, window, cx| {
             if phase == DispatchPhase::Capture {
                 cx.shared.tooltips.pressed = true;
-                report(Report::Suppress(window.window_handle()), cx);
+                report(Report::Suppress(window.window_id()), cx);
             }
         });
         window.on_mouse_event(|_: &MouseUpEvent, phase, _, cx| {
@@ -276,7 +288,7 @@ impl From<Host> for UiNode {
 }
 
 fn evaluate(window: &mut Window, cx: &mut App) {
-    let handle = window.window_handle();
+    let handle = window.window_id();
     let position = window.mouse_position();
     let scale = window.scale_factor();
     let origin = window.hwnd().client_origin();
@@ -375,10 +387,7 @@ fn render(cx: &mut App) {
             let delay = show_delay(reshow);
             let timer = cx.after(delay, move |cx| {
                 let window = key.window;
-                if window
-                    .update(cx, |_, window, cx| evaluate(window, cx))
-                    .is_err()
-                {
+                if cx.update_window(window, evaluate).is_err() {
                     report(Report::Gone(key), cx);
                 }
                 report(Report::Timer(epoch), cx);
@@ -391,18 +400,18 @@ fn render(cx: &mut App) {
 
 pub(crate) fn window_closed(window: WindowId, cx: &mut App) {
     let tips = &mut cx.shared.tooltips;
-    tips.owners.retain(|handle, _| handle.window_id() != window);
+    tips.owners.retain(|&id, _| id != window);
     if let Some(key) = tips
         .state
         .key()
-        .filter(|key| key.window.window_id() == window)
+        .filter(|key| key.window == window)
         .cloned()
     {
         report(Report::Gone(key), cx);
     }
 }
 
-pub(crate) fn window_deactivated(window: AnyWindowHandle, cx: &mut App) {
+pub(crate) fn window_deactivated(window: WindowId, cx: &mut App) {
     report(Report::Suppress(window), cx);
 }
 
@@ -431,14 +440,14 @@ fn hide(cx: &mut App) {
         return;
     }
     tips.closed_at = Some(Instant::now());
-    let Some(popup) = &tips.popup else {
+    let Some(popup) = tips.popup else {
         return;
     };
-    let (view, hwnd) = (popup.view.clone(), popup.hwnd);
-    view.update(cx, |view, cx| {
+    cx.with_tooltip(popup.window_id, |view, cx| {
         view.visible = false;
-        cx.notify();
+        cx.refresh_window(popup.window_id);
     });
+    let hwnd = popup.hwnd;
     let timer = cx.after(FADE, move |cx| {
         let tips = &mut cx.shared.tooltips;
         if tips.shown.is_none() {
@@ -449,19 +458,15 @@ fn hide(cx: &mut App) {
     cx.shared.tooltips.hiding = Some(timer);
 }
 
-fn popup(cx: &mut App) -> Option<overlay::Overlay<TooltipView>> {
-    if let Some(popup) = &cx.shared.tooltips.popup {
-        return Some(popup.clone());
+fn popup(cx: &mut App) -> Option<overlay::Overlay> {
+    if let Some(popup) = cx.shared.tooltips.popup {
+        return Some(popup);
     }
     let popup = overlay::open(
-        |_| TooltipView {
-            text: "".into(),
-            size: size(px(0.), px(0.)),
-            visible: false,
-        },
+        WindowContent::Tooltip(TooltipView::new("", size(px(0.), px(0.)), false)),
         cx,
     )?;
-    cx.shared.tooltips.popup = Some(popup.clone());
+    cx.shared.tooltips.popup = Some(popup);
     Some(popup)
 }
 
@@ -513,13 +518,13 @@ fn show(snap: Snap, cx: &mut App) {
         },
     );
     let text = snap.text.clone();
-    let Ok(measured) = popup.handle.update(cx, |_, window, cx| {
+    let Ok(measured) = cx.update_window(popup.window_id, |window, cx| {
         let measured = measure(&text, window);
-        popup.view.update(cx, |view, cx| {
+        cx.with_tooltip(popup.window_id, |view, cx| {
             view.text = text.clone();
             view.size = measured;
             view.visible = true;
-            cx.notify();
+            cx.refresh_window(popup.window_id);
         });
         measured
     }) else {
@@ -559,13 +564,13 @@ fn show(snap: Snap, cx: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui::{WindowHandle, WindowId};
+    use crate::ui::WindowId;
 
-    fn win(id: u64) -> AnyWindowHandle {
-        WindowHandle::<TooltipView>::new(WindowId::from(id)).into()
+    fn win(id: u64) -> WindowId {
+        WindowId::from(id)
     }
 
-    fn snap(window: AnyWindowHandle, id: &'static str, text: &'static str) -> Snap {
+    fn snap(window: WindowId, id: &'static str, text: &'static str) -> Snap {
         Snap {
             key: Key {
                 window,

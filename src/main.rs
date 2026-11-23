@@ -249,13 +249,28 @@ pub(crate) struct AppShared {
     pub(crate) tab_drag: Option<tab_drag::TabDrag>,
 }
 
-fn apply_word_wrap_to_windows(word_wrap: bool, cx: &mut App) {
-    for handle in cx.windows() {
-        if let Some(window) = handle.downcast::<Jot>() {
-            let _ = window.update(cx, |jot, window, cx| {
-                jot.set_word_wrap(word_wrap, window, cx);
-            });
+/// Concrete root content owned directly by `ui::App` for each open window.
+pub(crate) enum WindowContent {
+    Main(Box<Jot>),
+    Tooltip(tooltip::TooltipView),
+    KeyTips(keytips::KeyTipView),
+}
+
+impl WindowContent {
+    pub(crate) fn render(&mut self, window: &mut Window, cx: &mut App) -> UiNode {
+        match self {
+            Self::Main(jot) => jot.render(window, cx),
+            Self::Tooltip(view) => view.render(window, cx),
+            Self::KeyTips(view) => view.render(),
         }
+    }
+}
+
+fn apply_word_wrap_to_windows(word_wrap: bool, cx: &mut App) {
+    for id in cx.main_windows() {
+        cx.update_jot_window(id, |jot, window, cx| {
+            jot.set_word_wrap(word_wrap, window, cx);
+        });
     }
 }
 
@@ -328,16 +343,15 @@ fn open_jot_window(
     initial: Option<TabData>,
     window_size: Option<Size<Pixels>>,
     cx: &mut App,
-) -> (WindowHandle<Jot>, Entity<Jot>) {
-    let mut created = None;
-    let handle = cx
+) -> (WindowId, WindowHwnd) {
+    let mut hwnd = None;
+    let id = cx
         .open_window(window_options(window_size, cx), |window, cx| {
-            let view = cx.new(|cx| Jot::new(initial, window, cx));
-            created = Some(view.clone());
-            view
+            hwnd = Some(window.hwnd());
+            WindowContent::Main(Box::new(Jot::new(initial, window, cx)))
         })
         .expect("Failed to open window");
-    (handle, created.expect("Failed to create Jot view"))
+    (id, hwnd.expect("Failed to create Jot window"))
 }
 
 fn round_half_up(value: f32) -> f32 {
@@ -406,7 +420,8 @@ struct MinSizeCache {
     size: Size<Pixels>,
 }
 
-struct Jot {
+pub(crate) struct Jot {
+    window_id: WindowId,
     tabs: Vec<Tab>,
     active: usize,
     strip: tabs::TabStrip,
@@ -416,11 +431,11 @@ struct Jot {
     find: find::FindBar,
     file_workflow: Option<files::FileWorkflow>,
     min_size: Rc<Cell<Option<MinSizeCache>>>,
-    _subscriptions: Vec<Subscription>,
 }
 
 impl Jot {
-    fn new(initial: Option<TabData>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(initial: Option<TabData>, window: &mut Window, cx: &mut App) -> Self {
+        let window_id = window.window_id();
         let tab = match initial {
             Some(data) => Self::adopt_tab(data),
             None => Self::create_tab(None, window, cx),
@@ -429,76 +444,65 @@ impl Jot {
         let dialogs = dialog::Dialogs::new(window, cx);
         let find = find::FindBar::new(window, cx);
 
-        let access_keys = {
-            let jot = cx.weak_entity();
-            let handle = window.window_handle();
-            cx.intercept_keystrokes(move |event, window, cx| {
-                if window.window_handle() != handle {
-                    return;
+        window.set_keystroke_interceptor(move |event, window, cx| {
+            cx.with_jot(window_id, |jot, cx| {
+                if !jot.dialogs.is_open() && jot.menu_key_down(&event.keystroke, window, cx) {
+                    return true;
                 }
-                let consumed = jot
-                    .update(cx, |jot, cx| {
-                        if !jot.dialogs.is_open()
-                            && jot.menu_key_down(&event.keystroke, window, cx)
-                        {
-                            return true;
-                        }
-                        if let Some(slot) = jot.focused_editor_slot(window) {
-                            let host = jot.editor_host(slot, cx);
-                            if let Some(ed) = jot.editor_by_slot_mut(slot) {
-                                ed.pause_blink(&host, cx);
-                                cx.notify();
-                            }
-                        }
-                        false
-                    })
-                    .unwrap_or(false);
-                if consumed {
-                    cx.stop_propagation();
+                if let Some(slot) = jot.focused_editor_slot(window) {
+                    let host = jot.editor_host(slot);
+                    if let Some(ed) = jot.editor_by_slot_mut(slot) {
+                        ed.pause_blink(&host, cx);
+                        jot.notify(cx);
+                    }
                 }
+                false
             })
-        };
-        let _subscriptions = vec![
-            access_keys,
-            cx.observe_window_appearance(window, |_, window, cx| {
-                theme::apply(window.appearance(), cx);
-                cx.notify();
-            }),
-            cx.observe_window_activation(window, |this, window, cx| {
+            .unwrap_or(false)
+        });
+        window.on_appearance_change(move |window, cx| {
+            theme::apply(window.appearance(), cx);
+            cx.refresh_window(window_id);
+        });
+        window.on_activation_change(move |window, cx| {
+            cx.with_jot(window_id, |this, cx| {
                 if !window.is_window_active() {
                     this.menu_cancel(window, cx);
-                    tooltip::window_deactivated(window.window_handle(), cx);
+                    tooltip::window_deactivated(window.window_id(), cx);
                     this.stop_all_editor_blinks();
-                    cx.notify();
+                    this.notify(cx);
                 } else if let Some(slot) = this.focused_editor_slot(window) {
-                    let host = this.editor_host(slot, cx);
+                    let host = this.editor_host(slot);
                     if let Some(ed) = this.editor_by_slot_mut(slot) {
                         ed.start_blink(&host, cx);
                     }
-                    cx.notify();
+                    this.notify(cx);
                 }
-            }),
-            cx.observe_focus_change(window, |this, old_focus, new_focus, _, cx| {
+            });
+        });
+        window.on_focus_change(move |old_focus, new_focus, _, cx| {
+            cx.with_jot(window_id, |this, cx| {
                 if let Some(old) = old_focus
                     && let Some(slot) = this.editor_slot_for_focus(old)
                     && let Some(ed) = this.editor_by_slot_mut(slot)
                 {
                     ed.on_blur();
-                    cx.notify();
+                    this.notify(cx);
                 }
                 if let Some(new) = new_focus
                     && let Some(slot) = this.editor_slot_for_focus(new)
                 {
-                    let host = this.editor_host(slot, cx);
+                    let host = this.editor_host(slot);
                     if let Some(ed) = this.editor_by_slot_mut(slot) {
                         ed.start_blink(&host, cx);
                     }
-                    cx.notify();
+                    this.notify(cx);
                 }
-            }),
-        ];
+            });
+        });
 
         let mut jot = Self {
+            window_id,
             tabs: vec![tab],
             active: 0,
             strip: tabs::TabStrip::new(),
@@ -508,15 +512,38 @@ impl Jot {
             find,
             file_workflow: None,
             min_size: Rc::new(Cell::new(None)),
-            _subscriptions,
         };
         jot.activate_tab(0, window, cx);
-        let this = cx.weak_entity();
-        window.on_window_should_close(cx, move |window, cx| {
-            this.update(cx, |jot, cx| jot.request_close_window(window, cx))
+        window.on_window_should_close(move |window, cx| {
+            cx.with_jot(window_id, |jot, cx| jot.request_close_window(window, cx))
                 .unwrap_or(true)
         });
         jot
+    }
+
+    pub(crate) fn on<E: ?Sized>(
+        &self,
+        mut f: impl FnMut(&mut Self, &E, &mut Window, &mut App) + 'static,
+    ) -> impl FnMut(&E, &mut Window, &mut App) + 'static {
+        let window_id = self.window_id;
+        move |event, window, cx| {
+            cx.with_jot(window_id, |jot, cx| f(jot, event, window, cx));
+        }
+    }
+
+    pub(crate) fn on_cmd(
+        &self,
+        mut f: impl FnMut(&mut Self, Command, &mut Window, &mut App) -> bool + 'static,
+    ) -> impl FnMut(Command, &mut Window, &mut App) -> bool + 'static {
+        let window_id = self.window_id;
+        move |command, window, cx| {
+            cx.with_jot(window_id, |jot, cx| f(jot, command, window, cx))
+                .unwrap_or(false)
+        }
+    }
+
+    pub(crate) fn notify(&self, cx: &mut App) {
+        cx.refresh_window(self.window_id);
     }
 
     pub(crate) fn active_tab_id(&self) -> tabs::TabId {
@@ -580,32 +607,27 @@ impl Jot {
         self.dialogs.line.stop_blink();
     }
 
-    pub(crate) fn editor_host(&self, slot: EditorSlot, cx: &Context<Self>) -> EditorHost {
-        EditorHost::new(cx.weak_entity(), slot)
+    pub(crate) fn editor_host(&self, slot: EditorSlot) -> EditorHost {
+        EditorHost::new(self.window_id, slot)
     }
 
-    pub(crate) fn focus_editor(
-        &mut self,
-        slot: EditorSlot,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let host = self.editor_host(slot, cx);
+    pub(crate) fn focus_editor(&mut self, slot: EditorSlot, window: &mut Window, cx: &mut App) {
+        let host = self.editor_host(slot);
         if let Some(ed) = self.editor_by_slot_mut(slot) {
             ed.focus_handle().focus(window, cx);
             ed.start_blink(&host, cx);
         }
     }
 
-    pub(crate) fn focus_active_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn focus_active_editor(&mut self, window: &mut Window, cx: &mut App) {
         self.focus_editor(EditorSlot::Tab(self.active_tab_id()), window, cx);
     }
 
-    fn set_word_wrap(&mut self, word_wrap: bool, _: &mut Window, cx: &mut Context<Self>) {
+    fn set_word_wrap(&mut self, word_wrap: bool, _: &mut Window, cx: &mut App) {
         for tab in &mut self.tabs {
             tab.data.editor.set_soft_wrap(word_wrap, cx);
         }
-        cx.notify();
+        self.notify(cx);
     }
 
     fn has_text(&self) -> bool {
@@ -711,7 +733,7 @@ impl Jot {
         px((CARET_HEIGHT * self.zoom()).round())
     }
 
-    fn activate_tab(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+    fn activate_tab(&mut self, ix: usize, window: &mut Window, cx: &mut App) {
         self.active = ix;
         self.reveal_tab(ix);
         self.find.clear_notice();
@@ -721,7 +743,7 @@ impl Jot {
         self.focus_active_editor(window, cx);
         self.sync_selection_focus();
         self.refresh_title(window);
-        cx.notify();
+        self.notify(cx);
     }
 
     pub(crate) fn sync_selection_focus(&mut self) {
@@ -736,12 +758,7 @@ impl Jot {
         }
     }
 
-    fn handle_command(
-        &mut self,
-        command: Command,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> bool {
+    fn handle_command(&mut self, command: Command, window: &mut Window, cx: &mut App) -> bool {
         match command {
             Command::Cancel => return self.cancel(window, cx),
             Command::ShowContextMenu => return self.show_context_menu(window, cx),
@@ -777,19 +794,19 @@ impl Jot {
         true
     }
 
-    fn insert_time_date(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+    fn insert_time_date(&mut self, _: &mut Window, cx: &mut App) {
         let stamp = crate::win32::format_local_time_date();
         self.active_editor_mut().replace(&stamp, cx);
-        cx.notify();
+        self.notify(cx);
     }
 
-    fn set_zoom(&mut self, zoom: f32, cx: &mut Context<Self>) {
+    fn set_zoom(&mut self, zoom: f32, cx: &mut App) {
         self.tabs[self.active].data.zoom =
             ((zoom / ZOOM_STEP).round() * ZOOM_STEP).clamp(ZOOM_MIN, ZOOM_MAX);
-        cx.notify();
+        self.notify(cx);
     }
 
-    fn cancel(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+    fn cancel(&mut self, window: &mut Window, cx: &mut App) -> bool {
         if tab_drag::dragging(cx) {
             cx.defer(tab_drag::cancel);
             true
@@ -801,7 +818,7 @@ impl Jot {
         }
     }
 
-    fn next_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn next_tab(&mut self, window: &mut Window, cx: &mut App) {
         if self.dialogs.is_open() || self.tabs.len() <= 1 {
             return;
         }
@@ -809,7 +826,7 @@ impl Jot {
         self.activate_tab(next, window, cx);
     }
 
-    fn prev_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn prev_tab(&mut self, window: &mut Window, cx: &mut App) {
         if self.dialogs.is_open() || self.tabs.len() <= 1 {
             return;
         }
@@ -817,14 +834,14 @@ impl Jot {
         self.activate_tab(prev, window, cx);
     }
 
-    fn select_tab(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+    fn select_tab(&mut self, ix: usize, window: &mut Window, cx: &mut App) {
         if self.dialogs.is_open() || ix >= self.tabs.len() || ix == self.active {
             return;
         }
         self.activate_tab(ix, window, cx);
     }
 
-    fn select_last_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn select_last_tab(&mut self, window: &mut Window, cx: &mut App) {
         let last = self.tabs.len().saturating_sub(1);
         if self.dialogs.is_open() || last == self.active {
             return;
@@ -832,12 +849,7 @@ impl Jot {
         self.activate_tab(last, window, cx);
     }
 
-    fn title_bar(
-        &self,
-        strip: &tabs::StripFrame,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) -> Div {
+    fn title_bar(&self, strip: &tabs::StripFrame, window: &Window, cx: &App) -> Div {
         let p = palette(cx);
 
         div()
@@ -906,7 +918,7 @@ impl Jot {
             .child(separator(p))
     }
 
-    fn show_context_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+    fn show_context_menu(&mut self, window: &mut Window, cx: &mut App) -> bool {
         if !self.active_editor().focus_handle().is_focused(window) {
             return false;
         }
@@ -918,12 +930,12 @@ impl Jot {
         true
     }
 
-    fn editor(&mut self, find: Option<Div>, cx: &mut Context<Self>) -> Div {
+    fn editor(&mut self, find: Option<Div>, cx: &App) -> Div {
         let p = palette(cx);
         let caret_height = self.caret_height();
         let caret_hidden = self.menu_bar.access_active();
         let slot = EditorSlot::Tab(self.active_tab_id());
-        let host = self.editor_host(slot, cx);
+        let host = self.editor_host(slot);
         let editor_view = {
             let ed = self.active_editor_mut();
             ed.set_caret_height(caret_height);
@@ -936,7 +948,7 @@ impl Jot {
             .flex_1()
             .min_h(px(self.editor_min_height()))
             .bg(rgb(p.editor))
-            .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
+            .on_scroll_wheel(self.on(|this, event: &ScrollWheelEvent, _, cx| {
                 if !event.modifiers.control
                     || this.dialogs.is_open()
                     || this.menu_bar.is_open()
@@ -1028,8 +1040,8 @@ fn status_spacer(p: Palette) -> CanvasNode {
     .h(px(STATUS_DIVIDER_HEIGHT))
 }
 
-impl Render for Jot {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl Into<UiNode> {
+impl Jot {
+    fn render(&mut self, window: &mut Window, cx: &mut App) -> UiNode {
         let p = palette(cx);
         let status_metrics = cx.shared.view.status_bar.then(|| self.status_metrics());
         let strip = self.sample_tabs(window, cx);
@@ -1042,11 +1054,11 @@ impl Render for Jot {
         let root = div()
             .relative()
             .size_full()
-            .capture_any_mouse_down(cx.listener(|this, _, _, cx| {
+            .capture_any_mouse_down(self.on(|this, _, _, cx| {
                 this.menu_pointer_down(cx);
             }))
-            .on_drop(cx.listener(Self::open_dropped))
-            .on_command(cx.command_listener(Self::handle_command))
+            .on_drop(self.on(Self::open_dropped))
+            .on_command(self.on_cmd(Self::handle_command))
             .child(
                 div()
                     .key_context(CONTEXT)
@@ -1060,7 +1072,7 @@ impl Render for Jot {
             )
             .children(dialogs)
             .children(min_size);
-        tooltip::host(root)
+        tooltip::host(root).into()
     }
 }
 
@@ -1071,16 +1083,12 @@ fn open_handoff_paths(paths: Vec<PathBuf>, cx: &mut App) {
     // If a single path is already open in any Jot window, focus that window & tab directly.
     if paths.len() == 1 {
         let target = std::path::absolute(&paths[0]).unwrap_or_else(|_| paths[0].clone());
-        for handle in cx.windows() {
-            let Some(window) = handle.downcast::<Jot>() else {
-                continue;
-            };
-            let existing = window
-                .read(cx)
-                .ok()
+        for id in cx.main_windows() {
+            let existing = cx
+                .jot(id)
                 .and_then(|jot| jot.find_open_tab(&target).map(|ix| (ix, jot.hwnd)));
             if let Some((ix, hwnd)) = existing {
-                let _ = window.update(cx, |jot, window, cx| {
+                cx.update_jot_window(id, |jot, window, cx| {
                     jot.activate_tab(ix, window, cx);
                 });
                 hwnd.bring_to_front();
@@ -1091,24 +1099,19 @@ fn open_handoff_paths(paths: Vec<PathBuf>, cx: &mut App) {
 
     let target_window = cx
         .active_window()
-        .and_then(|handle| handle.downcast::<Jot>())
-        .or_else(|| {
-            cx.windows()
-                .into_iter()
-                .rev()
-                .find_map(|handle| handle.downcast::<Jot>())
-        });
+        .filter(|&id| cx.jot(id).is_some())
+        .or_else(|| cx.main_windows().into_iter().next_back());
 
-    if let Some(window) = target_window {
+    if let Some(id) = target_window {
         let mut hwnd = WindowHwnd::default();
-        let _ = window.update(cx, |jot, window, cx| {
+        cx.update_jot_window(id, |jot, window, cx| {
             hwnd = jot.hwnd;
             jot.open_paths(paths, window, cx);
         });
         hwnd.bring_to_front();
     } else {
-        let (window, _) = open_jot_window(None, None, cx);
-        let _ = window.update(cx, |jot, window, cx| {
+        let (id, _) = open_jot_window(None, None, cx);
+        cx.update_jot_window(id, |jot, window, cx| {
             jot.open_paths(paths, window, cx);
         });
     }
@@ -1141,15 +1144,10 @@ fn main() {
         cx.on_window_closed(|cx, window| {
             tooltip::window_closed(window, cx);
             keytips::window_closed(window, cx);
-            if cx
-                .windows()
-                .into_iter()
-                .all(|window| window.downcast::<Jot>().is_none())
-            {
+            if cx.main_windows().is_empty() {
                 cx.quit();
             }
-        })
-        .detach();
+        });
 
         theme::apply(cx.window_appearance(), cx);
         cx.bind_keys(key_bindings());
@@ -1160,12 +1158,10 @@ fn main() {
         cx.on_command(|command, cx| {
             match command {
                 Command::Exit => cx.defer(|cx| {
-                    for window in cx.windows() {
-                        window
-                            .update(cx, |_, window, cx| {
-                                window.dispatch_command(Command::CloseWindow, cx);
-                            })
-                            .ok();
+                    for id in cx.main_windows() {
+                        let _ = cx.update_window(id, |window, cx| {
+                            window.dispatch_command(Command::CloseWindow, cx);
+                        });
                     }
                 }),
                 Command::NewWindow => {
@@ -1193,13 +1189,11 @@ fn main() {
             true
         });
 
-        let (window, _) = open_jot_window(None, None, cx);
+        let (id, _) = open_jot_window(None, None, cx);
         if !paths.is_empty() {
-            window
-                .update(cx, |jot, window, cx| {
-                    jot.open_paths(paths, window, cx);
-                })
-                .ok();
+            cx.update_jot_window(id, |jot, window, cx| {
+                jot.open_paths(paths, window, cx);
+            });
         }
     });
 }
@@ -1347,7 +1341,7 @@ mod ui_regression_tests {
 
     struct TestHarness {
         app_cell: Rc<crate::ui::AppCell>,
-        handle: WindowHandle<Jot>,
+        window_id: WindowId,
     }
 
     impl TestHarness {
@@ -1356,7 +1350,7 @@ mod ui_regression_tests {
                 crate::ui::WindowsPlatform::new().expect("WindowsPlatform::new failed"),
             );
             let app_cell = crate::ui::App::new_rc(platform);
-            let handle = {
+            let window_id = {
                 let mut app = app_cell.inner.borrow_mut();
                 // Settle transitions in 1 frame so hit-tests are deterministic without sleeps.
                 app.set_reduce_motion(true);
@@ -1373,7 +1367,7 @@ mod ui_regression_tests {
                             opts.show = false;
                             opts.focus = false;
                             let _ = cx.open_window(opts, |window, cx| {
-                                cx.new(|cx| Jot::new(None, window, cx))
+                                WindowContent::Main(Box::new(Jot::new(None, window, cx)))
                             });
                         }
                         Command::ToggleStatusBar => {
@@ -1401,13 +1395,18 @@ mod ui_regression_tests {
                 let mut opts = window_options(Some(size(px(1024.), px(700.))), &app);
                 opts.show = false;
                 opts.focus = false;
-                let handle = app
-                    .open_window(opts, |window, cx| cx.new(|cx| Jot::new(None, window, cx)))
+                let id = app
+                    .open_window(opts, |window, cx| {
+                        WindowContent::Main(Box::new(Jot::new(None, window, cx)))
+                    })
                     .expect("open_window failed");
                 app.flush_effects();
-                handle
+                id
             };
-            let mut harness = Self { app_cell, handle };
+            let mut harness = Self {
+                app_cell,
+                window_id,
+            };
             harness.draw();
             harness
         }
@@ -1415,9 +1414,7 @@ mod ui_regression_tests {
         fn draw(&mut self) {
             for _ in 0..2 {
                 let mut app = self.app_cell.inner.borrow_mut();
-                let _ = app.update_window_impl(self.handle.id, |root, window, cx| {
-                    window.draw_frame(&root, cx);
-                });
+                app.draw_window(self.window_id);
                 app.drain_jobs();
                 app.flush_effects();
             }
@@ -1426,33 +1423,32 @@ mod ui_regression_tests {
         fn window_open(&self) -> bool {
             let app = self.app_cell.inner.borrow();
             app.windows
-                .get(&self.handle.id)
+                .get(&self.window_id)
                 .and_then(Option::as_ref)
                 .is_some()
         }
 
         fn read_jot<R>(&self, f: impl FnOnce(&Jot, &App) -> R) -> R {
             let app = self.app_cell.inner.borrow();
-            let jot = self.handle.read(&app).expect("Jot window should be open");
+            let jot = app.jot(self.window_id).expect("Jot window should be open");
             f(jot, &app)
         }
 
         fn element_bounds(&self, id: impl Into<ElementId>) -> Option<Bounds<Pixels>> {
             let id = id.into();
             let app = self.app_cell.inner.borrow();
-            let win = app.windows.get(&self.handle.id)?.as_ref()?;
+            let win = app.windows.get(&self.window_id)?.as_ref()?;
             win.test_element_bounds(&id)
         }
 
         fn move_mouse(&mut self, pos: Point<Pixels>) {
             {
                 let mut app = self.app_cell.inner.borrow_mut();
-                let _ = app.update_window_impl(self.handle.id, |_, window, cx| {
+                let _ = app.update_window(self.window_id, |window, cx| {
                     window.dispatch_mouse_move(
                         MouseMoveEvent {
                             position: pos,
                             pressed_button: None,
-                            modifiers: Modifiers::default(),
                         },
                         cx,
                     );
@@ -1470,7 +1466,7 @@ mod ui_regression_tests {
             self.move_mouse(pos);
             {
                 let mut app = self.app_cell.inner.borrow_mut();
-                let _ = app.update_window_impl(self.handle.id, |_, window, cx| {
+                let _ = app.update_window(self.window_id, |window, cx| {
                     window.dispatch_mouse_down(
                         MouseDownEvent {
                             button,
@@ -1485,13 +1481,11 @@ mod ui_regression_tests {
             self.draw();
             {
                 let mut app = self.app_cell.inner.borrow_mut();
-                let _ = app.update_window_impl(self.handle.id, |_, window, cx| {
+                let _ = app.update_window(self.window_id, |window, cx| {
                     window.dispatch_mouse_up(
                         MouseUpEvent {
                             button,
                             position: pos,
-                            modifiers: Modifiers::default(),
-                            click_count,
                         },
                         cx,
                     );
@@ -1508,7 +1502,7 @@ mod ui_regression_tests {
             self.move_mouse(from);
             {
                 let mut app = self.app_cell.inner.borrow_mut();
-                let _ = app.update_window_impl(self.handle.id, |_, window, cx| {
+                let _ = app.update_window(self.window_id, |window, cx| {
                     window.dispatch_mouse_down(
                         MouseDownEvent {
                             button: MouseButton::Left,
@@ -1523,12 +1517,11 @@ mod ui_regression_tests {
             self.draw();
             {
                 let mut app = self.app_cell.inner.borrow_mut();
-                let _ = app.update_window_impl(self.handle.id, |_, window, cx| {
+                let _ = app.update_window(self.window_id, |window, cx| {
                     window.dispatch_mouse_move(
                         MouseMoveEvent {
                             position: to,
                             pressed_button: Some(MouseButton::Left),
-                            modifiers: Modifiers::default(),
                         },
                         cx,
                     );
@@ -1537,13 +1530,11 @@ mod ui_regression_tests {
             self.draw();
             {
                 let mut app = self.app_cell.inner.borrow_mut();
-                let _ = app.update_window_impl(self.handle.id, |_, window, cx| {
+                let _ = app.update_window(self.window_id, |window, cx| {
                     window.dispatch_mouse_up(
                         MouseUpEvent {
                             button: MouseButton::Left,
                             position: to,
-                            modifiers: Modifiers::default(),
-                            click_count: 1,
                         },
                         cx,
                     );
@@ -1584,14 +1575,8 @@ mod ui_regression_tests {
             let keystroke = Keystroke::parse(spec);
             {
                 let mut app = self.app_cell.inner.borrow_mut();
-                let _ = app.update_window_impl(self.handle.id, |_, window, cx| {
-                    window.dispatch_key_down(
-                        KeyDownEvent {
-                            keystroke,
-                            is_held: false,
-                        },
-                        cx,
-                    );
+                let _ = app.update_window(self.window_id, |window, cx| {
+                    window.dispatch_key_down(KeyDownEvent { keystroke }, cx);
                 });
             }
             self.draw();
@@ -1600,7 +1585,7 @@ mod ui_regression_tests {
         fn type_text(&mut self, text: &str) {
             {
                 let mut app = self.app_cell.inner.borrow_mut();
-                let _ = app.update_window_impl(self.handle.id, |_, window, cx| {
+                let _ = app.update_window(self.window_id, |window, cx| {
                     window.dispatch_text_input(text, cx);
                 });
             }
@@ -1610,7 +1595,7 @@ mod ui_regression_tests {
         fn scroll_wheel(&mut self, pos: Point<Pixels>, lines_y: f32, modifiers: Modifiers) {
             {
                 let mut app = self.app_cell.inner.borrow_mut();
-                let _ = app.update_window_impl(self.handle.id, |_, window, cx| {
+                let _ = app.update_window(self.window_id, |window, cx| {
                     window.dispatch_scroll_wheel(
                         ScrollWheelEvent {
                             position: pos,
@@ -1626,7 +1611,7 @@ mod ui_regression_tests {
 
         fn close_if_open(&mut self) {
             let mut app = self.app_cell.inner.borrow_mut();
-            app.remove_window_by_id(self.handle.id);
+            app.remove_window_by_id(self.window_id);
         }
     }
 
@@ -1717,9 +1702,13 @@ mod ui_regression_tests {
         // Verify shortcut hints resolve even while AppCell is mutably borrowed.
         {
             let mut app = h.app_cell.inner.borrow_mut();
-            app.update_window_impl(h.handle.id, |root, window, cx| {
-                let jot = root.downcast::<Jot>().unwrap();
-                let focus = jot.read(cx).active_editor().focus_handle().clone();
+            app.update_window(h.window_id, |window, cx| {
+                let focus = cx
+                    .jot(h.window_id)
+                    .unwrap()
+                    .active_editor()
+                    .focus_handle()
+                    .clone();
                 assert!(window.shortcut_for_command_in(Command::Save, &focus).is_some());
                 assert!(window.shortcut_for_command_in(Command::NewTab, &focus).is_some());
             })
@@ -1826,7 +1815,7 @@ mod ui_regression_tests {
         // prevent_default + stop_propagation AND on_click) -> clears the query field!
         let clear_bounds = {
             let app = h.app_cell.inner.borrow();
-            let win = app.windows.get(&h.handle.id).unwrap().as_ref().unwrap();
+            let win = app.windows.get(&h.window_id).unwrap().as_ref().unwrap();
             win.find_test_element_bounds(|id| {
                 matches!(id, ElementId::NamedInteger(name, _) if name.as_str() == "field-clear")
             })
@@ -1835,7 +1824,7 @@ mod ui_regression_tests {
         h.click_point(clear_bounds.center(), MouseButton::Left);
         {
             let app = h.app_cell.inner.borrow();
-            let win = app.windows.get(&h.handle.id).unwrap().as_ref().unwrap();
+            let win = app.windows.get(&h.window_id).unwrap().as_ref().unwrap();
             assert!(
                 win.find_test_element_bounds(|id| {
                     matches!(id, ElementId::NamedInteger(name, _) if name.as_str() == "field-clear")
@@ -1862,7 +1851,7 @@ mod ui_regression_tests {
             .expect("Replace button must be laid out after expanding replace row");
         let query_clear_bounds = {
             let app = h.app_cell.inner.borrow();
-            let win = app.windows.get(&h.handle.id).unwrap().as_ref().unwrap();
+            let win = app.windows.get(&h.window_id).unwrap().as_ref().unwrap();
             win.find_test_element_bounds(|id| {
                 matches!(id, ElementId::NamedInteger(name, _) if name.as_str() == "field-clear")
             })
@@ -2059,7 +2048,7 @@ mod ui_regression_tests {
         let max_pt = h.element_bounds("caption-maximize").unwrap().center();
         let min_pt = h.element_bounds("caption-minimize").unwrap().center();
         let app = h.app_cell.inner.borrow();
-        let win = app.windows.get(&h.handle.id).unwrap().as_ref().unwrap();
+        let win = app.windows.get(&h.window_id).unwrap().as_ref().unwrap();
         assert_eq!(win.hit_test_control_area(close_pt), Some(WindowControlArea::Close));
         assert_eq!(win.hit_test_control_area(max_pt), Some(WindowControlArea::Max));
         assert_eq!(win.hit_test_control_area(min_pt), Some(WindowControlArea::Min));
@@ -2075,7 +2064,7 @@ mod ui_regression_tests {
         let ed_center = h.element_bounds("editor-area").unwrap().center();
         {
             let mut app = h.app_cell.inner.borrow_mut();
-            let _ = app.update_window_impl(h.handle.id, |_, window, cx| {
+            let _ = app.update_window(h.window_id, |window, cx| {
                 window.dispatch_file_drop(ExternalPaths(vec![tmp.clone()]), ed_center, cx);
             });
         }
@@ -2110,7 +2099,7 @@ mod ui_regression_tests {
         h.type_text("!");
         let allow_close = {
             let mut app = h.app_cell.inner.borrow_mut();
-            app.update_window_impl(h.handle.id, |_, window, cx| window.check_should_close(cx))
+            app.update_window(h.window_id, |window, cx| window.check_should_close(cx))
                 .unwrap()
         };
         assert!(!allow_close, "dirty window must intercept close and show prompt");
@@ -2121,7 +2110,7 @@ mod ui_regression_tests {
 
         let allow_close = {
             let mut app = h.app_cell.inner.borrow_mut();
-            app.update_window_impl(h.handle.id, |_, window, cx| window.check_should_close(cx))
+            app.update_window(h.window_id, |window, cx| window.check_should_close(cx))
                 .unwrap()
         };
         assert!(!allow_close);
@@ -2135,7 +2124,15 @@ mod ui_regression_tests {
         let h = TestHarness::new();
         let overlay = {
             let mut app = h.app_cell.inner.borrow_mut();
-            overlay::open(|_| TooltipTestView, &mut app).expect("overlay::open failed")
+            overlay::open(
+                WindowContent::Tooltip(tooltip::TooltipView::new(
+                    "Tip",
+                    size(px(160.), px(40.)),
+                    true,
+                )),
+                &mut app,
+            )
+            .expect("overlay::open failed")
         };
         overlay::place(
             overlay.hwnd,
@@ -2148,23 +2145,18 @@ mod ui_regression_tests {
         );
         {
             let mut app = h.app_cell.inner.borrow_mut();
-            app.update_window_impl(overlay.handle.window_id(), |root, window, cx| {
-                window.draw_frame(&root, cx);
-                assert!(
-                    window.viewport_size().width > px(10.0)
-                        && window.viewport_size().height > px(10.0),
-                    "overlay must sync resized client rect before drawing"
-                );
-            })
-            .unwrap();
-            app.remove_window_by_id(overlay.handle.window_id());
-        }
-    }
-
-    struct TooltipTestView;
-    impl Render for TooltipTestView {
-        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl Into<UiNode> {
-            div().size_full().bg(rgba(0x202020ff)).child("Tip")
+            app.draw_window(overlay.window_id);
+            let vp = app
+                .windows
+                .get(&overlay.window_id)
+                .and_then(Option::as_ref)
+                .unwrap()
+                .viewport_size();
+            assert!(
+                vp.width > px(10.0) && vp.height > px(10.0),
+                "overlay must sync resized client rect before drawing"
+            );
+            app.remove_window_by_id(overlay.window_id);
         }
     }
 
@@ -2204,7 +2196,7 @@ mod ui_regression_tests {
         let scale = {
             let app = h.app_cell.inner.borrow();
             app.windows
-                .get(&h.handle.id)
+                .get(&h.window_id)
                 .unwrap()
                 .as_ref()
                 .unwrap()
@@ -2220,7 +2212,7 @@ mod ui_regression_tests {
         // Even when laid out at exact min width OR forced narrower than min width (e.g. toggling
         // Status Bar on while squished), every status bar label must remain single-line.
         let mut app = h.app_cell.inner.borrow_mut();
-        app.update_window_impl(h.handle.id, |_, window, cx| {
+        app.update_window(h.window_id, |window, cx| {
             let p = palette(cx);
             for test_width in [min_size.width, px(220.0)] {
                 let mut bar: UiNode = div()
@@ -2338,7 +2330,7 @@ mod ui_regression_tests {
         crate::ui::platform::drive_frames(&h.app_cell);
         {
             let app = h.app_cell.inner.borrow();
-            let win = app.windows.get(&h.handle.id).unwrap().as_ref().unwrap();
+            let win = app.windows.get(&h.window_id).unwrap().as_ref().unwrap();
             assert!(
                 win.is_window_active(),
                 "queued re-entrant WM_ACTIVATE must apply once drive_frames drains it"
@@ -2364,7 +2356,7 @@ mod ui_regression_tests {
         }
         {
             let app = h.app_cell.inner.borrow();
-            let win = app.windows.get(&h.handle.id).unwrap().as_ref().unwrap();
+            let win = app.windows.get(&h.window_id).unwrap().as_ref().unwrap();
             assert!(win.native.in_size_move);
         }
         unsafe {
@@ -2384,14 +2376,14 @@ mod ui_regression_tests {
         }
         {
             let app = h.app_cell.inner.borrow();
-            let win = app.windows.get(&h.handle.id).unwrap().as_ref().unwrap();
+            let win = app.windows.get(&h.window_id).unwrap().as_ref().unwrap();
             assert!(!win.native.in_size_move);
         }
 
         // 3. Closing window cleans up HWND_REGISTRY atomically.
         {
             let mut app = h.app_cell.inner.borrow_mut();
-            app.remove_window_by_id(h.handle.id);
+            app.remove_window_by_id(h.window_id);
         }
         crate::ui::platform::ACTIVE_APP.with(|s| *s.borrow_mut() = None);
         assert!(
@@ -2412,12 +2404,14 @@ mod ui_regression_tests {
             let mut opts = window_options(None, cx);
             opts.show = false;
             opts.focus = false;
-            let handle = cx
-                .open_window(opts, |window, cx| cx.new(|cx| Jot::new(None, window, cx)))
+            let id = cx
+                .open_window(opts, |window, cx| {
+                    WindowContent::Main(Box::new(Jot::new(None, window, cx)))
+                })
                 .expect("open_window in Application::run failed");
-            cx.on_window_closed(|cx, _| cx.quit()).detach();
+            cx.on_window_closed(|cx, _| cx.quit());
             cx.after(Duration::from_millis(25), move |cx| {
-                cx.remove_window_by_id(handle.id);
+                cx.remove_window_by_id(id);
             })
             .detach();
         });
@@ -2429,7 +2423,7 @@ mod ui_regression_tests {
         let baseline_tracks = {
             let app = h.app_cell.inner.borrow();
             app.windows
-                .get(&h.handle.id)
+                .get(&h.window_id)
                 .and_then(Option::as_ref)
                 .unwrap()
                 .anim_track_count()
@@ -2440,7 +2434,7 @@ mod ui_regression_tests {
         let open_tracks = {
             let app = h.app_cell.inner.borrow();
             app.windows
-                .get(&h.handle.id)
+                .get(&h.window_id)
                 .and_then(Option::as_ref)
                 .unwrap()
                 .anim_track_count()
@@ -2456,7 +2450,7 @@ mod ui_regression_tests {
         let closed_tracks = {
             let app = h.app_cell.inner.borrow();
             app.windows
-                .get(&h.handle.id)
+                .get(&h.window_id)
                 .and_then(Option::as_ref)
                 .unwrap()
                 .anim_track_count()

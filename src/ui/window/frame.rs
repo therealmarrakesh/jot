@@ -13,7 +13,6 @@ use crate::ui::element::{
     ContentMask, DispatchPhase, ElementId, GlobalElementId, Hitbox, HitboxBehavior, HitboxId,
     InputHandler, UiNode,
 };
-use crate::ui::entity::EntityId;
 use crate::ui::focus::{FocusHandle, FocusId};
 use crate::ui::geometry::{Bounds, Corners, Pixels, Point, Size};
 use crate::ui::graphics::d2d_renderer::{BoxShadow, PaintQuad};
@@ -177,17 +176,6 @@ impl Window {
         let gid = GlobalElementId(self.id_stack.clone());
         let res = f(&gid, self);
         self.id_stack.pop();
-        res
-    }
-
-    pub(crate) fn with_current_view<R>(
-        &mut self,
-        view_id: EntityId,
-        f: impl FnOnce(&mut Window) -> R,
-    ) -> R {
-        self.view_stack.push(view_id);
-        let res = f(self);
-        self.view_stack.pop();
         res
     }
 

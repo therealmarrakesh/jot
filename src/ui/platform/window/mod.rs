@@ -168,7 +168,7 @@ pub(super) fn drain_pending_win32_events(app_cell: &Rc<AppCell>) {
                 height,
             } => {
                 if let Some(entry) = hwnd_entry(HWND(hwnd as *mut _)) {
-                    let _ = app.update_window_impl(entry.window_id, |_, window, cx| {
+                    let _ = app.update_window(entry.window_id, |window, cx| {
                         let scale = window.native.scale_factor;
                         window.native.logical_size =
                             size(px(width as f32 / scale), px(height as f32 / scale));
@@ -178,7 +178,7 @@ pub(super) fn drain_pending_win32_events(app_cell: &Rc<AppCell>) {
             }
             PendingWin32Event::DpiChanged { hwnd, scale } => {
                 if let Some(entry) = hwnd_entry(HWND(hwnd as *mut _)) {
-                    let _ = app.update_window_impl(entry.window_id, |_, window, cx| {
+                    let _ = app.update_window(entry.window_id, |window, cx| {
                         window.native.scale_factor = scale;
                         let (w, h) = window.native.physical_size();
                         window.native.logical_size =
@@ -189,7 +189,7 @@ pub(super) fn drain_pending_win32_events(app_cell: &Rc<AppCell>) {
             }
             PendingWin32Event::Activated { hwnd, active } => {
                 if let Some(entry) = hwnd_entry(HWND(hwnd as *mut _)) {
-                    let _ = app.update_window_impl(entry.window_id, |_, window, cx| {
+                    let _ = app.update_window(entry.window_id, |window, cx| {
                         window.native.active = active;
                         if active {
                             cx.active_window = Some(window.window_id());
@@ -202,7 +202,7 @@ pub(super) fn drain_pending_win32_events(app_cell: &Rc<AppCell>) {
             }
             PendingWin32Event::ThemeChanged { hwnd } => {
                 if let Some(entry) = hwnd_entry(HWND(hwnd as *mut _)) {
-                    let _ = app.update_window_impl(entry.window_id, |_, window, cx| {
+                    let _ = app.update_window(entry.window_id, |window, cx| {
                         let appearance = cx.window_appearance();
                         window.apply_appearance(appearance, cx);
                         cx.sync_system_reduce_motion();
@@ -214,7 +214,7 @@ pub(super) fn drain_pending_win32_events(app_cell: &Rc<AppCell>) {
                 paths,
                 client_px,
             } => {
-                let _ = app.update_window_impl(window_id, |_, window, cx| {
+                let _ = app.update_window(window_id, |window, cx| {
                     let pos = point(
                         px(client_px.0 as f32 / window.native.scale_factor),
                         px(client_px.1 as f32 / window.native.scale_factor),
@@ -636,9 +636,7 @@ fn with_window_for_hwnd<R>(
     let window_id = hwnd_entry(hwnd)?.window_id;
     let app_cell = ACTIVE_APP.with(|s| s.borrow().clone())?;
     let mut app = app_cell.inner.try_borrow_mut().ok()?;
-    let result = app
-        .update_window_impl(window_id, |_, window, cx| f(window, cx))
-        .ok();
+    let result = app.update_window(window_id, f).ok();
     drop(app);
     drive_frames(&app_cell);
     result
@@ -677,9 +675,7 @@ unsafe extern "system" fn window_wnd_proc(
                 && let Some(app_cell) = ACTIVE_APP.with(|s| s.borrow().clone())
                 && let Ok(mut app) = app_cell.inner.try_borrow_mut()
             {
-                let _ = app.update_window_impl(entry.window_id, |root, window, cx| {
-                    window.draw_frame(&root, cx);
-                });
+                app.draw_window(entry.window_id);
             }
             LRESULT(0)
         }
@@ -780,7 +776,6 @@ unsafe extern "system" fn window_wnd_proc(
                     MouseMoveEvent {
                         position: pos,
                         pressed_button: window.native.pressed_button,
-                        modifiers: current_modifiers(),
                     },
                     cx,
                 );
@@ -836,8 +831,6 @@ unsafe extern "system" fn window_wnd_proc(
                         MouseUpEvent {
                             button: MouseButton::Left,
                             position: pos,
-                            modifiers: current_modifiers(),
-                            click_count: 1,
                         },
                         cx,
                     );
@@ -897,7 +890,6 @@ unsafe extern "system" fn window_wnd_proc(
                     MouseMoveEvent {
                         position: pos,
                         pressed_button: window.native.pressed_button,
-                        modifiers: current_modifiers(),
                     },
                     cx,
                 );
@@ -961,13 +953,10 @@ unsafe extern "system" fn window_wnd_proc(
                     window.native.pressed_button = None;
                 }
                 let (_, _, pos) = window.native.client_point(lparam);
-                let click_count = window.native.clicks.last_count();
                 window.dispatch_mouse_up(
                     MouseUpEvent {
                         button,
                         position: pos,
-                        modifiers: current_modifiers(),
-                        click_count,
                     },
                     cx,
                 );
@@ -1033,7 +1022,7 @@ unsafe extern "system" fn window_wnd_proc(
                     key,
                     key_char: None,
                 };
-                let handled = window.dispatch_key_down(KeyDownEvent { keystroke, is_held }, cx);
+                let handled = window.dispatch_key_down(KeyDownEvent { keystroke }, cx);
                 if handled {
                     window.native.suppress_next_char = true;
                 }

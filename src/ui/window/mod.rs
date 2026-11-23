@@ -7,7 +7,7 @@ mod frame;
 pub(crate) use events::*;
 
 use std::any::{Any, TypeId};
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -15,10 +15,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use crate::layout::LayoutEngine;
 use crate::win32::WindowHwnd;
 
-use super::app::{AnyWindowHandle, App, Subscription};
+use super::app::App;
 use super::color::transparent_black;
-use super::element::{ElementId, GlobalElementId, HitboxBehavior};
-use super::entity::{AnyView, EntityId};
+use super::element::{ElementId, GlobalElementId, HitboxBehavior, UiNode};
 use super::focus::{FocusHandle, FocusId};
 use super::geometry::{Bounds, Pixels, Point, Size, point, px};
 use super::graphics::d2d_renderer::D2DRenderer;
@@ -50,18 +49,14 @@ impl From<u64> for WindowId {
 }
 
 type ShouldCloseCallback = Box<dyn FnMut(&mut Window, &mut App) -> bool>;
-type WindowCallback = (Rc<Cell<bool>>, Box<dyn FnMut(&mut Window, &mut App) -> bool>);
-type FocusChangeCallback = (
-    Rc<Cell<bool>>,
-    Box<dyn FnMut(Option<FocusId>, Option<FocusId>, &mut Window, &mut App) -> bool>,
-);
+type KeystrokeInterceptor = Box<dyn FnMut(&KeyDownEvent, &mut Window, &mut App) -> bool>;
+type WindowCallback = Box<dyn FnMut(&mut Window, &mut App)>;
+type FocusChangeCallback = Box<dyn FnMut(Option<FocusId>, Option<FocusId>, &mut Window, &mut App)>;
 
 pub(crate) struct Window {
     id: WindowId,
     pub(crate) native: NativeWindow,
     renderer: D2DRenderer,
-    root_view: Option<AnyView>,
-    root_type: TypeId,
     text_system: Rc<TextSystem>,
     keymap: Rc<RefCell<super::keymap::Keymap>>,
     appearance: WindowAppearance,
@@ -78,7 +73,6 @@ pub(crate) struct Window {
     element_offset_stack: Vec<Point<Pixels>>,
     focus_stack: Vec<FocusId>,
     key_context_stack: Vec<KeyContext>,
-    view_stack: Vec<EntityId>,
     deferred_draws: Vec<DeferredDraw>,
     focused_handle: Option<FocusHandle>,
     in_paint: bool,
@@ -91,6 +85,7 @@ pub(crate) struct Window {
     show_on_open: bool,
     focus_on_open: bool,
     should_close: Option<ShouldCloseCallback>,
+    keystroke_interceptor: Option<KeystrokeInterceptor>,
     activation_observers: Vec<WindowCallback>,
     appearance_observers: Vec<WindowCallback>,
     bounds_observers: Vec<WindowCallback>,
@@ -113,8 +108,6 @@ impl Window {
             id,
             native,
             renderer,
-            root_view: None,
-            root_type: TypeId::of::<()>(),
             text_system: cx.text_system.clone(),
             keymap: cx.keymap.clone(),
             appearance,
@@ -131,7 +124,6 @@ impl Window {
             element_offset_stack: vec![Point::default()],
             focus_stack: Vec::new(),
             key_context_stack: Vec::new(),
-            view_stack: Vec::new(),
             deferred_draws: Vec::new(),
             focused_handle: None,
             in_paint: false,
@@ -144,6 +136,7 @@ impl Window {
             show_on_open: options.show,
             focus_on_open: options.focus,
             should_close: None,
+            keystroke_interceptor: None,
             activation_observers: Vec::new(),
             appearance_observers: Vec::new(),
             bounds_observers: Vec::new(),
@@ -151,31 +144,12 @@ impl Window {
         })
     }
 
-    pub(crate) fn set_root_view(&mut self, view: AnyView) {
-        self.root_view = Some(view);
-    }
-
     pub(crate) fn finish_open(&mut self) {
         self.native.show(self.show_on_open, self.focus_on_open);
     }
 
-    pub(crate) fn root_view(&self) -> Option<&AnyView> {
-        self.root_view.as_ref()
-    }
-
     pub(crate) fn window_id(&self) -> WindowId {
         self.id
-    }
-
-    pub(crate) fn window_handle(&self) -> AnyWindowHandle {
-        AnyWindowHandle {
-            id: self.id,
-            root_type: self.root_type,
-        }
-    }
-
-    pub(crate) fn set_root_type<V: 'static>(&mut self) {
-        self.root_type = TypeId::of::<V>();
     }
 
     pub(crate) fn hwnd(&self) -> WindowHwnd {
@@ -294,13 +268,12 @@ impl Window {
     ) {
         let id = self.id;
         cx.defer(move |cx| {
-            let _ = cx.update_window_impl(id, |_, window, cx| f(window, cx));
+            let _ = cx.update_window(id, f);
         });
     }
 
     pub(crate) fn on_window_should_close(
         &mut self,
-        _cx: &mut App,
         f: impl FnMut(&mut Window, &mut App) -> bool + 'static,
     ) {
         self.should_close = Some(Box::new(f));
@@ -316,48 +289,48 @@ impl Window {
         }
     }
 
+    pub(crate) fn set_keystroke_interceptor(
+        &mut self,
+        f: impl FnMut(&KeyDownEvent, &mut Window, &mut App) -> bool + 'static,
+    ) {
+        self.keystroke_interceptor = Some(Box::new(f));
+    }
+
     // ---- Observers ----
 
     pub(crate) fn on_activation_change(
         &mut self,
-        f: impl FnMut(&mut Window, &mut App) -> bool + 'static,
-    ) -> Subscription {
-        let active = Rc::new(Cell::new(true));
-        self.activation_observers.push((active.clone(), Box::new(f)));
-        Subscription::new(move || active.set(false))
+        f: impl FnMut(&mut Window, &mut App) + 'static,
+    ) {
+        self.activation_observers.push(Box::new(f));
     }
 
     pub(crate) fn on_appearance_change(
         &mut self,
-        f: impl FnMut(&mut Window, &mut App) -> bool + 'static,
-    ) -> Subscription {
-        let active = Rc::new(Cell::new(true));
-        self.appearance_observers.push((active.clone(), Box::new(f)));
-        Subscription::new(move || active.set(false))
+        f: impl FnMut(&mut Window, &mut App) + 'static,
+    ) {
+        self.appearance_observers.push(Box::new(f));
     }
 
     pub(crate) fn on_bounds_change(
         &mut self,
-        f: impl FnMut(&mut Window, &mut App) -> bool + 'static,
-    ) -> Subscription {
-        let active = Rc::new(Cell::new(true));
-        self.bounds_observers.push((active.clone(), Box::new(f)));
-        Subscription::new(move || active.set(false))
+        f: impl FnMut(&mut Window, &mut App) + 'static,
+    ) {
+        self.bounds_observers.push(Box::new(f));
     }
 
     pub(crate) fn on_focus_change(
         &mut self,
-        f: impl FnMut(Option<FocusId>, Option<FocusId>, &mut Window, &mut App) -> bool + 'static,
-    ) -> Subscription {
-        let active = Rc::new(Cell::new(true));
-        self.focus_change_observers
-            .push((active.clone(), Box::new(f)));
-        Subscription::new(move || active.set(false))
+        f: impl FnMut(Option<FocusId>, Option<FocusId>, &mut Window, &mut App) + 'static,
+    ) {
+        self.focus_change_observers.push(Box::new(f));
     }
 
     pub(crate) fn notify_activation_changed(&mut self, cx: &mut App) {
         let mut obs = std::mem::take(&mut self.activation_observers);
-        obs.retain_mut(|(a, cb)| a.get() && cb(self, cx));
+        for cb in &mut obs {
+            cb(self, cx);
+        }
         obs.append(&mut self.activation_observers);
         self.activation_observers = obs;
         self.dirty = true;
@@ -367,7 +340,9 @@ impl Window {
         self.appearance = appearance;
         self.native.set_appearance(appearance);
         let mut obs = std::mem::take(&mut self.appearance_observers);
-        obs.retain_mut(|(a, cb)| a.get() && cb(self, cx));
+        for cb in &mut obs {
+            cb(self, cx);
+        }
         obs.append(&mut self.appearance_observers);
         self.appearance_observers = obs;
         self.dirty = true;
@@ -375,7 +350,9 @@ impl Window {
 
     pub(crate) fn notify_bounds_changed(&mut self, cx: &mut App) {
         let mut obs = std::mem::take(&mut self.bounds_observers);
-        obs.retain_mut(|(a, cb)| a.get() && cb(self, cx));
+        for cb in &mut obs {
+            cb(self, cx);
+        }
         obs.append(&mut self.bounds_observers);
         self.bounds_observers = obs;
     }
@@ -387,7 +364,9 @@ impl Window {
         cx: &mut App,
     ) {
         let mut obs = std::mem::take(&mut self.focus_change_observers);
-        obs.retain_mut(|(a, cb)| a.get() && cb(old_focus, new_focus, self, cx));
+        for cb in &mut obs {
+            cb(old_focus, new_focus, self, cx);
+        }
         obs.append(&mut self.focus_change_observers);
         self.focus_change_observers = obs;
     }
@@ -408,11 +387,12 @@ impl Window {
         self.dirty = true;
     }
 
-    pub(crate) fn draw_frame(&mut self, root: &AnyView, cx: &mut App) {
+    /// Resets per-frame stacks and syncs client metrics; returns `false` for minimized windows.
+    pub(crate) fn prepare_frame(&mut self) -> bool {
         self.dirty = false;
         self.animation_requested = false;
         let Some((pw, ph, scale)) = self.native.live_client_metrics() else {
-            return;
+            return false;
         };
         let _ = self.renderer.resize(pw, ph, scale);
         self.layout_engine.clear();
@@ -428,11 +408,12 @@ impl Window {
         self.element_offset_stack.push(Point::default());
         self.focus_stack.clear();
         self.key_context_stack.clear();
-        self.view_stack.clear();
-        self.view_stack.push(root.entity_id());
+        true
+    }
 
-        // 1. Render + Layout
-        let mut root_elem = root.render(self, cx);
+    /// Runs the 3-pass layout -> prepaint -> Direct2D paint cycle for `root_elem`.
+    pub(crate) fn finish_frame(&mut self, mut root_elem: UiNode, cx: &mut App) {
+        // 1. Layout
         let root_layout_id = root_elem.request_layout(self, cx);
         let viewport = self.viewport_size();
         self.layout_engine

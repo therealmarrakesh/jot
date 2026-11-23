@@ -1,5 +1,5 @@
 //! Lean concrete `UiNode` tree, `CustomWidget` escape hatch, `CanvasNode`, `DeferredNode`,
-//! `AnchoredNode`, `ScrollHandle`, hitboxes, and IME `EntityInputHandler`.
+//! `AnchoredNode`, hitboxes, and IME `InputHandler`.
 
 use std::any::Any;
 use std::ops::Range;
@@ -8,7 +8,6 @@ use crate::layout::{AvailableSpace, LayoutId};
 
 use super::app::App;
 use super::div::{Div, TextNode};
-use super::entity::{Entity, EntityId};
 use super::geometry::{Bounds, Length, Pixels, Point, Size, point, px, relative};
 use super::style::{Position, Style, StyleRefinement};
 use super::types::SharedString;
@@ -43,12 +42,6 @@ impl From<String> for ElementId {
 impl From<usize> for ElementId {
     fn from(n: usize) -> Self {
         Self::Integer(n as u64)
-    }
-}
-
-impl From<EntityId> for ElementId {
-    fn from(id: EntityId) -> Self {
-        Self::Integer(id.0)
     }
 }
 
@@ -112,11 +105,6 @@ impl Hitbox {
     pub(crate) fn contains(&self, p: &Point<Pixels>) -> bool {
         self.bounds.contains(p) && self.content_mask.is_none_or(|mask| mask.contains(p))
     }
-}
-
-/// View trait implemented by root windows (`Jot`, overlays).
-pub(crate) trait Render: 'static + Sized {
-    fn render(&mut self, window: &mut Window, cx: &mut super::app::Context<Self>) -> impl Into<UiNode>;
 }
 
 /// Escape-hatch trait for custom 3-phase widgets (`Editor`, `Scrollbar`, `tooltip::Host`).
@@ -499,52 +487,6 @@ impl From<AnchoredNode> for UiNode {
     #[inline]
     fn from(anc: AnchoredNode) -> Self {
         Self::Anchored(anc)
-    }
-}
-
-struct EntityWidget<V: Render> {
-    entity: Entity<V>,
-    rendered: Option<UiNode>,
-}
-
-impl<V: Render> CustomWidget for EntityWidget<V> {
-    fn id(&self) -> Option<ElementId> {
-        Some(ElementId::from(self.entity.entity_id()))
-    }
-
-    fn request_layout(&mut self, window: &mut Window, cx: &mut App) -> LayoutId {
-        let mut node = window.with_current_view(self.entity.entity_id(), |window| {
-            self.entity
-                .update(cx, |view, cx| view.render(window, cx).into())
-        });
-        let lid = node.request_layout(window, cx);
-        self.rendered = Some(node);
-        lid
-    }
-
-    fn prepaint(&mut self, _: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
-        if let Some(node) = self.rendered.as_mut() {
-            window.with_current_view(self.entity.entity_id(), |window| {
-                node.prepaint(window, cx);
-            });
-        }
-    }
-
-    fn paint(&mut self, _: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
-        if let Some(node) = self.rendered.as_mut() {
-            window.with_current_view(self.entity.entity_id(), |window| {
-                node.paint(window, cx);
-            });
-        }
-    }
-}
-
-impl<V: Render> From<Entity<V>> for UiNode {
-    fn from(entity: Entity<V>) -> Self {
-        Self::widget(EntityWidget {
-            entity,
-            rendered: None,
-        })
     }
 }
 

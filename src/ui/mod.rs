@@ -5,7 +5,6 @@ pub(crate) mod app;
 pub(crate) mod color;
 pub(crate) mod div;
 pub(crate) mod element;
-pub(crate) mod entity;
 pub(crate) mod focus;
 pub(crate) mod geometry;
 pub(crate) mod graphics;
@@ -21,7 +20,6 @@ pub(crate) use app::*;
 pub(crate) use color::*;
 pub(crate) use div::*;
 pub(crate) use element::*;
-pub(crate) use entity::*;
 pub(crate) use focus::*;
 pub(crate) use geometry::*;
 pub(crate) use graphics::d2d_renderer::{BoxShadow, fill};
@@ -45,7 +43,7 @@ pub(crate) use window::*;
 pub(crate) use crate::layout::{AvailableSpace, LayoutId};
 pub(crate) use crate::win32::{ScreenPoint, ScreenRect, WindowHwnd};
 
-/// Clean-room symbols re-exported through `crate::win32` when `--features d2d` is active.
+/// DirectWrite line-break helper re-exported through `crate::win32`.
 pub(crate) mod win32_bridge {
     pub(crate) use super::graphics::dwrite::line_break_opportunities;
 }

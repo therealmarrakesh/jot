@@ -22,16 +22,12 @@ pub(crate) struct MouseDownEvent {
 pub(crate) struct MouseUpEvent {
     pub(crate) button: MouseButton,
     pub(crate) position: Point<Pixels>,
-    pub(crate) modifiers: Modifiers,
-    pub(crate) click_count: usize,
 }
 
 #[derive(Clone, Debug)]
 pub(crate) struct MouseMoveEvent {
     pub(crate) position: Point<Pixels>,
     pub(crate) pressed_button: Option<MouseButton>,
-    #[allow(dead_code)]
-    pub(crate) modifiers: Modifiers,
 }
 
 impl MouseMoveEvent {
@@ -44,12 +40,6 @@ impl MouseMoveEvent {
 #[derive(Clone, Debug)]
 pub(crate) struct ClickEvent {
     pub(crate) button: MouseButton,
-    #[allow(dead_code)]
-    pub(crate) position: Point<Pixels>,
-    #[allow(dead_code)]
-    pub(crate) modifiers: Modifiers,
-    #[allow(dead_code)]
-    pub(crate) click_count: usize,
 }
 
 impl ClickEvent {
@@ -85,8 +75,6 @@ pub(crate) struct ScrollWheelEvent {
 #[derive(Clone, Debug)]
 pub(crate) struct KeyDownEvent {
     pub(crate) keystroke: Keystroke,
-    #[allow(dead_code)]
-    pub(crate) is_held: bool,
 }
 
 #[derive(Copy, Clone, Debug)]

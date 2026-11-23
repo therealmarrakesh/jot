@@ -35,7 +35,7 @@ pub(crate) fn key_bindings() -> Vec<KeyBinding> {
     ]
 }
 
-type PromptCallback = Box<dyn FnOnce(&mut Jot, usize, &mut Window, &mut Context<Jot>)>;
+type PromptCallback = Box<dyn FnOnce(&mut Jot, usize, &mut Window, &mut App)>;
 
 struct Prompt {
     title: SharedString,
@@ -181,7 +181,7 @@ impl Dialogs {
 }
 
 impl Jot {
-    pub(crate) fn go_to(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn go_to(&mut self, window: &mut Window, cx: &mut App) {
         if self.dialogs.active().is_some() {
             return;
         }
@@ -190,21 +190,21 @@ impl Jot {
         self.show_go_to(Some(row + 1), window, cx);
     }
 
-    fn show_go_to(&mut self, line: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
+    fn show_go_to(&mut self, line: Option<usize>, window: &mut Window, cx: &mut App) {
         self.dialogs.show(DialogKind::GoTo, cx);
         if let Some(line) = line {
             self.dialogs.line.set_value(&line.to_string(), cx);
         }
         self.dialogs.line.select_all();
         self.focus_editor(EditorSlot::GoToLine, window, cx);
-        cx.notify();
+        self.notify(cx);
     }
 
     fn handle_dialog_command(
         &mut self,
         command: Command,
         window: &mut Window,
-        cx: &mut Context<Self>,
+        cx: &mut App,
     ) -> bool {
         match command {
             Command::Confirm => self.confirm_dialog(window, cx),
@@ -216,7 +216,7 @@ impl Jot {
         true
     }
 
-    fn confirm_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn confirm_dialog(&mut self, window: &mut Window, cx: &mut App) {
         let Some(dialog) = self.dialogs.active() else {
             return;
         };
@@ -227,7 +227,7 @@ impl Jot {
         self.press_dialog_button(focused.unwrap_or(0), window, cx);
     }
 
-    fn cancel_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn cancel_dialog(&mut self, window: &mut Window, cx: &mut App) {
         let Some(dialog) = self.dialogs.active() else {
             return;
         };
@@ -235,7 +235,7 @@ impl Jot {
         self.press_dialog_button(last, window, cx);
     }
 
-    fn step_dialog_focus(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
+    fn step_dialog_focus(&mut self, delta: isize, window: &mut Window, cx: &mut App) {
         let Some(dialog) = self.dialogs.active() else {
             return;
         };
@@ -254,10 +254,10 @@ impl Jot {
             None => ring.len() - 1,
         };
         ring[next].focus(window, cx);
-        cx.notify();
+        self.notify(cx);
     }
 
-    fn press_dialog_button(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+    fn press_dialog_button(&mut self, ix: usize, window: &mut Window, cx: &mut App) {
         let Some(dialog) = self.dialogs.active() else {
             return;
         };
@@ -275,8 +275,8 @@ impl Jot {
         message: impl Into<SharedString>,
         buttons: &'static [&'static str],
         window: &mut Window,
-        cx: &mut Context<Self>,
-        on_answer: impl FnOnce(&mut Jot, usize, &mut Window, &mut Context<Jot>) + 'static,
+        cx: &mut App,
+        on_answer: impl FnOnce(&mut Jot, usize, &mut Window, &mut App) + 'static,
     ) {
         self.dialogs.show(
             DialogKind::Prompt(Prompt {
@@ -288,10 +288,10 @@ impl Jot {
             cx,
         );
         self.dialogs.focus_default(window, cx);
-        cx.notify();
+        self.notify(cx);
     }
 
-    fn answer_prompt(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+    fn answer_prompt(&mut self, index: usize, window: &mut Window, cx: &mut App) {
         let on_answer = self
             .dialogs
             .active_mut()
@@ -305,12 +305,12 @@ impl Jot {
         }
     }
 
-    fn close_dialogs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn close_dialogs(&mut self, window: &mut Window, cx: &mut App) {
         self.dialogs.hide();
         self.focus_active_editor(window, cx);
     }
 
-    fn submit_go_to(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn submit_go_to(&mut self, window: &mut Window, cx: &mut App) {
         let value = self.dialogs.line.value();
         let lines = self.active_editor().text().lines_len();
         match value.parse::<usize>() {
@@ -319,21 +319,17 @@ impl Jot {
                 self.active_editor_mut()
                     .set_cursor_position(Position::new((line - 1) as u32, 0));
                 self.focus_active_editor(window, cx);
-                cx.notify();
+                self.notify(cx);
             }
             _ => {
                 self.dialogs.show(DialogKind::LineOutOfRange, cx);
                 self.dialogs.focus_default(window, cx);
-                cx.notify();
+                self.notify(cx);
             }
         }
     }
 
-    pub(crate) fn render_dialogs(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Option<Div> {
+    pub(crate) fn render_dialogs(&mut self, window: &mut Window, cx: &mut App) -> Option<Div> {
         self.dialogs
             .open
             .retain_mut(|dialog| !dialog.sample(window, cx));
@@ -356,7 +352,7 @@ impl Jot {
                 .top_0()
                 .left_0()
                 .size_full()
-                .on_command(cx.command_listener(Self::handle_dialog_command))
+                .on_command(self.on_cmd(Self::handle_dialog_command))
                 .children(layers),
         )
     }
@@ -366,7 +362,7 @@ impl Jot {
         dialog: &OpenDialog,
         accent: Rgba,
         window: &Window,
-        cx: &mut Context<Self>,
+        cx: &App,
     ) -> Div {
         let p = palette(cx);
         let s = dialog.scale;
@@ -397,7 +393,7 @@ impl Jot {
                         Some(handle),
                         window,
                     )
-                    .on_click(cx.listener(move |this, _, window, cx| {
+                    .on_click(self.on(move |this, _, window, cx| {
                         this.press_dialog_button(ix, window, cx)
                     }))
                 })
@@ -439,7 +435,7 @@ impl Jot {
             .child(dialog_frame(p, s, width, title, body, buttons))
     }
 
-    fn go_to_body(&self, p: Palette, s: f32, window: &Window, cx: &mut Context<Self>) -> Div {
+    fn go_to_body(&self, p: Palette, s: f32, window: &Window, cx: &App) -> Div {
         div()
             .child(
                 message_body("Line number".into(), s)
@@ -448,7 +444,7 @@ impl Jot {
             )
             .child(text_field(
                 &self.dialogs.line,
-                self.editor_host(EditorSlot::GoToLine, cx),
+                self.editor_host(EditorSlot::GoToLine),
                 false,
                 p.content_surface,
                 s,

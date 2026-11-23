@@ -1,25 +1,12 @@
 use super::*;
 
-pub(crate) struct Overlay<V> {
-    pub view: Entity<V>,
-    pub handle: AnyWindowHandle,
-    pub hwnd: WindowHwnd,
+#[derive(Clone, Copy)]
+pub(crate) struct Overlay {
+    pub(crate) window_id: WindowId,
+    pub(crate) hwnd: WindowHwnd,
 }
 
-impl<V> Clone for Overlay<V> {
-    fn clone(&self) -> Self {
-        Self {
-            view: self.view.clone(),
-            handle: self.handle,
-            hwnd: self.hwnd,
-        }
-    }
-}
-
-pub(crate) fn open<V: Render>(
-    build: impl FnOnce(&mut Context<V>) -> V,
-    cx: &mut App,
-) -> Option<Overlay<V>> {
+pub(crate) fn open(content: WindowContent, cx: &mut App) -> Option<Overlay> {
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(Bounds::new(
             point(px(0.), px(0.)),
@@ -29,23 +16,19 @@ pub(crate) fn open<V: Render>(
         focus: false,
         show: false,
         kind: WindowKind::Overlay,
-        inactive_frame_interval: None,
         window_background: WindowBackgroundAppearance::Transparent,
         ..Default::default()
     };
-    let mut created = None;
-    let handle = cx
-        .open_window(options, |window, cx| {
-            let view = cx.new(build);
-            created = Some((view.clone(), window.hwnd()));
-            view
+    let mut hwnd = None;
+    let window_id = cx
+        .open_window(options, |window, _| {
+            hwnd = Some(window.hwnd());
+            content
         })
         .ok()?;
-    let (view, hwnd) = created?;
     Some(Overlay {
-        view,
-        handle: handle.into(),
-        hwnd,
+        window_id,
+        hwnd: hwnd?,
     })
 }
 

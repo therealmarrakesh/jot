@@ -52,10 +52,6 @@ impl ClickTracker {
         self.last_time = Some(now);
         self.count
     }
-
-    pub(super) fn last_count(&self) -> usize {
-        self.count.max(1)
-    }
 }
 
 pub(crate) fn current_modifiers() -> Modifiers {

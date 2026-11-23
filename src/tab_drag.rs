@@ -13,7 +13,7 @@ const MOVE_LOOP_START_TIMEOUT: Duration = Duration::from_millis(500);
 
 #[derive(Clone, Copy)]
 pub(crate) struct Owner {
-    window: WindowHandle<Jot>,
+    window: WindowId,
     hwnd: WindowHwnd,
 }
 
@@ -38,25 +38,24 @@ pub(crate) struct TabDrag {
     source_placement: Option<WindowPlacement>,
 }
 
-pub(crate) fn owner(window: &Window) -> Option<Owner> {
-    Some(Owner {
-        window: window.window_handle().downcast::<Jot>()?,
+pub(crate) fn owner(window: &Window) -> Owner {
+    Owner {
+        window: window.window_id(),
         hwnd: window.hwnd(),
-    })
+    }
 }
 
 fn with_jot<R>(
     owner: Owner,
     cx: &mut App,
-    f: impl FnOnce(&mut Jot, &mut Window, &mut Context<Jot>) -> R,
+    f: impl FnOnce(&mut Jot, &mut Window, &mut App) -> R,
 ) -> Option<R> {
-    owner.window.update(cx, |jot, window, cx| f(jot, window, cx)).ok()
+    cx.update_jot_window(owner.window, f)
 }
 
 fn jot_windows(cx: &App) -> impl Iterator<Item = Owner> + '_ {
-    cx.windows().into_iter().filter_map(move |handle| {
-        let window = handle.downcast::<Jot>()?;
-        let hwnd = window.read(cx).ok()?.hwnd;
+    cx.main_windows().into_iter().filter_map(move |window| {
+        let hwnd = cx.jot(window)?.hwnd;
         Some(Owner { window, hwnd })
     })
 }
@@ -224,15 +223,15 @@ pub(crate) fn cancel(cx: &mut App) {
     .flatten() else {
         return;
     };
-    if drag.source.window.read(cx).is_ok() {
+    if cx.jot(drag.source.window).is_some() {
         with_jot(drag.source, cx, |jot, window, cx| {
             jot.restore_tab(data, index, window, cx)
         });
         drag.source.hwnd.set_foreground();
     } else {
-        let (_, jot) = open_jot_window(Some(data), None, cx);
+        let (_, hwnd) = open_jot_window(Some(data), None, cx);
         if let Some(placement) = drag.source_placement {
-            jot.read(cx).hwnd.restore_placement(placement);
+            hwnd.restore_placement(placement);
         }
     }
 }
@@ -265,11 +264,8 @@ fn detach(drag: &mut TabDrag, alone: bool, point: ScreenPoint, cx: &mut App) {
         .flatten() else {
             return;
         };
-        let (window, jot) = open_jot_window(Some(data), Some(size), cx);
-        drag.owner = Owner {
-            window,
-            hwnd: jot.read(cx).hwnd,
-        };
+        let (window, hwnd) = open_jot_window(Some(data), Some(size), cx);
+        drag.owner = Owner { window, hwnd };
     } else {
         let hwnd = drag.owner.hwnd;
         if hwnd == drag.source.hwnd && drag.source_placement.is_none() {

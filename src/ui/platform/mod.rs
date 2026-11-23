@@ -8,7 +8,6 @@ use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Duration;
 
 use windows::Win32::{
     Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM},
@@ -148,8 +147,6 @@ pub(crate) struct WindowOptions {
     pub(crate) display_id: Option<DisplayId>,
     pub(crate) window_background: WindowBackgroundAppearance,
     pub(crate) window_min_size: Option<Size<Pixels>>,
-    #[allow(dead_code)]
-    pub(crate) inactive_frame_interval: Option<Duration>,
 }
 
 impl Default for WindowOptions {
@@ -165,7 +162,6 @@ impl Default for WindowOptions {
             display_id: None,
             window_background: WindowBackgroundAppearance::Opaque,
             window_min_size: None,
-            inactive_frame_interval: None,
         }
     }
 }
@@ -428,9 +424,7 @@ pub(crate) fn drive_frames(app_cell: &Rc<AppCell>) {
             let Ok(mut app) = app_cell.inner.try_borrow_mut() else {
                 return;
             };
-            let _ = app.update_window_impl(id, |root, window, cx| {
-                window.draw_frame(&root, cx);
-            });
+            app.draw_window(id);
             app.flush_effects();
         }
         let still_animating = {
@@ -462,7 +456,6 @@ unsafe extern "system" fn wake_wnd_proc(
                     Ok(mut app) => {
                         app.drain_jobs();
                         app.flush_effects();
-                        app.entities.prune_dropped();
                     }
                     Err(_) => {
                         let _ = unsafe {

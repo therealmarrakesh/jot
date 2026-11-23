@@ -90,15 +90,14 @@ impl BlinkState {
             self.timer.cancel();
             return;
         };
-        let host = host.clone();
+        let host = *host;
         self.timer = cx.after(delay, move |cx| {
-            let h = host.clone();
             host.with_mut(cx, |ed, cx| {
                 if ed.blink.epoch != epoch {
                     return;
                 }
                 ed.blink.paused = false;
-                ed.blink.step(epoch, &h, cx);
+                ed.blink.step(epoch, &host, cx);
             });
             host.notify(cx);
         });
@@ -119,11 +118,10 @@ impl BlinkState {
         };
         self.visible = !self.visible;
         let next_epoch = self.bump_epoch();
-        let host = host.clone();
+        let host = *host;
         self.timer = cx.after(interval, move |cx| {
-            let h = host.clone();
             host.with_mut(cx, |ed, cx| {
-                ed.blink.step(next_epoch, &h, cx);
+                ed.blink.step(next_epoch, &host, cx);
             });
             host.notify(cx);
         });
@@ -181,7 +179,7 @@ impl AutoScroll {
             return;
         }
         if !was_active {
-            let host = host.clone();
+            let host = *host;
             let interval = Duration::from_millis(16);
             self.timer = cx.every(interval, interval, move |cx| {
                 let mut keep_running = false;
@@ -461,7 +459,7 @@ impl Editor {
             if !self.selection.contains(offset) {
                 self.move_to(offset, None, Some(host), cx);
             }
-            let h = host.clone();
+            let h = *host;
             window.defer(cx, move |window, cx| {
                 h.open_context_menu(pos, window, cx);
             });
@@ -940,11 +938,11 @@ impl InputHandler for EditorInputHandler {
         _: &mut Window,
         cx: &mut App,
     ) {
-        let h = self.host.clone();
-        self.host.with_mut(cx, |ed, cx| {
-            ed.replace_text_in_range(range_utf16, new_text, Some(&h), cx);
+        let host = self.host;
+        host.with_mut(cx, |ed, cx| {
+            ed.replace_text_in_range(range_utf16, new_text, Some(&host), cx);
         });
-        self.host.notify(cx);
+        host.notify(cx);
     }
 
     fn replace_and_mark_text_in_range(
@@ -1213,7 +1211,7 @@ impl CustomWidget for EditorTextWidget {
         window.handle_input(
             &focus_handle,
             EditorInputHandler {
-                host: self.host.clone(),
+                host: self.host,
                 bounds,
             },
         );
@@ -1275,29 +1273,27 @@ impl CustomWidget for EditorTextWidget {
         }
 
         // Drag-select & mouse-up release listeners
-        let host_move = self.host.clone();
+        let host = self.host;
         window.on_mouse_event(move |event: &MouseMoveEvent, _, window, cx| {
             if event.pressed_button == Some(MouseButton::Left) {
-                let h = host_move.clone();
                 let mut changed = false;
-                host_move.with_mut(cx, |ed, cx| {
+                host.with_mut(cx, |ed, cx| {
                     if ed.selecting {
-                        ed.on_drag_move(event, &h, window, cx);
+                        ed.on_drag_move(event, &host, window, cx);
                         changed = true;
                     }
                 });
                 if changed {
-                    host_move.notify(cx);
+                    host.notify(cx);
                 }
             }
         });
 
-        let host_up = self.host.clone();
         window.on_mouse_event(move |_: &MouseUpEvent, phase, _, cx| {
             if !phase.bubble() {
                 return;
             }
-            host_up.with_mut(cx, |ed, _| {
+            host.with_mut(cx, |ed, _| {
                 ed.auto_scroll.stop();
                 ed.selecting = false;
             });
@@ -1354,9 +1350,9 @@ impl CustomWidget for EditorScrollbarWidget {
     fn prepaint(&mut self, _: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
         let p = palette(cx);
         let reduce_motion = cx.reduce_motion();
-        let host = self.host.clone();
+        let host = self.host;
 
-        let prepared = self.host.with_mut(cx, |ed, cx| {
+        let prepared = host.with_mut(cx, |ed, cx| {
             let snap = ed.scrollbar_snapshot?;
             ed.clamp_and_set_scroll(snap.synced_offset);
             let offset = ed.scroll_offset;
@@ -1367,10 +1363,9 @@ impl CustomWidget for EditorScrollbarWidget {
                 p,
                 window,
                 |delay| {
-                    let h = host.clone();
                     cx.after(delay, move |cx| {
-                        h.with_mut(cx, |ed, _| ed.scrollbar.on_idle_timer_fired());
-                        h.notify(cx);
+                        host.with_mut(cx, |ed, _| ed.scrollbar.on_idle_timer_fired());
+                        host.notify(cx);
                     })
                 },
             );
@@ -1388,32 +1383,31 @@ impl CustomWidget for EditorScrollbarWidget {
         };
         let viewport = sp.viewport_bounds;
         ScrollbarState::paint_axes(&sp.axes, viewport, window);
+        let host = self.host;
 
         for item in &sp.axes {
             let item = item.clone();
 
             // Wheel wakeup
-            let host_wheel = self.host.clone();
             window.on_mouse_event(move |event: &ScrollWheelEvent, phase, _, cx| {
                 if phase.bubble() && viewport.contains(&event.position) {
                     let mut woke = false;
-                    host_wheel.with_mut(cx, |ed, _| {
+                    host.with_mut(cx, |ed, _| {
                         woke = ed.scrollbar.on_wheel(ed.scroll_offset, Instant::now());
                     });
                     if woke {
-                        host_wheel.notify(cx);
+                        host.notify(cx);
                     }
                 }
             });
 
             // Track click & thumb grab (registered AFTER editor container -> wins Bubble!)
             if item.interactive {
-                let host_down = self.host.clone();
                 let down_item = item.clone();
                 window.on_mouse_event(move |event: &MouseDownEvent, phase, _, cx| {
                     if phase.bubble() && down_item.track_bounds.contains(&event.position) {
                         cx.stop_propagation();
-                        host_down.with_mut(cx, |ed, _| {
+                        host.with_mut(cx, |ed, _| {
                             let next = ed.scrollbar.on_mouse_down(
                                 &down_item,
                                 event.position,
@@ -1421,31 +1415,28 @@ impl CustomWidget for EditorScrollbarWidget {
                             );
                             ed.clamp_and_set_scroll(next);
                         });
-                        host_down.notify(cx);
+                        host.notify(cx);
                     }
                 });
             }
 
             // Hover & thumb drag
-            let host_move = self.host.clone();
             let move_item = item.clone();
             window.on_mouse_event(move |event: &MouseMoveEvent, _, _, cx| {
-                let h = host_move.clone();
-                let outcome = host_move.with_mut(cx, |ed, cx| {
+                let outcome = host.with_mut(cx, |ed, cx| {
                     let out = ed.scrollbar.on_mouse_move(
                         &move_item,
                         event.position,
                         event.dragging(),
                         ed.scroll_offset,
                         |delay| {
-                            let h2 = h.clone();
                             cx.after(delay, move |cx| {
                                 let mut fire = false;
-                                h2.with_mut(cx, |ed, _| {
+                                host.with_mut(cx, |ed, _| {
                                     fire = ed.scrollbar.on_drag_timer_fired(Instant::now());
                                 });
                                 if fire {
-                                    h2.notify(cx);
+                                    host.notify(cx);
                                 }
                             })
                         },
@@ -1460,20 +1451,19 @@ impl CustomWidget for EditorScrollbarWidget {
                         cx.stop_propagation();
                     }
                     if out.notify_now {
-                        host_move.notify(cx);
+                        host.notify(cx);
                     }
                 }
             });
 
             // End thumb drag
-            let host_up = self.host.clone();
             let up_item = item;
             window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
                 if !phase.bubble() {
                     return;
                 }
                 let mut dragged = false;
-                host_up.with_mut(cx, |ed, _| {
+                host.with_mut(cx, |ed, _| {
                     if let Some(next) =
                         ed.scrollbar
                             .on_mouse_up(&up_item, event.position, ed.scroll_offset)
@@ -1483,7 +1473,7 @@ impl CustomWidget for EditorScrollbarWidget {
                     }
                 });
                 if dragged {
-                    host_up.notify(cx);
+                    host.notify(cx);
                 }
             });
         }

@@ -103,7 +103,7 @@ impl IDropTarget_Impl for JotDropTarget_Impl {
             let mut client = POINT { x: pt.x, y: pt.y };
             let _ = unsafe { ScreenToClient(self.hwnd, &mut client) };
             if let Ok(mut app) = app_cell.inner.try_borrow_mut() {
-                let _ = app.update_window_impl(self.window_id, |_, window, cx| {
+                let _ = app.update_window(self.window_id, |window, cx| {
                     let pos = point(
                         px(client.x as f32 / window.native.scale_factor),
                         px(client.y as f32 / window.native.scale_factor),

@@ -466,41 +466,41 @@ impl FindBar {
 }
 
 impl Jot {
-    pub(crate) fn find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn find(&mut self, window: &mut Window, cx: &mut App) {
         if self.has_text() {
             self.open_find(false, window, cx);
         }
     }
 
-    pub(crate) fn replace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn replace(&mut self, window: &mut Window, cx: &mut App) {
         if self.has_text() {
             self.open_find(true, window, cx);
         }
     }
 
-    pub(crate) fn find_next(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn find_next(&mut self, window: &mut Window, cx: &mut App) {
         if self.has_text() {
             self.find_step(true, window, cx);
         }
     }
 
-    pub(crate) fn find_previous(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn find_previous(&mut self, window: &mut Window, cx: &mut App) {
         if self.has_text() {
             self.find_step(false, window, cx);
         }
     }
 
-    pub(crate) fn toggle_match_case(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn toggle_match_case(&mut self, window: &mut Window, cx: &mut App) {
         self.find.match_case = !self.find.match_case;
         self.refocus_find(window, cx);
     }
 
-    pub(crate) fn toggle_wrap_around(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn toggle_wrap_around(&mut self, window: &mut Window, cx: &mut App) {
         self.find.wrap_around = !self.find.wrap_around;
         self.refocus_find(window, cx);
     }
 
-    pub(crate) fn replace_next(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn replace_next(&mut self, window: &mut Window, cx: &mut App) {
         if self.find.prepare().is_none() {
             return;
         }
@@ -517,7 +517,7 @@ impl Jot {
         self.find_step(true, window, cx);
     }
 
-    pub(crate) fn replace_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn replace_all(&mut self, window: &mut Window, cx: &mut App) {
         let Some(query) = self.find.prepare() else {
             return;
         };
@@ -545,7 +545,7 @@ impl Jot {
         self.refocus_find(window, cx);
     }
 
-    fn refocus_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn refocus_find(&mut self, window: &mut Window, cx: &mut App) {
         if self.find.is_open() {
             let slot = if self.find.replace
                 && self
@@ -560,10 +560,10 @@ impl Jot {
             };
             self.focus_editor(slot, window, cx);
         }
-        cx.notify();
+        self.notify(cx);
     }
 
-    fn open_find(&mut self, replace: bool, window: &mut Window, cx: &mut Context<Self>) {
+    fn open_find(&mut self, replace: bool, window: &mut Window, cx: &mut App) {
         let selected = self.active_editor().selected_text().to_string();
         if !selected.is_empty() && !selected.contains('\n') {
             self.find.query.set_value(&selected, cx);
@@ -577,10 +577,10 @@ impl Jot {
         self.find.query.select_all();
         self.focus_editor(EditorSlot::FindQuery, window, cx);
         self.sync_selection_focus();
-        cx.notify();
+        self.notify(cx);
     }
 
-    pub(crate) fn close_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn close_find(&mut self, window: &mut Window, cx: &mut App) {
         if !self.find.is_open() {
             return;
         }
@@ -591,7 +591,7 @@ impl Jot {
         self.focus_active_editor(window, cx);
     }
 
-    fn find_step(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
+    fn find_step(&mut self, forward: bool, window: &mut Window, cx: &mut App) {
         let Some(query) = self.find.prepare() else {
             self.open_find(false, window, cx);
             return;
@@ -627,25 +627,25 @@ impl Jot {
         if !self.find.is_open() {
             self.focus_active_editor(window, cx);
         }
-        cx.notify();
+        self.notify(cx);
     }
 
-    fn show_notice(&mut self, notice: impl Into<SharedString>, cx: &mut Context<Self>) {
+    fn show_notice(&mut self, notice: impl Into<SharedString>, cx: &mut App) {
         if !self.find.is_open() {
             return;
         }
         self.find.notice = Some(notice.into());
-        let this = cx.weak_entity();
+        let window_id = self.window_id;
         self.find.notice_timer = cx.after(NOTICE_DURATION, move |cx| {
-            let _ = this.update(cx, |this, cx| {
+            cx.with_jot(window_id, |this, cx| {
                 this.find.notice = None;
-                cx.notify();
+                this.notify(cx);
             });
         });
-        cx.notify();
+        self.notify(cx);
     }
 
-    fn open_find_options(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn open_find_options(&mut self, window: &mut Window, cx: &mut App) {
         let target = self.find.options_bounds.get();
         let entries = vec![
             Entry::toggle("Match case", self.find.match_case, Command::ToggleMatchCase),
@@ -659,11 +659,7 @@ impl Jot {
         self.open_flyout_above(entries, target, return_focus, window, cx);
     }
 
-    pub(crate) fn render_find(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Option<Div> {
+    pub(crate) fn render_find(&mut self, window: &mut Window, cx: &mut App) -> Option<Div> {
         let p = palette(cx);
         let scale = self.find.sample(window, cx)?;
         let (width, height) = self.find.card_size(window);
@@ -706,7 +702,7 @@ impl Jot {
         height: f32,
         scale: Point<f32>,
         window: &Window,
-        cx: &mut Context<Self>,
+        cx: &App,
     ) -> Div {
         let s = scale.x;
         let u = |v: f32| px(v * s);
@@ -748,7 +744,7 @@ impl Jot {
         )
     }
 
-    fn find_query_row(&self, p: Palette, s: f32, window: &Window, cx: &mut Context<Self>) -> Div {
+    fn find_query_row(&self, p: Palette, s: f32, window: &Window, cx: &App) -> Div {
         let u = |v: f32| px(v * s);
         let options_bounds = self.find.options_bounds.clone();
         let replace = self.find.replace;
@@ -773,7 +769,7 @@ impl Jot {
                     CHEVRON_SIZE,
                     s,
                 )
-                .on_click(cx.listener(|this, _, window, cx| {
+                .on_click(self.on(|this, _, window, cx| {
                     this.find.replace = !this.find.replace;
                     this.refocus_find(window, cx);
                 })),
@@ -785,7 +781,7 @@ impl Jot {
                     .key_context(QUERY_CONTEXT)
                     .child(text_field(
                         &self.find.query,
-                        self.editor_host(EditorSlot::FindQuery, cx),
+                        self.editor_host(EditorSlot::FindQuery),
                         true,
                         p.card_surface,
                         s,
@@ -802,7 +798,7 @@ impl Jot {
                     ICON_SIZE,
                     s,
                 )
-                .on_click(cx.listener(|this, _, window, cx| this.find_step(true, window, cx))),
+                .on_click(self.on(|this, _, window, cx| this.find_step(true, window, cx))),
             )
             .child(
                 icon_button(
@@ -813,7 +809,7 @@ impl Jot {
                     ICON_SIZE,
                     s,
                 )
-                .on_click(cx.listener(|this, _, window, cx| this.find_step(false, window, cx))),
+                .on_click(self.on(|this, _, window, cx| this.find_step(false, window, cx))),
             )
             .child(
                 icon_button(
@@ -824,7 +820,7 @@ impl Jot {
                     ICON_SIZE,
                     s,
                 )
-                .on_click(cx.listener(|this, _, window, cx| this.open_find_options(window, cx)))
+                .on_click(self.on(|this, _, window, cx| this.open_find_options(window, cx)))
                 .on_bounds(move |bounds, _, _| options_bounds.set(bounds)),
             )
             .child(
@@ -836,7 +832,7 @@ impl Jot {
                     ICON_SIZE,
                     s,
                 )
-                .on_click(cx.listener(|this, _, window, cx| this.close_find(window, cx))),
+                .on_click(self.on(|this, _, window, cx| this.close_find(window, cx))),
             )
     }
 
@@ -845,7 +841,7 @@ impl Jot {
         p: Palette,
         buttons: field::ButtonStyle,
         window: &Window,
-        cx: &mut Context<Self>,
+        cx: &App,
     ) -> Div {
         let s = buttons.scale;
         let u = |v: f32| px(v * s);
@@ -868,7 +864,7 @@ impl Jot {
                     .key_context(REPLACEMENT_CONTEXT)
                     .child(text_field(
                         &self.find.replacement,
-                        self.editor_host(EditorSlot::FindReplace, cx),
+                        self.editor_host(EditorSlot::FindReplace),
                         false,
                         p.card_surface,
                         s,
@@ -878,7 +874,7 @@ impl Jot {
             )
             .child(action(
                 field::button(p, buttons, "find-replace", "Replace", false, None, window).on_click(
-                    cx.listener(|this, _, window, cx| this.replace_next(window, cx)),
+                    self.on(|this, _, window, cx| this.replace_next(window, cx)),
                 ),
             ))
             .child(action(
@@ -891,7 +887,7 @@ impl Jot {
                     None,
                     window,
                 )
-                .on_click(cx.listener(|this, _, window, cx| this.replace_all(window, cx))),
+                .on_click(self.on(|this, _, window, cx| this.replace_all(window, cx))),
             ))
     }
 }

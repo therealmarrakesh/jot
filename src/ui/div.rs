@@ -14,7 +14,7 @@ use super::element::{
     ContentMask, DispatchPhase, ElementId, GlobalElementId, Hitbox, HitboxBehavior, UiNode,
 };
 use super::focus::FocusHandle;
-use super::geometry::{Bounds, Pixels, Point, Size, point, px, size};
+use super::geometry::{Bounds, Pixels, Size, point, px, size};
 use super::graphics::d2d_renderer::PaintQuad;
 use super::graphics::dwrite::{TextAlign, WrappedLine};
 use super::keymap::{Command, KeyContext};
@@ -689,12 +689,7 @@ impl Div {
                         if was_active || was_pending {
                             window.refresh();
                             if was_pending && hb_up.is_hovered(window) {
-                                let click = ClickEvent {
-                                    button: ev.button,
-                                    position: ev.position,
-                                    modifiers: ev.modifiers,
-                                    click_count: ev.click_count,
-                                };
+                                let click = ClickEvent { button: ev.button };
                                 for cb in mouse_click_cbs.borrow_mut().iter_mut() {
                                     cb(&click, window, cx);
                                 }
@@ -714,9 +709,6 @@ impl Div {
                             {
                                 let click = ClickEvent {
                                     button: MouseButton::Left,
-                                    position: Point::default(),
-                                    modifiers: ev.keystroke.modifiers,
-                                    click_count: 1,
                                 };
                                 for cb in click_cbs.borrow_mut().iter_mut() {
                                     cb(&click, window, cx);
@@ -752,12 +744,7 @@ impl Div {
                             && hb_up.is_hovered(window)
                             && !window.default_prevented()
                         {
-                            let click = ClickEvent {
-                                button: ev.button,
-                                position: ev.position,
-                                modifiers: ev.modifiers,
-                                click_count: ev.click_count,
-                            };
+                            let click = ClickEvent { button: ev.button };
                             for cb in &mut aux_cbs {
                                 cb(&click, window, cx);
                             }

@@ -64,7 +64,7 @@ impl Jot {
         title: impl Into<SharedString>,
         message: impl Into<SharedString>,
         window: &mut Window,
-        cx: &mut Context<Self>,
+        cx: &mut App,
     ) {
         self.prompt(title, message, &["OK"], window, cx, |_, _, _, _| {});
     }
@@ -74,7 +74,7 @@ impl Jot {
         path: &Path,
         error: &io::Error,
         window: &mut Window,
-        cx: &mut Context<Self>,
+        cx: &mut App,
     ) {
         let title = format!("Can't save {}", display_name(Some(path)));
         self.show_error(title, error.to_string(), window, cx);
@@ -89,8 +89,7 @@ impl Jot {
         tab.data.path.is_none() && tab.data.editor.text().len() == 0
     }
 
-    pub(crate) fn open(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let this = cx.weak_entity();
+    pub(crate) fn open(&mut self, window: &mut Window, cx: &mut App) {
         let window_id = window.window_id();
         cx.prompt_for_paths(
             PathPromptOptions {
@@ -102,8 +101,8 @@ impl Jot {
                 let Ok(Some(paths)) = result else {
                     return;
                 };
-                let _ = cx.update_window_impl(window_id, |_, window, cx| {
-                    let _ = this.update(cx, |this, cx| this.open_paths(paths, window, cx));
+                cx.update_jot_window(window_id, |this, window, cx| {
+                    this.open_paths(paths, window, cx);
                 });
             },
         );
@@ -113,7 +112,7 @@ impl Jot {
         &mut self,
         paths: &ExternalPaths,
         window: &mut Window,
-        cx: &mut Context<Self>,
+        cx: &mut App,
     ) {
         self.open_paths(paths.paths().to_vec(), window, cx);
     }
@@ -131,7 +130,7 @@ impl Jot {
         &mut self,
         paths: Vec<PathBuf>,
         window: &mut Window,
-        cx: &mut Context<Self>,
+        cx: &mut App,
     ) {
         let mut to_load: Vec<PathBuf> = Vec::new();
         let mut last_existing = None;
@@ -154,9 +153,9 @@ impl Jot {
             }
             return;
         }
-        let this = cx.weak_entity();
+        let window_id = window.window_id();
         cx.spawn_bg_in(
-            window.window_id(),
+            window_id,
             move || {
                 to_load
                     .into_iter()
@@ -167,7 +166,7 @@ impl Jot {
                     .collect::<Vec<_>>()
             },
             move |results, window, cx| {
-                let _ = this.update(cx, |this, cx| {
+                cx.with_jot(window_id, |this, cx| {
                     for (path, result) in results {
                         if let Some(ix) = this.find_open_tab(&path) {
                             this.activate_tab(ix, window, cx);
@@ -199,7 +198,7 @@ impl Jot {
         );
     }
 
-    pub(crate) fn save(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn save(&mut self, window: &mut Window, cx: &mut App) {
         let id = self.active_tab_id();
         self.start_file_workflow(
             FileWorkflow::single(
@@ -214,7 +213,7 @@ impl Jot {
         );
     }
 
-    pub(crate) fn save_as(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn save_as(&mut self, window: &mut Window, cx: &mut App) {
         let id = self.active_tab_id();
         self.start_file_workflow(
             FileWorkflow::single(WorkflowStep::SaveTabAs(id), WorkflowFinish::None),
@@ -223,7 +222,7 @@ impl Jot {
         );
     }
 
-    pub(crate) fn save_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn save_all(&mut self, window: &mut Window, cx: &mut App) {
         let dirty = self.dirty_tabs();
         if dirty.is_empty() {
             return;
@@ -248,7 +247,7 @@ impl Jot {
             .collect()
     }
 
-    pub(crate) fn close_tab(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn close_tab(&mut self, ix: usize, window: &mut Window, cx: &mut App) {
         if !self.tabs[ix].data.is_dirty() {
             self.remove_tab(ix, window, cx);
             return;
@@ -268,11 +267,7 @@ impl Jot {
         );
     }
 
-    pub(crate) fn request_close_window(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> bool {
+    pub(crate) fn request_close_window(&mut self, window: &mut Window, cx: &mut App) -> bool {
         let dirty = self.dirty_tabs();
         if dirty.is_empty() {
             return true;
@@ -290,12 +285,7 @@ impl Jot {
         false
     }
 
-    fn start_file_workflow(
-        &mut self,
-        workflow: FileWorkflow,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn start_file_workflow(&mut self, workflow: FileWorkflow, window: &mut Window, cx: &mut App) {
         self.file_workflow = Some(workflow);
         self.advance_file_workflow(window, cx);
     }
@@ -304,7 +294,7 @@ impl Jot {
         self.file_workflow = None;
     }
 
-    fn advance_file_workflow(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn advance_file_workflow(&mut self, window: &mut Window, cx: &mut App) {
         loop {
             let next = self
                 .file_workflow
@@ -384,12 +374,7 @@ impl Jot {
         }
     }
 
-    fn begin_save_tab_as(
-        &mut self,
-        id: TabId,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn begin_save_tab_as(&mut self, id: TabId, window: &mut Window, cx: &mut App) {
         let Some(ix) = self.tab_index(id) else {
             self.abort_file_workflow();
             return;
@@ -397,7 +382,6 @@ impl Jot {
         let current = self.tabs[ix].data.path.clone();
         let format = self.tabs[ix].data.format;
         let suggested = file_name(current.as_deref()).unwrap_or_else(|| UNTITLED_FILE_NAME.into());
-        let this = cx.weak_entity();
         let window_id = window.window_id();
         cx.prompt_for_save_path(
             self.hwnd,
@@ -421,23 +405,21 @@ impl Jot {
                 }),
             },
             move |result, cx| {
-                let _ = cx.update_window_impl(window_id, |_, window, cx| {
-                    let _ = this.update(cx, |this, cx| {
-                        let Ok(Some((path, choice))) = result else {
-                            this.abort_file_workflow();
-                            return;
-                        };
-                        let format = Format {
-                            encoding: choice
-                                .and_then(|ix| Encoding::SAVE_ORDER.get(ix).copied())
-                                .unwrap_or(format.encoding),
-                            ..format
-                        };
-                        match this.tab_index(id) {
-                            Some(ix) => this.begin_write_tab(ix, path, format, window, cx),
-                            None => this.abort_file_workflow(),
-                        }
-                    });
+                cx.update_jot_window(window_id, |this, window, cx| {
+                    let Ok(Some((path, choice))) = result else {
+                        this.abort_file_workflow();
+                        return;
+                    };
+                    let format = Format {
+                        encoding: choice
+                            .and_then(|ix| Encoding::SAVE_ORDER.get(ix).copied())
+                            .unwrap_or(format.encoding),
+                        ..format
+                    };
+                    match this.tab_index(id) {
+                        Some(ix) => this.begin_write_tab(ix, path, format, window, cx),
+                        None => this.abort_file_workflow(),
+                    }
                 });
             },
         );
@@ -449,19 +431,19 @@ impl Jot {
         path: PathBuf,
         format: Format,
         window: &mut Window,
-        cx: &mut Context<Self>,
+        cx: &mut App,
     ) {
         let id = self.tabs[ix].data.id;
         let snapshot = self.tabs[ix].data.editor.begin_save();
         let text = self.tabs[ix].data.editor.text().clone();
         let path = std::path::absolute(&path).unwrap_or(path);
         let check_text = text.clone();
-        let this = cx.weak_entity();
+        let window_id = window.window_id();
         cx.spawn_bg_in(
-            window.window_id(),
+            window_id,
             move || document::is_lossy(&check_text, format),
             move |lossy_res, window, cx| {
-                let _ = this.update(cx, |this, cx| match lossy_res {
+                cx.with_jot(window_id, |this, cx| match lossy_res {
                     Err(error) => {
                         this.show_save_error(&path, &error, window, cx);
                         this.abort_file_workflow();
@@ -500,15 +482,15 @@ impl Jot {
         path: PathBuf,
         format: Format,
         window: &mut Window,
-        cx: &mut Context<Self>,
+        cx: &mut App,
     ) {
         let write_path = path.clone();
-        let this = cx.weak_entity();
+        let window_id = window.window_id();
         cx.spawn_bg_in(
-            window.window_id(),
+            window_id,
             move || document::write_rope(&write_path, &text, format),
             move |result, window, cx| {
-                let _ = this.update(cx, |this, cx| match result {
+                cx.with_jot(window_id, |this, cx| match result {
                     Ok(()) => {
                         let Some(ix) = this.tab_index(id) else {
                             this.abort_file_workflow();
@@ -519,7 +501,7 @@ impl Jot {
                         tab.data.path = Some(path);
                         tab.data.format = format;
                         this.refresh_title(window);
-                        cx.notify();
+                        this.notify(cx);
                         this.advance_file_workflow(window, cx);
                     }
                     Err(error) => {

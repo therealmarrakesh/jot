@@ -16,8 +16,8 @@ use crate::scrollbar::ScrollbarState;
 use crate::tabs::TabId;
 use crate::ui::{
     App, Bounds, Command, Div, Edges, FocusHandle, KeyBinding, MouseButton, MouseDownEvent,
-    MouseUpEvent, Pixels, Point as UiPoint, ScrollWheelEvent, SharedString, Size, WeakEntity,
-    WeakFocusHandle, Window, div, point, px, size,
+    MouseUpEvent, Pixels, Point as UiPoint, ScrollWheelEvent, SharedString, Size, WeakFocusHandle,
+    Window, WindowId, div, point, px, size,
 };
 
 pub(crate) use buffer::{Position, RopeExt};
@@ -76,22 +76,20 @@ pub(crate) enum EditorSlot {
     GoToLine,
 }
 
-/// Lightweight handle routing widget, IME, and timer callbacks to an owned `Editor` on `Jot`.
-#[derive(Clone)]
+/// Lightweight copyable handle routing widget, IME, and timer callbacks to an owned `Editor`.
+#[derive(Copy, Clone)]
 pub(crate) struct EditorHost {
-    jot: WeakEntity<crate::Jot>,
+    window_id: WindowId,
     slot: EditorSlot,
 }
 
 impl EditorHost {
-    pub(crate) fn new(jot: WeakEntity<crate::Jot>, slot: EditorSlot) -> Self {
-        Self { jot, slot }
+    pub(crate) fn new(window_id: WindowId, slot: EditorSlot) -> Self {
+        Self { window_id, slot }
     }
 
     pub(crate) fn with<R>(&self, cx: &App, f: impl FnOnce(&Editor) -> R) -> Option<R> {
-        let entity = self.jot.upgrade()?;
-        let jot = entity.read(cx);
-        jot.editor_by_slot(self.slot).map(f)
+        cx.jot(self.window_id)?.editor_by_slot(self.slot).map(f)
     }
 
     pub(crate) fn with_mut<R>(
@@ -99,17 +97,15 @@ impl EditorHost {
         cx: &mut App,
         f: impl FnOnce(&mut Editor, &mut App) -> R,
     ) -> Option<R> {
-        let entity = self.jot.upgrade()?;
         let slot = self.slot;
-        entity.update(cx, |jot, cx| {
+        cx.with_jot(self.window_id, |jot, cx| {
             jot.editor_by_slot_mut(slot).map(|ed| f(ed, cx))
         })
+        .flatten()
     }
 
     pub(crate) fn notify(&self, cx: &mut App) {
-        if let Some(entity) = self.jot.upgrade() {
-            cx.notify(entity.entity_id());
-        }
+        cx.refresh_window(self.window_id);
     }
 
     pub(crate) fn open_context_menu(
@@ -118,9 +114,9 @@ impl EditorHost {
         window: &mut Window,
         cx: &mut App,
     ) {
-        let _ = self
-            .jot
-            .update(cx, |jot, cx| jot.open_context_menu(pos, window, cx));
+        cx.with_jot(self.window_id, |jot, cx| {
+            jot.open_context_menu(pos, window, cx);
+        });
     }
 }
 
@@ -453,65 +449,53 @@ impl Editor {
     // ---- Rendering ----
 
     pub(crate) fn render(&self, host: EditorHost) -> Div {
-        let host_cmd = host.clone();
-        let host_l_down = host.clone();
-        let host_r_down = host.clone();
-        let host_l_up = host.clone();
-        let host_r_up = host.clone();
-        let host_wheel = host.clone();
-
         div()
             .id(("editor", self.id))
             .key_context(CONTEXT)
             .track_focus(&self.focus_handle)
             .on_command(move |command, _, cx| {
-                let h = host_cmd.clone();
-                let handled = host_cmd
-                    .with_mut(cx, |ed, cx| ed.handle_command(command, &h, cx))
+                let handled = host
+                    .with_mut(cx, |ed, cx| ed.handle_command(command, &host, cx))
                     .unwrap_or(false);
                 if handled {
-                    host_cmd.notify(cx);
+                    host.notify(cx);
                 }
                 handled
             })
             .on_mouse_down(
                 MouseButton::Left,
                 move |event: &MouseDownEvent, window, cx| {
-                    let h = host_l_down.clone();
-                    host_l_down.with_mut(cx, |ed, cx| ed.on_mouse_down(event, &h, window, cx));
-                    host_l_down.notify(cx);
+                    host.with_mut(cx, |ed, cx| ed.on_mouse_down(event, &host, window, cx));
+                    host.notify(cx);
                 },
             )
             .on_mouse_down(
                 MouseButton::Right,
                 move |event: &MouseDownEvent, window, cx| {
-                    let h = host_r_down.clone();
-                    host_r_down.with_mut(cx, |ed, cx| ed.on_mouse_down(event, &h, window, cx));
-                    host_r_down.notify(cx);
+                    host.with_mut(cx, |ed, cx| ed.on_mouse_down(event, &host, window, cx));
+                    host.notify(cx);
                 },
             )
             .on_mouse_up(
                 MouseButton::Left,
                 move |event: &MouseUpEvent, window, cx| {
-                    let h = host_l_up.clone();
-                    host_l_up.with_mut(cx, |ed, cx| ed.on_mouse_up(event, &h, window, cx));
-                    host_l_up.notify(cx);
+                    host.with_mut(cx, |ed, cx| ed.on_mouse_up(event, &host, window, cx));
+                    host.notify(cx);
                 },
             )
             .on_mouse_up(
                 MouseButton::Right,
                 move |event: &MouseUpEvent, window, cx| {
-                    let h = host_r_up.clone();
-                    host_r_up.with_mut(cx, |ed, cx| ed.on_mouse_up(event, &h, window, cx));
-                    host_r_up.notify(cx);
+                    host.with_mut(cx, |ed, cx| ed.on_mouse_up(event, &host, window, cx));
+                    host.notify(cx);
                 },
             )
             .on_scroll_wheel(move |event: &ScrollWheelEvent, window, cx| {
-                let moved = host_wheel
+                let moved = host
                     .with_mut(cx, |ed, cx| ed.on_scroll_wheel(event, window, cx))
                     .unwrap_or(false);
                 if moved {
-                    host_wheel.notify(cx);
+                    host.notify(cx);
                 }
             })
             .cursor_text()
@@ -531,7 +515,7 @@ impl Editor {
                     .pb(self.paddings.bottom)
                     .pl(self.paddings.left)
             })
-            .child(EditorTextWidget::new(host.clone(), self.placeholder.clone()))
+            .child(EditorTextWidget::new(host, self.placeholder.clone()))
             .when(self.multi_line, |this| {
                 this.child(EditorScrollbarWidget::new(host))
             })

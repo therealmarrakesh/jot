@@ -238,17 +238,19 @@ pub(crate) struct MenuBar {
     bar_focus: Option<MenuKind>,
     access: bool,
     bounds: Bounds<Pixels>,
-    _window_bounds: Subscription,
 }
 
 impl MenuBar {
-    pub(crate) fn new(window: &mut Window, cx: &mut Context<Jot>) -> Self {
-        let _window_bounds = cx.observe_window_bounds(window, |this, window, cx| {
-            let bounds = window.bounds();
-            if bounds != this.menu_bar.bounds {
-                this.menu_bar.bounds = bounds;
-                this.menu_cancel(window, cx);
-            }
+    pub(crate) fn new(window: &mut Window, cx: &App) -> Self {
+        let window_id = window.window_id();
+        window.on_bounds_change(move |window, cx| {
+            cx.with_jot(window_id, |this, cx| {
+                let bounds = window.bounds();
+                if bounds != this.menu_bar.bounds {
+                    this.menu_bar.bounds = bounds;
+                    this.menu_cancel(window, cx);
+                }
+            });
         });
         Self {
             focus: cx.focus_handle(),
@@ -260,7 +262,6 @@ impl MenuBar {
             bar_focus: None,
             access: false,
             bounds: window.bounds(),
-            _window_bounds,
         }
     }
 
@@ -356,14 +357,14 @@ impl MenuBar {
 }
 
 impl Jot {
-    fn menu_exit_access(&mut self, cx: &mut Context<Self>) {
+    fn menu_exit_access(&mut self, cx: &mut App) {
         if self.menu_bar.access {
             self.menu_bar.access = false;
-            cx.notify();
+            self.notify(cx);
         }
     }
 
-    pub(crate) fn menu_cancel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn menu_cancel(&mut self, window: &mut Window, cx: &mut App) {
         if self.menu_bar.live_open().is_some() {
             self.menu_close(window, cx);
         } else if self.menu_bar.bar_focus.is_some() {
@@ -373,7 +374,7 @@ impl Jot {
         self.menu_exit_access(cx);
     }
 
-    pub(crate) fn menu_pointer_down(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn menu_pointer_down(&mut self, cx: &mut App) {
         self.menu_bar.bar_focus = None;
         self.menu_exit_access(cx);
     }
@@ -382,7 +383,7 @@ impl Jot {
         &mut self,
         keystroke: &Keystroke,
         window: &mut Window,
-        cx: &mut Context<Self>,
+        cx: &mut App,
     ) -> bool {
         let modifiers = keystroke.modifiers;
         if matches!(keystroke.key.as_str(), "alt" | "f10") && !modifiers.modified() {
@@ -419,7 +420,7 @@ impl Jot {
         }
     }
 
-    fn menu_toggle_access(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn menu_toggle_access(&mut self, window: &mut Window, cx: &mut App) {
         if self.menu_bar.access {
             self.menu_exit_access(cx);
             if self.menu_bar.live_open().is_none() {
@@ -438,10 +439,10 @@ impl Jot {
             }
         }
         self.menu_bar.access = true;
-        cx.notify();
+        self.notify(cx);
     }
 
-    fn menu_access_back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn menu_access_back(&mut self, window: &mut Window, cx: &mut App) {
         match self.menu_bar.live_open_mut() {
             Some(open) => match open.live_submenu().map(|submenu| submenu.ix) {
                 Some(ix) => {
@@ -457,7 +458,7 @@ impl Jot {
         }
     }
 
-    fn menu_invoke_access(&mut self, key: char, window: &mut Window, cx: &mut Context<Self>) -> bool {
+    fn menu_invoke_access(&mut self, key: char, window: &mut Window, cx: &mut App) -> bool {
         let Some(open) = self.menu_bar.live_open_mut() else {
             let Some(kind) = MenuKind::ALL
                 .into_iter()
@@ -495,7 +496,7 @@ impl Jot {
         true
     }
 
-    fn menu_open_by_keyboard(&mut self, kind: MenuKind, window: &mut Window, cx: &mut Context<Self>) {
+    fn menu_open_by_keyboard(&mut self, kind: MenuKind, window: &mut Window, cx: &mut App) {
         self.menu_open(kind, window, cx);
         if let Some(open) = self.menu_bar.open.as_mut() {
             open.panel.step(1);
@@ -503,7 +504,7 @@ impl Jot {
         }
     }
 
-    fn menu_close_to_bar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn menu_close_to_bar(&mut self, window: &mut Window, cx: &mut App) {
         let Some(open) = self.menu_bar.live_open_mut() else {
             return;
         };
@@ -515,23 +516,23 @@ impl Jot {
         self.menu_bar.bar_focus = Some(kind);
         self.menu_bar.focus.focus(window, cx);
         self.sync_selection_focus();
-        cx.notify();
+        self.notify(cx);
     }
 
-    fn menu_leave_bar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn menu_leave_bar(&mut self, window: &mut Window, cx: &mut App) {
         self.menu_bar.bar_focus = None;
         self.focus_active_editor(window, cx);
-        cx.notify();
+        self.notify(cx);
     }
 
-    fn menu_move_bar_focus(&mut self, delta: isize, cx: &mut Context<Self>) {
+    fn menu_move_bar_focus(&mut self, delta: isize, cx: &mut App) {
         if let Some(kind) = self.menu_bar.bar_focus {
             self.menu_bar.bar_focus = Some(kind.cycle(delta));
-            cx.notify();
+            self.notify(cx);
         }
     }
 
-    fn menu_open(&mut self, kind: MenuKind, window: &mut Window, cx: &mut Context<Self>) {
+    fn menu_open(&mut self, kind: MenuKind, window: &mut Window, cx: &mut App) {
         let editor = self.active_editor();
         let entries = kind.entries(editor, cx);
         let focus = editor.focus_handle().clone();
@@ -543,7 +544,7 @@ impl Jot {
         &mut self,
         anchor: Point<Pixels>,
         window: &mut Window,
-        cx: &mut Context<Self>,
+        cx: &mut App,
     ) {
         let editor = self.active_editor();
         let (commands, entries) = context_menu(editor);
@@ -569,7 +570,7 @@ impl Jot {
         target: Bounds<Pixels>,
         return_focus: FocusHandle,
         window: &mut Window,
-        cx: &mut Context<Self>,
+        cx: &mut App,
     ) {
         let focus = self.active_editor().focus_handle().clone();
         let panel = Panel::new(entries, FLYOUT_MIN_WIDTH, true, &focus, window);
@@ -589,17 +590,17 @@ impl Jot {
         );
     }
 
-    fn menu_show(&mut self, open: OpenMenu, window: &mut Window, cx: &mut Context<Self>) {
+    fn menu_show(&mut self, open: OpenMenu, window: &mut Window, cx: &mut App) {
         self.menu_bar.bar_focus = None;
         let motion = Motion::new(self.menu_bar.next_serial(), !open.commands.is_empty());
         self.menu_bar.open = Some(OpenMenu { motion, ..open });
         self.menu_bar.submenu_timer.cancel();
         self.menu_bar.focus.focus(window, cx);
         self.sync_selection_focus();
-        cx.notify();
+        self.notify(cx);
     }
 
-    fn menu_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn menu_close(&mut self, window: &mut Window, cx: &mut App) {
         self.menu_bar.access = false;
         let return_focus = self.menu_bar.live_open_mut().and_then(|open| {
             open.motion.closing = true;
@@ -609,10 +610,10 @@ impl Jot {
         let target = return_focus.unwrap_or_else(|| self.active_editor().focus_handle().clone());
         target.focus(window, cx);
         self.sync_selection_focus();
-        cx.notify();
+        self.notify(cx);
     }
 
-    fn menu_run_command(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+    fn menu_run_command(&mut self, ix: usize, window: &mut Window, cx: &mut App) {
         let Some(command) = self
             .menu_bar
             .live_open()
@@ -625,7 +626,7 @@ impl Jot {
         self.menu_dispatch(command.command, window, cx);
     }
 
-    fn menu_dispatch(&mut self, command: Command, window: &mut Window, cx: &mut Context<Self>) {
+    fn menu_dispatch(&mut self, command: Command, window: &mut Window, cx: &mut App) {
         self.menu_close(window, cx);
         let target = self.active_editor().focus_handle().clone();
         window.defer(cx, move |window, cx| {
@@ -637,7 +638,7 @@ impl Jot {
         &mut self,
         path: (usize, Option<usize>),
         window: &mut Window,
-        cx: &mut Context<Self>,
+        cx: &mut App,
     ) {
         let Some(open) = self.menu_bar.live_open() else {
             return;
@@ -665,7 +666,7 @@ impl Jot {
         ix: usize,
         highlight_first: bool,
         window: &mut Window,
-        cx: &mut Context<Self>,
+        cx: &mut App,
     ) {
         let action_context = self.active_editor().focus_handle().clone();
         let serial = self.menu_bar.next_serial();
@@ -688,14 +689,14 @@ impl Jot {
             submenu.panel.focused = None;
             submenu.panel.step(1);
         }
-        cx.notify();
+        self.notify(cx);
     }
 
-    fn menu_close_submenu(&mut self, cx: &mut Context<Self>) {
+    fn menu_close_submenu(&mut self, cx: &mut App) {
         self.menu_bar.submenu_timer.cancel();
         if let Some(submenu) = self.menu_bar.open.as_mut().and_then(OpenMenu::live_submenu_mut) {
             submenu.motion.closing = true;
-            cx.notify();
+            self.notify(cx);
         }
     }
 
@@ -703,7 +704,7 @@ impl Jot {
         &mut self,
         change: SubmenuChange,
         window: &mut Window,
-        cx: &mut Context<Self>,
+        cx: &mut App,
     ) {
         let target = match change {
             SubmenuChange::Keep => {
@@ -714,9 +715,9 @@ impl Jot {
             SubmenuChange::Close => None,
         };
         let delay = menu_show_delay();
-        let this = cx.weak_entity();
-        self.menu_bar.submenu_timer = cx.after_in(window.window_id(), delay, move |window, cx| {
-            let _ = this.update(cx, |this, cx| match target {
+        let window_id = window.window_id();
+        self.menu_bar.submenu_timer = cx.after_in(window_id, delay, move |window, cx| {
+            cx.with_jot(window_id, |this, cx| match target {
                 Some(ix) => this.menu_open_submenu(ix, false, window, cx),
                 None => this.menu_close_submenu(cx),
             });
@@ -727,7 +728,7 @@ impl Jot {
         &mut self,
         path: (usize, Option<usize>),
         window: &mut Window,
-        cx: &mut Context<Self>,
+        cx: &mut App,
     ) {
         let Some(open) = self.menu_bar.live_open() else {
             return;
@@ -745,10 +746,10 @@ impl Jot {
             (_, Some(_)) => SubmenuChange::Keep,
         };
         self.menu_schedule_submenu(change, window, cx);
-        cx.notify();
+        self.notify(cx);
     }
 
-    fn menu_switch(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
+    fn menu_switch(&mut self, delta: isize, window: &mut Window, cx: &mut App) {
         let Some(kind) = self.menu_bar.open_kind() else {
             return;
         };
@@ -759,7 +760,7 @@ impl Jot {
         &mut self,
         command: Command,
         window: &mut Window,
-        cx: &mut Context<Self>,
+        cx: &mut App,
     ) -> bool {
         match command {
             Command::SelectUp => self.menu_step_active(-1, window, cx),
@@ -773,7 +774,7 @@ impl Jot {
         true
     }
 
-    fn menu_step_active(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
+    fn menu_step_active(&mut self, delta: isize, window: &mut Window, cx: &mut App) {
         let Some(open) = self.menu_bar.live_open_mut() else {
             if delta > 0
                 && let Some(kind) = self.menu_bar.bar_focused(window)
@@ -792,10 +793,10 @@ impl Jot {
         } else {
             open.step_linear(delta);
         }
-        cx.notify();
+        self.notify(cx);
     }
 
-    fn menu_on_confirm(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn menu_on_confirm(&mut self, window: &mut Window, cx: &mut App) {
         let Some(open) = self.menu_bar.live_open() else {
             if let Some(kind) = self.menu_bar.bar_focused(window) {
                 self.menu_open_by_keyboard(kind, window, cx);
@@ -814,7 +815,7 @@ impl Jot {
         }
     }
 
-    fn menu_on_cancel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn menu_on_cancel(&mut self, window: &mut Window, cx: &mut App) {
         match self.menu_bar.live_open() {
             Some(open) if open.in_submenu() => self.menu_close_submenu(cx),
             Some(open) if open.kind.is_some() => self.menu_close_to_bar(window, cx),
@@ -823,7 +824,7 @@ impl Jot {
         }
     }
 
-    fn menu_on_left(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn menu_on_left(&mut self, window: &mut Window, cx: &mut App) {
         let Some(open) = self.menu_bar.live_open_mut() else {
             self.menu_move_bar_focus(-1, cx);
             return;
@@ -831,7 +832,7 @@ impl Jot {
         open.focus_visible = true;
         if !open.commands.is_empty() {
             open.step_command(-1);
-            cx.notify();
+            self.notify(cx);
         } else if open.in_submenu() {
             self.menu_close_submenu(cx);
         } else {
@@ -839,7 +840,7 @@ impl Jot {
         }
     }
 
-    fn menu_on_right(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn menu_on_right(&mut self, window: &mut Window, cx: &mut App) {
         let Some(open) = self.menu_bar.live_open_mut() else {
             self.menu_move_bar_focus(1, cx);
             return;
@@ -847,7 +848,7 @@ impl Jot {
         open.focus_visible = true;
         if !open.commands.is_empty() {
             open.step_command(1);
-            cx.notify();
+            self.notify(cx);
             return;
         }
         let submenu_row = open.panel.focused.filter(|ix| {
