@@ -1,7 +1,7 @@
 use super::*;
 use field::{BODY_SIZE, CONTROL_HEIGHT, CONTROL_RADIUS, OVERLAY_RADIUS, text_field};
-use crate::base::input::EditorState;
-use crate::base::{MotionStatus, transition_from};
+use crate::editor::EditorState;
+use crate::ui::{MotionStatus, transition_from};
 use menu::Entry;
 
 const QUERY_CONTEXT: &str = "JotFindQuery";

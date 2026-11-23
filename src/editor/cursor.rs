@@ -115,7 +115,7 @@ impl RangeBounds<usize> for CursorSelection {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::base::input::Position;
+    use crate::editor::Position;
     use crate::ui::px;
 
     #[test]

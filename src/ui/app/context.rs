@@ -290,12 +290,14 @@ impl<T> BorrowMut<App> for Context<'_, T> {
     }
 }
 
+type ObserverCallback<'a, T, W> = &'a mut dyn FnMut(&mut T, Entity<W>, &mut Context<T>);
+
 #[inline(never)]
 fn invoke_observer<T: 'static, W: 'static>(
     observer: &WeakEntity<T>,
     observed: Entity<W>,
     cx: &mut App,
-    on_notify: &mut dyn FnMut(&mut T, Entity<W>, &mut Context<T>),
+    on_notify: ObserverCallback<'_, T, W>,
 ) -> bool {
     if let Some(observer) = observer.upgrade() {
         observer.update(cx, |observer, cx| on_notify(observer, observed, cx));

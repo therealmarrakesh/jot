@@ -1,9 +1,9 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-mod base;
 mod brush;
 mod dialog;
 mod document;
+mod editor;
 mod field;
 mod files;
 mod find;
@@ -12,6 +12,7 @@ mod keytips;
 mod measure;
 mod menu;
 mod overlay;
+mod scrollbar;
 mod tab_drag;
 mod tabs;
 mod theme;
@@ -21,9 +22,7 @@ mod win32;
 
 use brush::{BrushTransitionExt as _, Brushes, PressedExt as _};
 use crate::ui::*;
-use crate::base::Easing;
-use crate::base::actions::Cancel;
-use crate::base::input::{self, EditorState, Rope, RopeExt as _};
+use crate::editor::{EditorState, Rope, RopeExt as _};
 use menu::MenuBar;
 use std::cell::Cell;
 use std::ops::Range;
@@ -1104,7 +1103,8 @@ fn main() {
         crate::ui::WindowsPlatform::new().expect("Failed to initialize Windows platform"),
     );
     Application::with_platform(platform).run(move |cx| {
-        base::init(cx);
+        ui::reduce_motion::init(cx);
+        editor::init(cx);
 
         let (handoff_tx, mut handoff_rx) = crate::ui::futures::channel::mpsc::unbounded::<Vec<PathBuf>>();
         instance::start_listener(move |incoming| {
@@ -1183,7 +1183,7 @@ fn main() {
 #[cfg(test)]
 mod large_file_smoke {
     use super::*;
-    use crate::base::input::{TextWrapper, WrapDisplayPoint};
+    use crate::editor::{TextWrapper, WrapDisplayPoint};
     use std::io::Write as _;
     use std::time::Instant;
 
@@ -1247,7 +1247,7 @@ mod large_file_smoke {
         let mid = loaded.text.len() / 2;
         let mut edited = loaded.text.clone();
         edited.insert(mid, "X");
-        let insert_rope = crate::base::input::Rope::from("X");
+        let insert_rope = crate::editor::Rope::from("X");
         let t0 = Instant::now();
         wrapper_wrap.update_for_bench(&edited, &(mid..mid), &insert_rope, 110, &mut |_, _, _| {});
         let edit_ms = t0.elapsed().as_secs_f64() * 1000.0;

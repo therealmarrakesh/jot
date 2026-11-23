@@ -35,10 +35,12 @@ pub(crate) struct DispatchNode {
 type KeyListener = Rc<dyn Fn(&dyn Any, DispatchPhase, &mut Window, &mut App)>;
 type ModifiersChangedListener = Rc<dyn Fn(&ModifiersChangedEvent, &mut Window, &mut App)>;
 
+type ActionListener = Rc<dyn Fn(&dyn Any, DispatchPhase, &mut Window, &mut App)>;
+
 #[derive(Clone)]
 pub(crate) struct DispatchActionListener {
     pub(crate) action_type: TypeId,
-    pub(crate) listener: Rc<dyn Fn(&dyn Any, DispatchPhase, &mut Window, &mut App)>,
+    pub(crate) listener: ActionListener,
 }
 
 impl DispatchTree {
@@ -130,11 +132,7 @@ impl DispatchTree {
             .push(listener);
     }
 
-    pub(crate) fn on_action(
-        &mut self,
-        action_type: TypeId,
-        listener: Rc<dyn Fn(&dyn Any, DispatchPhase, &mut Window, &mut App)>,
-    ) {
+    pub(crate) fn on_action(&mut self, action_type: TypeId, listener: ActionListener) {
         self.active_node()
             .action_listeners
             .push(DispatchActionListener {

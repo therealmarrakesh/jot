@@ -1,5 +1,5 @@
 use super::*;
-use crate::base::{MotionStatus, transition_from};
+use crate::ui::{MotionStatus, transition_from};
 
 const TAB_WIDTH: f32 = 240.;
 const TAB_MIN_WIDTH: f32 = 80.;

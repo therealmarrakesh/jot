@@ -1,9 +1,5 @@
 //! Trimmed Windows-only GPUI core for Jot.
 #![allow(missing_docs)]
-#![allow(clippy::type_complexity)]
-#![allow(clippy::collapsible_else_if)]
-#![allow(clippy::too_many_arguments)]
-#![allow(clippy::large_enum_variant)]
 
 mod action;
 pub(crate) mod anyhow;
@@ -13,6 +9,7 @@ mod arena;
 mod bounds_tree;
 pub(crate) mod collections;
 mod color;
+mod common_actions;
 mod element;
 mod elements;
 mod executor;
@@ -28,7 +25,9 @@ mod interactive;
 mod key_dispatch;
 mod keymap;
 mod layout;
+pub(crate) mod motion;
 mod platform;
+pub(crate) mod reduce_motion;
 mod refineable;
 mod scene;
 mod style;
@@ -49,12 +48,14 @@ pub(crate) use crate::ui::anyhow::Result;
 pub(crate) use app::*;
 pub(crate) use arena::*;
 pub(crate) use color::*;
+pub(crate) use common_actions::*;
 pub(crate) use element::*;
 pub(crate) use elements::*;
 pub(crate) use executor::*;
 pub(crate) use geometry::*;
 pub(crate) use global::*;
 pub(crate) use gpui_util::{debug_panic, maybe};
+pub(crate) use motion::{Easing, Interpolate, MotionStatus, transition, transition_from};
 pub(crate) use shared_string::*;
 pub(crate) use input::*;
 pub(crate) use interactive::*;

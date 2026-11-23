@@ -168,8 +168,7 @@ pub(crate) struct App {
     pub(crate) window_handles: FxHashMap<WindowId, AnyWindowHandle>,
     pub(crate) focus_handles: Arc<FocusMap>,
     pub(crate) keymap: Rc<RefCell<Keymap>>,
-    pub(crate) global_action_listeners:
-        TypeIdHashMap<Vec<Rc<dyn Fn(&dyn Any, DispatchPhase, &mut Self)>>>,
+    pub(crate) global_action_listeners: TypeIdHashMap<Vec<GlobalActionListener>>,
     pending_effects: VecDeque<Effect>,
 
     pub(crate) observers: SubscriberSet<EntityId, Handler>,
@@ -194,6 +193,9 @@ pub(crate) struct App {
     pub(crate) reduce_motion: bool,
     pending_updates: usize,
 }
+
+type GlobalActionListener = Rc<dyn Fn(&dyn Any, DispatchPhase, &mut App)>;
+type WindowUpdateFn<'a> = &'a mut dyn FnMut(Option<(AnyView, &mut Window, &mut App)>);
 
 impl App {
     #[allow(clippy::new_ret_no_self)]
@@ -892,11 +894,7 @@ impl App {
     }
 
     #[inline(never)]
-    fn update_window_erased(
-        &mut self,
-        window_id: WindowId,
-        update: &mut dyn FnMut(Option<(AnyView, &mut Window, &mut App)>),
-    ) {
+    fn update_window_erased(&mut self, window_id: WindowId, update: WindowUpdateFn<'_>) {
         self.update(|cx| {
             let Some(mut window) = cx.windows.get_mut(window_id).and_then(Option::take) else {
                 update(None);

@@ -23,11 +23,13 @@ use crate::ui::{
 
 type MeasureFn =
     dyn FnMut(Size<Option<Pixels>>, Size<AvailableSpace>, &mut Window, &mut App) -> Size<Pixels>;
+#[cfg(test)]
+type PureMeasureFn = Box<dyn FnMut(Size<Option<Pixels>>, Size<AvailableSpace>) -> Size<Pixels>>;
 
 enum MeasureSlot {
     App(Box<MeasureFn>),
     #[cfg(test)]
-    Pure(Box<dyn FnMut(Size<Option<Pixels>>, Size<AvailableSpace>) -> Size<Pixels>>),
+    Pure(PureMeasureFn),
 }
 
 enum MeasureEnv<'a> {
@@ -661,6 +663,7 @@ impl LayoutEngine {
         bounds
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn compute_node(
         &mut self,
         id: LayoutId,
@@ -713,6 +716,7 @@ impl LayoutEngine {
         result
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn compute_node_uncached(
         &mut self,
         id: LayoutId,
@@ -770,6 +774,7 @@ impl LayoutEngine {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn compute_leaf(
         &mut self,
         id: LayoutId,
@@ -852,6 +857,7 @@ impl LayoutEngine {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn compute_block(
         &mut self,
         id: LayoutId,
@@ -1031,6 +1037,7 @@ impl LayoutEngine {
         size(container_w, container_h)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn compute_flex(
         &mut self,
         id: LayoutId,
@@ -1534,6 +1541,7 @@ impl LayoutEngine {
         container_size
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn layout_absolute_children(
         &mut self,
         children: &[LayoutId],
@@ -2146,9 +2154,9 @@ mod tests {
             let text_node = |engine: &mut LayoutEngine, text: &'static str| {
                 let wts = wts.clone();
                 let font = font.clone();
-                let cache: std::rc::Rc<
-                    std::cell::RefCell<Option<(Option<Pixels>, Size<Pixels>)>>,
-                > = Default::default();
+                type TextMeasureCache =
+                    std::rc::Rc<std::cell::RefCell<Option<(Option<Pixels>, Size<Pixels>)>>>;
+                let cache: TextMeasureCache = Default::default();
                 engine.req_measured(s(), scale, move |known, avail| {
                     let wrap_width = known.width.or(match avail.width {
                         AvailableSpace::Definite(x) => Some(x),

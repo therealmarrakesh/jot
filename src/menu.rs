@@ -1,6 +1,7 @@
 use super::*;
-use crate::base::actions::{Cancel, Confirm, SelectDown, SelectLeft, SelectRight, SelectUp};
-use crate::base::{MotionStatus, transition_from};
+use crate::ui::{
+    Cancel, Confirm, MotionStatus, SelectDown, SelectLeft, SelectRight, SelectUp, transition_from,
+};
 use windows::Win32::System::DataExchange::IsClipboardFormatAvailable;
 use windows::Win32::System::Ole::CF_UNICODETEXT;
 use windows::Win32::UI::WindowsAndMessaging::SPI_GETMENUSHOWDELAY;
@@ -104,18 +105,18 @@ fn context_menu(editor: &EditorState) -> (Vec<CommandButton>, Vec<Entry>) {
         glyph,
     };
     let commands = vec![
-        button("Cut", "\u{E8C6}", selection, || Box::new(input::Cut)),
-        button("Copy", "\u{E8C8}", selection, || Box::new(input::Copy)),
+        button("Cut", "\u{E8C6}", selection, || Box::new(editor::Cut)),
+        button("Copy", "\u{E8C8}", selection, || Box::new(editor::Copy)),
         button("Paste", "\u{E77F}", clipboard_has_text(), || {
-            Box::new(input::Paste)
+            Box::new(editor::Paste)
         }),
         button("Select all", "\u{E8B3}", true, || {
-            Box::new(input::SelectAll)
+            Box::new(editor::SelectAll)
         }),
-        button("Delete", "\u{E74D}", selection, || Box::new(input::Delete)),
+        button("Delete", "\u{E74D}", selection, || Box::new(editor::Delete)),
     ];
     let entries = vec![Entry::Command {
-        command: Command::new("Undo", editor.can_undo(), || Box::new(input::Undo)),
+        command: Command::new("Undo", editor.can_undo(), || Box::new(editor::Undo)),
         icon: Some("\u{E7A7}"),
     }];
     (commands, entries)
@@ -256,12 +257,12 @@ impl MenuKind {
                 let clipboard_text = clipboard_has_text();
                 let text = editor.text().len() > 0;
                 vec![
-                    Entry::command_if("&Undo", editor.can_undo(), || Box::new(input::Undo)),
+                    Entry::command_if("&Undo", editor.can_undo(), || Box::new(editor::Undo)),
                     Entry::Separator,
-                    Entry::command_if("Cu&t", selection, || Box::new(input::Cut)),
-                    Entry::command_if("&Copy", selection, || Box::new(input::Copy)),
-                    Entry::command_if("&Paste", clipboard_text, || Box::new(input::Paste)),
-                    Entry::command_if("De&lete", selection, || Box::new(input::Delete)),
+                    Entry::command_if("Cu&t", selection, || Box::new(editor::Cut)),
+                    Entry::command_if("&Copy", selection, || Box::new(editor::Copy)),
+                    Entry::command_if("&Paste", clipboard_text, || Box::new(editor::Paste)),
+                    Entry::command_if("De&lete", selection, || Box::new(editor::Delete)),
                     Entry::Separator,
                     Entry::command_if("&Find", text, || Box::new(Find)),
                     Entry::command_if("Find &next", text, || Box::new(FindNext)),
@@ -269,7 +270,7 @@ impl MenuKind {
                     Entry::command_if("&Replace", text, || Box::new(Replace)),
                     Entry::command("&Go to", || Box::new(GoTo)),
                     Entry::Separator,
-                    Entry::command("Select &all", || Box::new(input::SelectAll)),
+                    Entry::command("Select &all", || Box::new(editor::SelectAll)),
                     Entry::command("Time/&Date", || Box::new(TimeDate)),
                 ]
             }

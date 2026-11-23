@@ -1,7 +1,7 @@
 use crate::ui::{Context, Pixels, Point, Window};
 
-use crate::base::input::rope_ext::Bias;
-use crate::base::input::{
+use super::rope_ext::Bias;
+use super::{
     EditorState, MoveDown, MoveEnd, MoveHome, MoveLeft, MovePageDown, MovePageUp, MoveRight,
     MoveToEnd, MoveToNextWord, MoveToPreviousWord, MoveToStart, MoveUp, RopeExt as _,
 };

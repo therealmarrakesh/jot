@@ -1,4 +1,4 @@
-use crate::base::input::change::Change;
+use super::change::Change;
 
 use super::cursor::CursorSelection;
 

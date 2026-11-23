@@ -9,7 +9,7 @@ use crate::ui::{
 use ropey::Rope;
 use unicode_segmentation::UnicodeSegmentation as _;
 
-use crate::base::input::{Point as TreeSitterPoint, RopeExt, layout::LastLayout};
+use super::{Point as TreeSitterPoint, RopeExt, layout::LastLayout};
 
 /// A single visual sub-row within a wrapped buffer line.
 pub(crate) enum InputLine {
@@ -984,10 +984,10 @@ mod tests {
                     measured_wrap_boundaries(line, width, false, measure, out);
                 },
             );
-            let expected = if value.ends_with('s') {
-                vec![0..7, 7..value.len()]
+            let expected: &[Range<usize>] = if value.ends_with('s') {
+                &[0..7, 7..value.len()]
             } else {
-                vec![0..7]
+                std::slice::from_ref(&(0..7))
             };
             assert_eq!(wrapper.line(0).unwrap().wrapped_lines.as_slice(), expected);
             let cursor = wrapper.offset_to_display_point(value.len());
@@ -1187,7 +1187,7 @@ mod tests {
         wrapper.update_inner(&text, &range, &Rope::from(""), 0, &mut fake_wrap_line);
         assert_eq!(text.to_string(), "");
         assert_eq!(wrapper.lines_count(), 1);
-        assert_eq!(wrapper.line(0).unwrap().wrapped_lines.as_slice(), [0..0]);
+        assert_eq!(wrapper.line(0).unwrap().wrapped_lines.as_slice(), std::slice::from_ref(&(0..0)));
 
         // Test full update
         let range = 0..text.len();
@@ -1233,7 +1233,7 @@ mod tests {
         wrapper.update_inner(&text, &range, &Rope::from(""), 0, &mut |_, _, _| {});
         assert_eq!(wrapper.lines_count(), 1);
         assert_eq!(wrapper.len(), 1);
-        assert_eq!(wrapper.line(0).unwrap().wrapped_lines.as_slice(), [0..0]);
+        assert_eq!(wrapper.line(0).unwrap().wrapped_lines.as_slice(), std::slice::from_ref(&(0..0)));
     }
 
     #[test]

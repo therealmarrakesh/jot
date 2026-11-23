@@ -8,12 +8,10 @@ use crate::ui::{
 use ropey::Rope;
 use std::{borrow::Cow, ops::Range, rc::Rc};
 
-use crate::base::{
-    Scrollbar,
-    input::{
-        RopeExt as _,
-        text_wrapper::{BufferLineLayout, InputLine},
-    },
+use crate::scrollbar::Scrollbar;
+use super::{
+    RopeExt as _,
+    text_wrapper::{BufferLineLayout, InputLine},
 };
 use crate::theme::palette;
 
@@ -112,10 +110,14 @@ impl Element for EditorScrollbar {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
-        let mut style = Style::default();
-        style.position = Position::Absolute;
-        style.size.width = relative(1.).into();
-        style.size.height = relative(1.).into();
+        let style = Style {
+            position: Position::Absolute,
+            size: Size {
+                width: relative(1.).into(),
+                height: relative(1.).into(),
+            },
+            ..Style::default()
+        };
         (window.request_layout(style, [], cx), ())
     }
 
@@ -332,7 +334,7 @@ impl TextElement {
             ),
             size(CARET_WIDTH, cursor_height),
         );
-        bounds.origin = bounds.origin + scroll_offset;
+        bounds.origin += scroll_offset;
 
         (cursor_bounds, scroll_offset)
     }

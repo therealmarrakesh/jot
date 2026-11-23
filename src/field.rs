@@ -1,5 +1,5 @@
 use super::*;
-use crate::base::input::EditorState;
+use crate::editor::EditorState;
 
 pub(crate) const CONTROL_HEIGHT: f32 = 32.;
 pub(crate) const CONTROL_RADIUS: f32 = 4.;

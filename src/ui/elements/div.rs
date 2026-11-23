@@ -28,6 +28,8 @@ pub(crate) struct GroupStyle {
     pub(crate) style: Box<StyleRefinement>,
 }
 
+type HoverListener = Box<dyn Fn(&bool, &mut Window, &mut App)>;
+
 impl Interactivity {
     /// Create a default `Interactivity`.
     pub(crate) fn new() -> Interactivity {
@@ -569,7 +571,7 @@ pub(crate) struct Interactivity {
     pub(crate) drop_listeners: Vec<(TypeId, DropListener)>,
     pub(crate) click_listeners: Vec<ClickListener>,
     pub(crate) aux_click_listeners: Vec<ClickListener>,
-    pub(crate) hover_listener: Option<Box<dyn Fn(&bool, &mut Window, &mut App)>>,
+    pub(crate) hover_listener: Option<HoverListener>,
     pub(crate) window_control: Option<WindowControlArea>,
     pub(crate) hitbox_behavior: HitboxBehavior,
 }

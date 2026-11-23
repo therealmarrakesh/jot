@@ -1,4 +1,4 @@
-use crate::base::input::{Rope, RopeBuilder};
+use crate::editor::{Rope, RopeBuilder};
 use std::ffi::OsString;
 use std::fs;
 use std::io::{self, BufWriter, Read, Seek, SeekFrom, Write};

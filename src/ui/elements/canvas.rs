@@ -18,11 +18,14 @@ pub(crate) fn canvas<T>(
     }
 }
 
+type CanvasPrepaintFn<T> = Box<dyn FnOnce(Bounds<Pixels>, &mut Window, &mut App) -> T>;
+type CanvasPaintFn<T> = Box<dyn FnOnce(Bounds<Pixels>, T, &mut Window, &mut App)>;
+
 /// A canvas element, meant for accessing the low level paint API without defining a whole
 /// custom element
 pub(crate) struct Canvas<T> {
-    prepaint: Option<Box<dyn FnOnce(Bounds<Pixels>, &mut Window, &mut App) -> T>>,
-    paint: Option<Box<dyn FnOnce(Bounds<Pixels>, T, &mut Window, &mut App)>>,
+    prepaint: Option<CanvasPrepaintFn<T>>,
+    paint: Option<CanvasPaintFn<T>>,
     style: StyleRefinement,
 }
 

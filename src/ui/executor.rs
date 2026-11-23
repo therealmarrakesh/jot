@@ -60,8 +60,10 @@ impl MainTaskQueue {
     }
 }
 
+type PollFn = Box<dyn FnMut(&mut Context<'_>) -> bool + Send>;
+
 struct TaskCore {
-    poll_fn: Option<Box<dyn FnMut(&mut Context<'_>) -> bool + Send>>,
+    poll_fn: Option<PollFn>,
     scheduled: bool,
     running: bool,
     closed: bool,

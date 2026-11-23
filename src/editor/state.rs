@@ -28,9 +28,9 @@ use super::{
     text_wrapper::TextWrapper,
     undo_manager::{EditIntent, UndoManager},
 };
-use crate::base::AutoScroll;
-use crate::base::actions::{SelectDown, SelectLeft, SelectRight, SelectUp};
-use crate::base::input::{Position, RopeExt as _};
+use super::auto_scroll::AutoScroll;
+use crate::ui::{SelectDown, SelectLeft, SelectRight, SelectUp};
+use super::{Position, RopeExt as _};
 
 const DEFAULT_WHEEL_SCROLL: u32 = 3;
 const WHEEL_STEP_FRACTION: f32 = 0.15;
@@ -138,6 +138,9 @@ pub(crate) fn init(cx: &mut App) {
 }
 
 /// Unified single-caret text editor state for both single-line inputs and multi-line documents.
+type ValidateFn = Box<dyn Fn(&str, &mut App) -> bool + 'static>;
+type ContextMenuHandler = Rc<dyn Fn(Point<Pixels>, &mut Window, &mut App)>;
+
 pub(crate) struct EditorState {
     multi_line: bool,
     pub(super) focus_handle: FocusHandle,
@@ -162,7 +165,7 @@ pub(crate) struct EditorState {
     pub(super) last_selected_range: Option<CursorSelection>,
     pub(super) selecting: bool,
     pub(crate) cursor_line_end_affinity: bool,
-    pub(super) validate: Option<Box<dyn Fn(&str, &mut App) -> bool + 'static>>,
+    pub(super) validate: Option<ValidateFn>,
     pub(crate) scroll_handle: ScrollHandle,
     pub(crate) deferred_scroll_offset: Option<Point<Pixels>>,
     pub(crate) scroll_size: crate::ui::Size<Pixels>,
@@ -171,7 +174,7 @@ pub(crate) struct EditorState {
     pub(super) longest_line_width: Cell<Option<(LongestLineKey, Pixels)>>,
     pub(super) editor_paddings: Edges<Pixels>,
     pub(super) placeholder: SharedString,
-    context_menu_handler: Option<Rc<dyn Fn(Point<Pixels>, &mut Window, &mut App)>>,
+    context_menu_handler: Option<ContextMenuHandler>,
     pending_context_menu: Option<(Point<Pixels>, usize)>,
     _subscriptions: Vec<Subscription>,
     _window_subscriptions: Vec<Subscription>,
@@ -313,10 +316,7 @@ impl EditorState {
         self.undo_manager.is_clean()
     }
 
-    pub(crate) fn on_context_menu(
-        &mut self,
-        handler: Rc<dyn Fn(Point<Pixels>, &mut Window, &mut App)>,
-    ) {
+    pub(crate) fn on_context_menu(&mut self, handler: ContextMenuHandler) {
         self.context_menu_handler = Some(handler);
     }
 
@@ -777,7 +777,7 @@ impl EditorState {
         self.undo_manager.break_transaction_coalescing();
 
         if let Some(ime_marked_range) = &self.ime_marked_range
-            && ime_marked_range.len() == 0
+            && ime_marked_range.is_empty()
         {
             self.ime_marked_range = None;
         }

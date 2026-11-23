@@ -194,7 +194,7 @@ mod tests {
     use super::{Bias, Point};
     use ropey::Rope;
 
-    use crate::base::input::{Position, RopeExt};
+    use crate::editor::{Position, RopeExt};
 
     #[test]
     fn test_slice_line() {

@@ -4,7 +4,7 @@ use crate::ui::{Context, Window};
 use ropey::Rope;
 
 use super::{EditorState, RopeExt as _, rope_ext::Bias};
-use crate::base::text_boundary::word_range_from_chars;
+use super::text_boundary::word_range_from_chars;
 
 impl EditorState {
     /// Select the word at the given offset on double-click.

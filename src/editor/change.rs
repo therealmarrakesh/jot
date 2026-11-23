@@ -1,4 +1,4 @@
-use crate::base::input::Selection;
+use super::Selection;
 
 /// One text replacement, in the coordinates of the document immediately before
 /// the replacement was applied.

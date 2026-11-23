@@ -1,5 +1,5 @@
 use super::*;
-use crate::base::transition;
+use crate::ui::transition;
 use std::collections::HashMap;
 use std::time::Instant;
 use windows::Win32::Foundation::{POINT, RECT};

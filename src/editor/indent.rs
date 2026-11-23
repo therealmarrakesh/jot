@@ -1,4 +1,4 @@
-use crate::base::input::{
+use super::{
     EditorState, Indent, IndentInline, Outdent, OutdentInline, RopeExt, cursor::CursorSelection,
 };
 use crate::ui::{Context, SharedString, Window};
@@ -20,7 +20,7 @@ impl Default for TabSize {
 }
 
 impl TabSize {
-    pub(super) fn to_string(&self) -> SharedString {
+    pub(super) fn to_string(self) -> SharedString {
         if self.hard_tabs {
             "\t".into()
         } else {

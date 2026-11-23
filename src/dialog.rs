@@ -1,9 +1,8 @@
 use super::*;
 use field::{BODY_LINE, BODY_SIZE, text_field};
 use crate::ui::futures::channel::oneshot;
-use crate::base::actions::{Cancel, Confirm};
-use crate::base::input::{EditorState, Position};
-use crate::base::{MotionStatus, transition_from};
+use crate::editor::{EditorState, Position};
+use crate::ui::{Cancel, Confirm, MotionStatus, transition_from};
 
 crate::ui::actions!(jot_dialog, [FocusNext, FocusPrev]);
 

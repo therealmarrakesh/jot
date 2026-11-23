@@ -1,5 +1,5 @@
 use super::*;
-use crate::base::{Interpolate, transition};
+use crate::ui::{Interpolate, transition};
 
 const FADE_DURATION: Duration = Duration::from_millis(83);
 

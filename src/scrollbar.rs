@@ -11,7 +11,7 @@ use crate::ui::{
     Style, Window, fill, point, px, relative, rgba, size,
 };
 
-use crate::base::motion::{Easing, TimedTransition};
+use crate::ui::motion::{Easing, TimedTransition};
 use crate::theme::palette;
 
 const TRACK_WIDTH: Pixels = px(16.);
@@ -299,10 +299,14 @@ impl Element for Scrollbar {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, ()) {
-        let mut style = Style::default();
-        style.position = Position::Absolute;
-        style.size.width = relative(1.).into();
-        style.size.height = relative(1.).into();
+        let style = Style {
+            position: Position::Absolute,
+            size: Size {
+                width: relative(1.).into(),
+                height: relative(1.).into(),
+            },
+            ..Style::default()
+        };
         (window.request_layout(style, None, cx), ())
     }
 
@@ -337,24 +341,25 @@ impl Element for Scrollbar {
         }
 
         let is_hovered = inner.hovered_axis.is_some() || inner.hovered_thumb.is_some();
-        if !is_hovered && inner.dragged_axis.is_none() {
-            if let Some(last_time) = inner.last_scroll_time {
-                let elapsed = now.saturating_duration_since(last_time);
-                if elapsed < IDLE_HOLD && !inner.idle_timer_scheduled {
-                    inner.idle_timer_scheduled = true;
-                    let state = state.clone();
-                    let view_id = window.current_view();
-                    let delay = IDLE_HOLD - elapsed;
-                    window
-                        .spawn(cx, async move |cx| {
-                            cx.background_executor().timer(delay).await;
-                            let mut s = state.get();
-                            s.idle_timer_scheduled = false;
-                            state.set(s);
-                            cx.update(|_, cx| cx.notify(view_id)).ok();
-                        })
-                        .detach();
-                }
+        if !is_hovered
+            && inner.dragged_axis.is_none()
+            && let Some(last_time) = inner.last_scroll_time
+        {
+            let elapsed = now.saturating_duration_since(last_time);
+            if elapsed < IDLE_HOLD && !inner.idle_timer_scheduled {
+                inner.idle_timer_scheduled = true;
+                let state = state.clone();
+                let view_id = window.current_view();
+                let delay = IDLE_HOLD - elapsed;
+                window
+                    .spawn(cx, async move |cx| {
+                        cx.background_executor().timer(delay).await;
+                        let mut s = state.get();
+                        s.idle_timer_scheduled = false;
+                        state.set(s);
+                        cx.update(|_, cx| cx.notify(view_id)).ok();
+                    })
+                    .detach();
             }
         }
 
