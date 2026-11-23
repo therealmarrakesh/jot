@@ -333,7 +333,7 @@ impl Jot {
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Option<impl IntoElement + use<>> {
+    ) -> Option<Div> {
         self.dialogs
             .open
             .retain_mut(|dialog| !dialog.sample(window, cx));
@@ -367,7 +367,7 @@ impl Jot {
         accent: Rgba,
         window: &Window,
         cx: &mut Context<Self>,
-    ) -> Stateful<Div> {
+    ) -> Div {
         let p = palette(cx);
         let s = dialog.scale;
         let style = field::ButtonStyle {
@@ -471,7 +471,7 @@ fn dialog_frame(
     content_width: f32,
     title: SharedString,
     body: Div,
-    buttons: Vec<Stateful<Div>>,
+    buttons: Vec<Div>,
 ) -> Div {
     let u = |v: f32| px(v * s);
     let width = (content_width + 2. * PADDING + 2. * BORDER).clamp(MIN_WIDTH, MAX_WIDTH);

@@ -13,12 +13,10 @@ pub(crate) mod keymap;
 pub(crate) mod platform;
 pub(crate) mod runtime;
 pub(crate) mod style;
-pub(crate) mod styled;
 pub(crate) mod types;
-pub(crate) mod util;
 pub(crate) mod window;
 
-pub(crate) use anim::{AnimStatus, Easing, Lerp, animate, animate_from};
+pub(crate) use anim::{AnimStatus, Easing, animate, animate_from};
 pub(crate) use app::*;
 pub(crate) use color::*;
 pub(crate) use div::*;
@@ -43,9 +41,7 @@ pub(crate) use platform::{
 pub(crate) use runtime::futures;
 pub(crate) use runtime::Task;
 pub(crate) use style::*;
-pub(crate) use styled::*;
 pub(crate) use types::{SharedString, UiError, UiResult};
-pub(crate) use util::FluentBuilder;
 pub(crate) use window::*;
 
 pub(crate) use crate::layout::{AvailableSpace, LayoutId};

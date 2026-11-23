@@ -13,7 +13,7 @@ use std::rc::{Rc, Weak};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::app::{App, AsyncApp, AsyncWindowContext, Context};
-use super::element::{AnyElement, IntoElement, Render};
+use super::element::{Render, UiNode};
 use super::focus::{FocusHandle, Focusable};
 use super::types::{UiError, UiResult};
 use super::window::Window;
@@ -242,7 +242,7 @@ pub(crate) struct AnyView {
     id: EntityId,
     token: Rc<()>,
     type_id: TypeId,
-    render_fn: fn(EntityId, &Rc<()>, &mut Window, &mut App) -> AnyElement,
+    render_fn: fn(EntityId, &Rc<()>, &mut Window, &mut App) -> UiNode,
 }
 
 impl AnyView {
@@ -252,9 +252,9 @@ impl AnyView {
             token: &Rc<()>,
             window: &mut Window,
             cx: &mut App,
-        ) -> AnyElement {
+        ) -> UiNode {
             let entity = Entity::<V>::from_parts(id, token.clone());
-            entity.update(cx, |view, cx| view.render(window, cx).into_any_element())
+            entity.update(cx, |view, cx| view.render(window, cx).into())
         }
         Self {
             id: entity.id,
@@ -273,7 +273,7 @@ impl AnyView {
         (self.type_id == TypeId::of::<V>()).then(|| Entity::from_parts(self.id, self.token.clone()))
     }
 
-    pub(crate) fn render(&self, window: &mut Window, cx: &mut App) -> AnyElement {
+    pub(crate) fn render(&self, window: &mut Window, cx: &mut App) -> UiNode {
         (self.render_fn)(self.id, &self.token, window, cx)
     }
 }

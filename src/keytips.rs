@@ -24,7 +24,7 @@ struct KeyTipView {
 }
 
 impl Render for KeyTipView {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl Into<UiNode> {
         div().size_full().children(self.tips.iter().map(|tip| {
             div()
                 .absolute()

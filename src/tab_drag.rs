@@ -109,7 +109,7 @@ pub(crate) fn forget(tab: EntityId, cx: &mut App) {
     }
 }
 
-pub(crate) fn listeners() -> impl IntoElement {
+pub(crate) fn listeners() -> CanvasNode {
     window_listeners(|window| {
         window.on_mouse_event(|event: &MouseMoveEvent, phase, _, cx| {
             if phase != DispatchPhase::Bubble {

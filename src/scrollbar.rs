@@ -5,10 +5,10 @@ use std::{
 };
 
 use crate::ui::{
-    Anchor, App, Axis, Bounds, ContentMask, CursorStyle, Element, ElementId, EntityId,
-    GlobalElementId, Hitbox, HitboxBehavior, IntoElement, LayoutId, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, Pixels, Point, Position, Rgba, ScrollHandle, ScrollWheelEvent, Size,
-    Style, Window, fill, point, px, relative, rgba, size,
+    Anchor, App, Axis, Bounds, ContentMask, CursorStyle, CustomWidget, ElementId, EntityId, Hitbox,
+    HitboxBehavior, LayoutId, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point,
+    Position, Rgba, ScrollHandle, ScrollWheelEvent, Size, Style, UiNode, Window, fill, point, px,
+    relative, rgba, size,
 };
 
 use crate::ui::anim::{Easing, TimedTransition};
@@ -240,6 +240,7 @@ pub(crate) struct Scrollbar {
     viewport_bounds: Bounds<Pixels>,
     scroll_size: Size<Pixels>,
     horizontal: bool,
+    prepaint: Option<PrepaintState>,
 }
 
 impl Scrollbar {
@@ -254,15 +255,14 @@ impl Scrollbar {
             viewport_bounds,
             scroll_size,
             horizontal,
+            prepaint: None,
         }
     }
 }
 
-impl IntoElement for Scrollbar {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
-        self
+impl From<Scrollbar> for UiNode {
+    fn from(scrollbar: Scrollbar) -> Self {
+        UiNode::widget(scrollbar)
     }
 }
 
@@ -285,20 +285,12 @@ pub(crate) struct PrepaintState {
     axes: Vec<AxisLayout>,
 }
 
-impl Element for Scrollbar {
-    type RequestLayoutState = ();
-    type PrepaintState = PrepaintState;
-
+impl CustomWidget for Scrollbar {
     fn id(&self) -> Option<ElementId> {
         Some("jot-scrollbar".into())
     }
 
-    fn request_layout(
-        &mut self,
-        _: Option<&GlobalElementId>,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> (LayoutId, ()) {
+    fn request_layout(&mut self, window: &mut Window, cx: &mut App) -> LayoutId {
         let style = Style {
             position: Position::Absolute,
             size: Size {
@@ -307,17 +299,10 @@ impl Element for Scrollbar {
             },
             ..Style::default()
         };
-        (window.request_layout(style, None, cx), ())
+        window.request_layout(style, None, cx)
     }
 
-    fn prepaint(
-        &mut self,
-        _: Option<&GlobalElementId>,
-        _: Bounds<Pixels>,
-        _: &mut (),
-        window: &mut Window,
-        cx: &mut App,
-    ) -> PrepaintState {
+    fn prepaint(&mut self, _: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
         let viewport = self.viewport_bounds;
         let state = window
             .use_state(cx, |_, _| ScrollbarState::default())
@@ -484,22 +469,17 @@ impl Element for Scrollbar {
 
         state.set(inner);
 
-        PrepaintState {
+        self.prepaint = Some(PrepaintState {
             viewport_bounds: viewport,
             state,
             axes,
-        }
+        });
     }
 
-    fn paint(
-        &mut self,
-        _: Option<&GlobalElementId>,
-        _: Bounds<Pixels>,
-        _: &mut (),
-        prepaint: &mut PrepaintState,
-        window: &mut Window,
-        _: &mut App,
-    ) {
+    fn paint(&mut self, _: Bounds<Pixels>, window: &mut Window, _: &mut App) {
+        let Some(prepaint) = self.prepaint.as_mut() else {
+            return;
+        };
         let view_id = window.current_view();
         let viewport = prepaint.viewport_bounds;
 

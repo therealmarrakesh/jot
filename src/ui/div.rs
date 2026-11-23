@@ -1,309 +1,83 @@
-//! Clean-room `Div`, `Stateful<Div>`, `Interactivity`, `InteractiveElement`,
-//! `StatefulInteractiveElement`, text elements, and `Entity<V>` rendering.
+//! Single concrete fluent `Div` builder (combining layout, visual style, hover/active/pressed
+//! transitions, tooltip registration, bounds observation, and input handlers) and `TextNode`.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::time::Duration;
 
 use crate::layout::{AvailableSpace, LayoutId};
 
+use super::anim::{Easing, Lerp, animate};
 use super::app::App;
+use super::color::{Rgba, rgba, transparent_black};
 use super::element::{
-    AnyElement, ContentMask, DispatchPhase, Element, ElementId, GlobalElementId, Hitbox,
-    HitboxBehavior, IntoElement, ParentElement, Render,
+    ContentMask, DispatchPhase, ElementId, GlobalElementId, Hitbox, HitboxBehavior, UiNode,
 };
-use super::entity::Entity;
 use super::focus::FocusHandle;
 use super::geometry::{Bounds, Pixels, Point, Size, point, px, size};
 use super::graphics::d2d_renderer::PaintQuad;
-use super::graphics::dwrite::WrappedLine;
+use super::graphics::dwrite::{TextAlign, WrappedLine};
 use super::keymap::{Command, KeyContext};
 use super::platform::{ExternalPaths, WindowControlArea};
 use super::style::{Overflow, Style, StyleRefinement, TextOverflow, WhiteSpace};
-use super::styled::Styled;
 use super::types::SharedString;
 use super::window::{
     ClickEvent, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
     ScrollWheelEvent, Window,
 };
 
+const BRUSH_FADE_DURATION: Duration = Duration::from_millis(83);
+
 type MouseDownHandler = Box<dyn FnMut(&MouseDownEvent, &mut Window, &mut App)>;
 type MouseUpHandler = Box<dyn FnMut(&MouseUpEvent, &mut Window, &mut App)>;
-type MouseMoveHandler = Box<dyn FnMut(&MouseMoveEvent, &mut Window, &mut App)>;
 type ClickHandler = Box<dyn FnMut(&ClickEvent, &mut Window, &mut App)>;
 type HoverHandler = Box<dyn FnMut(&bool, &mut Window, &mut App)>;
 type ScrollWheelHandler = Box<dyn FnMut(&ScrollWheelEvent, &mut Window, &mut App)>;
-type KeyDownHandler = Box<dyn FnMut(&KeyDownEvent, &mut Window, &mut App)>;
-type DropHandler = Box<dyn FnMut(&ExternalPaths, &mut Window, &mut App)>;
 type CommandHandler = Box<dyn FnMut(Command, &mut Window, &mut App) -> bool>;
+type DropHandler = Box<dyn FnMut(&ExternalPaths, &mut Window, &mut App)>;
+type BoundsHandler = Box<dyn FnOnce(Bounds<Pixels>, &mut Window, &mut App)>;
 
-#[derive(Default)]
-pub(crate) struct Interactivity {
-    pub(crate) element_id: Option<ElementId>,
-    pub(crate) base_style: StyleRefinement,
-    pub(crate) hover_style: Option<StyleRefinement>,
-    pub(crate) active_style: Option<StyleRefinement>,
-    pub(crate) group: Option<SharedString>,
-    pub(crate) group_hover_style: Option<(SharedString, StyleRefinement)>,
-    pub(crate) focus_handle: Option<FocusHandle>,
-    pub(crate) key_context: Option<KeyContext>,
-    pub(crate) window_control: Option<WindowControlArea>,
-    pub(crate) occlude_mouse: bool,
-    pub(crate) mouse_down_listeners: Vec<(Option<MouseButton>, MouseDownHandler)>,
-    pub(crate) mouse_down_out_listeners: Vec<MouseDownHandler>,
-    pub(crate) capture_mouse_down_listeners: Vec<MouseDownHandler>,
-    pub(crate) mouse_up_listeners: Vec<(Option<MouseButton>, MouseUpHandler)>,
-    pub(crate) mouse_up_out_listeners: Vec<(Option<MouseButton>, MouseUpHandler)>,
-    pub(crate) capture_mouse_up_listeners: Vec<MouseUpHandler>,
-    pub(crate) mouse_move_listeners: Vec<MouseMoveHandler>,
-    pub(crate) click_listeners: Vec<ClickHandler>,
-    pub(crate) aux_click_listeners: Vec<ClickHandler>,
-    pub(crate) hover_listeners: Vec<HoverHandler>,
-    pub(crate) scroll_wheel_listeners: Vec<ScrollWheelHandler>,
-    pub(crate) key_down_listeners: Vec<KeyDownHandler>,
-    pub(crate) command_listeners: Vec<CommandHandler>,
-    pub(crate) drop_listeners: Vec<DropHandler>,
+/// Rest / hover / pressed fill colors animated with premultiplied RGBA interpolation.
+#[derive(Clone, Copy)]
+pub(crate) struct Brushes {
+    pub(crate) rest: Rgba,
+    pub(crate) hover: Rgba,
+    pub(crate) pressed: Rgba,
 }
 
-impl Interactivity {
-    pub(crate) fn capture_any_mouse_down(
-        &mut self,
-        f: impl FnMut(&MouseDownEvent, &mut Window, &mut App) + 'static,
-    ) {
-        self.capture_mouse_down_listeners.push(Box::new(f));
-    }
-
-    pub(crate) fn capture_any_mouse_up(
-        &mut self,
-        f: impl FnMut(&MouseUpEvent, &mut Window, &mut App) + 'static,
-    ) {
-        self.capture_mouse_up_listeners.push(Box::new(f));
-    }
-
-    pub(crate) fn on_mouse_up_out(
-        &mut self,
-        button: MouseButton,
-        f: impl FnMut(&MouseUpEvent, &mut Window, &mut App) + 'static,
-    ) {
-        self.mouse_up_out_listeners.push((Some(button), Box::new(f)));
+impl Brushes {
+    pub(crate) fn subtle(p: crate::theme::Palette) -> Self {
+        Self {
+            rest: transparent_black(),
+            hover: rgba(p.subtle_secondary),
+            pressed: rgba(p.subtle_tertiary),
+        }
     }
 }
 
-pub(crate) trait InteractiveElement: Sized {
-    fn interactivity(&mut self) -> &mut Interactivity;
+#[derive(Clone, Copy, PartialEq)]
+struct Premultiplied(Rgba);
 
-    fn id(mut self, id: impl Into<ElementId>) -> Stateful<Self> {
-        self.interactivity().element_id = Some(id.into());
-        Stateful(self)
-    }
-
-    fn group(mut self, name: impl Into<SharedString>) -> Self {
-        self.interactivity().group = Some(name.into());
-        self
-    }
-
-    fn group_hover(
-        mut self,
-        group: impl Into<SharedString>,
-        f: impl FnOnce(StyleRefinement) -> StyleRefinement,
-    ) -> Self {
-        let style = f(StyleRefinement::default());
-        self.interactivity().group_hover_style = Some((group.into(), style));
-        self
-    }
-
-    fn hover(mut self, f: impl FnOnce(StyleRefinement) -> StyleRefinement) -> Self {
-        let style = f(StyleRefinement::default());
-        self.interactivity()
-            .hover_style
-            .get_or_insert_with(StyleRefinement::default)
-            .refine(&style);
-        self
-    }
-
-    fn track_focus(mut self, handle: &FocusHandle) -> Self {
-        self.interactivity().focus_handle = Some(handle.clone());
-        self
-    }
-
-    fn key_context(mut self, context: &str) -> Self {
-        self.interactivity().key_context = Some(KeyContext::parse(context));
-        self
-    }
-
-    fn window_control_area(mut self, area: WindowControlArea) -> Self {
-        self.interactivity().window_control = Some(area);
-        self
-    }
-
-    fn occlude(mut self) -> Self {
-        self.interactivity().occlude_mouse = true;
-        self
-    }
-
-    fn on_mouse_down(
-        mut self,
-        button: MouseButton,
-        f: impl FnMut(&MouseDownEvent, &mut Window, &mut App) + 'static,
-    ) -> Self {
-        self.interactivity()
-            .mouse_down_listeners
-            .push((Some(button), Box::new(f)));
-        self
-    }
-
-    fn on_mouse_down_out(
-        mut self,
-        f: impl FnMut(&MouseDownEvent, &mut Window, &mut App) + 'static,
-    ) -> Self {
-        self.interactivity()
-            .mouse_down_out_listeners
-            .push(Box::new(f));
-        self
-    }
-
-    fn capture_any_mouse_down(
-        mut self,
-        f: impl FnMut(&MouseDownEvent, &mut Window, &mut App) + 'static,
-    ) -> Self {
-        self.interactivity()
-            .capture_mouse_down_listeners
-            .push(Box::new(f));
-        self
-    }
-
-    fn on_mouse_up(
-        mut self,
-        button: MouseButton,
-        f: impl FnMut(&MouseUpEvent, &mut Window, &mut App) + 'static,
-    ) -> Self {
-        self.interactivity()
-            .mouse_up_listeners
-            .push((Some(button), Box::new(f)));
-        self
-    }
-
-    fn on_mouse_up_out(
-        mut self,
-        button: MouseButton,
-        f: impl FnMut(&MouseUpEvent, &mut Window, &mut App) + 'static,
-    ) -> Self {
-        self.interactivity()
-            .mouse_up_out_listeners
-            .push((Some(button), Box::new(f)));
-        self
-    }
-
-    fn on_scroll_wheel(
-        mut self,
-        f: impl FnMut(&ScrollWheelEvent, &mut Window, &mut App) + 'static,
-    ) -> Self {
-        self.interactivity()
-            .scroll_wheel_listeners
-            .push(Box::new(f));
-        self
-    }
-
-    fn on_command(
-        mut self,
-        f: impl FnMut(Command, &mut Window, &mut App) -> bool + 'static,
-    ) -> Self {
-        self.interactivity().command_listeners.push(Box::new(f));
-        self
-    }
-
-    fn on_drop(
-        mut self,
-        f: impl FnMut(&ExternalPaths, &mut Window, &mut App) + 'static,
-    ) -> Self {
-        self.interactivity().drop_listeners.push(Box::new(f));
-        self
+impl Lerp for Premultiplied {
+    fn lerp(&self, target: &Self, t: f32) -> Self {
+        let (from, to) = (self.0, target.0);
+        let a = from.a + (to.a - from.a) * t;
+        let channel = |x: f32, y: f32| {
+            let premul = x * from.a + (y * to.a - x * from.a) * t;
+            if a > 0.0 {
+                (premul / a).clamp(0.0, 1.0)
+            } else {
+                0.0
+            }
+        };
+        Premultiplied(Rgba {
+            r: channel(from.r, to.r),
+            g: channel(from.g, to.g),
+            b: channel(from.b, to.b),
+            a,
+        })
     }
 }
-
-pub(crate) trait StatefulInteractiveElement: InteractiveElement {
-    fn active(mut self, f: impl FnOnce(StyleRefinement) -> StyleRefinement) -> Self {
-        let style = f(StyleRefinement::default());
-        self.interactivity()
-            .active_style
-            .get_or_insert_with(StyleRefinement::default)
-            .refine(&style);
-        self
-    }
-
-    fn on_click(
-        mut self,
-        f: impl FnMut(&ClickEvent, &mut Window, &mut App) + 'static,
-    ) -> Self {
-        self.interactivity().click_listeners.push(Box::new(f));
-        self
-    }
-
-    fn on_aux_click(
-        mut self,
-        f: impl FnMut(&ClickEvent, &mut Window, &mut App) + 'static,
-    ) -> Self {
-        self.interactivity().aux_click_listeners.push(Box::new(f));
-        self
-    }
-
-    fn on_hover(mut self, f: impl FnMut(&bool, &mut Window, &mut App) + 'static) -> Self {
-        self.interactivity().hover_listeners.push(Box::new(f));
-        self
-    }
-}
-
-/// Core layout & visual container element (`div()`).
-#[derive(Default)]
-pub(crate) struct Div {
-    interactivity: Interactivity,
-    children: Vec<AnyElement>,
-}
-
-pub(crate) fn div() -> Div {
-    Div::default()
-}
-
-impl Styled for Div {
-    fn style(&mut self) -> &mut StyleRefinement {
-        &mut self.interactivity.base_style
-    }
-}
-
-impl ParentElement for Div {
-    fn extend(&mut self, elements: impl IntoIterator<Item = AnyElement>) {
-        self.children.extend(elements);
-    }
-}
-
-impl InteractiveElement for Div {
-    fn interactivity(&mut self) -> &mut Interactivity {
-        &mut self.interactivity
-    }
-}
-
-/// Wrapper marking an element as having an explicit `ElementId` (enabling `on_click`, `active`,
-/// `on_hover`).
-pub(crate) struct Stateful<E>(E);
-
-impl<E: Styled> Styled for Stateful<E> {
-    fn style(&mut self) -> &mut StyleRefinement {
-        self.0.style()
-    }
-}
-
-impl<E: ParentElement> ParentElement for Stateful<E> {
-    fn extend(&mut self, elements: impl IntoIterator<Item = AnyElement>) {
-        self.0.extend(elements);
-    }
-}
-
-impl<E: InteractiveElement> InteractiveElement for Stateful<E> {
-    fn interactivity(&mut self) -> &mut Interactivity {
-        self.0.interactivity()
-    }
-}
-
-impl<E: InteractiveElement> StatefulInteractiveElement for Stateful<E> {}
 
 #[derive(Clone, Default)]
 struct InteractiveState {
@@ -311,24 +85,307 @@ struct InteractiveState {
     pending_click: Rc<Cell<bool>>,
     aux_clicked: Rc<Cell<Option<MouseButton>>>,
     hovered: Rc<Cell<bool>>,
+    brush_pressed: Rc<Cell<bool>>,
 }
 
-impl Element for Div {
-    type RequestLayoutState = Style;
-    type PrepaintState = Option<Hitbox>;
+/// Core layout, visual, and interactive container node (`div()`).
+#[derive(Default)]
+pub(crate) struct Div {
+    element_id: Option<ElementId>,
+    base_style: StyleRefinement,
+    hover_style: Option<StyleRefinement>,
+    active_style: Option<StyleRefinement>,
+    group: Option<SharedString>,
+    group_hover_style: Option<(SharedString, StyleRefinement)>,
+    brushes: Option<Brushes>,
+    tooltip: Option<SharedString>,
+    disabled: bool,
+    on_bounds: Option<BoundsHandler>,
+    focus_handle: Option<FocusHandle>,
+    key_context: Option<KeyContext>,
+    window_control: Option<WindowControlArea>,
+    occlude_mouse: bool,
+    mouse_down_listeners: Vec<(Option<MouseButton>, MouseDownHandler)>,
+    mouse_down_out_listeners: Vec<MouseDownHandler>,
+    capture_mouse_down_listeners: Vec<MouseDownHandler>,
+    mouse_up_listeners: Vec<(Option<MouseButton>, MouseUpHandler)>,
+    mouse_up_out_listeners: Vec<(Option<MouseButton>, MouseUpHandler)>,
+    click_listeners: Vec<ClickHandler>,
+    aux_click_listeners: Vec<ClickHandler>,
+    hover_listeners: Vec<HoverHandler>,
+    scroll_wheel_listeners: Vec<ScrollWheelHandler>,
+    command_listeners: Vec<CommandHandler>,
+    drop_listeners: Vec<DropHandler>,
+    children: Vec<UiNode>,
+    // Per-frame cached layout/prepaint state
+    layout_id: Option<LayoutId>,
+    bounds: Bounds<Pixels>,
+    computed_style: Style,
+    hitbox: Option<Hitbox>,
+}
 
-    fn id(&self) -> Option<ElementId> {
-        self.interactivity.element_id.clone()
+pub(crate) fn div() -> Div {
+    Div::default()
+}
+
+crate::__impl_visual_style_builders!(Div, |self| &mut self.base_style);
+crate::__impl_layout_style_builders!(Div, |self| &mut self.base_style);
+
+impl Div {
+    // ---- Conditional / fluent composition helpers ----
+
+    #[inline]
+    pub(crate) fn map<U>(self, f: impl FnOnce(Self) -> U) -> U {
+        f(self)
     }
 
-    fn request_layout(
-        &mut self,
-        _id: Option<&GlobalElementId>,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> (LayoutId, Style) {
+    #[inline]
+    pub(crate) fn when(self, condition: bool, then: impl FnOnce(Self) -> Self) -> Self {
+        if condition { then(self) } else { self }
+    }
+
+    #[inline]
+    pub(crate) fn when_some<T>(self, option: Option<T>, then: impl FnOnce(Self, T) -> Self) -> Self {
+        if let Some(value) = option {
+            then(self, value)
+        } else {
+            self
+        }
+    }
+
+    // ---- Children ----
+
+    pub(crate) fn child(mut self, child: impl Into<UiNode>) -> Self {
+        self.children.push(child.into());
+        self
+    }
+
+    pub(crate) fn children(mut self, children: impl IntoIterator<Item = impl Into<UiNode>>) -> Self {
+        self.children.extend(children.into_iter().map(Into::into));
+        self
+    }
+
+    // ---- Identity, hover/active/brush transitions, tooltips, bounds ----
+
+    pub(crate) fn id(mut self, id: impl Into<ElementId>) -> Self {
+        self.element_id = Some(id.into());
+        self
+    }
+
+    pub(crate) fn group(mut self, name: impl Into<SharedString>) -> Self {
+        self.group = Some(name.into());
+        self
+    }
+
+    pub(crate) fn group_hover(
+        mut self,
+        group: impl Into<SharedString>,
+        f: impl FnOnce(StyleRefinement) -> StyleRefinement,
+    ) -> Self {
+        let style = f(StyleRefinement::default());
+        self.group_hover_style = Some((group.into(), style));
+        self
+    }
+
+    pub(crate) fn hover(mut self, f: impl FnOnce(StyleRefinement) -> StyleRefinement) -> Self {
+        let style = f(StyleRefinement::default());
+        self.hover_style
+            .get_or_insert_with(StyleRefinement::default)
+            .refine(&style);
+        self
+    }
+
+    pub(crate) fn active(mut self, f: impl FnOnce(StyleRefinement) -> StyleRefinement) -> Self {
+        let style = f(StyleRefinement::default());
+        self.active_style
+            .get_or_insert_with(StyleRefinement::default)
+            .refine(&style);
+        self
+    }
+
+    /// Applies an active style strictly on primary (left) button presses.
+    pub(crate) fn pressed(self, f: impl FnOnce(StyleRefinement) -> StyleRefinement) -> Self {
+        self.capture_any_mouse_down(|event, window, _| {
+            if event.button != MouseButton::Left {
+                window.prevent_default();
+            }
+        })
+        .active(f)
+    }
+
+    /// Smoothly animates background fills between `rest`, `hover`, and `pressed` states.
+    pub(crate) fn brush_transition(mut self, brushes: Brushes) -> Self {
+        self.brushes = Some(brushes);
+        self
+    }
+
+    /// Registers a native tooltip anchored to this `Div`'s laid-out bounds (requires `.id(...)`).
+    pub(crate) fn tooltip(mut self, text: impl Into<SharedString>) -> Self {
+        self.tooltip = Some(text.into());
+        self
+    }
+
+    /// Suppresses brush transitions and tooltip registration while disabled.
+    pub(crate) fn disabled(mut self, disabled: bool) -> Self {
+        self.disabled = disabled;
+        self
+    }
+
+    /// Observes this `Div`'s laid-out bounds during `prepaint`.
+    pub(crate) fn on_bounds(
+        mut self,
+        f: impl FnOnce(Bounds<Pixels>, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.on_bounds = Some(Box::new(f));
+        self
+    }
+
+    // ---- Focus, key contexts, window chrome, occlusion ----
+
+    pub(crate) fn track_focus(mut self, handle: &FocusHandle) -> Self {
+        self.focus_handle = Some(handle.clone());
+        self
+    }
+
+    pub(crate) fn key_context(mut self, context: &str) -> Self {
+        self.key_context = Some(KeyContext::parse(context));
+        self
+    }
+
+    pub(crate) fn window_control_area(mut self, area: WindowControlArea) -> Self {
+        self.window_control = Some(area);
+        self
+    }
+
+    pub(crate) fn occlude(mut self) -> Self {
+        self.occlude_mouse = true;
+        self
+    }
+
+    // ---- Event handlers ----
+
+    pub(crate) fn on_mouse_down(
+        mut self,
+        button: MouseButton,
+        f: impl FnMut(&MouseDownEvent, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.mouse_down_listeners.push((Some(button), Box::new(f)));
+        self
+    }
+
+    pub(crate) fn on_mouse_down_out(
+        mut self,
+        f: impl FnMut(&MouseDownEvent, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.mouse_down_out_listeners.push(Box::new(f));
+        self
+    }
+
+    pub(crate) fn capture_any_mouse_down(
+        mut self,
+        f: impl FnMut(&MouseDownEvent, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.capture_mouse_down_listeners.push(Box::new(f));
+        self
+    }
+
+    pub(crate) fn on_mouse_up(
+        mut self,
+        button: MouseButton,
+        f: impl FnMut(&MouseUpEvent, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.mouse_up_listeners.push((Some(button), Box::new(f)));
+        self
+    }
+
+    pub(crate) fn on_mouse_up_out(
+        mut self,
+        button: MouseButton,
+        f: impl FnMut(&MouseUpEvent, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.mouse_up_out_listeners
+            .push((Some(button), Box::new(f)));
+        self
+    }
+
+    pub(crate) fn on_click(
+        mut self,
+        f: impl FnMut(&ClickEvent, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.click_listeners.push(Box::new(f));
+        self
+    }
+
+    pub(crate) fn on_aux_click(
+        mut self,
+        f: impl FnMut(&ClickEvent, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.aux_click_listeners.push(Box::new(f));
+        self
+    }
+
+    pub(crate) fn on_hover(
+        mut self,
+        f: impl FnMut(&bool, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.hover_listeners.push(Box::new(f));
+        self
+    }
+
+    pub(crate) fn on_scroll_wheel(
+        mut self,
+        f: impl FnMut(&ScrollWheelEvent, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.scroll_wheel_listeners.push(Box::new(f));
+        self
+    }
+
+    pub(crate) fn on_command(
+        mut self,
+        f: impl FnMut(Command, &mut Window, &mut App) -> bool + 'static,
+    ) -> Self {
+        self.command_listeners.push(Box::new(f));
+        self
+    }
+
+    pub(crate) fn on_drop(
+        mut self,
+        f: impl FnMut(&ExternalPaths, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.drop_listeners.push(Box::new(f));
+        self
+    }
+
+    // ---- Internal 3-phase lifecycle called by `UiNode` ----
+
+    #[inline]
+    pub(super) fn element_id(&self) -> Option<ElementId> {
+        self.element_id.clone()
+    }
+
+    #[inline]
+    pub(super) fn layout_id(&self) -> Option<LayoutId> {
+        self.layout_id
+    }
+
+    #[inline]
+    pub(super) fn set_layout_id(&mut self, id: LayoutId) {
+        self.layout_id = Some(id);
+    }
+
+    #[inline]
+    pub(super) fn bounds(&self) -> Bounds<Pixels> {
+        self.bounds
+    }
+
+    #[inline]
+    pub(super) fn set_bounds(&mut self, bounds: Bounds<Pixels>) {
+        self.bounds = bounds;
+    }
+
+    pub(super) fn request_layout(&mut self, window: &mut Window, cx: &mut App) -> LayoutId {
         let mut style = Style::default();
-        style.refine(&self.interactivity.base_style);
+        style.refine(&self.base_style);
 
         let child_ids: Vec<LayoutId> = window.with_text_style(&style.text, |window| {
             self.children
@@ -337,38 +394,47 @@ impl Element for Div {
                 .collect()
         });
         let lid = window.request_layout(style.clone(), child_ids, cx);
-        (lid, style)
+        self.computed_style = style;
+        lid
     }
 
-    fn prepaint(
+    pub(super) fn prepaint(
         &mut self,
         _id: Option<&GlobalElementId>,
         bounds: Bounds<Pixels>,
-        style: &mut Style,
         window: &mut Window,
         cx: &mut App,
-    ) -> Option<Hitbox> {
-        let needs_hitbox = self.interactivity.occlude_mouse
-            || self.interactivity.window_control.is_some()
-            || self.interactivity.focus_handle.is_some()
-            || self.interactivity.hover_style.is_some()
-            || self.interactivity.active_style.is_some()
-            || self.interactivity.group.is_some()
-            || self.interactivity.group_hover_style.is_some()
-            || self.interactivity.base_style.cursor.is_some()
-            || !self.interactivity.mouse_down_listeners.is_empty()
-            || !self.interactivity.mouse_up_listeners.is_empty()
-            || !self.interactivity.mouse_move_listeners.is_empty()
-            || !self.interactivity.capture_mouse_down_listeners.is_empty()
-            || !self.interactivity.capture_mouse_up_listeners.is_empty()
-            || !self.interactivity.click_listeners.is_empty()
-            || !self.interactivity.aux_click_listeners.is_empty()
-            || !self.interactivity.hover_listeners.is_empty()
-            || !self.interactivity.scroll_wheel_listeners.is_empty()
-            || !self.interactivity.drop_listeners.is_empty();
+    ) {
+        if let Some(on_bounds) = self.on_bounds.take() {
+            on_bounds(bounds, window, cx);
+        }
+
+        if !self.disabled
+            && let (Some(tip_id), Some(text)) = (self.element_id.clone(), self.tooltip.take())
+        {
+            crate::tooltip::register(tip_id, text, bounds, window, cx);
+        }
+
+        let needs_hitbox = self.occlude_mouse
+            || self.window_control.is_some()
+            || self.focus_handle.is_some()
+            || self.hover_style.is_some()
+            || self.active_style.is_some()
+            || self.group.is_some()
+            || self.group_hover_style.is_some()
+            || (self.brushes.is_some() && !self.disabled)
+            || self.base_style.cursor.is_some()
+            || !self.mouse_down_listeners.is_empty()
+            || !self.mouse_up_listeners.is_empty()
+            || !self.capture_mouse_down_listeners.is_empty()
+            || !self.click_listeners.is_empty()
+            || !self.aux_click_listeners.is_empty()
+            || !self.hover_listeners.is_empty()
+            || !self.scroll_wheel_listeners.is_empty()
+            || !self.drop_listeners.is_empty();
 
         let hitbox = if needs_hitbox {
-            let behavior = if self.interactivity.occlude_mouse {
+            let behavior = if self.occlude_mouse {
                 HitboxBehavior::BlockMouse
             } else {
                 HitboxBehavior::Normal
@@ -378,20 +444,21 @@ impl Element for Div {
             None
         };
 
-        if let Some(area) = self.interactivity.window_control {
+        if let Some(area) = self.window_control {
             window.insert_window_control(bounds, area);
         }
 
-        if let (Some(group), Some(hb)) = (&self.interactivity.group, &hitbox) {
+        if let (Some(group), Some(hb)) = (&self.group, &hitbox) {
             window.register_group_hitbox(group.clone(), hb.id);
         }
 
-        let clip = (style.overflow.x == Overflow::Hidden || style.overflow.y == Overflow::Hidden)
+        let clip = (self.computed_style.overflow.x == Overflow::Hidden
+            || self.computed_style.overflow.y == Overflow::Hidden)
             .then_some(ContentMask { bounds });
 
-        let focus_id = self.interactivity.focus_handle.as_ref().map(FocusHandle::id);
-        let key_ctx = self.interactivity.key_context.clone();
-        let text_ref = style.text.clone();
+        let focus_id = self.focus_handle.as_ref().map(FocusHandle::id);
+        let key_ctx = self.key_context.clone();
+        let text_ref = self.computed_style.text.clone();
 
         window.with_focus_node(focus_id, key_ctx, |window| {
             window.with_text_style(&text_ref, |window| {
@@ -403,15 +470,13 @@ impl Element for Div {
             });
         });
 
-        hitbox
+        self.hitbox = hitbox;
     }
 
-    fn paint(
+    pub(super) fn paint(
         &mut self,
         id: Option<&GlobalElementId>,
         bounds: Bounds<Pixels>,
-        style: &mut Style,
-        hitbox: &mut Option<Hitbox>,
         window: &mut Window,
         cx: &mut App,
     ) {
@@ -422,53 +487,113 @@ impl Element for Div {
             })
         });
 
-        let mut resolved = style.clone();
-        resolved.refine(&self.interactivity.base_style);
+        let mut resolved = self.computed_style.clone();
+        resolved.refine(&self.base_style);
 
-        let hovered = hitbox.as_ref().is_some_and(|hb| hb.is_hovered(window));
-        if hovered && let Some(hs) = &self.interactivity.hover_style {
+        let hovered = self.hitbox.as_ref().is_some_and(|hb| hb.is_hovered(window));
+        if hovered && let Some(hs) = &self.hover_style {
             resolved.refine(hs);
         }
-        if let Some((group, ghs)) = &self.interactivity.group_hover_style
+        if let Some((group, ghs)) = &self.group_hover_style
             && window.is_group_hovered(group)
         {
             resolved.refine(ghs);
         }
         let is_active = state.as_ref().is_some_and(|s| s.clicked.get());
-        if is_active && let Some(as_) = &self.interactivity.active_style {
+        if is_active && let Some(as_) = &self.active_style {
             resolved.refine(as_);
         }
 
-        if let (Some(cursor), Some(hb)) = (resolved.cursor, hitbox.as_ref()) {
+        if let Some(brushes) = self.brushes {
+            let brush_hovered = !self.disabled && hovered;
+            let brush_down = !self.disabled && state.as_ref().is_some_and(|s| s.brush_pressed.get());
+            let target = if brush_down {
+                brushes.pressed
+            } else if brush_hovered {
+                brushes.hover
+            } else {
+                brushes.rest
+            };
+            let Premultiplied(color) = animate(
+                "brush",
+                Premultiplied(target),
+                BRUSH_FADE_DURATION,
+                Easing::Linear,
+                window,
+                cx,
+            );
+            resolved.background = Some(color);
+
+            if !self.disabled
+                && let Some(hb) = self.hitbox.clone()
+            {
+                if let Some(st) = &state {
+                    let pressed_down = st.brush_pressed.clone();
+                    let hb_down = hb.clone();
+                    window.on_mouse_event(move |ev: &MouseDownEvent, phase, window, _| {
+                        if phase == DispatchPhase::Capture
+                            && ev.button == MouseButton::Left
+                            && hb_down.is_hovered(window)
+                            && !pressed_down.replace(true)
+                        {
+                            window.refresh();
+                        }
+                    });
+                    let pressed_up = st.brush_pressed.clone();
+                    let hb_up = hb.clone();
+                    window.on_mouse_event(move |ev: &MouseUpEvent, phase, window, _| {
+                        if phase == DispatchPhase::Capture
+                            && ev.button == MouseButton::Left
+                            && hb_up.is_hovered(window)
+                            && pressed_up.replace(false)
+                        {
+                            window.refresh();
+                        }
+                    });
+                    let pressed_out = st.brush_pressed.clone();
+                    let hb_out = hb.clone();
+                    window.on_mouse_event(move |ev: &MouseUpEvent, phase, window, _| {
+                        if phase == DispatchPhase::Bubble
+                            && ev.button == MouseButton::Left
+                            && !hb_out.is_hovered(window)
+                            && pressed_out.replace(false)
+                        {
+                            window.refresh();
+                        }
+                    });
+                }
+                window.on_mouse_event(move |_: &MouseMoveEvent, phase, window, _| {
+                    if phase == DispatchPhase::Capture && hb.is_hovered(window) != brush_hovered {
+                        window.refresh();
+                    }
+                });
+            }
+        }
+
+        if let (Some(cursor), Some(hb)) = (resolved.cursor, self.hitbox.as_ref()) {
             window.set_cursor_style(cursor, hb);
         }
 
-        let focus_id = self.interactivity.focus_handle.as_ref().map(FocusHandle::id);
+        let focus_id = self.focus_handle.as_ref().map(FocusHandle::id);
 
         // Register event listeners in pre-order (parent before children) so Capture phase runs
         // outermost-to-innermost and Bubble phase (reverse) runs innermost-to-outermost.
-        let hb_clone = hitbox.clone();
+        let hb_clone = self.hitbox.clone();
         let owner_focus = focus_id.or_else(|| window.current_focus_id());
 
-        for handler in self.interactivity.command_listeners.drain(..) {
+        for handler in self.command_listeners.drain(..) {
             window.register_command_listener(owner_focus, handler);
         }
-        for handler in self.interactivity.key_down_listeners.drain(..) {
-            window.register_key_down_listener(owner_focus, handler);
-        }
-        for handler in self.interactivity.drop_listeners.drain(..) {
-            let hb = hb_clone.clone();
-            window.register_drop_listener(hb, handler);
+        for handler in self.drop_listeners.drain(..) {
+            window.register_drop_listener(hb_clone.clone(), handler);
         }
 
-        // Hover / active state transitions & callbacks
-        if let Some(hb) = hb_clone.clone() {
-            let has_hover_fx = self.interactivity.hover_style.is_some()
-                || self.interactivity.group.is_some()
-                || !self.interactivity.hover_listeners.is_empty();
+        if let Some(hb) = hb_clone {
+            let has_hover_fx = self.hover_style.is_some()
+                || self.group.is_some()
+                || !self.hover_listeners.is_empty();
             if has_hover_fx {
-                let mut listeners: Vec<HoverHandler> =
-                    std::mem::take(&mut self.interactivity.hover_listeners);
+                let mut listeners: Vec<HoverHandler> = std::mem::take(&mut self.hover_listeners);
                 let prev_hovered = state.as_ref().map(|s| s.hovered.clone());
                 let hb_move = hb.clone();
                 window.on_mouse_event(move |_: &MouseMoveEvent, phase, window, cx| {
@@ -489,18 +614,9 @@ impl Element for Div {
                 });
             }
 
-            // Capture mouse down/up listeners (Capture phase runs forward).
-            for mut cb in self.interactivity.capture_mouse_down_listeners.drain(..) {
+            for mut cb in self.capture_mouse_down_listeners.drain(..) {
                 let hb_c = hb.clone();
                 window.on_mouse_event(move |ev: &MouseDownEvent, phase, window, cx| {
-                    if phase == DispatchPhase::Capture && hb_c.is_hovered(window) {
-                        cb(ev, window, cx);
-                    }
-                });
-            }
-            for mut cb in self.interactivity.capture_mouse_up_listeners.drain(..) {
-                let hb_c = hb.clone();
-                window.on_mouse_event(move |ev: &MouseUpEvent, phase, window, cx| {
                     if phase == DispatchPhase::Capture && hb_c.is_hovered(window) {
                         cb(ev, window, cx);
                     }
@@ -518,7 +634,7 @@ impl Element for Div {
             //      suppressing its own `.on_click(...)`!
             //   3. Register internal `click`/`aux_click` MouseUp handlers BEFORE user `on_mouse_up`
             //      so Bubble runs `on_mouse_up` before `on_click`.
-            if let Some(handle) = self.interactivity.focus_handle.clone() {
+            if let Some(handle) = self.focus_handle.clone() {
                 let hb_f = hb.clone();
                 window.on_mouse_event(move |_: &MouseDownEvent, phase, window, cx| {
                     if phase == DispatchPhase::Bubble
@@ -530,7 +646,7 @@ impl Element for Div {
                     }
                 });
             }
-            for (btn, mut cb) in self.interactivity.mouse_down_listeners.drain(..).rev() {
+            for (btn, mut cb) in self.mouse_down_listeners.drain(..).rev() {
                 let hb_l = hb.clone();
                 window.on_mouse_event(move |ev: &MouseDownEvent, phase, window, cx| {
                     if phase == DispatchPhase::Bubble
@@ -542,12 +658,10 @@ impl Element for Div {
                 });
             }
 
-            // Active visual state & primary click tracking
             if let Some(st) = state.clone()
-                && (self.interactivity.active_style.is_some()
-                    || !self.interactivity.click_listeners.is_empty())
+                && (self.active_style.is_some() || !self.click_listeners.is_empty())
             {
-                let has_active = self.interactivity.active_style.is_some();
+                let has_active = self.active_style.is_some();
                 let clicked_down = st.clicked.clone();
                 let pending_down = st.pending_click.clone();
                 let hb_down = hb.clone();
@@ -566,9 +680,7 @@ impl Element for Div {
                 let clicked_up = st.clicked.clone();
                 let pending_up = st.pending_click.clone();
                 let hb_up = hb.clone();
-                let click_cbs = std::rc::Rc::new(std::cell::RefCell::new(std::mem::take(
-                    &mut self.interactivity.click_listeners,
-                )));
+                let click_cbs = Rc::new(RefCell::new(std::mem::take(&mut self.click_listeners)));
                 let mouse_click_cbs = click_cbs.clone();
                 window.on_mouse_event(move |ev: &MouseUpEvent, phase, window, cx| {
                     if phase == DispatchPhase::Bubble && ev.button == MouseButton::Left {
@@ -590,7 +702,6 @@ impl Element for Div {
                         }
                     }
                 });
-                // Keyboard activation (Enter / Space) when this clickable element has focus
                 if let Some(fid) = focus_id
                     && window.focused_id() == Some(fid)
                     && !click_cbs.borrow().is_empty()
@@ -617,9 +728,8 @@ impl Element for Div {
                 }
             }
 
-            // Auxiliary click tracking (middle/right click)
-            if let Some(st) = state.clone()
-                && !self.interactivity.aux_click_listeners.is_empty()
+            if let Some(st) = state
+                && !self.aux_click_listeners.is_empty()
             {
                 let aux_down = st.aux_clicked.clone();
                 let hb_down = hb.clone();
@@ -634,8 +744,7 @@ impl Element for Div {
                 });
                 let aux_up = st.aux_clicked.clone();
                 let hb_up = hb.clone();
-                let mut aux_cbs: Vec<ClickHandler> =
-                    std::mem::take(&mut self.interactivity.aux_click_listeners);
+                let mut aux_cbs: Vec<ClickHandler> = std::mem::take(&mut self.aux_click_listeners);
                 window.on_mouse_event(move |ev: &MouseUpEvent, phase, window, cx| {
                     if phase == DispatchPhase::Bubble && ev.button != MouseButton::Left {
                         let was = aux_up.replace(None);
@@ -657,8 +766,7 @@ impl Element for Div {
                 });
             }
 
-            // Bubble mouse up / move / scroll listeners
-            for (btn, mut cb) in self.interactivity.mouse_up_listeners.drain(..).rev() {
+            for (btn, mut cb) in self.mouse_up_listeners.drain(..).rev() {
                 let hb_l = hb.clone();
                 window.on_mouse_event(move |ev: &MouseUpEvent, phase, window, cx| {
                     if phase == DispatchPhase::Bubble
@@ -669,7 +777,7 @@ impl Element for Div {
                     }
                 });
             }
-            for (btn, mut cb) in self.interactivity.mouse_up_out_listeners.drain(..).rev() {
+            for (btn, mut cb) in self.mouse_up_out_listeners.drain(..).rev() {
                 let hb_l = hb.clone();
                 window.on_mouse_event(move |ev: &MouseUpEvent, phase, window, cx| {
                     if phase == DispatchPhase::Bubble
@@ -680,15 +788,7 @@ impl Element for Div {
                     }
                 });
             }
-            for mut cb in self.interactivity.mouse_move_listeners.drain(..).rev() {
-                let hb_l = hb.clone();
-                window.on_mouse_event(move |ev: &MouseMoveEvent, phase, window, cx| {
-                    if phase == DispatchPhase::Bubble && hb_l.is_hovered(window) {
-                        cb(ev, window, cx);
-                    }
-                });
-            }
-            for mut cb in self.interactivity.scroll_wheel_listeners.drain(..).rev() {
+            for mut cb in self.scroll_wheel_listeners.drain(..).rev() {
                 let hb_l = hb.clone();
                 window.on_scroll_wheel_event(move |ev: &ScrollWheelEvent, phase, window, cx| {
                     if phase == DispatchPhase::Bubble && hb_l.contains(&ev.position) {
@@ -698,8 +798,7 @@ impl Element for Div {
             }
         }
 
-        // Mouse-down-out listeners fire even without hover on `bounds`.
-        for mut cb in self.interactivity.mouse_down_out_listeners.drain(..) {
+        for mut cb in self.mouse_down_out_listeners.drain(..) {
             window.on_mouse_event(move |ev: &MouseDownEvent, phase, window, cx| {
                 if phase == DispatchPhase::Capture && !bounds.contains(&ev.position) {
                     cb(ev, window, cx);
@@ -707,11 +806,9 @@ impl Element for Div {
             });
         }
 
-        // Paint visual box: drop shadows -> background -> children -> border (inside optional opacity layer).
+        // Paint visual box: drop shadows -> background -> children -> border.
         let opacity = resolved.opacity.unwrap_or(1.0);
-        let paint_contents = |window: &mut Window,
-                              children: &mut [AnyElement],
-                              cx: &mut App| {
+        let paint_contents = |window: &mut Window, children: &mut [UiNode], cx: &mut App| {
             if !resolved.box_shadow.is_empty() {
                 window.paint_shadows(bounds, resolved.corner_radii, &resolved.box_shadow);
             }
@@ -723,7 +820,7 @@ impl Element for Div {
                     corner_radii: resolved.corner_radii,
                     background: bg,
                     border_widths: super::geometry::Edges::default(),
-                    border_color: super::color::Rgba::default(),
+                    border_color: Rgba::default(),
                 });
             }
             let clip =
@@ -748,7 +845,7 @@ impl Element for Div {
                 window.paint_quad(PaintQuad {
                     bounds,
                     corner_radii: resolved.corner_radii,
-                    background: super::color::Rgba::default(),
+                    background: Rgba::default(),
                     border_widths: resolved.border_widths,
                     border_color,
                 });
@@ -765,63 +862,8 @@ impl Element for Div {
     }
 }
 
-impl IntoElement for Div {
-    type Element = Self;
-    fn into_element(self) -> Self {
-        self
-    }
-}
-
-impl<E: Element> Element for Stateful<E> {
-    type RequestLayoutState = E::RequestLayoutState;
-    type PrepaintState = E::PrepaintState;
-
-    fn id(&self) -> Option<ElementId> {
-        self.0.id()
-    }
-
-    fn request_layout(
-        &mut self,
-        id: Option<&GlobalElementId>,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> (LayoutId, Self::RequestLayoutState) {
-        self.0.request_layout(id, window, cx)
-    }
-
-    fn prepaint(
-        &mut self,
-        id: Option<&GlobalElementId>,
-        bounds: Bounds<Pixels>,
-        req: &mut Self::RequestLayoutState,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> Self::PrepaintState {
-        self.0.prepaint(id, bounds, req, window, cx)
-    }
-
-    fn paint(
-        &mut self,
-        id: Option<&GlobalElementId>,
-        bounds: Bounds<Pixels>,
-        req: &mut Self::RequestLayoutState,
-        pre: &mut Self::PrepaintState,
-        window: &mut Window,
-        cx: &mut App,
-    ) {
-        self.0.paint(id, bounds, req, pre, window, cx)
-    }
-}
-
-impl<E: Element> IntoElement for Stateful<E> {
-    type Element = Self;
-    fn into_element(self) -> Self {
-        self
-    }
-}
-
 // ---------------------------------------------------------------------------
-// Leaf text element (`String`, `&'static str`, `SharedString`)
+// Leaf text node (`String`, `&'static str`, `SharedString`)
 // ---------------------------------------------------------------------------
 
 struct MeasuredText {
@@ -831,28 +873,50 @@ struct MeasuredText {
     size: Size<Pixels>,
 }
 
-pub(crate) struct TextLeaf {
+pub(crate) struct TextNode {
     text: SharedString,
     measured: Rc<RefCell<Option<MeasuredText>>>,
     lines: Vec<WrappedLine>,
     line_height: Pixels,
-    align: super::graphics::dwrite::TextAlign,
+    align: TextAlign,
+    layout_id: Option<LayoutId>,
+    bounds: Bounds<Pixels>,
 }
 
-impl Element for TextLeaf {
-    type RequestLayoutState = ();
-    type PrepaintState = ();
-
-    fn id(&self) -> Option<ElementId> {
-        None
+impl TextNode {
+    pub(crate) fn new(text: SharedString) -> Self {
+        Self {
+            text,
+            measured: Rc::new(RefCell::new(None)),
+            lines: Vec::new(),
+            line_height: px(18.0),
+            align: TextAlign::Left,
+            layout_id: None,
+            bounds: Bounds::default(),
+        }
     }
 
-    fn request_layout(
-        &mut self,
-        _: Option<&GlobalElementId>,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> (LayoutId, ()) {
+    #[inline]
+    pub(super) fn layout_id(&self) -> Option<LayoutId> {
+        self.layout_id
+    }
+
+    #[inline]
+    pub(super) fn set_layout_id(&mut self, id: LayoutId) {
+        self.layout_id = Some(id);
+    }
+
+    #[inline]
+    pub(super) fn bounds(&self) -> Bounds<Pixels> {
+        self.bounds
+    }
+
+    #[inline]
+    pub(super) fn set_bounds(&mut self, bounds: Bounds<Pixels>) {
+        self.bounds = bounds;
+    }
+
+    pub(super) fn request_layout(&mut self, window: &mut Window, cx: &mut App) -> LayoutId {
         let text_style = window.text_style();
         let line_height = text_style.line_height_in_pixels();
         self.line_height = line_height;
@@ -868,7 +932,7 @@ impl Element for TextLeaf {
         let measured = self.measured.clone();
         *measured.borrow_mut() = None;
 
-        let lid = window.request_measured_layout(
+        window.request_measured_layout(
             Style::default(),
             move |known, available, window, _cx| {
                 let wrap_width = if nowrap {
@@ -933,18 +997,10 @@ impl Element for TextLeaf {
                 size(out_w, cached_size.height)
             },
             cx,
-        );
-        (lid, ())
+        )
     }
 
-    fn prepaint(
-        &mut self,
-        _: Option<&GlobalElementId>,
-        bounds: Bounds<Pixels>,
-        _: &mut (),
-        window: &mut Window,
-        _cx: &mut App,
-    ) {
+    pub(super) fn prepaint(&mut self, bounds: Bounds<Pixels>, window: &mut Window, _cx: &mut App) {
         let text_style = window.text_style();
         self.line_height = text_style.line_height_in_pixels();
         self.align = text_style.text_align;
@@ -984,15 +1040,7 @@ impl Element for TextLeaf {
         );
     }
 
-    fn paint(
-        &mut self,
-        _: Option<&GlobalElementId>,
-        bounds: Bounds<Pixels>,
-        _: &mut (),
-        _: &mut (),
-        window: &mut Window,
-        cx: &mut App,
-    ) {
+    pub(super) fn paint(&mut self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
         let live_color = window.text_style().color;
         let mut y = bounds.origin.y;
         for line in &self.lines {
@@ -1006,121 +1054,6 @@ impl Element for TextLeaf {
                 cx,
             );
             y += line.size(self.line_height).height;
-        }
-    }
-}
-
-impl IntoElement for TextLeaf {
-    type Element = Self;
-    fn into_element(self) -> Self {
-        self
-    }
-}
-
-impl IntoElement for SharedString {
-    type Element = TextLeaf;
-    fn into_element(self) -> TextLeaf {
-        TextLeaf {
-            text: self,
-            measured: Rc::new(RefCell::new(None)),
-            lines: Vec::new(),
-            line_height: px(18.0),
-            align: super::graphics::dwrite::TextAlign::Left,
-        }
-    }
-}
-
-impl IntoElement for &'static str {
-    type Element = TextLeaf;
-    fn into_element(self) -> TextLeaf {
-        SharedString::new_static(self).into_element()
-    }
-}
-
-impl IntoElement for String {
-    type Element = TextLeaf;
-    fn into_element(self) -> TextLeaf {
-        SharedString::from(self).into_element()
-    }
-}
-
-// ---------------------------------------------------------------------------
-// `Entity<V: Render>` as an `IntoElement`
-// ---------------------------------------------------------------------------
-
-pub(crate) struct EntityElement<V: Render> {
-    entity: Entity<V>,
-    rendered: Option<AnyElement>,
-}
-
-impl<V: Render> Element for EntityElement<V> {
-    type RequestLayoutState = ();
-    type PrepaintState = ();
-
-    fn id(&self) -> Option<ElementId> {
-        Some(ElementId::from(self.entity.entity_id()))
-    }
-
-    fn request_layout(
-        &mut self,
-        _: Option<&GlobalElementId>,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> (LayoutId, ()) {
-        let mut elem = window.with_current_view(self.entity.entity_id(), |window| {
-            self.entity
-                .update(cx, |view, cx| view.render(window, cx).into_any_element())
-        });
-        let lid = elem.request_layout(window, cx);
-        self.rendered = Some(elem);
-        (lid, ())
-    }
-
-    fn prepaint(
-        &mut self,
-        _: Option<&GlobalElementId>,
-        _: Bounds<Pixels>,
-        _: &mut (),
-        window: &mut Window,
-        cx: &mut App,
-    ) {
-        if let Some(elem) = self.rendered.as_mut() {
-            window.with_current_view(self.entity.entity_id(), |window| {
-                elem.prepaint(window, cx);
-            });
-        }
-    }
-
-    fn paint(
-        &mut self,
-        _: Option<&GlobalElementId>,
-        _: Bounds<Pixels>,
-        _: &mut (),
-        _: &mut (),
-        window: &mut Window,
-        cx: &mut App,
-    ) {
-        if let Some(elem) = self.rendered.as_mut() {
-            window.with_current_view(self.entity.entity_id(), |window| {
-                elem.paint(window, cx);
-            });
-        }
-    }
-}
-
-impl<V: Render> IntoElement for EntityElement<V> {
-    type Element = Self;
-    fn into_element(self) -> Self {
-        self
-    }
-}
-
-impl<V: Render> IntoElement for Entity<V> {
-    type Element = EntityElement<V>;
-    fn into_element(self) -> EntityElement<V> {
-        EntityElement {
-            entity: self,
-            rendered: None,
         }
     }
 }

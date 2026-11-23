@@ -1,6 +1,7 @@
-//! Clean-room element traits, IDs, `AnyElement`, `canvas`, `deferred`, `anchored`,
-//! `ScrollHandle`, hitboxes, and IME `EntityInputHandler`.
+//! Lean concrete `UiNode` tree, `CustomWidget` escape hatch, `CanvasNode`, `DeferredNode`,
+//! `AnchoredNode`, `ScrollHandle`, hitboxes, and IME `EntityInputHandler`.
 
+use std::any::Any;
 use std::cell::Cell;
 use std::ops::Range;
 use std::rc::Rc;
@@ -8,10 +9,10 @@ use std::rc::Rc;
 use crate::layout::{AvailableSpace, LayoutId};
 
 use super::app::{App, Context};
+use super::div::{Div, TextNode};
 use super::entity::{Entity, EntityId};
-use super::geometry::{Bounds, Pixels, Point, Size, point, px};
-use super::style::{Style, StyleRefinement};
-use super::styled::Styled;
+use super::geometry::{Bounds, Length, Pixels, Point, Size, point, px, relative};
+use super::style::{Position, Style, StyleRefinement};
 use super::types::SharedString;
 use super::window::Window;
 
@@ -117,10 +118,7 @@ impl Hitbox {
     }
 
     pub(crate) fn contains(&self, p: &Point<Pixels>) -> bool {
-        self.bounds.contains(p)
-            && self
-                .content_mask
-                .is_none_or(|mask| mask.contains(p))
+        self.bounds.contains(p) && self.content_mask.is_none_or(|mask| mask.contains(p))
     }
 }
 
@@ -144,138 +142,327 @@ impl ScrollHandle {
     }
 }
 
-/// Core 3-phase UI element protocol (`request_layout` → `prepaint` → `paint`).
-pub(crate) trait Element: 'static + IntoElement {
-    type RequestLayoutState: 'static;
-    type PrepaintState: 'static;
-
-    fn id(&self) -> Option<ElementId>;
-
-    fn request_layout(
-        &mut self,
-        id: Option<&GlobalElementId>,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> (LayoutId, Self::RequestLayoutState);
-
-    fn prepaint(
-        &mut self,
-        id: Option<&GlobalElementId>,
-        bounds: Bounds<Pixels>,
-        request_layout: &mut Self::RequestLayoutState,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> Self::PrepaintState;
-
-    fn paint(
-        &mut self,
-        id: Option<&GlobalElementId>,
-        bounds: Bounds<Pixels>,
-        request_layout: &mut Self::RequestLayoutState,
-        prepaint: &mut Self::PrepaintState,
-        window: &mut Window,
-        cx: &mut App,
-    );
-}
-
-pub(crate) trait IntoElement: Sized {
-    type Element: Element;
-    fn into_element(self) -> Self::Element;
-    fn into_any_element(self) -> AnyElement {
-        AnyElement::new(self.into_element())
-    }
-}
-
+/// View trait implemented by root windows and nested views (`Jot`, `EditorState`, overlays).
 pub(crate) trait Render: 'static + Sized {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement;
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl Into<UiNode>;
 }
 
-pub(crate) trait ParentElement: Sized {
-    fn extend(&mut self, elements: impl IntoIterator<Item = AnyElement>);
-
-    fn child(mut self, child: impl IntoElement) -> Self {
-        self.extend(std::iter::once(child.into_any_element()));
-        self
+/// Escape-hatch trait for custom 3-phase widgets (`Editor`, `Scrollbar`, `tooltip::Host`).
+pub(crate) trait CustomWidget: 'static {
+    fn id(&self) -> Option<ElementId> {
+        None
     }
 
-    fn children(mut self, children: impl IntoIterator<Item = impl IntoElement>) -> Self {
-        self.extend(children.into_iter().map(IntoElement::into_any_element));
-        self
-    }
-}
-
-trait ElementObject {
     fn request_layout(&mut self, window: &mut Window, cx: &mut App) -> LayoutId;
-    fn prepaint(&mut self, window: &mut Window, cx: &mut App);
-    fn paint(&mut self, window: &mut Window, cx: &mut App);
-    fn layout_as_root(
-        &mut self,
-        available: Size<AvailableSpace>,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> Size<Pixels>;
-    fn prepaint_as_root(
-        &mut self,
-        origin: Point<Pixels>,
-        available: Size<AvailableSpace>,
-        window: &mut Window,
-        cx: &mut App,
-    );
+
+    fn prepaint(&mut self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App);
+
+    fn paint(&mut self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App);
 }
 
-struct DrawableElement<E: Element> {
-    element: E,
+pub(crate) struct WidgetNode {
+    widget: Box<dyn CustomWidget>,
     layout_id: Option<LayoutId>,
     bounds: Bounds<Pixels>,
-    request_state: Option<E::RequestLayoutState>,
-    prepaint_state: Option<E::PrepaintState>,
 }
 
-impl<E: Element> ElementObject for DrawableElement<E> {
-    fn request_layout(&mut self, window: &mut Window, cx: &mut App) -> LayoutId {
-        let (layout_id, state) = if let Some(id) = self.element.id() {
-            window.with_id(id, |gid, window| {
-                self.element.request_layout(Some(gid), window, cx)
-            })
-        } else {
-            self.element.request_layout(None, window, cx)
-        };
-        self.layout_id = Some(layout_id);
-        self.request_state = Some(state);
-        layout_id
+/// Custom prepaint/paint callback leaf (`canvas(...)`).
+type CanvasPrepaintFn = Box<dyn FnOnce(Bounds<Pixels>, &mut Window, &mut App) -> Box<dyn Any>>;
+type CanvasPaintFn = Box<dyn FnOnce(Bounds<Pixels>, Box<dyn Any>, &mut Window, &mut App)>;
+
+pub(crate) struct CanvasNode {
+    style: StyleRefinement,
+    prepaint: Option<CanvasPrepaintFn>,
+    paint: Option<CanvasPaintFn>,
+    layout_id: Option<LayoutId>,
+    bounds: Bounds<Pixels>,
+    state: Option<Box<dyn Any>>,
+}
+
+pub(crate) fn canvas<T: 'static>(
+    prepaint: impl FnOnce(Bounds<Pixels>, &mut Window, &mut App) -> T + 'static,
+    paint: impl FnOnce(Bounds<Pixels>, T, &mut Window, &mut App) + 'static,
+) -> CanvasNode {
+    CanvasNode {
+        style: StyleRefinement::default(),
+        prepaint: Some(Box::new(move |bounds, window, cx| {
+            Box::new(prepaint(bounds, window, cx))
+        })),
+        paint: Some(Box::new(move |bounds, boxed, window, cx| {
+            let state = *boxed
+                .downcast::<T>()
+                .expect("CanvasNode prepaint state type mismatch");
+            paint(bounds, state, window, cx);
+        })),
+        layout_id: None,
+        bounds: Bounds::default(),
+        state: None,
+    }
+}
+
+impl CanvasNode {
+    pub(crate) fn absolute(mut self) -> Self {
+        self.style.position = Some(Position::Absolute);
+        self
     }
 
-    fn prepaint(&mut self, window: &mut Window, cx: &mut App) {
-        let layout_id = self.layout_id.expect("prepaint called before request_layout");
-        let bounds = window.layout_bounds(layout_id);
-        self.bounds = bounds;
-        let req = self.request_state.as_mut().unwrap();
-        let pre = if let Some(id) = self.element.id() {
-            #[cfg(test)]
-            window.record_test_element_bounds(id.clone(), bounds);
-            window.with_id(id, |gid, window| {
-                self.element.prepaint(Some(gid), bounds, req, window, cx)
-            })
-        } else {
-            self.element.prepaint(None, bounds, req, window, cx)
-        };
-        self.prepaint_state = Some(pre);
+    pub(crate) fn size_full(mut self) -> Self {
+        self.style.size.width = Some(Length::Definite(relative(1.0)));
+        self.style.size.height = Some(Length::Definite(relative(1.0)));
+        self
     }
 
-    fn paint(&mut self, window: &mut Window, cx: &mut App) {
-        let req = self.request_state.as_mut().unwrap();
-        let pre = self.prepaint_state.as_mut().unwrap();
-        if let Some(id) = self.element.id() {
-            window.with_id(id, |gid, window| {
-                self.element
-                    .paint(Some(gid), self.bounds, req, pre, window, cx);
-            });
-        } else {
-            self.element.paint(None, self.bounds, req, pre, window, cx);
+    pub(crate) fn flex_1(mut self) -> Self {
+        self.style.flex_grow = Some(1.0);
+        self.style.flex_shrink = Some(1.0);
+        self.style.flex_basis = Some(Length::Definite(relative(0.0)));
+        self
+    }
+
+    pub(crate) fn min_w(mut self, width: impl Into<Length>) -> Self {
+        self.style.min_size.width = Some(width.into());
+        self
+    }
+
+    pub(crate) fn h(mut self, height: impl Into<Length>) -> Self {
+        self.style.size.height = Some(height.into());
+        self
+    }
+}
+
+/// Defers prepaint & paint of `child` to run after normal content in ascending `priority` order.
+pub(crate) struct DeferredNode {
+    priority: usize,
+    child: Option<Box<UiNode>>,
+}
+
+pub(crate) fn deferred(child: impl Into<UiNode>) -> DeferredNode {
+    DeferredNode {
+        priority: 0,
+        child: Some(Box::new(child.into())),
+    }
+}
+
+impl DeferredNode {
+    pub(crate) fn with_priority(mut self, priority: usize) -> Self {
+        self.priority = priority;
+        self
+    }
+}
+
+/// Positions a popup child at an explicit or layout-derived anchor, clamped to the viewport.
+pub(crate) struct AnchoredNode {
+    anchor_position: Option<Point<Pixels>>,
+    child_layout_id: Option<LayoutId>,
+    layout_id: Option<LayoutId>,
+    child: Option<Box<UiNode>>,
+}
+
+pub(crate) fn anchored() -> AnchoredNode {
+    AnchoredNode {
+        anchor_position: None,
+        child_layout_id: None,
+        layout_id: None,
+        child: None,
+    }
+}
+
+impl AnchoredNode {
+    pub(crate) fn position(mut self, pos: Point<Pixels>) -> Self {
+        self.anchor_position = Some(pos);
+        self
+    }
+
+    pub(crate) fn child(mut self, child: impl Into<UiNode>) -> Self {
+        self.child = Some(Box::new(child.into()));
+        self
+    }
+}
+
+/// Concrete retained-per-frame UI tree node (replaces `Element` / `IntoElement` / `AnyElement`).
+pub(crate) enum UiNode {
+    Div(Box<Div>),
+    Text(TextNode),
+    Canvas(Box<CanvasNode>),
+    Deferred(DeferredNode),
+    Anchored(AnchoredNode),
+    Widget(WidgetNode),
+}
+
+impl UiNode {
+    pub(crate) fn widget(widget: impl CustomWidget) -> Self {
+        Self::Widget(WidgetNode {
+            widget: Box::new(widget),
+            layout_id: None,
+            bounds: Bounds::default(),
+        })
+    }
+
+    pub(crate) fn request_layout(&mut self, window: &mut Window, cx: &mut App) -> LayoutId {
+        match self {
+            Self::Div(div) => {
+                let lid = if let Some(id) = div.element_id() {
+                    window.with_id(id, |_, window| div.request_layout(window, cx))
+                } else {
+                    div.request_layout(window, cx)
+                };
+                div.set_layout_id(lid);
+                lid
+            }
+            Self::Text(text) => {
+                let lid = text.request_layout(window, cx);
+                text.set_layout_id(lid);
+                lid
+            }
+            Self::Canvas(canvas) => {
+                let mut style = Style::default();
+                style.refine(&canvas.style);
+                let lid = window.request_layout(style, [], cx);
+                canvas.layout_id = Some(lid);
+                lid
+            }
+            Self::Deferred(def) => def
+                .child
+                .as_mut()
+                .expect("deferred child missing")
+                .request_layout(window, cx),
+            Self::Anchored(anc) => {
+                let child_lid = anc.child.as_mut().map(|c| c.request_layout(window, cx));
+                let style = Style {
+                    position: Position::Absolute,
+                    display: super::style::Display::Flex,
+                    ..Style::default()
+                };
+                let lid = window.request_layout(style, child_lid, cx);
+                anc.child_layout_id = child_lid;
+                anc.layout_id = Some(lid);
+                lid
+            }
+            Self::Widget(node) => {
+                let lid = if let Some(id) = node.widget.id() {
+                    window.with_id(id, |_, window| node.widget.request_layout(window, cx))
+                } else {
+                    node.widget.request_layout(window, cx)
+                };
+                node.layout_id = Some(lid);
+                lid
+            }
         }
     }
 
-    fn layout_as_root(
+    pub(crate) fn prepaint(&mut self, window: &mut Window, cx: &mut App) {
+        match self {
+            Self::Div(div) => {
+                let lid = div.layout_id().expect("prepaint called before request_layout");
+                let bounds = window.layout_bounds(lid);
+                div.set_bounds(bounds);
+                if let Some(id) = div.element_id() {
+                    #[cfg(test)]
+                    window.record_test_element_bounds(id.clone(), bounds);
+                    window.with_id(id, |gid, window| div.prepaint(Some(gid), bounds, window, cx));
+                } else {
+                    div.prepaint(None, bounds, window, cx);
+                }
+            }
+            Self::Text(text) => {
+                let lid = text.layout_id().expect("prepaint called before request_layout");
+                let bounds = window.layout_bounds(lid);
+                text.set_bounds(bounds);
+                text.prepaint(bounds, window, cx);
+            }
+            Self::Canvas(canvas) => {
+                let lid = canvas
+                    .layout_id
+                    .expect("prepaint called before request_layout");
+                let bounds = window.layout_bounds(lid);
+                canvas.bounds = bounds;
+                canvas.state = canvas.prepaint.take().map(|f| f(bounds, window, cx));
+            }
+            Self::Deferred(def) => {
+                if let Some(child) = def.child.take() {
+                    window.defer_draw(*child, def.priority);
+                }
+            }
+            Self::Anchored(anc) => {
+                let lid = anc
+                    .layout_id
+                    .expect("prepaint called before request_layout");
+                let bounds = window.layout_bounds(lid);
+                let (Some(child), Some(cid)) = (anc.child.as_mut(), anc.child_layout_id) else {
+                    return;
+                };
+                let child_bounds = window.layout_bounds(cid);
+                let viewport = window.viewport_size();
+                let desired = anc.anchor_position.unwrap_or(bounds.origin);
+                let clamped = point(
+                    desired
+                        .x
+                        .min((viewport.width - child_bounds.size.width).max(px(0.0)))
+                        .max(px(0.0)),
+                    desired
+                        .y
+                        .min((viewport.height - child_bounds.size.height).max(px(0.0)))
+                        .max(px(0.0)),
+                );
+                let offset = clamped - child_bounds.origin;
+                window.with_element_offset(offset, |window| {
+                    child.prepaint(window, cx);
+                });
+            }
+            Self::Widget(node) => {
+                let lid = node
+                    .layout_id
+                    .expect("prepaint called before request_layout");
+                let bounds = window.layout_bounds(lid);
+                node.bounds = bounds;
+                if let Some(id) = node.widget.id() {
+                    #[cfg(test)]
+                    window.record_test_element_bounds(id.clone(), bounds);
+                    window.with_id(id, |_, window| node.widget.prepaint(bounds, window, cx));
+                } else {
+                    node.widget.prepaint(bounds, window, cx);
+                }
+            }
+        }
+    }
+
+    pub(crate) fn paint(&mut self, window: &mut Window, cx: &mut App) {
+        match self {
+            Self::Div(div) => {
+                let bounds = div.bounds();
+                if let Some(id) = div.element_id() {
+                    window.with_id(id, |gid, window| div.paint(Some(gid), bounds, window, cx));
+                } else {
+                    div.paint(None, bounds, window, cx);
+                }
+            }
+            Self::Text(text) => {
+                let bounds = text.bounds();
+                text.paint(bounds, window, cx);
+            }
+            Self::Canvas(canvas) => {
+                if let (Some(f), Some(state)) = (canvas.paint.take(), canvas.state.take()) {
+                    f(canvas.bounds, state, window, cx);
+                }
+            }
+            Self::Deferred(_) => {}
+            Self::Anchored(anc) => {
+                if let Some(child) = anc.child.as_mut() {
+                    child.paint(window, cx);
+                }
+            }
+            Self::Widget(node) => {
+                let bounds = node.bounds;
+                if let Some(id) = node.widget.id() {
+                    window.with_id(id, |_, window| node.widget.paint(bounds, window, cx));
+                } else {
+                    node.widget.paint(bounds, window, cx);
+                }
+            }
+        }
+    }
+
+    pub(crate) fn layout_as_root(
         &mut self,
         available: Size<AvailableSpace>,
         window: &mut Window,
@@ -286,7 +473,7 @@ impl<E: Element> ElementObject for DrawableElement<E> {
         window.layout_bounds(lid).size
     }
 
-    fn prepaint_as_root(
+    pub(crate) fn prepaint_as_root(
         &mut self,
         origin: Point<Pixels>,
         available: Size<AvailableSpace>,
@@ -301,100 +488,105 @@ impl<E: Element> ElementObject for DrawableElement<E> {
     }
 }
 
-/// Boxed type-erased UI element (100% safe Rust; no unsafe element arena).
-pub(crate) struct AnyElement(Box<dyn ElementObject>);
-
-impl AnyElement {
-    pub(crate) fn new<E: Element>(element: E) -> Self {
-        Self(Box::new(DrawableElement {
-            element,
-            layout_id: None,
-            bounds: Bounds::default(),
-            request_state: None,
-            prepaint_state: None,
-        }))
-    }
-
-    pub(crate) fn request_layout(&mut self, window: &mut Window, cx: &mut App) -> LayoutId {
-        self.0.request_layout(window, cx)
-    }
-
-    pub(crate) fn prepaint(&mut self, window: &mut Window, cx: &mut App) {
-        self.0.prepaint(window, cx);
-    }
-
-    pub(crate) fn paint(&mut self, window: &mut Window, cx: &mut App) {
-        self.0.paint(window, cx);
-    }
-
-    pub(crate) fn layout_as_root(
-        &mut self,
-        available: Size<AvailableSpace>,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> Size<Pixels> {
-        self.0.layout_as_root(available, window, cx)
-    }
-
-    pub(crate) fn prepaint_as_root(
-        &mut self,
-        origin: Point<Pixels>,
-        available: Size<AvailableSpace>,
-        window: &mut Window,
-        cx: &mut App,
-    ) {
-        self.0.prepaint_as_root(origin, available, window, cx);
+impl From<Div> for UiNode {
+    #[inline]
+    fn from(div: Div) -> Self {
+        Self::Div(Box::new(div))
     }
 }
 
-impl Element for AnyElement {
-    type RequestLayoutState = ();
-    type PrepaintState = ();
+impl From<TextNode> for UiNode {
+    #[inline]
+    fn from(text: TextNode) -> Self {
+        Self::Text(text)
+    }
+}
 
+impl From<SharedString> for UiNode {
+    #[inline]
+    fn from(text: SharedString) -> Self {
+        Self::Text(TextNode::new(text))
+    }
+}
+
+impl From<&'static str> for UiNode {
+    #[inline]
+    fn from(text: &'static str) -> Self {
+        Self::Text(TextNode::new(SharedString::new_static(text)))
+    }
+}
+
+impl From<String> for UiNode {
+    #[inline]
+    fn from(text: String) -> Self {
+        Self::Text(TextNode::new(SharedString::from(text)))
+    }
+}
+
+impl From<CanvasNode> for UiNode {
+    #[inline]
+    fn from(canvas: CanvasNode) -> Self {
+        Self::Canvas(Box::new(canvas))
+    }
+}
+
+impl From<DeferredNode> for UiNode {
+    #[inline]
+    fn from(def: DeferredNode) -> Self {
+        Self::Deferred(def)
+    }
+}
+
+impl From<AnchoredNode> for UiNode {
+    #[inline]
+    fn from(anc: AnchoredNode) -> Self {
+        Self::Anchored(anc)
+    }
+}
+
+struct EntityWidget<V: Render> {
+    entity: Entity<V>,
+    rendered: Option<UiNode>,
+}
+
+impl<V: Render> CustomWidget for EntityWidget<V> {
     fn id(&self) -> Option<ElementId> {
-        None
+        Some(ElementId::from(self.entity.entity_id()))
     }
 
-    fn request_layout(
-        &mut self,
-        _: Option<&GlobalElementId>,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> (LayoutId, ()) {
-        (self.0.request_layout(window, cx), ())
+    fn request_layout(&mut self, window: &mut Window, cx: &mut App) -> LayoutId {
+        let mut node = window.with_current_view(self.entity.entity_id(), |window| {
+            self.entity
+                .update(cx, |view, cx| view.render(window, cx).into())
+        });
+        let lid = node.request_layout(window, cx);
+        self.rendered = Some(node);
+        lid
     }
 
-    fn prepaint(
-        &mut self,
-        _: Option<&GlobalElementId>,
-        _: Bounds<Pixels>,
-        _: &mut (),
-        window: &mut Window,
-        cx: &mut App,
-    ) {
-        self.0.prepaint(window, cx);
+    fn prepaint(&mut self, _: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
+        if let Some(node) = self.rendered.as_mut() {
+            window.with_current_view(self.entity.entity_id(), |window| {
+                node.prepaint(window, cx);
+            });
+        }
     }
 
-    fn paint(
-        &mut self,
-        _: Option<&GlobalElementId>,
-        _: Bounds<Pixels>,
-        _: &mut (),
-        _: &mut (),
-        window: &mut Window,
-        cx: &mut App,
-    ) {
-        self.0.paint(window, cx);
+    fn paint(&mut self, _: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
+        if let Some(node) = self.rendered.as_mut() {
+            window.with_current_view(self.entity.entity_id(), |window| {
+                node.paint(window, cx);
+            });
+        }
     }
 }
 
-impl IntoElement for AnyElement {
-    type Element = Self;
-    fn into_element(self) -> Self {
-        self
-    }
-    fn into_any_element(self) -> AnyElement {
-        self
+impl<V: Render> From<Entity<V>> for UiNode {
+    fn from(entity: Entity<V>) -> Self {
+        Self::widget(EntityWidget {
+            entity,
+            rendered: None,
+        })
     }
 }
 
@@ -521,264 +713,8 @@ impl<V: EntityInputHandler> ErasedInputHandler for ElementInputHandler<V> {
         cx: &mut App,
     ) -> Option<Bounds<Pixels>> {
         let bounds = self.bounds;
-        self.entity
-            .update(cx, |this, cx| this.bounds_for_range(range_utf16, bounds, window, cx))
-    }
-}
-
-// ---------------------------------------------------------------------------
-// `canvas(...)`, `deferred(...)`, `anchored()`
-// ---------------------------------------------------------------------------
-
-type CanvasPrepaint<T> = Box<dyn FnOnce(Bounds<Pixels>, &mut Window, &mut App) -> T>;
-type CanvasPaint<T> = Box<dyn FnOnce(Bounds<Pixels>, T, &mut Window, &mut App)>;
-
-pub(crate) struct Canvas<T: 'static> {
-    prepaint: Option<CanvasPrepaint<T>>,
-    paint: Option<CanvasPaint<T>>,
-    style: StyleRefinement,
-}
-
-pub(crate) fn canvas<T: 'static>(
-    prepaint: impl FnOnce(Bounds<Pixels>, &mut Window, &mut App) -> T + 'static,
-    paint: impl FnOnce(Bounds<Pixels>, T, &mut Window, &mut App) + 'static,
-) -> Canvas<T> {
-    Canvas {
-        prepaint: Some(Box::new(prepaint)),
-        paint: Some(Box::new(paint)),
-        style: StyleRefinement::default(),
-    }
-}
-
-impl<T: 'static> Styled for Canvas<T> {
-    fn style(&mut self) -> &mut StyleRefinement {
-        &mut self.style
-    }
-}
-
-impl<T: 'static> Element for Canvas<T> {
-    type RequestLayoutState = ();
-    type PrepaintState = Option<T>;
-
-    fn id(&self) -> Option<ElementId> {
-        None
-    }
-
-    fn request_layout(
-        &mut self,
-        _: Option<&GlobalElementId>,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> (LayoutId, ()) {
-        let mut style = Style::default();
-        style.refine(&self.style);
-        (window.request_layout(style, [], cx), ())
-    }
-
-    fn prepaint(
-        &mut self,
-        _: Option<&GlobalElementId>,
-        bounds: Bounds<Pixels>,
-        _: &mut (),
-        window: &mut Window,
-        cx: &mut App,
-    ) -> Option<T> {
-        self.prepaint.take().map(|f| f(bounds, window, cx))
-    }
-
-    fn paint(
-        &mut self,
-        _: Option<&GlobalElementId>,
-        bounds: Bounds<Pixels>,
-        _: &mut (),
-        prepaint: &mut Option<T>,
-        window: &mut Window,
-        cx: &mut App,
-    ) {
-        if let (Some(f), Some(state)) = (self.paint.take(), prepaint.take()) {
-            f(bounds, state, window, cx);
-        }
-    }
-}
-
-impl<T: 'static> IntoElement for Canvas<T> {
-    type Element = Self;
-    fn into_element(self) -> Self {
-        self
-    }
-}
-
-/// Defers prepaint & paint of `child` to run after normal content in ascending `priority` order.
-pub(crate) struct Deferred {
-    child: Option<AnyElement>,
-    priority: usize,
-}
-
-pub(crate) fn deferred(child: impl IntoElement) -> Deferred {
-    Deferred {
-        child: Some(child.into_any_element()),
-        priority: 0,
-    }
-}
-
-impl Deferred {
-    pub(crate) fn with_priority(mut self, priority: usize) -> Self {
-        self.priority = priority;
-        self
-    }
-}
-
-impl Element for Deferred {
-    type RequestLayoutState = ();
-    type PrepaintState = ();
-
-    fn id(&self) -> Option<ElementId> {
-        None
-    }
-
-    fn request_layout(
-        &mut self,
-        _: Option<&GlobalElementId>,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> (LayoutId, ()) {
-        let lid = self
-            .child
-            .as_mut()
-            .expect("deferred child missing")
-            .request_layout(window, cx);
-        (lid, ())
-    }
-
-    fn prepaint(
-        &mut self,
-        _: Option<&GlobalElementId>,
-        _: Bounds<Pixels>,
-        _: &mut (),
-        window: &mut Window,
-        _cx: &mut App,
-    ) {
-        if let Some(child) = self.child.take() {
-            window.defer_draw(child, self.priority);
-        }
-    }
-
-    fn paint(
-        &mut self,
-        _: Option<&GlobalElementId>,
-        _: Bounds<Pixels>,
-        _: &mut (),
-        _: &mut (),
-        _: &mut Window,
-        _: &mut App,
-    ) {
-    }
-}
-
-impl IntoElement for Deferred {
-    type Element = Self;
-    fn into_element(self) -> Self {
-        self
-    }
-}
-
-/// Positions a popup child at an explicit or layout-derived anchor, clamped to the viewport.
-pub(crate) struct Anchored {
-    child: Option<AnyElement>,
-    anchor_position: Option<Point<Pixels>>,
-}
-
-pub(crate) fn anchored() -> Anchored {
-    Anchored {
-        child: None,
-        anchor_position: None,
-    }
-}
-
-impl Anchored {
-    pub(crate) fn position(mut self, pos: Point<Pixels>) -> Self {
-        self.anchor_position = Some(pos);
-        self
-    }
-
-    pub(crate) fn child(mut self, child: impl IntoElement) -> Self {
-        self.child = Some(child.into_any_element());
-        self
-    }
-}
-
-impl Element for Anchored {
-    type RequestLayoutState = Option<LayoutId>;
-    type PrepaintState = ();
-
-    fn id(&self) -> Option<ElementId> {
-        None
-    }
-
-    fn request_layout(
-        &mut self,
-        _: Option<&GlobalElementId>,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> (LayoutId, Option<LayoutId>) {
-        let child_lid = self.child.as_mut().map(|c| c.request_layout(window, cx));
-        let style = Style {
-            position: super::style::Position::Absolute,
-            display: super::style::Display::Flex,
-            ..Style::default()
-        };
-        let lid = window.request_layout(style, child_lid, cx);
-        (lid, child_lid)
-    }
-
-    fn prepaint(
-        &mut self,
-        _: Option<&GlobalElementId>,
-        bounds: Bounds<Pixels>,
-        child_lid: &mut Option<LayoutId>,
-        window: &mut Window,
-        cx: &mut App,
-    ) {
-        let (Some(child), Some(cid)) = (self.child.as_mut(), *child_lid) else {
-            return;
-        };
-        let child_bounds = window.layout_bounds(cid);
-        let viewport = window.viewport_size();
-        let desired = self.anchor_position.unwrap_or(bounds.origin);
-        let clamped = point(
-            desired
-                .x
-                .min((viewport.width - child_bounds.size.width).max(px(0.0)))
-                .max(px(0.0)),
-            desired
-                .y
-                .min((viewport.height - child_bounds.size.height).max(px(0.0)))
-                .max(px(0.0)),
-        );
-        let offset = clamped - child_bounds.origin;
-        window.with_element_offset(offset, |window| {
-            child.prepaint(window, cx);
-        });
-    }
-
-    fn paint(
-        &mut self,
-        _: Option<&GlobalElementId>,
-        _: Bounds<Pixels>,
-        _: &mut Option<LayoutId>,
-        _: &mut (),
-        window: &mut Window,
-        cx: &mut App,
-    ) {
-        if let Some(child) = self.child.as_mut() {
-            child.paint(window, cx);
-        }
-    }
-}
-
-impl IntoElement for Anchored {
-    type Element = Self;
-    fn into_element(self) -> Self {
-        self
+        self.entity.update(cx, |this, cx| {
+            this.bounds_for_range(range_utf16, bounds, window, cx)
+        })
     }
 }

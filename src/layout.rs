@@ -11,14 +11,34 @@
 use std::fmt::Debug;
 
 use crate::ui::{
-    AlignItems, AlignSelf, App, Bounds, DefiniteLength, Display, Edges,
-    FlexDirection, JustifyContent, Length, Overflow, Pixels, Point, Position, Size, Style, Window,
-    size,
-    util::{
-        ceil_to_device_pixel, round_half_toward_zero, round_stroke_to_device_pixel,
-        round_to_device_pixel,
-    },
+    AlignItems, AlignSelf, App, Bounds, DefiniteLength, Display, Edges, FlexDirection,
+    JustifyContent, Length, Overflow, Pixels, Point, Position, Size, Style, Window, size,
 };
+
+/// Rounds to the nearest integer with exact `.5` ties rounded toward zero.
+#[inline]
+fn round_half_toward_zero(value: f32) -> f32 {
+    (value.abs() - 0.5).ceil().copysign(value)
+}
+
+#[inline]
+fn round_to_device_pixel(logical: f32, scale_factor: f32) -> f32 {
+    round_half_toward_zero(logical * scale_factor)
+}
+
+#[inline]
+fn round_stroke_to_device_pixel(logical: f32, scale_factor: f32) -> f32 {
+    if logical == 0.0 {
+        0.0
+    } else {
+        round_to_device_pixel(logical.max(0.0), scale_factor).max(1.0)
+    }
+}
+
+#[inline]
+fn ceil_to_device_pixel(logical: f32, scale_factor: f32) -> f32 {
+    (logical * scale_factor).ceil()
+}
 
 type MeasureFn =
     dyn FnMut(Size<Option<Pixels>>, Size<AvailableSpace>, &mut Window, &mut App) -> Size<Pixels>;
@@ -1740,12 +1760,12 @@ fn snap_measured_size_to_device_pixels(size: Size<Pixels>, scale_factor: f32) ->
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui::{Styled as _, StyleRefinement, px, relative};
+    use crate::ui::{StyleRefinement, px, relative};
 
     impl LayoutEngine {
         fn req(&mut self, refine: StyleRefinement, children: &[LayoutId], scale: f32) -> LayoutId {
             let mut style = Style::default();
-            crate::ui::Refineable::refine(&mut style, &refine);
+            style.refine(&refine);
             self.request_layout(style, scale, children)
         }
 
@@ -1756,7 +1776,7 @@ mod tests {
             f: impl FnMut(Size<Option<Pixels>>, Size<AvailableSpace>) -> Size<Pixels> + 'static,
         ) -> LayoutId {
             let mut style = Style::default();
-            crate::ui::Refineable::refine(&mut style, &refine);
+            style.refine(&refine);
             let id = LayoutId(self.nodes.len() as u32);
             self.nodes.push(Node {
                 style: NodeStyle::from_style(&style, scale),

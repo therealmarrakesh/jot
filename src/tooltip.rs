@@ -65,7 +65,7 @@ struct TooltipView {
 }
 
 impl Render for TooltipView {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl Into<UiNode> {
         let p = palette(cx);
         let opacity = animate(
             "tooltip-fade",
@@ -199,17 +199,6 @@ pub(crate) struct Tooltips {
     hiding: Option<Task<()>>,
 }
 
-pub(crate) fn owner(
-    id: impl Into<ElementId>,
-    text: impl Into<SharedString>,
-    child: impl IntoElement,
-) -> measure::Measured {
-    let (id, text) = (id.into(), text.into());
-    measure::measured(child, move |bounds, window, cx| {
-        register(id, text, bounds, window, cx)
-    })
-}
-
 pub(crate) fn register(
     id: ElementId,
     text: SharedString,
@@ -229,40 +218,21 @@ pub(crate) fn register(
 }
 
 pub(crate) struct Host {
-    child: AnyElement,
+    child: UiNode,
 }
 
-pub(crate) fn host(child: impl IntoElement) -> Host {
+pub(crate) fn host(child: impl Into<UiNode>) -> Host {
     Host {
-        child: child.into_any_element(),
+        child: child.into(),
     }
 }
 
-impl Element for Host {
-    type RequestLayoutState = ();
-    type PrepaintState = ();
-
-    fn id(&self) -> Option<ElementId> {
-        None
+impl CustomWidget for Host {
+    fn request_layout(&mut self, window: &mut Window, cx: &mut App) -> LayoutId {
+        self.child.request_layout(window, cx)
     }
 
-    fn request_layout(
-        &mut self,
-        _: Option<&GlobalElementId>,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> (LayoutId, ()) {
-        (self.child.request_layout(window, cx), ())
-    }
-
-    fn prepaint(
-        &mut self,
-        _: Option<&GlobalElementId>,
-        _: Bounds<Pixels>,
-        _: &mut (),
-        window: &mut Window,
-        cx: &mut App,
-    ) {
+    fn prepaint(&mut self, _: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
         cx.shared
             .tooltips
             .owners
@@ -270,15 +240,7 @@ impl Element for Host {
         self.child.prepaint(window, cx);
     }
 
-    fn paint(
-        &mut self,
-        _: Option<&GlobalElementId>,
-        _: Bounds<Pixels>,
-        _: &mut (),
-        _: &mut (),
-        window: &mut Window,
-        cx: &mut App,
-    ) {
+    fn paint(&mut self, _: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
         window.on_mouse_event(|event: &MouseMoveEvent, phase, window, cx| {
             if phase == DispatchPhase::Capture {
                 cx.shared.tooltips.pressed = event.pressed_button.is_some();
@@ -307,11 +269,9 @@ impl Element for Host {
     }
 }
 
-impl IntoElement for Host {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
-        self
+impl From<Host> for UiNode {
+    fn from(host: Host) -> Self {
+        UiNode::widget(host)
     }
 }
 

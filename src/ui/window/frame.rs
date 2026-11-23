@@ -10,8 +10,8 @@ use crate::layout::{AvailableSpace, LayoutEngine, LayoutId};
 use crate::ui::app::{App, Context};
 use crate::ui::color::Rgba;
 use crate::ui::element::{
-    AnyElement, ContentMask, DispatchPhase, ElementId, ElementInputHandler, EntityInputHandler,
-    ErasedInputHandler, GlobalElementId, Hitbox, HitboxBehavior, HitboxId,
+    ContentMask, DispatchPhase, ElementId, ElementInputHandler, EntityInputHandler,
+    ErasedInputHandler, GlobalElementId, Hitbox, HitboxBehavior, HitboxId, UiNode,
 };
 use crate::ui::entity::{Entity, EntityId};
 use crate::ui::focus::{FocusHandle, FocusId};
@@ -46,7 +46,7 @@ pub(super) struct DeferredDraw {
     pub(super) element_offset: Point<Pixels>,
     pub(super) key_context_stack: Vec<KeyContext>,
     pub(super) focus_stack: Vec<FocusId>,
-    pub(super) element: AnyElement,
+    pub(super) element: UiNode,
 }
 
 pub(super) struct FocusNode {
@@ -485,7 +485,7 @@ impl Window {
             .paint_text_layout(origin, layout, default_color, run_colors);
     }
 
-    pub(crate) fn defer_draw(&mut self, element: AnyElement, priority: usize) {
+    pub(crate) fn defer_draw(&mut self, element: UiNode, priority: usize) {
         let order = self.deferred_draws.len();
         self.deferred_draws.push(DeferredDraw {
             priority,

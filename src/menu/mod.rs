@@ -55,9 +55,9 @@ impl MenuHitAreas {
         self.0.set(areas);
     }
 
-    fn record(&self, ix: usize, child: impl IntoElement) -> measure::Measured {
+    fn record(&self, ix: usize, child: Div) -> Div {
         let areas = self.0.clone();
-        measure::measured(child, move |bounds, _, _| {
+        child.on_bounds(move |bounds, _, _| {
             let mut all = areas.get();
             all[ix] = bounds;
             areas.set(all);

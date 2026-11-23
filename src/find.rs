@@ -674,7 +674,7 @@ impl Jot {
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Option<impl IntoElement + use<>> {
+    ) -> Option<Div> {
         let p = palette(cx);
         let scale = self.find.sample(window, cx)?;
         let (width, height) = self.find.card_size(window);
@@ -825,7 +825,7 @@ impl Jot {
                 )
                 .on_click(cx.listener(|this, _, window, cx| this.find_step(false, window, cx))),
             )
-            .child(measure::measured(
+            .child(
                 icon_button(
                     p,
                     "find-options",
@@ -834,9 +834,9 @@ impl Jot {
                     ICON_SIZE,
                     s,
                 )
-                .on_click(cx.listener(|this, _, window, cx| this.open_find_options(window, cx))),
-                move |bounds, _, _| options_bounds.set(bounds),
-            ))
+                .on_click(cx.listener(|this, _, window, cx| this.open_find_options(window, cx)))
+                .on_bounds(move |bounds, _, _| options_bounds.set(bounds)),
+            )
             .child(
                 icon_button(
                     p,
@@ -946,7 +946,7 @@ fn icon_button(
     glyph: &'static str,
     size: f32,
     s: f32,
-) -> brush::BrushTransition {
+) -> Div {
     let u = |v: f32| px(v * s);
     field::icon_button(
         p,

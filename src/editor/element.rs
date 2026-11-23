@@ -1,8 +1,8 @@
 use crate::ui::{
-    AnyElement, App, Bounds, ContentMask, Corners, Edges, Element, ElementId, ElementInputHandler,
-    Entity, GlobalElementId, Half, HitboxBehavior, IntoElement, LayoutId, MouseButton,
-    MouseMoveEvent, MouseUpEvent, Pixels, Point, Position, SharedString, Size, Style, TextRun,
-    UnderlineStyle, Window, fill, point, px, relative, rgb, rgba, size,
+    App, Bounds, ContentMask, Corners, CustomWidget, Edges, ElementId, ElementInputHandler, Entity,
+    Half, HitboxBehavior, LayoutId, MouseButton, MouseMoveEvent, MouseUpEvent, Pixels, Point,
+    Position, SharedString, Size, Style, TextRun, UiNode, UnderlineStyle, Window, fill, point, px,
+    relative, rgb, rgba, size,
 };
 use ropey::Rope;
 use std::{borrow::Cow, ops::Range, rc::Rc};
@@ -79,36 +79,30 @@ impl EditorScrollbarLayout {
 
 pub(super) struct EditorScrollbar {
     state: Entity<EditorState>,
+    scrollbar: Option<UiNode>,
 }
 
 impl EditorScrollbar {
     pub(super) fn new(state: Entity<EditorState>) -> Self {
-        Self { state }
+        Self {
+            state,
+            scrollbar: None,
+        }
     }
 }
 
-impl IntoElement for EditorScrollbar {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
-        self
+impl From<EditorScrollbar> for UiNode {
+    fn from(scrollbar: EditorScrollbar) -> Self {
+        UiNode::widget(scrollbar)
     }
 }
 
-impl Element for EditorScrollbar {
-    type RequestLayoutState = ();
-    type PrepaintState = Option<AnyElement>;
-
+impl CustomWidget for EditorScrollbar {
     fn id(&self) -> Option<ElementId> {
         Some("editor-scrollbar".into())
     }
 
-    fn request_layout(
-        &mut self,
-        _: Option<&GlobalElementId>,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> (LayoutId, Self::RequestLayoutState) {
+    fn request_layout(&mut self, window: &mut Window, cx: &mut App) -> LayoutId {
         let style = Style {
             position: Position::Absolute,
             size: Size {
@@ -117,32 +111,28 @@ impl Element for EditorScrollbar {
             },
             ..Style::default()
         };
-        (window.request_layout(style, [], cx), ())
+        window.request_layout(style, [], cx)
     }
 
-    fn prepaint(
-        &mut self,
-        _: Option<&GlobalElementId>,
-        _: Bounds<Pixels>,
-        _: &mut Self::RequestLayoutState,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> Self::PrepaintState {
+    fn prepaint(&mut self, _: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
         let state = self.state.read(cx);
-        let snapshot = state.editor_scrollbar_snapshot?;
+        let Some(snapshot) = state.editor_scrollbar_snapshot else {
+            self.scrollbar = None;
+            return;
+        };
         let scroll_handle = state.scroll_handle.clone();
 
         if scroll_handle.offset() != snapshot.cursor_scroll_offset {
             scroll_handle.set_offset(snapshot.cursor_scroll_offset);
         }
 
-        let mut scrollbar = Scrollbar::new(
+        let mut scrollbar: UiNode = Scrollbar::new(
             scroll_handle,
             snapshot.layout.bounds,
             snapshot.layout.scroll_size,
             !snapshot.soft_wrap,
         )
-        .into_any_element();
+        .into();
 
         scrollbar.prepaint_as_root(
             snapshot.layout.bounds.origin,
@@ -150,19 +140,11 @@ impl Element for EditorScrollbar {
             window,
             cx,
         );
-        Some(scrollbar)
+        self.scrollbar = Some(scrollbar);
     }
 
-    fn paint(
-        &mut self,
-        _: Option<&GlobalElementId>,
-        _: Bounds<Pixels>,
-        _: &mut Self::RequestLayoutState,
-        prepaint: &mut Self::PrepaintState,
-        window: &mut Window,
-        cx: &mut App,
-    ) {
-        if let Some(scrollbar) = prepaint.as_mut() {
+    fn paint(&mut self, _: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
+        if let Some(scrollbar) = self.scrollbar.as_mut() {
             scrollbar.paint(window, cx);
         }
     }
@@ -191,6 +173,7 @@ fn cursor_surrounding_padding(viewport_height: Pixels, line_height: Pixels) -> P
 pub(super) struct TextElement {
     pub(crate) state: Entity<EditorState>,
     placeholder: SharedString,
+    prepaint: Option<PrepaintState>,
 }
 
 impl TextElement {
@@ -198,6 +181,7 @@ impl TextElement {
         Self {
             state,
             placeholder: SharedString::default(),
+            prepaint: None,
         }
     }
 
@@ -595,28 +579,14 @@ pub(super) struct PrepaintState {
     bounds: Bounds<Pixels>,
 }
 
-impl IntoElement for TextElement {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
-        self
+impl From<TextElement> for UiNode {
+    fn from(element: TextElement) -> Self {
+        UiNode::widget(element)
     }
 }
 
-impl Element for TextElement {
-    type RequestLayoutState = ();
-    type PrepaintState = PrepaintState;
-
-    fn id(&self) -> Option<ElementId> {
-        None
-    }
-
-    fn request_layout(
-        &mut self,
-        _id: Option<&GlobalElementId>,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> (LayoutId, Self::RequestLayoutState) {
+impl CustomWidget for TextElement {
+    fn request_layout(&mut self, window: &mut Window, cx: &mut App) -> LayoutId {
         let state = self.state.read(cx);
         let line_height = window.line_height();
 
@@ -630,17 +600,10 @@ impl Element for TextElement {
             style.size.height = line_height.into();
         }
 
-        (window.request_layout(style, [], cx), ())
+        window.request_layout(style, [], cx)
     }
 
-    fn prepaint(
-        &mut self,
-        _id: Option<&GlobalElementId>,
-        bounds: Bounds<Pixels>,
-        _request_layout: &mut Self::RequestLayoutState,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> Self::PrepaintState {
+    fn prepaint(&mut self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
         let style = window.text_style();
         let font = style.font();
         let text_size = style.font_size;
@@ -805,25 +768,20 @@ impl Element for TextElement {
         let selection_bounds = self.layout_selection(&last_layout, &bounds, window, cx);
         let _hitbox = window.insert_hitbox(input_bounds, HitboxBehavior::Normal);
 
-        PrepaintState {
+        self.prepaint = Some(PrepaintState {
             bounds,
             last_layout,
             scroll_size,
             caret_rect,
             cursor_scroll_offset,
             selection_bounds,
-        }
+        });
     }
 
-    fn paint(
-        &mut self,
-        _id: Option<&GlobalElementId>,
-        input_bounds: Bounds<Pixels>,
-        _request_layout: &mut Self::RequestLayoutState,
-        prepaint: &mut Self::PrepaintState,
-        window: &mut Window,
-        cx: &mut App,
-    ) {
+    fn paint(&mut self, input_bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
+        let Some(prepaint) = self.prepaint.as_mut() else {
+            return;
+        };
         let (focus_handle, show_cursor, selected_range, caret_hidden) = {
             let state = self.state.read(cx);
             (

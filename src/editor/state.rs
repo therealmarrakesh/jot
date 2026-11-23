@@ -1,8 +1,7 @@
 use crate::ui::{
-    App, AppContext, Bounds, Command, Context, Edges, Entity, EntityInputHandler as _,
-    FluentBuilder as _, FocusHandle, Focusable, InteractiveElement as _, IntoElement, KeyBinding,
-    MouseButton, ParentElement as _, Pixels, Point, Render, ScrollHandle, SharedString,
-    Styled as _, Subscription, WeakFocusHandle, Window, div, point, px,
+    App, AppContext, Bounds, Command, Context, Edges, Entity, EntityInputHandler as _, FocusHandle,
+    Focusable, KeyBinding, MouseButton, Pixels, Point, Render, ScrollHandle, SharedString,
+    Subscription, UiNode, WeakFocusHandle, Window, div, point, px,
 };
 use ropey::{Rope, RopeSlice};
 use std::borrow::Cow;
@@ -659,7 +658,7 @@ impl EditorState {
 }
 
 impl Render for EditorState {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl Into<UiNode> {
         let entity = cx.entity();
 
         div()

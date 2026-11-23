@@ -232,7 +232,7 @@ fn slide(
     (sample.value.round(), sample.status == AnimStatus::Running)
 }
 
-pub(crate) fn window_listeners(register: impl FnOnce(&mut Window) + 'static) -> impl IntoElement {
+pub(crate) fn window_listeners(register: impl FnOnce(&mut Window) + 'static) -> CanvasNode {
     canvas(|_, _, _| {}, move |_, _, window, _| register(window))
         .absolute()
         .size_full()
@@ -269,7 +269,7 @@ fn visible(x: f32, right: f32, cover: Option<(f32, f32)>) -> (f32, f32) {
     }
 }
 
-fn frame(x: f32, width: f32, cover: Option<(f32, f32)>, content: impl IntoElement) -> Div {
+fn frame(x: f32, width: f32, cover: Option<(f32, f32)>, content: impl Into<UiNode>) -> Div {
     let (left, right) = visible(x, x + width, cover);
     div()
         .absolute()
@@ -336,7 +336,7 @@ fn strip_button(
     glyph: &'static str,
     glyph_size: f32,
     enabled: bool,
-) -> brush::BrushTransition {
+) -> Div {
     field::icon_button(
         p,
         id,
@@ -510,7 +510,7 @@ impl Jot {
         }
     }
 
-    fn thaw_listener(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    fn thaw_listener(&self, cx: &mut Context<Self>) -> CanvasNode {
         let area = self.strip.area.clone();
         let jot = cx.weak_entity();
         window_listeners(move |window| {
@@ -709,7 +709,7 @@ impl Jot {
         }
     }
 
-    fn tab(&self, ix: usize, left: f32, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    fn tab(&self, ix: usize, left: f32, cx: &mut Context<Self>) -> Div {
         let p = palette(cx);
         let tab = &self.tabs[ix];
         let id = tab.data.editor.entity_id();
@@ -737,7 +737,7 @@ impl Jot {
             .map_or(name.clone(), |path| path.display().to_string())
             .into();
 
-        let tab = div()
+        div()
             .id(("tab", id))
             .relative()
             .size_full()
@@ -792,16 +792,11 @@ impl Jot {
             .when(separator, |this| this.child(tab_separator(p)))
             .when(show_close, |this| {
                 this.child(Self::close_button(p, id, inset, cx))
-            });
-        tooltip::owner(("tab", id), tip, tab)
+            })
+            .tooltip(tip)
     }
 
-    fn close_button(
-        p: Palette,
-        id: EntityId,
-        inset: f32,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement + use<> {
+    fn close_button(p: Palette, id: EntityId, inset: f32, cx: &mut Context<Self>) -> Div {
         strip_button(
             p,
             ("close-tab", id),
@@ -825,7 +820,7 @@ impl Jot {
         self.strip.repeat = Task::ready(());
     }
 
-    fn new_tab_button(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    fn new_tab_button(&self, cx: &mut Context<Self>) -> Div {
         let p = palette(cx);
         strip_button(
             p,
@@ -840,7 +835,7 @@ impl Jot {
         .on_click(cx.listener(|this, _, window, cx| this.add_tab(window, cx)))
     }
 
-    fn scroll_button(&self, forward: bool, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    fn scroll_button(&self, forward: bool, cx: &mut Context<Self>) -> Div {
         let p = palette(cx);
         let target = self.strip.scroll;
         let enabled = if forward {
@@ -894,11 +889,7 @@ impl Jot {
             .child(button)
     }
 
-    pub(crate) fn tab_strip(
-        &self,
-        sampled: &StripFrame,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement + use<> {
+    pub(crate) fn tab_strip(&self, sampled: &StripFrame, cx: &mut Context<Self>) -> Div {
         let p = palette(cx);
         let shift = sampled.shift;
         let viewport = sampled.viewport;
@@ -933,7 +924,7 @@ impl Jot {
         let buttons = self.strip.buttons;
 
         let area = self.strip.area.clone();
-        let strip = div()
+        div()
             .relative()
             .flex()
             .h(px(TAB_HEIGHT))
@@ -980,8 +971,8 @@ impl Jot {
                     }),
             )
             .when(buttons, |this| this.child(self.scroll_button(true, cx)))
-            .child(self.new_tab_button(cx));
-        measure::measured(strip, move |bounds, _, _| area.set(bounds))
+            .child(self.new_tab_button(cx))
+            .on_bounds(move |bounds, _, _| area.set(bounds))
     }
 }
 

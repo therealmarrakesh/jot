@@ -46,10 +46,7 @@ impl Jot {
                 });
                 let button =
                     Self::menu_command_button(p, ix, command, cell, ring == Some(ix), window, cx);
-                divider
-                    .into_iter()
-                    .map(IntoElement::into_any_element)
-                    .chain(Some(button.into_any_element()))
+                divider.into_iter().chain(Some(button))
             }))
             .child(
                 div()
@@ -70,7 +67,7 @@ impl Jot {
         focused: bool,
         window: &Window,
         cx: &mut Context<Self>,
-    ) -> Stateful<Div> {
+    ) -> Div {
         let face = cell - 2. * (COMMAND_GAP + COMMAND_INSET);
         let CommandButton { command, glyph } = button;
         let enabled = command.enabled;
@@ -137,12 +134,7 @@ impl Jot {
             )
     }
 
-    fn menu_trigger(
-        &self,
-        kind: MenuKind,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement + use<> {
+    fn menu_trigger(&self, kind: MenuKind, window: &Window, cx: &mut Context<Self>) -> Div {
         let p = palette(cx);
         let open = self
             .menu_bar
@@ -218,12 +210,7 @@ impl Jot {
         cx.defer(move |cx| keytips::show(owner, origin, scale, tips, cx));
     }
 
-    fn menu_popup(
-        &self,
-        open: &OpenMenu,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement + use<> {
+    fn menu_popup(&self, open: &OpenMenu, window: &Window, cx: &mut Context<Self>) -> Div {
         let p = palette(cx);
         let panel = &open.panel;
         let width = panel.width;
@@ -280,7 +267,7 @@ impl Jot {
         open: &OpenMenu,
         submenu: &OpenSubmenu,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement + use<> {
+    ) -> Div {
         let p = palette(cx);
         let sub_width = submenu.panel.width;
         let sub_height = submenu.panel.height();
@@ -370,11 +357,7 @@ impl Jot {
             }))
     }
 
-    pub(crate) fn render_menu(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement + use<> {
+    pub(crate) fn render_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Div {
         let p = palette(cx);
         if self.menu_bar.access || keytips::is_owner(window.window_handle(), cx) {
             let this = cx.entity().downgrade();
@@ -429,7 +412,7 @@ impl Jot {
     }
 }
 
-fn separator_row(p: Palette, ix: usize) -> Stateful<Div> {
+fn separator_row(p: Palette, ix: usize) -> Div {
     div()
         .id(("menu-separator", ix))
         .h(px(ROW_SEPARATOR))
@@ -437,7 +420,7 @@ fn separator_row(p: Palette, ix: usize) -> Stateful<Div> {
         .child(div().h(px(1.)).bg(rgb(p.menu_separator)))
 }
 
-fn row_face(p: Palette, panel: &Panel, ix: usize, fade: bool, expanded: bool) -> AnyElement {
+fn row_face(p: Palette, panel: &Panel, ix: usize, fade: bool, expanded: bool) -> Div {
     let entry = &panel.entries[ix];
     let label = panel.labels[ix].clone();
     let checks = panel.checks;
@@ -530,14 +513,12 @@ fn row_face(p: Palette, panel: &Panel, ix: usize, fade: bool, expanded: bool) ->
     if fade {
         face.brush_transition(Brushes::subtle(p))
             .pressed(move |style| style.text_color(rgba(p.text_secondary)))
-            .into_any_element()
     } else {
         face.when(expanded, |this| this.bg(rgba(p.subtle_secondary)))
             .when(enabled, |this| {
                 this.hover(move |style| style.bg(rgba(p.subtle_secondary)))
                     .pressed(move |style| style.bg(rgba(p.subtle_tertiary)))
             })
-            .into_any_element()
     }
 }
 

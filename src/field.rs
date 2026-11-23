@@ -42,7 +42,7 @@ pub(crate) fn button(
     accented: bool,
     focus: Option<&FocusHandle>,
     window: &Window,
-) -> Stateful<Div> {
+) -> Div {
     let ButtonStyle {
         surface,
         accent,
@@ -128,7 +128,7 @@ pub(crate) fn icon_button(
     glyph: &'static str,
     style: IconButtonStyle,
     enabled: bool,
-) -> brush::BrushTransition {
+) -> Div {
     div()
         .id(id)
         .flex_none()
@@ -182,7 +182,7 @@ fn field_glyph(
     glyph: &'static str,
     right: f32,
     s: f32,
-) -> Stateful<Div> {
+) -> Div {
     let u = |v: f32| px(v * s);
     div()
         .id(id)
@@ -284,7 +284,7 @@ fn bottom_edge(focused: bool, color: Rgba, s: f32) -> Div {
         .bg(color)
 }
 
-fn clear_button(p: Palette, input: Entity<EditorState>, right: f32, s: f32) -> Stateful<Div> {
+fn clear_button(p: Palette, input: Entity<EditorState>, right: f32, s: f32) -> Div {
     field_glyph(p, ("field-clear", input.entity_id()), CLEAR_GLYPH, right, s)
         .hover(move |style| style.bg(rgba(p.subtle_secondary)))
         .pressed(move |style| {

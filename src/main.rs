@@ -1,6 +1,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-mod brush;
 mod command;
 mod dialog;
 mod document;
@@ -11,7 +10,6 @@ mod find;
 mod instance;
 mod keytips;
 mod layout;
-mod measure;
 mod menu;
 mod overlay;
 mod scrollbar;
@@ -22,7 +20,6 @@ mod tooltip;
 mod ui;
 mod win32;
 
-use brush::{BrushTransitionExt as _, Brushes, PressedExt as _};
 use crate::ui::*;
 use crate::editor::{EditorState, Rope, RopeExt as _};
 use menu::MenuBar;
@@ -159,7 +156,7 @@ impl Caption {
         }
     }
 
-    fn render(self, active: bool, p: Palette) -> impl IntoElement {
+    fn render(self, active: bool, p: Palette) -> Div {
         let (hover_bg, pressed_bg, hover_fg, pressed_fg) = match self {
             Self::Close => (
                 CLOSE_HOVER,
@@ -205,7 +202,7 @@ impl Caption {
     }
 }
 
-fn caption_buttons(window: &Window, p: Palette) -> impl IntoElement {
+fn caption_buttons(window: &Window, p: Palette) -> Div {
     let active = window.is_window_active();
     let maximize = if window.is_maximized() {
         Caption::Restore
@@ -536,7 +533,7 @@ impl Jot {
         metrics: Option<StatusMetrics>,
         window: &Window,
         cx: &App,
-    ) -> Option<impl IntoElement + use<>> {
+    ) -> Option<CanvasNode> {
         let zoom_pct = metrics.map_or((self.zoom() * 100.).round() as u32, |m| m.zoom_pct);
         let scale = window.scale_factor();
         let menu_width = self.menu_bar.width();
@@ -556,7 +553,7 @@ impl Jot {
         let hwnd = self.hwnd;
         let menu_areas = self.menu_bar.hit_areas();
         let cache = self.min_size.clone();
-        let status = metrics.map(|metrics| self.status_bar(metrics, cx).into_any_element());
+        let status = metrics.map(|metrics| UiNode::from(self.status_bar(metrics, cx)));
         let rows = tabs::STRIP_TOP
             + tabs::TAB_HEIGHT
             + MENU_BAR_HEIGHT
@@ -727,7 +724,7 @@ impl Jot {
         strip: &tabs::StripFrame,
         window: &Window,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    ) -> Div {
         let p = palette(cx);
 
         div()
@@ -762,7 +759,7 @@ impl Jot {
             .child(caption_buttons(window, p))
     }
 
-    fn render_menu_bar(&self, menu: impl IntoElement, p: Palette) -> impl IntoElement {
+    fn render_menu_bar(&self, menu: Div, p: Palette) -> Div {
         div()
             .flex_none()
             .child(
@@ -809,11 +806,7 @@ impl Jot {
         true
     }
 
-    fn editor(
-        &self,
-        find: Option<impl IntoElement>,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    fn editor(&self, find: Option<Div>, cx: &mut Context<Self>) -> Div {
         let p = palette(cx);
         let editor = self.active_editor().clone();
         let caret_height = self.caret_height();
@@ -864,7 +857,7 @@ impl Jot {
             .children(find)
     }
 
-    fn status_bar(&self, metrics: StatusMetrics, cx: &App) -> impl IntoElement {
+    fn status_bar(&self, metrics: StatusMetrics, cx: &App) -> Div {
         let p = palette(cx);
 
         div().flex_none().child(separator(p)).child(
@@ -900,7 +893,7 @@ fn status_divider(p: Palette) -> Div {
         .bg(rgba(p.stroke))
 }
 
-fn status_spacer(p: Palette) -> Canvas<()> {
+fn status_spacer(p: Palette) -> CanvasNode {
     canvas(
         |_, _, _| {},
         move |bounds, _, window, _| {
@@ -921,7 +914,7 @@ fn status_spacer(p: Palette) -> Canvas<()> {
 }
 
 impl Render for Jot {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl Into<UiNode> {
         let p = palette(cx);
         let status_metrics = cx
             .shared
@@ -2056,7 +2049,7 @@ mod ui_regression_tests {
 
     struct TooltipTestView;
     impl Render for TooltipTestView {
-        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl Into<UiNode> {
             div().size_full().bg(rgba(0x202020ff)).child("Tip")
         }
     }
@@ -2116,7 +2109,7 @@ mod ui_regression_tests {
         app.update_window_impl(h.handle.id, |_, window, cx| {
             let p = palette(cx);
             for test_width in [min_size.width, px(220.0)] {
-                let mut bar = div()
+                let mut bar: UiNode = div()
                     .w(test_width)
                     .flex()
                     .items_center()
@@ -2135,7 +2128,7 @@ mod ui_regression_tests {
                     .child(div().id("sb-eol").child("Windows (CRLF)"))
                     .child(status_divider(p))
                     .child(div().id("sb-enc").child("UTF-8"))
-                    .into_any_element();
+                    .into();
                 let root_lid = bar.request_layout(window, cx);
                 window.compute_layout(
                     root_lid,
@@ -2162,7 +2155,7 @@ mod ui_regression_tests {
             }
 
             // Constrained definite-width text (e.g. dialog body) must still wrap across lines.
-            let mut dialog_body = div()
+            let mut dialog_body: UiNode = div()
                 .flex()
                 .flex_col()
                 .w(px(180.0))
@@ -2174,7 +2167,7 @@ mod ui_regression_tests {
                         .id("dlg-msg")
                         .child("Do you want to save changes to a very long untitled document?"),
                 )
-                .into_any_element();
+                .into();
             let dlid = dialog_body.request_layout(window, cx);
             window.compute_layout(
                 dlid,

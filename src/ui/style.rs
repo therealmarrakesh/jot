@@ -9,21 +9,6 @@ use super::graphics::dwrite::{Font, FontStyle, FontWeight, TextAlign};
 use super::platform::CursorStyle;
 use super::types::SharedString;
 
-#[cfg(test)]
-pub(crate) trait Refineable {
-    type Refinement;
-    fn refine(&mut self, refinement: &Self::Refinement);
-}
-
-#[cfg(test)]
-impl Refineable for Style {
-    type Refinement = StyleRefinement;
-
-    fn refine(&mut self, refinement: &StyleRefinement) {
-        Style::refine(self, refinement);
-    }
-}
-
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) enum Display {
     Block,
@@ -573,5 +558,418 @@ impl StyleRefinement {
             self.cursor = other.cursor;
         }
         self.text.refine(&other.text);
+    }
+}
+
+/// Generates inherent color/visual style builder methods on `StyleRefinement` and `Div`.
+#[macro_export]
+#[doc(hidden)]
+macro_rules! __impl_visual_style_builders {
+    ($ty:ty, |$this:ident| $style:expr) => {
+        impl $ty {
+            pub(crate) fn bg(mut $this, color: $crate::ui::Rgba) -> Self {
+                ($style).background = Some(color);
+                $this
+            }
+
+            pub(crate) fn border_color(mut $this, color: $crate::ui::Rgba) -> Self {
+                ($style).border_color = Some(color);
+                $this
+            }
+
+            pub(crate) fn text_color(mut $this, color: $crate::ui::Rgba) -> Self {
+                ($style).text.color = Some(color);
+                $this
+            }
+        }
+    };
+}
+
+/// Generates inherent layout, spacing, border, typography, and visual-effect builder methods.
+#[macro_export]
+#[doc(hidden)]
+macro_rules! __impl_layout_style_builders {
+    ($ty:ty, |$this:ident| $style:expr) => {
+        impl $ty {
+            pub(crate) fn flex(mut $this) -> Self {
+                ($style).display = Some($crate::ui::Display::Flex);
+                $this
+            }
+
+            pub(crate) fn flex_col(mut $this) -> Self {
+                ($style).flex_direction = Some($crate::ui::FlexDirection::Column);
+                $this
+            }
+
+            pub(crate) fn flex_1(mut $this) -> Self {
+                let s = $style;
+                s.flex_grow = Some(1.0);
+                s.flex_shrink = Some(1.0);
+                s.flex_basis = Some($crate::ui::Length::Definite($crate::ui::relative(0.0)));
+                $this
+            }
+
+            pub(crate) fn flex_grow_1(mut $this) -> Self {
+                ($style).flex_grow = Some(1.0);
+                $this
+            }
+
+            pub(crate) fn flex_none(mut $this) -> Self {
+                let s = $style;
+                s.flex_grow = Some(0.0);
+                s.flex_shrink = Some(0.0);
+                $this
+            }
+
+            pub(crate) fn relative(mut $this) -> Self {
+                ($style).position = Some($crate::ui::Position::Relative);
+                $this
+            }
+
+            pub(crate) fn absolute(mut $this) -> Self {
+                ($style).position = Some($crate::ui::Position::Absolute);
+                $this
+            }
+
+            pub(crate) fn items_center(mut $this) -> Self {
+                ($style).align_items = Some($crate::ui::AlignItems::Center);
+                $this
+            }
+
+            pub(crate) fn justify_center(mut $this) -> Self {
+                ($style).justify_content = Some($crate::ui::JustifyContent::Center);
+                $this
+            }
+
+            pub(crate) fn self_start(mut $this) -> Self {
+                ($style).align_self = Some($crate::ui::AlignItems::Start);
+                $this
+            }
+
+            pub(crate) fn w(mut $this, width: impl Into<$crate::ui::Length>) -> Self {
+                ($style).size.width = Some(width.into());
+                $this
+            }
+
+            pub(crate) fn w_full(mut $this) -> Self {
+                ($style).size.width =
+                    Some($crate::ui::Length::Definite($crate::ui::relative(1.0)));
+                $this
+            }
+
+            pub(crate) fn h(mut $this, height: impl Into<$crate::ui::Length>) -> Self {
+                ($style).size.height = Some(height.into());
+                $this
+            }
+
+            pub(crate) fn h_full(mut $this) -> Self {
+                ($style).size.height =
+                    Some($crate::ui::Length::Definite($crate::ui::relative(1.0)));
+                $this
+            }
+
+            pub(crate) fn size(mut $this, length: impl Into<$crate::ui::Length>) -> Self {
+                let l = length.into();
+                let s = $style;
+                s.size.width = Some(l);
+                s.size.height = Some(l);
+                $this
+            }
+
+            pub(crate) fn size_full(mut $this) -> Self {
+                let s = $style;
+                s.size.width = Some($crate::ui::Length::Definite($crate::ui::relative(1.0)));
+                s.size.height = Some($crate::ui::Length::Definite($crate::ui::relative(1.0)));
+                $this
+            }
+
+            pub(crate) fn min_w_0(mut $this) -> Self {
+                ($style).min_size.width = Some($crate::ui::px(0.0).into());
+                $this
+            }
+
+            pub(crate) fn min_h(mut $this, height: impl Into<$crate::ui::Length>) -> Self {
+                ($style).min_size.height = Some(height.into());
+                $this
+            }
+
+            pub(crate) fn min_h_full(mut $this) -> Self {
+                ($style).min_size.height =
+                    Some($crate::ui::Length::Definite($crate::ui::relative(1.0)));
+                $this
+            }
+
+            pub(crate) fn max_w_full(mut $this) -> Self {
+                ($style).max_size.width =
+                    Some($crate::ui::Length::Definite($crate::ui::relative(1.0)));
+                $this
+            }
+
+            pub(crate) fn gap(mut $this, gap: impl Into<$crate::ui::DefiniteLength>) -> Self {
+                let g = gap.into();
+                let s = $style;
+                s.gap.width = Some(g);
+                s.gap.height = Some(g);
+                $this
+            }
+
+            pub(crate) fn top(mut $this, v: impl Into<$crate::ui::Length>) -> Self {
+                ($style).inset.top = Some(v.into());
+                $this
+            }
+
+            pub(crate) fn top_0(mut $this) -> Self {
+                ($style).inset.top = Some($crate::ui::px(0.0).into());
+                $this
+            }
+
+            pub(crate) fn right(mut $this, v: impl Into<$crate::ui::Length>) -> Self {
+                ($style).inset.right = Some(v.into());
+                $this
+            }
+
+            pub(crate) fn right_0(mut $this) -> Self {
+                ($style).inset.right = Some($crate::ui::px(0.0).into());
+                $this
+            }
+
+            pub(crate) fn bottom(mut $this, v: impl Into<$crate::ui::Length>) -> Self {
+                ($style).inset.bottom = Some(v.into());
+                $this
+            }
+
+            pub(crate) fn bottom_0(mut $this) -> Self {
+                ($style).inset.bottom = Some($crate::ui::px(0.0).into());
+                $this
+            }
+
+            pub(crate) fn left(mut $this, v: impl Into<$crate::ui::Length>) -> Self {
+                ($style).inset.left = Some(v.into());
+                $this
+            }
+
+            pub(crate) fn left_0(mut $this) -> Self {
+                ($style).inset.left = Some($crate::ui::px(0.0).into());
+                $this
+            }
+
+            pub(crate) fn p(mut $this, v: impl Into<$crate::ui::DefiniteLength>) -> Self {
+                let v = v.into();
+                let p = &mut ($style).padding;
+                p.top = Some(v);
+                p.right = Some(v);
+                p.bottom = Some(v);
+                p.left = Some(v);
+                $this
+            }
+
+            pub(crate) fn px(mut $this, v: impl Into<$crate::ui::DefiniteLength>) -> Self {
+                let v = v.into();
+                let p = &mut ($style).padding;
+                p.left = Some(v);
+                p.right = Some(v);
+                $this
+            }
+
+            pub(crate) fn py(mut $this, v: impl Into<$crate::ui::DefiniteLength>) -> Self {
+                let v = v.into();
+                let p = &mut ($style).padding;
+                p.top = Some(v);
+                p.bottom = Some(v);
+                $this
+            }
+
+            pub(crate) fn pt(mut $this, v: impl Into<$crate::ui::DefiniteLength>) -> Self {
+                ($style).padding.top = Some(v.into());
+                $this
+            }
+
+            pub(crate) fn pr(mut $this, v: impl Into<$crate::ui::DefiniteLength>) -> Self {
+                ($style).padding.right = Some(v.into());
+                $this
+            }
+
+            pub(crate) fn pb(mut $this, v: impl Into<$crate::ui::DefiniteLength>) -> Self {
+                ($style).padding.bottom = Some(v.into());
+                $this
+            }
+
+            pub(crate) fn pl(mut $this, v: impl Into<$crate::ui::DefiniteLength>) -> Self {
+                ($style).padding.left = Some(v.into());
+                $this
+            }
+
+            pub(crate) fn mt(mut $this, v: impl Into<$crate::ui::Length>) -> Self {
+                ($style).margin.top = Some(v.into());
+                $this
+            }
+
+            pub(crate) fn mb(mut $this, v: impl Into<$crate::ui::Length>) -> Self {
+                ($style).margin.bottom = Some(v.into());
+                $this
+            }
+
+            pub(crate) fn ml(mut $this, v: impl Into<$crate::ui::Length>) -> Self {
+                ($style).margin.left = Some(v.into());
+                $this
+            }
+
+            pub(crate) fn border_1(mut $this) -> Self {
+                let b = &mut ($style).border_widths;
+                b.top = Some($crate::ui::px(1.0));
+                b.right = Some($crate::ui::px(1.0));
+                b.bottom = Some($crate::ui::px(1.0));
+                b.left = Some($crate::ui::px(1.0));
+                $this
+            }
+
+            pub(crate) fn border_2(mut $this) -> Self {
+                let b = &mut ($style).border_widths;
+                b.top = Some($crate::ui::px(2.0));
+                b.right = Some($crate::ui::px(2.0));
+                b.bottom = Some($crate::ui::px(2.0));
+                b.left = Some($crate::ui::px(2.0));
+                $this
+            }
+
+            pub(crate) fn border_t_1(mut $this) -> Self {
+                ($style).border_widths.top = Some($crate::ui::px(1.0));
+                $this
+            }
+
+            pub(crate) fn border_r_1(mut $this) -> Self {
+                ($style).border_widths.right = Some($crate::ui::px(1.0));
+                $this
+            }
+
+            pub(crate) fn border_b_1(mut $this) -> Self {
+                ($style).border_widths.bottom = Some($crate::ui::px(1.0));
+                $this
+            }
+
+            pub(crate) fn border_l_1(mut $this) -> Self {
+                ($style).border_widths.left = Some($crate::ui::px(1.0));
+                $this
+            }
+
+            pub(crate) fn rounded(mut $this, radius: $crate::ui::Pixels) -> Self {
+                let c = &mut ($style).corner_radii;
+                c.top_left = Some(radius);
+                c.top_right = Some(radius);
+                c.bottom_right = Some(radius);
+                c.bottom_left = Some(radius);
+                $this
+            }
+
+            pub(crate) fn rounded_t(mut $this, radius: $crate::ui::Pixels) -> Self {
+                let c = &mut ($style).corner_radii;
+                c.top_left = Some(radius);
+                c.top_right = Some(radius);
+                $this
+            }
+
+            pub(crate) fn rounded_b(mut $this, radius: $crate::ui::Pixels) -> Self {
+                let c = &mut ($style).corner_radii;
+                c.bottom_left = Some(radius);
+                c.bottom_right = Some(radius);
+                $this
+            }
+
+            pub(crate) fn rounded_full($this) -> Self {
+                $this.rounded($crate::ui::px(9999.0))
+            }
+
+            pub(crate) fn shadow(mut $this, shadows: Vec<$crate::ui::BoxShadow>) -> Self {
+                ($style).box_shadow = Some(shadows);
+                $this
+            }
+
+            pub(crate) fn opacity(mut $this, opacity: f32) -> Self {
+                ($style).opacity = Some(opacity);
+                $this
+            }
+
+            pub(crate) fn overflow_hidden(mut $this) -> Self {
+                let o = &mut ($style).overflow;
+                o.x = Some($crate::ui::Overflow::Hidden);
+                o.y = Some($crate::ui::Overflow::Hidden);
+                $this
+            }
+
+            pub(crate) fn overflow_x_hidden(mut $this) -> Self {
+                ($style).overflow.x = Some($crate::ui::Overflow::Hidden);
+                $this
+            }
+
+            pub(crate) fn cursor_default(mut $this) -> Self {
+                ($style).cursor = Some($crate::ui::CursorStyle::Arrow);
+                $this
+            }
+
+            pub(crate) fn cursor_text(mut $this) -> Self {
+                ($style).cursor = Some($crate::ui::CursorStyle::IBeam);
+                $this
+            }
+
+            pub(crate) fn font_family(
+                mut $this,
+                family: impl Into<$crate::ui::SharedString>,
+            ) -> Self {
+                ($style).text.font_family = Some(family.into());
+                $this
+            }
+
+            pub(crate) fn font_weight(mut $this, weight: $crate::ui::FontWeight) -> Self {
+                ($style).text.font_weight = Some(weight);
+                $this
+            }
+
+            pub(crate) fn text_size(mut $this, size: $crate::ui::Pixels) -> Self {
+                ($style).text.font_size = Some(size);
+                $this
+            }
+
+            pub(crate) fn line_height(
+                mut $this,
+                line_height: impl Into<$crate::ui::DefiniteLength>,
+            ) -> Self {
+                ($style).text.line_height = Some(line_height.into());
+                $this
+            }
+
+            pub(crate) fn text_center(mut $this) -> Self {
+                ($style).text.text_align = Some($crate::ui::TextAlign::Center);
+                $this
+            }
+
+            pub(crate) fn whitespace_nowrap(mut $this) -> Self {
+                ($style).text.white_space = Some($crate::ui::WhiteSpace::Nowrap);
+                $this
+            }
+
+            pub(crate) fn line_clamp(mut $this, lines: usize) -> Self {
+                let s = $style;
+                s.overflow.x = Some($crate::ui::Overflow::Hidden);
+                s.overflow.y = Some($crate::ui::Overflow::Hidden);
+                s.text.line_clamp = Some(lines);
+                $this
+            }
+        }
+    };
+}
+
+__impl_visual_style_builders!(StyleRefinement, |self| &mut self);
+
+#[cfg(test)]
+#[allow(dead_code)]
+mod test_style_builders {
+    use super::StyleRefinement;
+    crate::__impl_layout_style_builders!(StyleRefinement, |self| &mut self);
+
+    impl StyleRefinement {
+        pub(crate) fn min_w(mut self, width: impl Into<crate::ui::Length>) -> Self {
+            self.min_size.width = Some(width.into());
+            self
+        }
     }
 }
