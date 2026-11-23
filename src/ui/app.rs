@@ -14,7 +14,7 @@ use super::element::Render;
 use super::entity::{AnyView, Entity, EntityId, EntityStore, WeakEntity};
 use super::focus::FocusHandle;
 use super::graphics::dwrite::TextSystem;
-use super::keymap::{Action, KeyBinding, Keymap};
+use super::keymap::{Command, KeyBinding, Keymap};
 use super::platform::{
     DisplayId, PathPromptOptions, WindowAppearance, WindowOptions, WindowsDisplay, WindowsPlatform,
 };
@@ -146,7 +146,7 @@ impl<V: 'static> WindowHandle<V> {
 type EntityObserver = Box<dyn FnMut(&mut App) -> bool>;
 type GlobalObserver = Box<dyn FnMut(&mut App) -> bool>;
 type KeystrokeInterceptor = Box<dyn FnMut(&KeyDownEvent, &mut Window, &mut App) -> bool>;
-type GlobalActionHandler = Box<dyn FnMut(&dyn Action, &mut App)>;
+type GlobalCommandHandler = Box<dyn FnMut(Command, &mut App) -> bool>;
 type WindowClosedCallback = Box<dyn FnMut(&mut App, WindowId)>;
 type DeferredAppCallback = Box<dyn FnOnce(&mut App)>;
 
@@ -178,11 +178,10 @@ pub(crate) struct App {
     entity_observers: HashMap<EntityId, Vec<CallbackSlot<EntityObserver>>>,
     global_observers: HashMap<TypeId, Vec<CallbackSlot<GlobalObserver>>>,
     keystroke_interceptors: Vec<CallbackSlot<KeystrokeInterceptor>>,
-    global_actions: HashMap<TypeId, GlobalActionHandler>,
+    global_commands: Vec<GlobalCommandHandler>,
     window_closed_listeners: Vec<CallbackSlot<WindowClosedCallback>>,
     pub(crate) quit_requested: bool,
     pub(crate) stop_propagation: bool,
-    pub(crate) propagate_action: bool,
 }
 
 impl App {
@@ -214,11 +213,10 @@ impl App {
                 entity_observers: HashMap::new(),
                 global_observers: HashMap::new(),
                 keystroke_interceptors: Vec::new(),
-                global_actions: HashMap::new(),
+                global_commands: Vec::new(),
                 window_closed_listeners: Vec::new(),
                 quit_requested: false,
                 stop_propagation: false,
-                propagate_action: false,
             }),
         })
     }
@@ -463,26 +461,22 @@ impl App {
         RefCell::borrow_mut(&self.keymap).add_bindings(bindings);
     }
 
-    pub(crate) fn on_action<A: Action>(&mut self, mut f: impl FnMut(&A, &mut App) + 'static) {
-        self.global_actions.insert(
-            TypeId::of::<A>(),
-            Box::new(move |action, cx| {
-                if let Some(typed) = action.downcast_ref::<A>() {
-                    f(typed, cx);
-                }
-            }),
-        );
+    pub(crate) fn on_command(&mut self, f: impl FnMut(Command, &mut App) -> bool + 'static) {
+        self.global_commands.push(Box::new(f));
     }
 
-    pub(crate) fn dispatch_global_action(&mut self, action: &dyn Action) -> bool {
-        let type_id = action.as_any().type_id();
-        if let Some(mut handler) = self.global_actions.remove(&type_id) {
-            handler(action, self);
-            self.global_actions.entry(type_id).or_insert(handler);
-            true
-        } else {
-            false
+    pub(crate) fn dispatch_global_command(&mut self, command: Command) -> bool {
+        let mut handlers = std::mem::take(&mut self.global_commands);
+        let mut handled = false;
+        for handler in handlers.iter_mut().rev() {
+            if handler(command, self) {
+                handled = true;
+                break;
+            }
         }
+        handlers.append(&mut self.global_commands);
+        self.global_commands = handlers;
+        handled
     }
 
     pub(crate) fn intercept_keystrokes(
@@ -528,10 +522,6 @@ impl App {
 
     pub(crate) fn stop_propagation(&mut self) {
         self.stop_propagation = true;
-    }
-
-    pub(crate) fn propagate(&mut self) {
-        self.propagate_action = true;
     }
 
     // ---- Motion, appearance, clipboard, displays, dialogs ----
@@ -825,6 +815,17 @@ impl<T: 'static> Context<'_, T> {
         let weak = self.weak_entity();
         move |event, window, app| {
             let _ = weak.update(app, |this, cx| f(this, event, window, cx));
+        }
+    }
+
+    pub(crate) fn command_listener(
+        &self,
+        mut f: impl FnMut(&mut T, Command, &mut Window, &mut Context<T>) -> bool + 'static,
+    ) -> impl FnMut(Command, &mut Window, &mut App) -> bool + 'static {
+        let weak = self.weak_entity();
+        move |command, window, app| {
+            weak.update(app, |this, cx| f(this, command, window, cx))
+                .unwrap_or(false)
         }
     }
 

@@ -1,17 +1,11 @@
-use crate::ui::{
-    Context, EntityInputHandler as _, SelectDown, SelectLeft, SelectRight, SelectUp, SharedString,
-    Window,
-};
+use crate::ui::{Context, EntityInputHandler as _, SharedString, Window};
 use ropey::Rope;
 use std::ops::Range;
 use unicode_segmentation::UnicodeSegmentation;
 
 use super::rope_ext::Bias;
 use super::{
-    Backspace, Copy, Cut, Delete, DeleteToNextWordEnd, DeleteToPreviousWordStart, EditorState,
-    Enter, Escape, Paste, Redo, RopeExt as _, SelectAll, SelectToEnd, SelectToEndOfLine,
-    SelectToNextWordEnd, SelectToPreviousWordStart, SelectToStart, SelectToStartOfLine, Undo,
-    change::Change, cursor::CursorSelection, undo_manager::EditIntent,
+    EditorState, RopeExt as _, change::Change, cursor::CursorSelection, undo_manager::EditIntent,
 };
 
 const WORD_SCAN_WINDOW_BYTES: usize = 256;
@@ -29,17 +23,17 @@ impl EditorState {
         self.replace_text_in_range(Some(range), &text, window, cx);
     }
 
-    pub(super) fn select_left(&mut self, _: &SelectLeft, _: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn select_left(&mut self, cx: &mut Context<Self>) {
         let offset = self.previous_boundary(self.selection.cursor_offset());
         self.select_keyboard_to(offset, false, false, cx);
     }
 
-    pub(super) fn select_right(&mut self, _: &SelectRight, _: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn select_right(&mut self, cx: &mut Context<Self>) {
         let offset = self.next_boundary(self.selection.cursor_offset());
         self.select_keyboard_to(offset, false, false, cx);
     }
 
-    pub(super) fn select_up(&mut self, _: &SelectUp, _: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn select_up(&mut self, cx: &mut Context<Self>) {
         if self.is_single_line() {
             return;
         }
@@ -52,7 +46,7 @@ impl EditorState {
         self.select_keyboard_to(offset, affinity, true, cx);
     }
 
-    pub(super) fn select_down(&mut self, _: &SelectDown, _: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn select_down(&mut self, cx: &mut Context<Self>) {
         if self.is_single_line() {
             return;
         }
@@ -65,70 +59,31 @@ impl EditorState {
         self.select_keyboard_to(offset, affinity, true, cx);
     }
 
-    pub(super) fn on_action_select_all(
-        &mut self,
-        _: &SelectAll,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.select_all(window, cx);
-    }
-
-    pub(super) fn select_to_start(
-        &mut self,
-        _: &SelectToStart,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub(super) fn select_to_start(&mut self, cx: &mut Context<Self>) {
         self.select_keyboard_to(0, false, false, cx);
     }
 
-    pub(super) fn select_to_end(
-        &mut self,
-        _: &SelectToEnd,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub(super) fn select_to_end(&mut self, cx: &mut Context<Self>) {
         let end = self.text.len();
         self.select_keyboard_to(end, false, false, cx);
     }
 
-    pub(super) fn select_to_start_of_line(
-        &mut self,
-        _: &SelectToStartOfLine,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub(super) fn select_to_start_of_line(&mut self, cx: &mut Context<Self>) {
         let offset = self.start_of_line_at(self.selection.cursor_offset());
         self.select_keyboard_to(offset, false, false, cx);
     }
 
-    pub(super) fn select_to_end_of_line(
-        &mut self,
-        _: &SelectToEndOfLine,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub(super) fn select_to_end_of_line(&mut self, cx: &mut Context<Self>) {
         let offset = self.end_of_line_at(self.selection.cursor_offset());
         self.select_keyboard_to(offset, true, false, cx);
     }
 
-    pub(super) fn select_to_previous_word(
-        &mut self,
-        _: &SelectToPreviousWordStart,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub(super) fn select_to_previous_word(&mut self, cx: &mut Context<Self>) {
         let offset = self.previous_start_of_word_at(self.selection.cursor_offset());
         self.select_keyboard_to(offset, false, false, cx);
     }
 
-    pub(super) fn select_to_next_word(
-        &mut self,
-        _: &SelectToNextWordEnd,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub(super) fn select_to_next_word(&mut self, cx: &mut Context<Self>) {
         let offset = self.next_end_of_word_at(self.selection.cursor_offset());
         self.select_keyboard_to(offset, false, false, cx);
     }
@@ -191,10 +146,9 @@ impl EditorState {
         self.pause_blink_cursor(cx);
     }
 
-    pub(super) fn backspace(&mut self, _: &Backspace, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn backspace(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         if self.selection.is_empty() && self.cursor() == 0 {
-            cx.propagate();
-            return;
+            return false;
         }
 
         self.delete_selection(
@@ -203,9 +157,10 @@ impl EditorState {
             window,
             cx,
         );
+        true
     }
 
-    pub(super) fn delete(&mut self, _: &Delete, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn delete(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.delete_selection(
             EditIntent::DeleteForward,
             |s, offset| offset..s.next_boundary(offset),
@@ -214,12 +169,7 @@ impl EditorState {
         );
     }
 
-    pub(super) fn delete_previous_word(
-        &mut self,
-        _: &DeleteToPreviousWordStart,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub(super) fn delete_previous_word(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.delete_selection(
             EditIntent::Atomic,
             |s, offset| s.previous_start_of_word_at(offset)..offset,
@@ -228,12 +178,7 @@ impl EditorState {
         );
     }
 
-    pub(super) fn delete_next_word(
-        &mut self,
-        _: &DeleteToNextWordEnd,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub(super) fn delete_next_word(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.delete_selection(
             EditIntent::Atomic,
             |s, offset| offset..s.next_end_of_word_at(offset),
@@ -242,24 +187,25 @@ impl EditorState {
         );
     }
 
-    pub(super) fn enter(&mut self, _: &Enter, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn enter(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         if self.is_multi_line() {
             self.replace_text_in_range(None, "\n", window, cx);
             self.pause_blink_cursor(cx);
+            true
         } else {
             self.undo_manager.break_transaction_coalescing();
-            cx.propagate();
+            false
         }
     }
 
-    pub(super) fn escape(&mut self, _: &Escape, _window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn escape(&mut self) -> bool {
         if self.ime_marked_range.is_some() {
             self.unmark_text();
         }
-        cx.propagate();
+        false
     }
 
-    pub(super) fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn copy(&mut self, cx: &mut Context<Self>) {
         if !self.is_copyable() {
             return;
         }
@@ -267,7 +213,7 @@ impl EditorState {
         cx.write_clipboard_text(&text);
     }
 
-    pub(super) fn cut(&mut self, _: &Cut, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn cut(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.is_copyable() {
             return;
         }
@@ -277,7 +223,7 @@ impl EditorState {
         self.replace_text_in_range(None, "", window, cx);
     }
 
-    pub(super) fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn paste(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(mut new_text) = cx.read_clipboard_text().filter(|text| !text.is_empty()) {
             if new_text.contains('\r') {
                 new_text = new_text.replace("\r\n", "\n").replace('\r', "\n");
@@ -349,11 +295,11 @@ impl EditorState {
         recorded
     }
 
-    pub(super) fn undo(&mut self, _: &Undo, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn undo(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.replay_history(true, window, cx);
     }
 
-    pub(super) fn redo(&mut self, _: &Redo, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn redo(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.replay_history(false, window, cx);
     }
 

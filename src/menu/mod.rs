@@ -2,9 +2,7 @@ mod items;
 mod render;
 
 use crate::*;
-use crate::ui::{
-    Cancel, Confirm, MotionStatus, SelectDown, SelectLeft, SelectRight, SelectUp, transition_from,
-};
+use crate::ui::{MotionStatus, transition_from};
 use items::{
     BORDER, CONTEXT_WIDTH, CommandButton, FLYOUT_GAP, FLYOUT_MIN_WIDTH, MIN_WIDTH, MenuKind,
     Panel, ROW_INSET, ROW_MARGIN_Y, context_menu, cycle, menu_show_delay,
@@ -21,13 +19,13 @@ const SUBMENU_AREA: usize = 2;
 
 pub(crate) fn key_bindings() -> Vec<KeyBinding> {
     vec![
-        KeyBinding::new("up", SelectUp, Some(CONTEXT)),
-        KeyBinding::new("down", SelectDown, Some(CONTEXT)),
-        KeyBinding::new("enter", Confirm { secondary: false }, Some(CONTEXT)),
-        KeyBinding::new("space", Confirm { secondary: false }, Some(CONTEXT)),
-        KeyBinding::new("escape", Cancel, Some(CONTEXT)),
-        KeyBinding::new("left", SelectLeft, Some(CONTEXT)),
-        KeyBinding::new("right", SelectRight, Some(CONTEXT)),
+        KeyBinding::new("up", Command::SelectUp, Some(CONTEXT)),
+        KeyBinding::new("down", Command::SelectDown, Some(CONTEXT)),
+        KeyBinding::new("enter", Command::Confirm, Some(CONTEXT)),
+        KeyBinding::new("space", Command::Confirm, Some(CONTEXT)),
+        KeyBinding::new("escape", Command::Cancel, Some(CONTEXT)),
+        KeyBinding::new("left", Command::SelectLeft, Some(CONTEXT)),
+        KeyBinding::new("right", Command::SelectRight, Some(CONTEXT)),
     ]
 }
 
@@ -633,15 +631,14 @@ impl Jot {
         else {
             return;
         };
-        let action = (command.action)();
-        self.menu_dispatch(action, window, cx);
+        self.menu_dispatch(command.command, window, cx);
     }
 
-    fn menu_dispatch(&mut self, action: Box<dyn Action>, window: &mut Window, cx: &mut Context<Self>) {
+    fn menu_dispatch(&mut self, command: Command, window: &mut Window, cx: &mut Context<Self>) {
         self.menu_close(window, cx);
         let target = self.active_editor().focus_handle(cx);
         window.defer(cx, move |window, cx| {
-            target.dispatch_action(action.as_ref(), window, cx);
+            target.dispatch_command(command, window, cx);
         });
     }
 
@@ -665,8 +662,8 @@ impl Jot {
             Entry::Submenu(..) => self.menu_open_submenu(path.0, true, window, cx),
             entry if !entry.selectable() => {}
             entry => {
-                if let Some(action) = entry.action() {
-                    self.menu_dispatch(action, window, cx);
+                if let Some(command) = entry.command_id() {
+                    self.menu_dispatch(command, window, cx);
                 }
             }
         }
@@ -768,17 +765,22 @@ impl Jot {
         self.menu_open_by_keyboard(kind.cycle(delta), window, cx);
     }
 
-    fn menu_on_up(&mut self, _: &SelectUp, window: &mut Window, cx: &mut Context<Self>) {
-        self.menu_step_active(-1, window, cx);
-    }
-
-    fn menu_on_down(
+    fn handle_menu_command(
         &mut self,
-        _: &SelectDown,
+        command: Command,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
-        self.menu_step_active(1, window, cx);
+    ) -> bool {
+        match command {
+            Command::SelectUp => self.menu_step_active(-1, window, cx),
+            Command::SelectDown => self.menu_step_active(1, window, cx),
+            Command::Confirm => self.menu_on_confirm(window, cx),
+            Command::Cancel => self.menu_on_cancel(window, cx),
+            Command::SelectLeft => self.menu_on_left(window, cx),
+            Command::SelectRight => self.menu_on_right(window, cx),
+            _ => return false,
+        }
+        true
     }
 
     fn menu_step_active(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
@@ -803,12 +805,7 @@ impl Jot {
         cx.notify();
     }
 
-    fn menu_on_confirm(
-        &mut self,
-        _: &Confirm,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn menu_on_confirm(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(open) = self.menu_bar.live_open() else {
             if let Some(kind) = self.menu_bar.bar_focused(window) {
                 self.menu_open_by_keyboard(kind, window, cx);
@@ -827,12 +824,7 @@ impl Jot {
         }
     }
 
-    fn menu_on_cancel(
-        &mut self,
-        _: &Cancel,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn menu_on_cancel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match self.menu_bar.live_open() {
             Some(open) if open.in_submenu() => self.menu_close_submenu(cx),
             Some(open) if open.kind.is_some() => self.menu_close_to_bar(window, cx),
@@ -841,12 +833,7 @@ impl Jot {
         }
     }
 
-    fn menu_on_left(
-        &mut self,
-        _: &SelectLeft,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn menu_on_left(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(open) = self.menu_bar.live_open_mut() else {
             self.menu_move_bar_focus(-1, cx);
             return;
@@ -862,12 +849,7 @@ impl Jot {
         }
     }
 
-    fn menu_on_right(
-        &mut self,
-        _: &SelectRight,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn menu_on_right(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(open) = self.menu_bar.live_open_mut() else {
             self.menu_move_bar_focus(1, cx);
             return;

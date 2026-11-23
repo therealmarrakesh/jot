@@ -2,9 +2,7 @@ use super::*;
 use field::{BODY_LINE, BODY_SIZE, text_field};
 use crate::ui::futures::channel::oneshot;
 use crate::editor::{EditorState, Position};
-use crate::ui::{Cancel, Confirm, MotionStatus, transition_from};
-
-crate::ui::actions!(jot_dialog, [FocusNext, FocusPrev]);
+use crate::ui::{MotionStatus, transition_from};
 
 const CONTEXT: &str = "JotDialog";
 const TITLE_FONT: &str = "Segoe UI Variable Display";
@@ -31,10 +29,10 @@ const BODY_BASELINE_SNAP: f32 = -1.;
 
 pub(crate) fn key_bindings() -> Vec<KeyBinding> {
     vec![
-        KeyBinding::new("enter", Confirm { secondary: false }, Some(CONTEXT)),
-        KeyBinding::new("escape", Cancel, Some(CONTEXT)),
-        KeyBinding::new("tab", FocusNext, Some(CONTEXT)),
-        KeyBinding::new("shift-tab", FocusPrev, Some(CONTEXT)),
+        KeyBinding::new("enter", Command::Confirm, Some(CONTEXT)),
+        KeyBinding::new("escape", Command::Cancel, Some(CONTEXT)),
+        KeyBinding::new("tab", Command::FocusNext, Some(CONTEXT)),
+        KeyBinding::new("shift-tab", Command::FocusPrev, Some(CONTEXT)),
     ]
 }
 
@@ -185,7 +183,7 @@ impl Dialogs {
 }
 
 impl Jot {
-    pub(crate) fn go_to(&mut self, _: &GoTo, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn go_to(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.dialogs.active().is_some() {
             return;
         }
@@ -205,7 +203,23 @@ impl Jot {
         });
     }
 
-    fn confirm_dialog(&mut self, _: &Confirm, window: &mut Window, cx: &mut Context<Self>) {
+    fn handle_dialog_command(
+        &mut self,
+        command: Command,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        match command {
+            Command::Confirm => self.confirm_dialog(window, cx),
+            Command::Cancel => self.cancel_dialog(window, cx),
+            Command::FocusNext => self.step_dialog_focus(1, window, cx),
+            Command::FocusPrev => self.step_dialog_focus(-1, window, cx),
+            _ => return false,
+        }
+        true
+    }
+
+    fn confirm_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(dialog) = self.dialogs.active() else {
             return;
         };
@@ -216,20 +230,12 @@ impl Jot {
         self.press_dialog_button(focused.unwrap_or(0), window, cx);
     }
 
-    fn cancel_dialog(&mut self, _: &Cancel, window: &mut Window, cx: &mut Context<Self>) {
+    fn cancel_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(dialog) = self.dialogs.active() else {
             return;
         };
         let last = dialog.buttons.len().saturating_sub(1);
         self.press_dialog_button(last, window, cx);
-    }
-
-    fn focus_next_dialog(&mut self, _: &FocusNext, window: &mut Window, cx: &mut Context<Self>) {
-        self.step_dialog_focus(1, window, cx);
-    }
-
-    fn focus_prev_dialog(&mut self, _: &FocusPrev, window: &mut Window, cx: &mut Context<Self>) {
-        self.step_dialog_focus(-1, window, cx);
     }
 
     fn step_dialog_focus(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
@@ -350,10 +356,7 @@ impl Jot {
                 .top_0()
                 .left_0()
                 .size_full()
-                .on_action(cx.listener(Self::confirm_dialog))
-                .on_action(cx.listener(Self::cancel_dialog))
-                .on_action(cx.listener(Self::focus_next_dialog))
-                .on_action(cx.listener(Self::focus_prev_dialog))
+                .on_command(cx.command_listener(Self::handle_dialog_command))
                 .children(layers),
         )
     }

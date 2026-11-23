@@ -42,7 +42,7 @@ impl Jot {
         tab.data.path.is_none() && tab.data.editor.read(cx).text().len() == 0
     }
 
-    pub(crate) fn open(&mut self, _: &Open, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let paths = cx.prompt_for_paths(PathPromptOptions {
             directories: false,
             multiple: true,
@@ -151,17 +151,17 @@ impl Jot {
         .detach();
     }
 
-    pub(crate) fn save(&mut self, _: &Save, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn save(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let id = self.active_editor().entity_id();
         self.save_tab(id, window, cx).detach();
     }
 
-    pub(crate) fn save_as(&mut self, _: &SaveAs, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn save_as(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let id = self.active_editor().entity_id();
         self.save_tab_as(id, window, cx).detach();
     }
 
-    pub(crate) fn save_all(&mut self, _: &SaveAll, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn save_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let dirty = self.dirty_tabs(cx);
         cx.spawn_in(window, async move |this, cx| {
             visit_tabs(&this, dirty, Self::save_tab, cx).await;

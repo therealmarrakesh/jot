@@ -1,6 +1,4 @@
-use super::{
-    EditorState, Indent, IndentInline, Outdent, OutdentInline, RopeExt, cursor::CursorSelection,
-};
+use super::{EditorState, RopeExt, cursor::CursorSelection};
 use crate::ui::{Context, SharedString, Window};
 use std::ops::Range;
 
@@ -30,35 +28,20 @@ impl TabSize {
 }
 
 impl EditorState {
-    pub(super) fn indent_inline(
-        &mut self,
-        _: &IndentInline,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.apply_indent(IndentDirection::Indent, false, window, cx);
+    pub(super) fn indent_inline(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        self.apply_indent(IndentDirection::Indent, false, window, cx)
     }
 
-    pub(super) fn indent_block(&mut self, _: &Indent, window: &mut Window, cx: &mut Context<Self>) {
-        self.apply_indent(IndentDirection::Indent, true, window, cx);
+    pub(super) fn indent_block(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        self.apply_indent(IndentDirection::Indent, true, window, cx)
     }
 
-    pub(super) fn outdent_inline(
-        &mut self,
-        _: &OutdentInline,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.apply_indent(IndentDirection::Outdent, false, window, cx);
+    pub(super) fn outdent_inline(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        self.apply_indent(IndentDirection::Outdent, false, window, cx)
     }
 
-    pub(super) fn outdent_block(
-        &mut self,
-        _: &Outdent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.apply_indent(IndentDirection::Outdent, true, window, cx);
+    pub(super) fn outdent_block(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        self.apply_indent(IndentDirection::Outdent, true, window, cx)
     }
 
     fn apply_indent(
@@ -67,10 +50,9 @@ impl EditorState {
         block: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
         if !self.is_multi_line() {
-            cx.propagate();
-            return;
+            return false;
         }
 
         let tab_indent = self.tab_size.to_string();
@@ -84,7 +66,7 @@ impl EditorState {
         };
 
         if edits.is_empty() {
-            return;
+            return true;
         }
 
         self.undo_manager.begin_transaction();
@@ -95,6 +77,7 @@ impl EditorState {
 
         self.scroll_to(self.cursor(), None, cx);
         cx.notify();
+        true
     }
 
     fn compute_block_indent(

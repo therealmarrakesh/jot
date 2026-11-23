@@ -41,49 +41,43 @@ pub(super) const BAR_GAP: f32 = 8.;
 pub(super) const CHECK_GLYPH: &str = "\u{E73E}";
 pub(super) const CHEVRON_GLYPH: &str = "\u{E76C}";
 
-pub(crate) type ActionFn = fn() -> Box<dyn Action>;
-
 #[derive(Clone, Copy)]
-pub(crate) struct Command {
+pub(crate) struct MenuCommand {
     pub(super) label: &'static str,
     pub(super) enabled: bool,
-    pub(super) action: ActionFn,
+    pub(super) command: Command,
 }
 
-impl Command {
-    fn new(label: &'static str, enabled: bool, action: ActionFn) -> Self {
+impl MenuCommand {
+    fn new(label: &'static str, enabled: bool, command: Command) -> Self {
         Self {
             label,
             enabled,
-            action,
+            command,
         }
     }
 }
 
 pub(super) struct CommandButton {
-    pub(super) command: Command,
+    pub(super) command: MenuCommand,
     pub(super) glyph: &'static str,
 }
 
 pub(super) fn context_menu(editor: &EditorState) -> (Vec<CommandButton>, Vec<Entry>) {
     let selection = !editor.selected_range().is_empty();
-    let button = |label, glyph, enabled, action| CommandButton {
-        command: Command::new(label, enabled, action),
+    let button = |label, glyph, enabled, command| CommandButton {
+        command: MenuCommand::new(label, enabled, command),
         glyph,
     };
     let commands = vec![
-        button("Cut", "\u{E8C6}", selection, || Box::new(editor::Cut)),
-        button("Copy", "\u{E8C8}", selection, || Box::new(editor::Copy)),
-        button("Paste", "\u{E77F}", clipboard_has_text(), || {
-            Box::new(editor::Paste)
-        }),
-        button("Select all", "\u{E8B3}", true, || {
-            Box::new(editor::SelectAll)
-        }),
-        button("Delete", "\u{E74D}", selection, || Box::new(editor::Delete)),
+        button("Cut", "\u{E8C6}", selection, Command::Cut),
+        button("Copy", "\u{E8C8}", selection, Command::Copy),
+        button("Paste", "\u{E77F}", clipboard_has_text(), Command::Paste),
+        button("Select all", "\u{E8B3}", true, Command::SelectAll),
+        button("Delete", "\u{E74D}", selection, Command::Delete),
     ];
     let entries = vec![Entry::Command {
-        command: Command::new("Undo", editor.can_undo(), || Box::new(editor::Undo)),
+        command: MenuCommand::new("Undo", editor.can_undo(), Command::Undo),
         icon: Some("\u{E7A7}"),
     }];
     (commands, entries)
@@ -96,35 +90,35 @@ fn display_label(label: &str) -> SharedString {
 #[derive(Clone)]
 pub(crate) enum Entry {
     Command {
-        command: Command,
+        command: MenuCommand,
         icon: Option<&'static str>,
     },
     Toggle {
         label: &'static str,
         checked: bool,
-        action: ActionFn,
+        command: Command,
     },
     Submenu(&'static str, Vec<Entry>),
     Separator,
 }
 
 impl Entry {
-    fn command(label: &'static str, action: ActionFn) -> Self {
-        Self::command_if(label, true, action)
+    fn command(label: &'static str, command: Command) -> Self {
+        Self::command_if(label, true, command)
     }
 
-    fn command_if(label: &'static str, enabled: bool, action: ActionFn) -> Self {
+    fn command_if(label: &'static str, enabled: bool, command: Command) -> Self {
         Self::Command {
-            command: Command::new(label, enabled, action),
+            command: MenuCommand::new(label, enabled, command),
             icon: None,
         }
     }
 
-    pub(crate) fn toggle(label: &'static str, checked: bool, action: ActionFn) -> Self {
+    pub(crate) fn toggle(label: &'static str, checked: bool, command: Command) -> Self {
         Self::Toggle {
             label,
             checked,
-            action,
+            command,
         }
     }
 
@@ -161,10 +155,10 @@ impl Entry {
         key.chars().next().map(|key| key.to_ascii_uppercase())
     }
 
-    pub(super) fn action(&self) -> Option<Box<dyn Action>> {
+    pub(super) fn command_id(&self) -> Option<Command> {
         match self {
-            Self::Command { command, .. } => Some((command.action)()),
-            Self::Toggle { action, .. } => Some(action()),
+            Self::Command { command, .. } => Some(command.command),
+            Self::Toggle { command, .. } => Some(*command),
             _ => None,
         }
     }
@@ -204,37 +198,37 @@ impl MenuKind {
     pub(super) fn entries(self, editor: &EditorState, cx: &App) -> Vec<Entry> {
         match self {
             Self::File => vec![
-                Entry::command("&New tab", || Box::new(NewTab)),
-                Entry::command("New &window", || Box::new(NewWindow)),
-                Entry::command("&Open", || Box::new(Open)),
-                Entry::command("&Save", || Box::new(Save)),
-                Entry::command("Save &as", || Box::new(SaveAs)),
-                Entry::command("Save a&ll", || Box::new(SaveAll)),
+                Entry::command("&New tab", Command::NewTab),
+                Entry::command("New &window", Command::NewWindow),
+                Entry::command("&Open", Command::Open),
+                Entry::command("&Save", Command::Save),
+                Entry::command("Save &as", Command::SaveAs),
+                Entry::command("Save a&ll", Command::SaveAll),
                 Entry::Separator,
-                Entry::command("&Close tab", || Box::new(CloseTab)),
-                Entry::command("Clos&e window", || Box::new(CloseWindow)),
-                Entry::command("E&xit", || Box::new(Exit)),
+                Entry::command("&Close tab", Command::CloseTab),
+                Entry::command("Clos&e window", Command::CloseWindow),
+                Entry::command("E&xit", Command::Exit),
             ],
             Self::Edit => {
                 let selection = !editor.selected_range().is_empty();
                 let clipboard_text = clipboard_has_text();
                 let text = editor.text().len() > 0;
                 vec![
-                    Entry::command_if("&Undo", editor.can_undo(), || Box::new(editor::Undo)),
+                    Entry::command_if("&Undo", editor.can_undo(), Command::Undo),
                     Entry::Separator,
-                    Entry::command_if("Cu&t", selection, || Box::new(editor::Cut)),
-                    Entry::command_if("&Copy", selection, || Box::new(editor::Copy)),
-                    Entry::command_if("&Paste", clipboard_text, || Box::new(editor::Paste)),
-                    Entry::command_if("De&lete", selection, || Box::new(editor::Delete)),
+                    Entry::command_if("Cu&t", selection, Command::Cut),
+                    Entry::command_if("&Copy", selection, Command::Copy),
+                    Entry::command_if("&Paste", clipboard_text, Command::Paste),
+                    Entry::command_if("De&lete", selection, Command::Delete),
                     Entry::Separator,
-                    Entry::command_if("&Find", text, || Box::new(Find)),
-                    Entry::command_if("Find &next", text, || Box::new(FindNext)),
-                    Entry::command_if("Find pre&vious", text, || Box::new(FindPrevious)),
-                    Entry::command_if("&Replace", text, || Box::new(Replace)),
-                    Entry::command("&Go to", || Box::new(GoTo)),
+                    Entry::command_if("&Find", text, Command::Find),
+                    Entry::command_if("Find &next", text, Command::FindNext),
+                    Entry::command_if("Find pre&vious", text, Command::FindPrevious),
+                    Entry::command_if("&Replace", text, Command::Replace),
+                    Entry::command("&Go to", Command::GoTo),
                     Entry::Separator,
-                    Entry::command("Select &all", || Box::new(editor::SelectAll)),
-                    Entry::command("Time/&Date", || Box::new(TimeDate)),
+                    Entry::command("Select &all", Command::SelectAll),
+                    Entry::command("Time/&Date", Command::TimeDate),
                 ]
             }
             Self::View => {
@@ -243,13 +237,13 @@ impl MenuKind {
                     Entry::Submenu(
                         "&Zoom",
                         vec![
-                            Entry::command("Zoom &in", || Box::new(ZoomIn)),
-                            Entry::command("Zoom &out", || Box::new(ZoomOut)),
-                            Entry::command("&Restore default zoom", || Box::new(ResetZoom)),
+                            Entry::command("Zoom &in", Command::ZoomIn),
+                            Entry::command("Zoom &out", Command::ZoomOut),
+                            Entry::command("&Restore default zoom", Command::ResetZoom),
                         ],
                     ),
-                    Entry::toggle("&Status bar", view.status_bar, || Box::new(ToggleStatusBar)),
-                    Entry::toggle("&Word wrap", view.word_wrap, || Box::new(ToggleWordWrap)),
+                    Entry::toggle("&Status bar", view.status_bar, Command::ToggleStatusBar),
+                    Entry::toggle("&Word wrap", view.word_wrap, Command::ToggleWordWrap),
                 ]
             }
         }
@@ -281,9 +275,9 @@ impl Panel {
             .iter()
             .map(|entry| {
                 entry
-                    .action()
+                    .command_id()
                     .filter(|_| shortcuts)
-                    .and_then(|action| shortcut_text(action.as_ref(), action_context, window))
+                    .and_then(|cmd| shortcut_text(cmd, action_context, window))
             })
             .collect();
         let checks = entries.iter().any(|entry| {
@@ -372,11 +366,11 @@ pub(super) fn menu_show_delay() -> Duration {
 }
 
 fn shortcut_text(
-    action: &dyn Action,
+    command: Command,
     focus: &FocusHandle,
     window: &Window,
 ) -> Option<SharedString> {
-    let binding = window.highest_precedence_binding_for_action_in(action, focus)?;
+    let binding = window.shortcut_for_command_in(command, focus)?;
     let keystroke = binding.keystroke();
     let modifiers = keystroke.modifiers;
     let mut parts: Vec<String> = Vec::new();

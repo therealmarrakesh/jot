@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod brush;
+mod command;
 mod dialog;
 mod document;
 mod editor;
@@ -227,44 +228,6 @@ fn caption_buttons(window: &Window, p: Palette) -> impl IntoElement {
         .child(div().flex_1().window_control_area(WindowControlArea::Drag))
 }
 
-crate::ui::actions!(
-    jot,
-    [
-        NewTab,
-        NewWindow,
-        Open,
-        Save,
-        SaveAs,
-        SaveAll,
-        CloseTab,
-        NextTab,
-        PrevTab,
-        SelectLastTab,
-        CloseWindow,
-        Exit,
-        Find,
-        FindNext,
-        FindPrevious,
-        Replace,
-        GoTo,
-        TimeDate,
-        ZoomIn,
-        ZoomOut,
-        ResetZoom,
-        ToggleStatusBar,
-        ToggleWordWrap,
-        ToggleMatchCase,
-        ToggleWrapAround,
-        ReplaceNext,
-        ShowContextMenu,
-        ToggleTheme,
-    ]
-);
-
-#[derive(Clone, PartialEq, Eq)]
-struct SelectTab(usize);
-crate::ui::impl_action!(jot, SelectTab);
-
 struct ViewSettings {
     status_bar: bool,
     word_wrap: bool,
@@ -274,40 +237,40 @@ impl Global for ViewSettings {}
 
 fn key_bindings() -> Vec<KeyBinding> {
     vec![
-        KeyBinding::new("escape", Cancel, Some(CONTEXT)),
-        KeyBinding::new("ctrl-n", NewTab, Some(CONTEXT)),
-        KeyBinding::new("ctrl-shift-n", NewWindow, Some(CONTEXT)),
-        KeyBinding::new("ctrl-o", Open, Some(CONTEXT)),
-        KeyBinding::new("ctrl-s", Save, Some(CONTEXT)),
-        KeyBinding::new("ctrl-shift-s", SaveAs, Some(CONTEXT)),
-        KeyBinding::new("ctrl-alt-s", SaveAll, Some(CONTEXT)),
-        KeyBinding::new("ctrl-w", CloseTab, Some(CONTEXT)),
-        KeyBinding::new("ctrl-tab", NextTab, Some(CONTEXT)),
-        KeyBinding::new("ctrl-shift-tab", PrevTab, Some(CONTEXT)),
-        KeyBinding::new("ctrl-pagedown", NextTab, Some(CONTEXT)),
-        KeyBinding::new("ctrl-pageup", PrevTab, Some(CONTEXT)),
-        KeyBinding::new("ctrl-1", SelectTab(0), Some(CONTEXT)),
-        KeyBinding::new("ctrl-2", SelectTab(1), Some(CONTEXT)),
-        KeyBinding::new("ctrl-3", SelectTab(2), Some(CONTEXT)),
-        KeyBinding::new("ctrl-4", SelectTab(3), Some(CONTEXT)),
-        KeyBinding::new("ctrl-5", SelectTab(4), Some(CONTEXT)),
-        KeyBinding::new("ctrl-6", SelectTab(5), Some(CONTEXT)),
-        KeyBinding::new("ctrl-7", SelectTab(6), Some(CONTEXT)),
-        KeyBinding::new("ctrl-8", SelectTab(7), Some(CONTEXT)),
-        KeyBinding::new("ctrl-9", SelectLastTab, Some(CONTEXT)),
-        KeyBinding::new("ctrl-shift-w", CloseWindow, Some(CONTEXT)),
-        KeyBinding::new("ctrl-f", Find, Some(CONTEXT)),
-        KeyBinding::new("f3", FindNext, Some(CONTEXT)),
-        KeyBinding::new("shift-f3", FindPrevious, Some(CONTEXT)),
-        KeyBinding::new("ctrl-h", Replace, Some(CONTEXT)),
-        KeyBinding::new("ctrl-g", GoTo, Some(CONTEXT)),
-        KeyBinding::new("f5", TimeDate, Some(CONTEXT)),
-        KeyBinding::new("shift-f10", ShowContextMenu, Some(CONTEXT)),
-        KeyBinding::new("menu", ShowContextMenu, Some(CONTEXT)),
-        KeyBinding::new("ctrl-=", ZoomIn, Some(CONTEXT)),
-        KeyBinding::new("ctrl-+", ZoomIn, Some(CONTEXT)),
-        KeyBinding::new("ctrl--", ZoomOut, Some(CONTEXT)),
-        KeyBinding::new("ctrl-0", ResetZoom, Some(CONTEXT)),
+        KeyBinding::new("escape", Command::Cancel, Some(CONTEXT)),
+        KeyBinding::new("ctrl-n", Command::NewTab, Some(CONTEXT)),
+        KeyBinding::new("ctrl-shift-n", Command::NewWindow, Some(CONTEXT)),
+        KeyBinding::new("ctrl-o", Command::Open, Some(CONTEXT)),
+        KeyBinding::new("ctrl-s", Command::Save, Some(CONTEXT)),
+        KeyBinding::new("ctrl-shift-s", Command::SaveAs, Some(CONTEXT)),
+        KeyBinding::new("ctrl-alt-s", Command::SaveAll, Some(CONTEXT)),
+        KeyBinding::new("ctrl-w", Command::CloseTab, Some(CONTEXT)),
+        KeyBinding::new("ctrl-tab", Command::NextTab, Some(CONTEXT)),
+        KeyBinding::new("ctrl-shift-tab", Command::PrevTab, Some(CONTEXT)),
+        KeyBinding::new("ctrl-pagedown", Command::NextTab, Some(CONTEXT)),
+        KeyBinding::new("ctrl-pageup", Command::PrevTab, Some(CONTEXT)),
+        KeyBinding::new("ctrl-1", Command::SelectTab(0), Some(CONTEXT)),
+        KeyBinding::new("ctrl-2", Command::SelectTab(1), Some(CONTEXT)),
+        KeyBinding::new("ctrl-3", Command::SelectTab(2), Some(CONTEXT)),
+        KeyBinding::new("ctrl-4", Command::SelectTab(3), Some(CONTEXT)),
+        KeyBinding::new("ctrl-5", Command::SelectTab(4), Some(CONTEXT)),
+        KeyBinding::new("ctrl-6", Command::SelectTab(5), Some(CONTEXT)),
+        KeyBinding::new("ctrl-7", Command::SelectTab(6), Some(CONTEXT)),
+        KeyBinding::new("ctrl-8", Command::SelectTab(7), Some(CONTEXT)),
+        KeyBinding::new("ctrl-9", Command::SelectLastTab, Some(CONTEXT)),
+        KeyBinding::new("ctrl-shift-w", Command::CloseWindow, Some(CONTEXT)),
+        KeyBinding::new("ctrl-f", Command::Find, Some(CONTEXT)),
+        KeyBinding::new("f3", Command::FindNext, Some(CONTEXT)),
+        KeyBinding::new("shift-f3", Command::FindPrevious, Some(CONTEXT)),
+        KeyBinding::new("ctrl-h", Command::Replace, Some(CONTEXT)),
+        KeyBinding::new("ctrl-g", Command::GoTo, Some(CONTEXT)),
+        KeyBinding::new("f5", Command::TimeDate, Some(CONTEXT)),
+        KeyBinding::new("shift-f10", Command::ShowContextMenu, Some(CONTEXT)),
+        KeyBinding::new("menu", Command::ShowContextMenu, Some(CONTEXT)),
+        KeyBinding::new("ctrl-=", Command::ZoomIn, Some(CONTEXT)),
+        KeyBinding::new("ctrl-+", Command::ZoomIn, Some(CONTEXT)),
+        KeyBinding::new("ctrl--", Command::ZoomOut, Some(CONTEXT)),
+        KeyBinding::new("ctrl-0", Command::ResetZoom, Some(CONTEXT)),
     ]
 }
 
@@ -636,26 +599,51 @@ impl Jot {
         }
     }
 
-    fn new_tab(&mut self, _: &NewTab, window: &mut Window, cx: &mut Context<Self>) {
-        self.add_tab(window, cx);
+    fn handle_command(
+        &mut self,
+        command: Command,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        match command {
+            Command::Cancel => return self.cancel(window, cx),
+            Command::ShowContextMenu => return self.show_context_menu(window, cx),
+            Command::ZoomIn => self.set_zoom(self.zoom() + ZOOM_STEP, cx),
+            Command::ZoomOut => self.set_zoom(self.zoom() - ZOOM_STEP, cx),
+            Command::ResetZoom => self.set_zoom(1., cx),
+            Command::CloseWindow => {
+                if self.request_close_window(window, cx) {
+                    window.remove_window();
+                }
+            }
+            Command::NewTab => self.add_tab(window, cx),
+            Command::CloseTab => self.close_tab(self.active, window, cx),
+            Command::NextTab => self.next_tab(window, cx),
+            Command::PrevTab => self.prev_tab(window, cx),
+            Command::SelectTab(ix) => self.select_tab(ix, window, cx),
+            Command::SelectLastTab => self.select_last_tab(window, cx),
+            Command::Open => self.open(window, cx),
+            Command::Save => self.save(window, cx),
+            Command::SaveAs => self.save_as(window, cx),
+            Command::SaveAll => self.save_all(window, cx),
+            Command::TimeDate => self.insert_time_date(window, cx),
+            Command::GoTo => self.go_to(window, cx),
+            Command::Find => self.find(window, cx),
+            Command::Replace => self.replace(window, cx),
+            Command::FindNext => self.find_next(window, cx),
+            Command::FindPrevious => self.find_previous(window, cx),
+            Command::ToggleMatchCase => self.toggle_match_case(window, cx),
+            Command::ToggleWrapAround => self.toggle_wrap_around(window, cx),
+            Command::ReplaceNext => self.replace_next(window, cx),
+            _ => return false,
+        }
+        true
     }
 
-    fn insert_time_date(&mut self, _: &TimeDate, window: &mut Window, cx: &mut Context<Self>) {
+    fn insert_time_date(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let stamp = crate::win32::format_local_time_date();
         self.active_editor()
             .update(cx, |editor, cx| editor.replace(stamp, window, cx));
-    }
-
-    fn zoom_in(&mut self, _: &ZoomIn, _: &mut Window, cx: &mut Context<Self>) {
-        self.set_zoom(self.zoom() + ZOOM_STEP, cx);
-    }
-
-    fn zoom_out(&mut self, _: &ZoomOut, _: &mut Window, cx: &mut Context<Self>) {
-        self.set_zoom(self.zoom() - ZOOM_STEP, cx);
-    }
-
-    fn reset_zoom(&mut self, _: &ResetZoom, _: &mut Window, cx: &mut Context<Self>) {
-        self.set_zoom(1., cx);
     }
 
     fn set_zoom(&mut self, zoom: f32, cx: &mut Context<Self>) {
@@ -664,27 +652,19 @@ impl Jot {
         cx.notify();
     }
 
-    fn cancel(&mut self, _: &Cancel, window: &mut Window, cx: &mut Context<Self>) {
+    fn cancel(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         if tab_drag::dragging(cx) {
             cx.defer(tab_drag::cancel);
+            true
         } else if self.find.is_open() {
             self.close_find(window, cx);
+            true
         } else {
-            cx.propagate();
+            false
         }
     }
 
-    fn close_window(&mut self, _: &CloseWindow, window: &mut Window, cx: &mut Context<Self>) {
-        if self.request_close_window(window, cx) {
-            window.remove_window();
-        }
-    }
-
-    fn close_active_tab(&mut self, _: &CloseTab, window: &mut Window, cx: &mut Context<Self>) {
-        self.close_tab(self.active, window, cx);
-    }
-
-    fn next_tab(&mut self, _: &NextTab, window: &mut Window, cx: &mut Context<Self>) {
+    fn next_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.dialogs.is_open() || self.tabs.len() <= 1 {
             return;
         }
@@ -692,7 +672,7 @@ impl Jot {
         self.activate_tab(next, window, cx);
     }
 
-    fn prev_tab(&mut self, _: &PrevTab, window: &mut Window, cx: &mut Context<Self>) {
+    fn prev_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.dialogs.is_open() || self.tabs.len() <= 1 {
             return;
         }
@@ -700,14 +680,14 @@ impl Jot {
         self.activate_tab(prev, window, cx);
     }
 
-    fn select_tab(&mut self, action: &SelectTab, window: &mut Window, cx: &mut Context<Self>) {
-        if self.dialogs.is_open() || action.0 >= self.tabs.len() || action.0 == self.active {
+    fn select_tab(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if self.dialogs.is_open() || ix >= self.tabs.len() || ix == self.active {
             return;
         }
-        self.activate_tab(action.0, window, cx);
+        self.activate_tab(ix, window, cx);
     }
 
-    fn select_last_tab(&mut self, _: &SelectLastTab, window: &mut Window, cx: &mut Context<Self>) {
+    fn select_last_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let last = self.tabs.len().saturating_sub(1);
         if self.dialogs.is_open() || last == self.active {
             return;
@@ -782,29 +762,24 @@ impl Jot {
                         )
                         .flex_none()
                         .on_click(|_, window, cx| {
-                            window.dispatch_action(Box::new(ToggleTheme), cx);
+                            window.dispatch_command(Command::ToggleTheme, cx);
                         }),
                     ),
             )
             .child(separator(p))
     }
 
-    fn show_context_menu(
-        &mut self,
-        _: &ShowContextMenu,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn show_context_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let editor = self.active_editor().clone();
         if !editor.focus_handle(cx).is_focused(window) {
-            cx.propagate();
-            return;
+            return false;
         }
         let Some(caret) = editor.read(cx).caret_bounds() else {
-            return;
+            return true;
         };
         let anchor = point(caret.right(), caret.bottom());
         self.open_context_menu(anchor, window, cx);
+        true
     }
 
     fn editor(
@@ -938,31 +913,7 @@ impl Render for Jot {
                 this.menu_pointer_down(cx);
             }))
             .on_drop(cx.listener(Self::open_dropped))
-            .on_action(cx.listener(Self::cancel))
-            .on_action(cx.listener(Self::show_context_menu))
-            .on_action(cx.listener(Self::zoom_in))
-            .on_action(cx.listener(Self::zoom_out))
-            .on_action(cx.listener(Self::reset_zoom))
-            .on_action(cx.listener(Self::close_window))
-            .on_action(cx.listener(Self::new_tab))
-            .on_action(cx.listener(Self::close_active_tab))
-            .on_action(cx.listener(Self::next_tab))
-            .on_action(cx.listener(Self::prev_tab))
-            .on_action(cx.listener(Self::select_tab))
-            .on_action(cx.listener(Self::select_last_tab))
-            .on_action(cx.listener(Self::open))
-            .on_action(cx.listener(Self::save))
-            .on_action(cx.listener(Self::save_as))
-            .on_action(cx.listener(Self::save_all))
-            .on_action(cx.listener(Self::insert_time_date))
-            .on_action(cx.listener(Self::go_to))
-            .on_action(cx.listener(Self::find))
-            .on_action(cx.listener(Self::replace))
-            .on_action(cx.listener(Self::find_next))
-            .on_action(cx.listener(Self::find_previous))
-            .on_action(cx.listener(Self::toggle_match_case))
-            .on_action(cx.listener(Self::toggle_wrap_around))
-            .on_action(cx.listener(Self::replace_next))
+            .on_command(cx.command_listener(Self::handle_command))
             .child(
                 div()
                     .key_context(CONTEXT)
@@ -1084,32 +1035,40 @@ fn main() {
         cx.bind_keys(dialog::key_bindings());
         cx.bind_keys(find::key_bindings());
 
-        cx.on_action(|_: &Exit, cx| {
-            cx.defer(|cx| {
-                for window in cx.windows() {
-                    window
-                        .update(cx, |_, window, cx| {
-                            window.dispatch_action(Box::new(CloseWindow), cx);
-                        })
-                        .ok();
+        cx.on_command(|command, cx| {
+            match command {
+                Command::Exit => cx.defer(|cx| {
+                    for window in cx.windows() {
+                        window
+                            .update(cx, |_, window, cx| {
+                                window.dispatch_command(Command::CloseWindow, cx);
+                            })
+                            .ok();
+                    }
+                }),
+                Command::NewWindow => {
+                    open_jot_window(None, None, cx);
                 }
-            });
-        });
-        cx.on_action(|_: &NewWindow, cx| {
-            open_jot_window(None, None, cx);
-        });
-        cx.on_action(|_: &ToggleStatusBar, cx| {
-            cx.update_global::<ViewSettings, _>(|view, _| view.status_bar = !view.status_bar);
-        });
-        cx.on_action(|_: &ToggleTheme, cx| {
-            cx.set_window_appearance(Some(if palette(cx).dark {
-                WindowAppearance::Light
-            } else {
-                WindowAppearance::Dark
-            }));
-        });
-        cx.on_action(|_: &ToggleWordWrap, cx| {
-            cx.update_global::<ViewSettings, _>(|view, _| view.word_wrap = !view.word_wrap);
+                Command::ToggleStatusBar => {
+                    cx.update_global::<ViewSettings, _>(|view, _| {
+                        view.status_bar = !view.status_bar;
+                    });
+                }
+                Command::ToggleTheme => {
+                    cx.set_window_appearance(Some(if palette(cx).dark {
+                        WindowAppearance::Light
+                    } else {
+                        WindowAppearance::Dark
+                    }));
+                }
+                Command::ToggleWordWrap => {
+                    cx.update_global::<ViewSettings, _>(|view, _| {
+                        view.word_wrap = !view.word_wrap;
+                    });
+                }
+                _ => return false,
+            }
+            true
         });
 
         let (window, _) = open_jot_window(None, None, cx);
@@ -1274,30 +1233,36 @@ mod ui_regression_tests {
                 app.bind_keys(menu::key_bindings());
                 app.bind_keys(dialog::key_bindings());
                 app.bind_keys(find::key_bindings());
-                app.on_action(|_: &NewWindow, cx| {
-                    let mut opts = window_options(Some(size(px(800.), px(600.))), cx);
-                    opts.show = false;
-                    opts.focus = false;
-                    let _ = cx.open_window(opts, |window, cx| {
-                        cx.new(|cx| Jot::new(None, window, cx))
-                    });
-                });
-                app.on_action(|_: &ToggleStatusBar, cx| {
-                    cx.update_global::<ViewSettings, _>(|view, _| {
-                        view.status_bar = !view.status_bar;
-                    });
-                });
-                app.on_action(|_: &ToggleTheme, cx| {
-                    cx.set_window_appearance(Some(if palette(cx).dark {
-                        WindowAppearance::Light
-                    } else {
-                        WindowAppearance::Dark
-                    }));
-                });
-                app.on_action(|_: &ToggleWordWrap, cx| {
-                    cx.update_global::<ViewSettings, _>(|view, _| {
-                        view.word_wrap = !view.word_wrap;
-                    });
+                app.on_command(|command, cx| {
+                    match command {
+                        Command::NewWindow => {
+                            let mut opts = window_options(Some(size(px(800.), px(600.))), cx);
+                            opts.show = false;
+                            opts.focus = false;
+                            let _ = cx.open_window(opts, |window, cx| {
+                                cx.new(|cx| Jot::new(None, window, cx))
+                            });
+                        }
+                        Command::ToggleStatusBar => {
+                            cx.update_global::<ViewSettings, _>(|view, _| {
+                                view.status_bar = !view.status_bar;
+                            });
+                        }
+                        Command::ToggleTheme => {
+                            cx.set_window_appearance(Some(if palette(cx).dark {
+                                WindowAppearance::Light
+                            } else {
+                                WindowAppearance::Dark
+                            }));
+                        }
+                        Command::ToggleWordWrap => {
+                            cx.update_global::<ViewSettings, _>(|view, _| {
+                                view.word_wrap = !view.word_wrap;
+                            });
+                        }
+                        _ => return false,
+                    }
+                    true
                 });
 
                 let mut opts = window_options(Some(size(px(1024.), px(700.))), &app);
@@ -1629,8 +1594,8 @@ mod ui_regression_tests {
             app.update_window_impl(h.handle.id, |root, window, cx| {
                 let jot = root.downcast::<Jot>().unwrap();
                 let focus = jot.read(cx).active_editor().focus_handle(cx);
-                assert!(window.highest_precedence_binding_for_action_in(&Save, &focus).is_some());
-                assert!(window.highest_precedence_binding_for_action_in(&NewTab, &focus).is_some());
+                assert!(window.shortcut_for_command_in(Command::Save, &focus).is_some());
+                assert!(window.shortcut_for_command_in(Command::NewTab, &focus).is_some());
             })
             .unwrap();
         }

@@ -1,10 +1,7 @@
-use crate::ui::{Context, Pixels, Point, Window};
+use crate::ui::{Context, Pixels, Point};
 
 use super::rope_ext::Bias;
-use super::{
-    EditorState, MoveDown, MoveEnd, MoveHome, MoveLeft, MovePageDown, MovePageUp, MoveRight,
-    MoveToEnd, MoveToNextWord, MoveToPreviousWord, MoveToStart, MoveUp, RopeExt as _,
-};
+use super::{EditorState, RopeExt as _};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MoveDirection {
@@ -193,10 +190,9 @@ impl EditorState {
         self.place_cursor(offset, anchor, affinity, Some(direction), cx);
     }
 
-    pub(super) fn left(&mut self, _: &MoveLeft, _: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn left(&mut self, cx: &mut Context<Self>) -> bool {
         if self.selection.is_empty() && self.cursor() == 0 {
-            cx.propagate();
-            return;
+            return false;
         }
 
         let offset = if self.selection.is_empty() {
@@ -206,12 +202,12 @@ impl EditorState {
         };
         let anchor = self.preferred_column_for(offset);
         self.place_cursor(offset, anchor, false, None, cx);
+        true
     }
 
-    pub(super) fn right(&mut self, _: &MoveRight, _: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn right(&mut self, cx: &mut Context<Self>) -> bool {
         if self.selection.is_empty() && self.cursor() == self.text.len() {
-            cx.propagate();
-            return;
+            return false;
         }
 
         let offset = if self.selection.is_empty() {
@@ -221,17 +217,18 @@ impl EditorState {
         };
         let anchor = self.preferred_column_for(offset);
         self.place_cursor(offset, anchor, false, None, cx);
+        true
     }
 
-    pub(super) fn up(&mut self, _: &MoveUp, _: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn up(&mut self, cx: &mut Context<Self>) {
         self.move_vertical(-1, true, cx);
     }
 
-    pub(super) fn down(&mut self, _: &MoveDown, _: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn down(&mut self, cx: &mut Context<Self>) {
         self.move_vertical(1, true, cx);
     }
 
-    pub(super) fn page_up(&mut self, _: &MovePageUp, _: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn page_up(&mut self, cx: &mut Context<Self>) {
         if self.is_single_line() {
             return;
         }
@@ -242,7 +239,7 @@ impl EditorState {
         self.move_vertical(-display_lines, false, cx);
     }
 
-    pub(super) fn page_down(&mut self, _: &MovePageDown, _: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn page_down(&mut self, cx: &mut Context<Self>) {
         if self.is_single_line() {
             return;
         }
@@ -253,48 +250,33 @@ impl EditorState {
         self.move_vertical(display_lines, false, cx);
     }
 
-    pub(super) fn home(&mut self, _: &MoveHome, _: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn home(&mut self, cx: &mut Context<Self>) {
         let offset = self.start_of_line_at(self.selection.cursor_offset());
         let anchor = self.preferred_column_for(offset);
         self.place_cursor(offset, anchor, false, Some(MoveDirection::Up), cx);
     }
 
-    pub(super) fn end(&mut self, _: &MoveEnd, _: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn end(&mut self, cx: &mut Context<Self>) {
         let offset = self.end_of_line_at(self.selection.cursor_offset());
         let anchor = self.preferred_column_for(offset);
         self.place_cursor(offset, anchor, true, Some(MoveDirection::Down), cx);
     }
 
-    pub(super) fn move_to_start(
-        &mut self,
-        _: &MoveToStart,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub(super) fn move_to_start(&mut self, cx: &mut Context<Self>) {
         self.move_to(0, None, cx);
     }
 
-    pub(super) fn move_to_end(&mut self, _: &MoveToEnd, _: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn move_to_end(&mut self, cx: &mut Context<Self>) {
         self.move_to(self.text.len(), None, cx);
     }
 
-    pub(super) fn move_to_previous_word(
-        &mut self,
-        _: &MoveToPreviousWord,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub(super) fn move_to_previous_word(&mut self, cx: &mut Context<Self>) {
         let offset = self.previous_start_of_word_at(self.selection.cursor_offset());
         let anchor = self.preferred_column_for(offset);
         self.place_cursor(offset, anchor, false, None, cx);
     }
 
-    pub(super) fn move_to_next_word(
-        &mut self,
-        _: &MoveToNextWord,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub(super) fn move_to_next_word(&mut self, cx: &mut Context<Self>) {
         let offset = self.next_end_of_word_at(self.selection.cursor_offset());
         let anchor = self.preferred_column_for(offset);
         self.place_cursor(offset, anchor, false, None, cx);

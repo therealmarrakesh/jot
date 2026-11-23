@@ -44,9 +44,9 @@ const OPTIONS_GLYPH: &str = "\u{E9E9}";
 
 pub(crate) fn key_bindings() -> Vec<KeyBinding> {
     vec![
-        KeyBinding::new("enter", FindNext, Some(QUERY_CONTEXT)),
-        KeyBinding::new("shift-enter", FindPrevious, Some(QUERY_CONTEXT)),
-        KeyBinding::new("enter", ReplaceNext, Some(REPLACEMENT_CONTEXT)),
+        KeyBinding::new("enter", Command::FindNext, Some(QUERY_CONTEXT)),
+        KeyBinding::new("shift-enter", Command::FindPrevious, Some(QUERY_CONTEXT)),
+        KeyBinding::new("enter", Command::ReplaceNext, Some(REPLACEMENT_CONTEXT)),
     ]
 }
 
@@ -470,61 +470,41 @@ impl FindBar {
 }
 
 impl Jot {
-    pub(crate) fn find(&mut self, _: &Find, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.has_text(cx) {
             self.open_find(false, window, cx);
         }
     }
 
-    pub(crate) fn replace(&mut self, _: &Replace, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn replace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.has_text(cx) {
             self.open_find(true, window, cx);
         }
     }
 
-    pub(crate) fn find_next(&mut self, _: &FindNext, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn find_next(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.has_text(cx) {
             self.find_step(true, window, cx);
         }
     }
 
-    pub(crate) fn find_previous(
-        &mut self,
-        _: &FindPrevious,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub(crate) fn find_previous(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.has_text(cx) {
             self.find_step(false, window, cx);
         }
     }
 
-    pub(crate) fn toggle_match_case(
-        &mut self,
-        _: &ToggleMatchCase,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub(crate) fn toggle_match_case(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.find.match_case = !self.find.match_case;
         self.refocus_find(window, cx);
     }
 
-    pub(crate) fn toggle_wrap_around(
-        &mut self,
-        _: &ToggleWrapAround,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub(crate) fn toggle_wrap_around(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.find.wrap_around = !self.find.wrap_around;
         self.refocus_find(window, cx);
     }
 
-    pub(crate) fn replace_next(
-        &mut self,
-        _: &ReplaceNext,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub(crate) fn replace_next(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.find.prepare(cx).is_none() {
             return;
         }
@@ -679,12 +659,12 @@ impl Jot {
     fn open_find_options(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let target = self.find.options_bounds.get();
         let entries = vec![
-            Entry::toggle("Match case", self.find.match_case, || {
-                Box::new(ToggleMatchCase)
-            }),
-            Entry::toggle("Wrap around", self.find.wrap_around, || {
-                Box::new(ToggleWrapAround)
-            }),
+            Entry::toggle("Match case", self.find.match_case, Command::ToggleMatchCase),
+            Entry::toggle(
+                "Wrap around",
+                self.find.wrap_around,
+                Command::ToggleWrapAround,
+            ),
         ];
         let return_focus = self.find.query.focus_handle(cx);
         self.open_flyout_above(entries, target, return_focus, window, cx);
@@ -907,7 +887,7 @@ impl Jot {
             )
             .child(action(
                 field::button(p, buttons, "find-replace", "Replace", false, None, window).on_click(
-                    cx.listener(|this, _, window, cx| this.replace_next(&ReplaceNext, window, cx)),
+                    cx.listener(|this, _, window, cx| this.replace_next(window, cx)),
                 ),
             ))
             .child(action(

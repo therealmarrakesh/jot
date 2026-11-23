@@ -6,7 +6,7 @@ use crate::ui::app::App;
 use crate::ui::element::DispatchPhase;
 use crate::ui::focus::FocusId;
 use crate::ui::geometry::{Bounds, Pixels, Point, point, px};
-use crate::ui::keymap::Action;
+use crate::ui::keymap::Command;
 use crate::ui::platform::ExternalPaths;
 
 use super::events::{
@@ -16,26 +16,25 @@ use super::events::{
 use super::Window;
 
 impl Window {
-    pub(crate) fn dispatch_action(&mut self, action: Box<dyn Action>, cx: &mut App) -> bool {
-        self.dispatch_action_internal(self.focused_id(), action, cx)
+    pub(crate) fn dispatch_command(&mut self, command: Command, cx: &mut App) -> bool {
+        self.dispatch_command_internal(self.focused_id(), command, cx)
     }
 
-    pub(crate) fn dispatch_action_on(
+    pub(crate) fn dispatch_command_on(
         &mut self,
         target: FocusId,
-        action: Box<dyn Action>,
+        command: Command,
         cx: &mut App,
     ) {
-        self.dispatch_action_internal(Some(target), action, cx);
+        self.dispatch_command_internal(Some(target), command, cx);
     }
 
-    fn dispatch_action_internal(
+    fn dispatch_command_internal(
         &mut self,
         start: Option<FocusId>,
-        action: Box<dyn Action>,
+        command: Command,
         cx: &mut App,
     ) -> bool {
-        let type_id = action.as_any().type_id();
         let mut focus_chain: Vec<Option<FocusId>> = Vec::new();
         let mut cur = start;
         while let Some(id) = cur {
@@ -48,24 +47,20 @@ impl Window {
         }
         focus_chain.push(None);
 
-        let mut listeners = std::mem::take(&mut self.prev_frame.action_listeners);
+        let mut listeners = std::mem::take(&mut self.prev_frame.command_listeners);
         let mut handled = false;
         'outer: for target in &focus_chain {
-            for (owner, tid, handler) in listeners.iter_mut().rev() {
-                if owner == target && *tid == type_id {
-                    cx.propagate_action = false;
-                    handler(action.as_ref(), self, cx);
-                    if !cx.propagate_action {
-                        handled = true;
-                        break 'outer;
-                    }
+            for (owner, handler) in listeners.iter_mut().rev() {
+                if owner == target && handler(command, self, cx) {
+                    handled = true;
+                    break 'outer;
                 }
             }
         }
-        self.prev_frame.action_listeners = listeners;
+        self.prev_frame.command_listeners = listeners;
 
         if !handled {
-            handled = cx.dispatch_global_action(action.as_ref());
+            handled = cx.dispatch_global_command(command);
         }
         self.dirty = true;
         handled
@@ -199,14 +194,14 @@ impl Window {
             return true;
         }
 
-        // Keymap action lookup along active focus chain
+        // Keymap command lookup along active focus chain
         let contexts = self.key_contexts_for(self.focused_id());
-        let actions = self
+        let commands = self
             .keymap
             .borrow()
             .match_keystroke(&event.keystroke, &contexts);
-        for action in actions {
-            if self.dispatch_action(action, cx) {
+        for command in commands {
+            if self.dispatch_command(command, cx) {
                 return true;
             }
         }

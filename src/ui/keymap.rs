@@ -1,66 +1,8 @@
-//! Clean-room actions, keystrokes, modifiers, key contexts, and keymap lookup.
+//! Clean-room keystrokes, modifiers, key contexts, and typed `Command` keymap lookup.
 
-use std::any::{Any, TypeId};
 use std::collections::HashMap;
-use std::fmt;
 
-/// Dynamic action dispatched through focus/element handlers.
-pub(crate) trait Action: Any + 'static {
-    fn boxed_clone(&self) -> Box<dyn Action>;
-    fn partial_eq(&self, other: &dyn Action) -> bool;
-    fn name(&self) -> &'static str;
-}
-
-impl dyn Action {
-    #[inline]
-    pub(crate) fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    #[inline]
-    pub(crate) fn downcast_ref<A: Action>(&self) -> Option<&A> {
-        self.as_any().downcast_ref::<A>()
-    }
-}
-
-impl Clone for Box<dyn Action> {
-    fn clone(&self) -> Self {
-        self.boxed_clone()
-    }
-}
-
-macro_rules! impl_action {
-    ($namespace:ident, $name:ident) => {
-        impl $crate::ui::Action for $name {
-            fn boxed_clone(&self) -> Box<dyn $crate::ui::Action> {
-                Box::new(self.clone())
-            }
-
-            fn partial_eq(&self, other: &dyn $crate::ui::Action) -> bool {
-                other
-                    .as_any()
-                    .downcast_ref::<Self>()
-                    .is_some_and(|other| self == other)
-            }
-
-            fn name(&self) -> &'static str {
-                concat!(stringify!($namespace), "::", stringify!($name))
-            }
-        }
-    };
-}
-
-macro_rules! actions {
-    ($namespace:ident, [$($name:ident),* $(,)?]) => {
-        $(
-            #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
-            pub(crate) struct $name;
-            $crate::ui::impl_action!($namespace, $name);
-        )*
-    };
-}
-
-pub(crate) use {actions, impl_action};
+pub(crate) use crate::command::Command;
 
 /// Keyboard modifier state.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash)]
@@ -173,33 +115,19 @@ impl KeyContext {
     }
 }
 
-/// Single keybinding mapping a keystroke in an optional context to an `Action`.
-#[derive(Clone)]
+/// Single keybinding mapping a keystroke in an optional context to a typed `Command`.
+#[derive(Clone, Debug)]
 pub(crate) struct KeyBinding {
     keystroke: Keystroke,
-    action: Box<dyn Action>,
+    command: Command,
     context: Option<String>,
 }
 
-impl fmt::Debug for KeyBinding {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("KeyBinding")
-            .field("keystroke", &self.keystroke)
-            .field("action", &self.action.name())
-            .field("context", &self.context)
-            .finish()
-    }
-}
-
 impl KeyBinding {
-    pub(crate) fn new<A: Action>(
-        keystroke: &str,
-        action: A,
-        context: Option<&str>,
-    ) -> Self {
+    pub(crate) fn new(keystroke: &str, command: Command, context: Option<&str>) -> Self {
         Self {
             keystroke: Keystroke::parse(keystroke),
-            action: Box::new(action),
+            command,
             context: context.map(str::to_owned),
         }
     }
@@ -217,30 +145,29 @@ impl KeyBinding {
     }
 }
 
-/// Registry of keybindings evaluated from highest precedence (most recently added) down.
+/// Registry of keybindings evaluated from deepest matching context / most recently added down.
 #[derive(Default)]
 pub(crate) struct Keymap {
     bindings: Vec<KeyBinding>,
-    by_action: HashMap<TypeId, Vec<usize>>,
+    by_command: HashMap<Command, Vec<usize>>,
 }
 
 impl Keymap {
     pub(crate) fn add_bindings(&mut self, bindings: impl IntoIterator<Item = KeyBinding>) {
         for binding in bindings {
             let idx = self.bindings.len();
-            let type_id = binding.action.as_any().type_id();
-            self.by_action.entry(type_id).or_default().push(idx);
+            self.by_command.entry(binding.command).or_default().push(idx);
             self.bindings.push(binding);
         }
     }
 
-    /// Returns matching bindings in priority order (deepest matching context / last added first).
+    /// Returns matching commands in priority order (deepest matching context / last added first).
     pub(crate) fn match_keystroke(
         &self,
         keystroke: &Keystroke,
         contexts: &[KeyContext],
-    ) -> Vec<Box<dyn Action>> {
-        let mut matched: Vec<(usize, usize, Box<dyn Action>)> = Vec::new();
+    ) -> Vec<Command> {
+        let mut matched: Vec<(usize, usize, Command)> = Vec::new();
         for (idx, binding) in self.bindings.iter().enumerate() {
             if !binding.keystroke.matches(keystroke) {
                 continue;
@@ -252,23 +179,22 @@ impl Keymap {
                     None => continue,
                 },
             };
-            matched.push((depth, idx, binding.action.boxed_clone()));
+            matched.push((depth, idx, binding.command));
         }
         matched.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
-        matched.into_iter().map(|(_, _, action)| action).collect()
+        matched.into_iter().map(|(_, _, cmd)| cmd).collect()
     }
 
-    pub(crate) fn highest_precedence_for_action(
+    pub(crate) fn shortcut_for(
         &self,
-        action: &dyn Action,
+        command: Command,
         contexts: &[KeyContext],
     ) -> Option<KeyBinding> {
-        let type_id = action.as_any().type_id();
-        let indices = self.by_action.get(&type_id)?;
+        let indices = self.by_command.get(&command)?;
         let mut best: Option<(usize, usize, &KeyBinding)> = None;
         for &idx in indices {
             let binding = &self.bindings[idx];
-            if !binding.action.partial_eq(action) || !binding.matches_context(contexts) {
+            if !binding.matches_context(contexts) {
                 continue;
             }
             let depth = match &binding.context {
@@ -312,30 +238,24 @@ mod tests {
     }
 
     #[test]
-    fn keymap_prefers_deeper_context_and_finds_shortcut_for_action() {
-        #[derive(Clone, PartialEq, Eq)]
-        struct TestSave;
-        impl Action for TestSave {
-            fn boxed_clone(&self) -> Box<dyn Action> {
-                Box::new(self.clone())
-            }
-            fn partial_eq(&self, other: &dyn Action) -> bool {
-                other.as_any().is::<Self>()
-            }
-            fn name(&self) -> &'static str {
-                "test::TestSave"
-            }
-        }
-
+    fn keymap_prefers_deeper_context_and_finds_shortcut_for_command() {
         let mut map = Keymap::default();
-        map.add_bindings([KeyBinding::new("ctrl-s", TestSave, Some("Jot"))]);
+        map.add_bindings([
+            KeyBinding::new("ctrl-s", Command::Save, Some("Jot")),
+            KeyBinding::new("enter", Command::Enter, Some("Input")),
+            KeyBinding::new("enter", Command::FindNext, Some("JotFindQuery")),
+        ]);
 
-        let contexts = [KeyContext::parse("Jot"), KeyContext::parse("Input")];
-        let matched = map.match_keystroke(&Keystroke::parse("ctrl-s"), &contexts);
-        assert_eq!(matched.len(), 1);
+        let contexts = [
+            KeyContext::parse("Jot"),
+            KeyContext::parse("Input"),
+            KeyContext::parse("JotFindQuery"),
+        ];
+        let matched = map.match_keystroke(&Keystroke::parse("enter"), &contexts);
+        assert_eq!(matched, vec![Command::FindNext, Command::Enter]);
 
         let shortcut = map
-            .highest_precedence_for_action(&TestSave, &contexts)
+            .shortcut_for(Command::Save, &contexts)
             .expect("binding should resolve");
         assert_eq!(shortcut.keystroke().key, "s");
         assert!(shortcut.keystroke().modifiers.control);

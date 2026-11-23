@@ -1,10 +1,9 @@
 use crate::ui::{
-    App, AppContext, Bounds, Context, Edges, Entity, EntityInputHandler as _, FluentBuilder as _,
-    FocusHandle, Focusable, InteractiveElement as _, IntoElement, KeyBinding, MouseButton,
-    ParentElement as _, Pixels, Point, Render, ScrollHandle, SharedString, Styled as _,
-    Subscription, WeakFocusHandle, Window, actions, div, point, px,
+    App, AppContext, Bounds, Command, Context, Edges, Entity, EntityInputHandler as _,
+    FluentBuilder as _, FocusHandle, Focusable, InteractiveElement as _, IntoElement, KeyBinding,
+    MouseButton, ParentElement as _, Pixels, Point, Render, ScrollHandle, SharedString,
+    Styled as _, Subscription, WeakFocusHandle, Window, div, point, px,
 };
-use crate::ui::{SelectDown, SelectLeft, SelectRight, SelectUp};
 use ropey::{Rope, RopeSlice};
 use std::borrow::Cow;
 use std::ops::Range;
@@ -22,94 +21,54 @@ use super::{
     undo_manager::{EditIntent, UndoManager},
 };
 
-actions!(
-    input,
-    [
-        Enter,
-        Backspace,
-        Delete,
-        DeleteToPreviousWordStart,
-        DeleteToNextWordEnd,
-        Indent,
-        Outdent,
-        IndentInline,
-        OutdentInline,
-        MoveUp,
-        MoveDown,
-        MoveLeft,
-        MoveRight,
-        MoveHome,
-        MoveEnd,
-        MovePageUp,
-        MovePageDown,
-        SelectAll,
-        SelectToStartOfLine,
-        SelectToEndOfLine,
-        SelectToStart,
-        SelectToEnd,
-        SelectToPreviousWordStart,
-        SelectToNextWordEnd,
-        Copy,
-        Cut,
-        Paste,
-        Undo,
-        Redo,
-        MoveToStart,
-        MoveToEnd,
-        MoveToPreviousWord,
-        MoveToNextWord,
-        Escape,
-    ]
-);
-
 pub(super) const CONTEXT: &str = "Input";
 
 pub(crate) fn init(cx: &mut App) {
     cx.bind_keys([
-        KeyBinding::new("backspace", Backspace, Some(CONTEXT)),
-        KeyBinding::new("shift-backspace", Backspace, Some(CONTEXT)),
-        KeyBinding::new("delete", Delete, Some(CONTEXT)),
-        KeyBinding::new("shift-delete", Delete, Some(CONTEXT)),
-        KeyBinding::new("ctrl-backspace", DeleteToPreviousWordStart, Some(CONTEXT)),
-        KeyBinding::new("ctrl-delete", DeleteToNextWordEnd, Some(CONTEXT)),
-        KeyBinding::new("enter", Enter, Some(CONTEXT)),
-        KeyBinding::new("shift-enter", Enter, Some(CONTEXT)),
-        KeyBinding::new("secondary-enter", Enter, Some(CONTEXT)),
-        KeyBinding::new("escape", Escape, Some(CONTEXT)),
-        KeyBinding::new("up", MoveUp, Some(CONTEXT)),
-        KeyBinding::new("down", MoveDown, Some(CONTEXT)),
-        KeyBinding::new("left", MoveLeft, Some(CONTEXT)),
-        KeyBinding::new("right", MoveRight, Some(CONTEXT)),
-        KeyBinding::new("pageup", MovePageUp, Some(CONTEXT)),
-        KeyBinding::new("pagedown", MovePageDown, Some(CONTEXT)),
-        KeyBinding::new("tab", IndentInline, Some(CONTEXT)),
-        KeyBinding::new("shift-tab", OutdentInline, Some(CONTEXT)),
-        KeyBinding::new("ctrl-]", Indent, Some(CONTEXT)),
-        KeyBinding::new("ctrl-[", Outdent, Some(CONTEXT)),
-        KeyBinding::new("shift-left", SelectLeft, Some(CONTEXT)),
-        KeyBinding::new("shift-right", SelectRight, Some(CONTEXT)),
-        KeyBinding::new("shift-up", SelectUp, Some(CONTEXT)),
-        KeyBinding::new("shift-down", SelectDown, Some(CONTEXT)),
-        KeyBinding::new("shift-alt-left", SelectLeft, Some(CONTEXT)),
-        KeyBinding::new("shift-alt-right", SelectRight, Some(CONTEXT)),
-        KeyBinding::new("home", MoveHome, Some(CONTEXT)),
-        KeyBinding::new("end", MoveEnd, Some(CONTEXT)),
-        KeyBinding::new("ctrl-home", MoveToStart, Some(CONTEXT)),
-        KeyBinding::new("ctrl-end", MoveToEnd, Some(CONTEXT)),
-        KeyBinding::new("ctrl-shift-home", SelectToStart, Some(CONTEXT)),
-        KeyBinding::new("ctrl-shift-end", SelectToEnd, Some(CONTEXT)),
-        KeyBinding::new("shift-home", SelectToStartOfLine, Some(CONTEXT)),
-        KeyBinding::new("shift-end", SelectToEndOfLine, Some(CONTEXT)),
-        KeyBinding::new("ctrl-shift-left", SelectToPreviousWordStart, Some(CONTEXT)),
-        KeyBinding::new("ctrl-shift-right", SelectToNextWordEnd, Some(CONTEXT)),
-        KeyBinding::new("ctrl-a", SelectAll, Some(CONTEXT)),
-        KeyBinding::new("ctrl-c", Copy, Some(CONTEXT)),
-        KeyBinding::new("ctrl-x", Cut, Some(CONTEXT)),
-        KeyBinding::new("ctrl-v", Paste, Some(CONTEXT)),
-        KeyBinding::new("ctrl-left", MoveToPreviousWord, Some(CONTEXT)),
-        KeyBinding::new("ctrl-right", MoveToNextWord, Some(CONTEXT)),
-        KeyBinding::new("ctrl-z", Undo, Some(CONTEXT)),
-        KeyBinding::new("ctrl-y", Redo, Some(CONTEXT)),
+        KeyBinding::new("backspace", Command::Backspace, Some(CONTEXT)),
+        KeyBinding::new("shift-backspace", Command::Backspace, Some(CONTEXT)),
+        KeyBinding::new("delete", Command::Delete, Some(CONTEXT)),
+        KeyBinding::new("shift-delete", Command::Delete, Some(CONTEXT)),
+        KeyBinding::new("ctrl-backspace", Command::DeletePrevWord, Some(CONTEXT)),
+        KeyBinding::new("ctrl-delete", Command::DeleteNextWord, Some(CONTEXT)),
+        KeyBinding::new("enter", Command::Enter, Some(CONTEXT)),
+        KeyBinding::new("shift-enter", Command::Enter, Some(CONTEXT)),
+        KeyBinding::new("secondary-enter", Command::Enter, Some(CONTEXT)),
+        KeyBinding::new("escape", Command::Escape, Some(CONTEXT)),
+        KeyBinding::new("up", Command::MoveUp, Some(CONTEXT)),
+        KeyBinding::new("down", Command::MoveDown, Some(CONTEXT)),
+        KeyBinding::new("left", Command::MoveLeft, Some(CONTEXT)),
+        KeyBinding::new("right", Command::MoveRight, Some(CONTEXT)),
+        KeyBinding::new("pageup", Command::MovePageUp, Some(CONTEXT)),
+        KeyBinding::new("pagedown", Command::MovePageDown, Some(CONTEXT)),
+        KeyBinding::new("tab", Command::IndentInline, Some(CONTEXT)),
+        KeyBinding::new("shift-tab", Command::OutdentInline, Some(CONTEXT)),
+        KeyBinding::new("ctrl-]", Command::Indent, Some(CONTEXT)),
+        KeyBinding::new("ctrl-[", Command::Outdent, Some(CONTEXT)),
+        KeyBinding::new("shift-left", Command::SelectLeft, Some(CONTEXT)),
+        KeyBinding::new("shift-right", Command::SelectRight, Some(CONTEXT)),
+        KeyBinding::new("shift-up", Command::SelectUp, Some(CONTEXT)),
+        KeyBinding::new("shift-down", Command::SelectDown, Some(CONTEXT)),
+        KeyBinding::new("shift-alt-left", Command::SelectLeft, Some(CONTEXT)),
+        KeyBinding::new("shift-alt-right", Command::SelectRight, Some(CONTEXT)),
+        KeyBinding::new("home", Command::MoveHome, Some(CONTEXT)),
+        KeyBinding::new("end", Command::MoveEnd, Some(CONTEXT)),
+        KeyBinding::new("ctrl-home", Command::MoveToStart, Some(CONTEXT)),
+        KeyBinding::new("ctrl-end", Command::MoveToEnd, Some(CONTEXT)),
+        KeyBinding::new("ctrl-shift-home", Command::SelectToStart, Some(CONTEXT)),
+        KeyBinding::new("ctrl-shift-end", Command::SelectToEnd, Some(CONTEXT)),
+        KeyBinding::new("shift-home", Command::SelectToStartOfLine, Some(CONTEXT)),
+        KeyBinding::new("shift-end", Command::SelectToEndOfLine, Some(CONTEXT)),
+        KeyBinding::new("ctrl-shift-left", Command::SelectPrevWord, Some(CONTEXT)),
+        KeyBinding::new("ctrl-shift-right", Command::SelectNextWord, Some(CONTEXT)),
+        KeyBinding::new("ctrl-a", Command::SelectAll, Some(CONTEXT)),
+        KeyBinding::new("ctrl-c", Command::Copy, Some(CONTEXT)),
+        KeyBinding::new("ctrl-x", Command::Cut, Some(CONTEXT)),
+        KeyBinding::new("ctrl-v", Command::Paste, Some(CONTEXT)),
+        KeyBinding::new("ctrl-left", Command::MovePrevWord, Some(CONTEXT)),
+        KeyBinding::new("ctrl-right", Command::MoveNextWord, Some(CONTEXT)),
+        KeyBinding::new("ctrl-z", Command::Undo, Some(CONTEXT)),
+        KeyBinding::new("ctrl-y", Command::Redo, Some(CONTEXT)),
     ]);
 }
 
@@ -638,6 +597,62 @@ impl Focusable for EditorState {
     }
 }
 
+impl EditorState {
+    fn handle_command(
+        &mut self,
+        command: Command,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        match command {
+            Command::Backspace => return self.backspace(window, cx),
+            Command::Delete => self.delete(window, cx),
+            Command::DeletePrevWord => self.delete_previous_word(window, cx),
+            Command::DeleteNextWord => self.delete_next_word(window, cx),
+            Command::Enter => return self.enter(window, cx),
+            Command::Escape => return self.escape(),
+            Command::Paste => self.paste(window, cx),
+            Command::Cut => self.cut(window, cx),
+            Command::Copy => self.copy(cx),
+            Command::Undo => self.undo(window, cx),
+            Command::Redo => self.redo(window, cx),
+            Command::IndentInline if self.is_multi_line() => {
+                return self.indent_inline(window, cx);
+            }
+            Command::OutdentInline if self.is_multi_line() => {
+                return self.outdent_inline(window, cx);
+            }
+            Command::Indent if self.is_multi_line() => return self.indent_block(window, cx),
+            Command::Outdent if self.is_multi_line() => return self.outdent_block(window, cx),
+            Command::MoveLeft => return self.left(cx),
+            Command::MoveRight => return self.right(cx),
+            Command::SelectLeft => self.select_left(cx),
+            Command::SelectRight => self.select_right(cx),
+            Command::MoveUp if self.is_multi_line() => self.up(cx),
+            Command::MoveDown if self.is_multi_line() => self.down(cx),
+            Command::SelectUp if self.is_multi_line() => self.select_up(cx),
+            Command::SelectDown if self.is_multi_line() => self.select_down(cx),
+            Command::MovePageUp if self.is_multi_line() => self.page_up(cx),
+            Command::MovePageDown if self.is_multi_line() => self.page_down(cx),
+            Command::SelectAll => self.select_all(window, cx),
+            Command::SelectToStartOfLine => self.select_to_start_of_line(cx),
+            Command::SelectToEndOfLine => self.select_to_end_of_line(cx),
+            Command::SelectPrevWord => self.select_to_previous_word(cx),
+            Command::SelectNextWord => self.select_to_next_word(cx),
+            Command::MoveHome => self.home(cx),
+            Command::MoveEnd => self.end(cx),
+            Command::MoveToStart => self.move_to_start(cx),
+            Command::MoveToEnd => self.move_to_end(cx),
+            Command::MovePrevWord => self.move_to_previous_word(cx),
+            Command::MoveNextWord => self.move_to_next_word(cx),
+            Command::SelectToStart => self.select_to_start(cx),
+            Command::SelectToEnd => self.select_to_end(cx),
+            _ => return false,
+        }
+        true
+    }
+}
+
 impl Render for EditorState {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let entity = cx.entity();
@@ -646,48 +661,7 @@ impl Render for EditorState {
             .id("input-state")
             .key_context(CONTEXT)
             .track_focus(&self.focus_handle)
-            .on_action(window.listener_for(&entity, EditorState::backspace))
-            .on_action(window.listener_for(&entity, EditorState::delete))
-            .on_action(window.listener_for(&entity, EditorState::delete_previous_word))
-            .on_action(window.listener_for(&entity, EditorState::delete_next_word))
-            .on_action(window.listener_for(&entity, EditorState::enter))
-            .on_action(window.listener_for(&entity, EditorState::escape))
-            .on_action(window.listener_for(&entity, EditorState::paste))
-            .on_action(window.listener_for(&entity, EditorState::cut))
-            .on_action(window.listener_for(&entity, EditorState::undo))
-            .on_action(window.listener_for(&entity, EditorState::redo))
-            .when(self.is_multi_line(), |this| {
-                this.on_action(window.listener_for(&entity, EditorState::indent_inline))
-                    .on_action(window.listener_for(&entity, EditorState::outdent_inline))
-                    .on_action(window.listener_for(&entity, EditorState::indent_block))
-                    .on_action(window.listener_for(&entity, EditorState::outdent_block))
-            })
-            .on_action(window.listener_for(&entity, EditorState::left))
-            .on_action(window.listener_for(&entity, EditorState::right))
-            .on_action(window.listener_for(&entity, EditorState::select_left))
-            .on_action(window.listener_for(&entity, EditorState::select_right))
-            .when(self.is_multi_line(), |this| {
-                this.on_action(window.listener_for(&entity, EditorState::up))
-                    .on_action(window.listener_for(&entity, EditorState::down))
-                    .on_action(window.listener_for(&entity, EditorState::select_up))
-                    .on_action(window.listener_for(&entity, EditorState::select_down))
-                    .on_action(window.listener_for(&entity, EditorState::page_up))
-                    .on_action(window.listener_for(&entity, EditorState::page_down))
-            })
-            .on_action(window.listener_for(&entity, EditorState::on_action_select_all))
-            .on_action(window.listener_for(&entity, EditorState::select_to_start_of_line))
-            .on_action(window.listener_for(&entity, EditorState::select_to_end_of_line))
-            .on_action(window.listener_for(&entity, EditorState::select_to_previous_word))
-            .on_action(window.listener_for(&entity, EditorState::select_to_next_word))
-            .on_action(window.listener_for(&entity, EditorState::home))
-            .on_action(window.listener_for(&entity, EditorState::end))
-            .on_action(window.listener_for(&entity, EditorState::move_to_start))
-            .on_action(window.listener_for(&entity, EditorState::move_to_end))
-            .on_action(window.listener_for(&entity, EditorState::move_to_previous_word))
-            .on_action(window.listener_for(&entity, EditorState::move_to_next_word))
-            .on_action(window.listener_for(&entity, EditorState::select_to_start))
-            .on_action(window.listener_for(&entity, EditorState::select_to_end))
-            .on_action(window.listener_for(&entity, EditorState::copy))
+            .on_command(window.command_listener_for(&entity, EditorState::handle_command))
             .on_mouse_down(
                 MouseButton::Left,
                 window.listener_for(&entity, EditorState::on_mouse_down),

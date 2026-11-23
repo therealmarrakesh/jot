@@ -2,7 +2,6 @@
 
 pub(crate) mod app;
 pub(crate) mod color;
-mod common_actions;
 pub(crate) mod div;
 pub(crate) mod element;
 pub(crate) mod entity;
@@ -22,7 +21,6 @@ pub(crate) mod window;
 
 pub(crate) use app::*;
 pub(crate) use color::*;
-pub(crate) use common_actions::*;
 pub(crate) use div::*;
 pub(crate) use element::*;
 pub(crate) use entity::*;

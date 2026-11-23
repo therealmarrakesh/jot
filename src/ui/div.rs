@@ -1,7 +1,6 @@
 //! Clean-room `Div`, `Stateful<Div>`, `Interactivity`, `InteractiveElement`,
 //! `StatefulInteractiveElement`, text elements, and `Entity<V>` rendering.
 
-use std::any::TypeId;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
@@ -17,7 +16,7 @@ use super::focus::FocusHandle;
 use super::geometry::{Bounds, Pixels, Point, Size, point, px, size};
 use super::graphics::d2d_renderer::PaintQuad;
 use super::graphics::dwrite::WrappedLine;
-use super::keymap::{Action, KeyContext};
+use super::keymap::{Command, KeyContext};
 use super::platform::{ExternalPaths, WindowControlArea};
 use super::style::{Overflow, Style, StyleRefinement, TextOverflow, WhiteSpace};
 use super::styled::Styled;
@@ -36,7 +35,7 @@ type HoverHandler = Box<dyn FnMut(&bool, &mut Window, &mut App)>;
 type ScrollWheelHandler = Box<dyn FnMut(&ScrollWheelEvent, &mut Window, &mut App)>;
 type KeyDownHandler = Box<dyn FnMut(&KeyDownEvent, &mut Window, &mut App)>;
 type DropHandler = Box<dyn FnMut(&ExternalPaths, &mut Window, &mut App)>;
-type ActionHandler = (TypeId, Box<dyn FnMut(&dyn Action, &mut Window, &mut App)>);
+type CommandHandler = Box<dyn FnMut(Command, &mut Window, &mut App) -> bool>;
 
 #[derive(Default)]
 pub(crate) struct Interactivity {
@@ -62,7 +61,7 @@ pub(crate) struct Interactivity {
     pub(crate) hover_listeners: Vec<HoverHandler>,
     pub(crate) scroll_wheel_listeners: Vec<ScrollWheelHandler>,
     pub(crate) key_down_listeners: Vec<KeyDownHandler>,
-    pub(crate) action_listeners: Vec<ActionHandler>,
+    pub(crate) command_listeners: Vec<CommandHandler>,
     pub(crate) drop_listeners: Vec<DropHandler>,
 }
 
@@ -205,18 +204,11 @@ pub(crate) trait InteractiveElement: Sized {
         self
     }
 
-    fn on_action<A: Action>(
+    fn on_command(
         mut self,
-        mut f: impl FnMut(&A, &mut Window, &mut App) + 'static,
+        f: impl FnMut(Command, &mut Window, &mut App) -> bool + 'static,
     ) -> Self {
-        self.interactivity().action_listeners.push((
-            TypeId::of::<A>(),
-            Box::new(move |action, window, cx| {
-                if let Some(typed) = action.downcast_ref::<A>() {
-                    f(typed, window, cx);
-                }
-            }),
-        ));
+        self.interactivity().command_listeners.push(Box::new(f));
         self
     }
 
@@ -459,8 +451,8 @@ impl Element for Div {
         let hb_clone = hitbox.clone();
         let owner_focus = focus_id.or_else(|| window.current_focus_id());
 
-        for (type_id, handler) in self.interactivity.action_listeners.drain(..) {
-            window.register_action_listener(owner_focus, type_id, handler);
+        for handler in self.interactivity.command_listeners.drain(..) {
+            window.register_command_listener(owner_focus, handler);
         }
         for handler in self.interactivity.key_down_listeners.drain(..) {
             window.register_key_down_listener(owner_focus, handler);

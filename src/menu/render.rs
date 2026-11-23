@@ -422,12 +422,7 @@ impl Jot {
             .font_family(TEXT_FONT)
             .text_size(px(LABEL_SIZE))
             .text_color(rgba(p.text_primary))
-            .on_action(cx.listener(Self::menu_on_up))
-            .on_action(cx.listener(Self::menu_on_down))
-            .on_action(cx.listener(Self::menu_on_confirm))
-            .on_action(cx.listener(Self::menu_on_cancel))
-            .on_action(cx.listener(Self::menu_on_left))
-            .on_action(cx.listener(Self::menu_on_right))
+            .on_command(cx.command_listener(Self::handle_menu_command))
             .children(MenuKind::ALL.map(|kind| self.menu_trigger(kind, window, cx)))
             .children(flyout);
         self.menu_bar.hit_areas.record(BAR_AREA, bar)

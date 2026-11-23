@@ -17,7 +17,7 @@ use crate::ui::entity::{Entity, EntityId};
 use crate::ui::focus::{FocusHandle, FocusId};
 use crate::ui::geometry::{Bounds, Corners, Pixels, Point, Size};
 use crate::ui::graphics::d2d_renderer::{BoxShadow, PaintQuad};
-use crate::ui::keymap::{Action, KeyBinding, KeyContext};
+use crate::ui::keymap::{Command, KeyBinding, KeyContext};
 use crate::ui::platform::{CursorStyle, ExternalPaths, WindowControlArea};
 use crate::ui::style::{Style, TextStyle, TextStyleRefinement};
 use crate::ui::types::SharedString;
@@ -31,10 +31,10 @@ pub(super) type AnyScrollListener =
 pub(super) type AnyKeyListener =
     Box<dyn FnMut(&KeyDownEvent, DispatchPhase, &mut Window, &mut App)>;
 pub(super) type AnyModListener = Box<dyn FnMut(&ModifiersChangedEvent, &mut Window, &mut App)>;
-pub(super) type ActionHandlerBox = Box<dyn FnMut(&dyn Action, &mut Window, &mut App)>;
+pub(super) type CommandHandlerBox = Box<dyn FnMut(Command, &mut Window, &mut App) -> bool>;
 pub(super) type KeyDownHandlerBox = Box<dyn FnMut(&KeyDownEvent, &mut Window, &mut App)>;
 pub(super) type DropHandlerBox = Box<dyn FnMut(&ExternalPaths, &mut Window, &mut App)>;
-pub(super) type FocusedActionListener = (Option<FocusId>, TypeId, ActionHandlerBox);
+pub(super) type FocusedCommandListener = (Option<FocusId>, CommandHandlerBox);
 pub(super) type FocusedKeyListener = (Option<FocusId>, KeyDownHandlerBox);
 pub(super) type DropListener = (Option<Hitbox>, DropHandlerBox);
 
@@ -65,7 +65,7 @@ pub(super) struct FrameState {
     pub(super) scroll_listeners: Vec<AnyScrollListener>,
     pub(super) key_listeners: Vec<AnyKeyListener>,
     pub(super) mod_listeners: Vec<AnyModListener>,
-    pub(super) action_listeners: Vec<FocusedActionListener>,
+    pub(super) command_listeners: Vec<FocusedCommandListener>,
     pub(super) key_down_listeners: Vec<FocusedKeyListener>,
     pub(super) drop_listeners: Vec<DropListener>,
     pub(super) focus_nodes: HashMap<FocusId, FocusNode>,
@@ -88,7 +88,7 @@ impl Default for FrameState {
             scroll_listeners: Vec::new(),
             key_listeners: Vec::new(),
             mod_listeners: Vec::new(),
-            action_listeners: Vec::new(),
+            command_listeners: Vec::new(),
             key_down_listeners: Vec::new(),
             drop_listeners: Vec::new(),
             focus_nodes: HashMap::new(),
@@ -550,13 +550,12 @@ impl Window {
         self.frame.mod_listeners.push(Box::new(f));
     }
 
-    pub(crate) fn register_action_listener(
+    pub(crate) fn register_command_listener(
         &mut self,
         focus: Option<FocusId>,
-        type_id: TypeId,
-        handler: ActionHandlerBox,
+        handler: CommandHandlerBox,
     ) {
-        self.frame.action_listeners.push((focus, type_id, handler));
+        self.frame.command_listeners.push((focus, handler));
     }
 
     pub(crate) fn register_key_down_listener(
@@ -629,14 +628,12 @@ impl Window {
         frame.root_key_contexts.clone()
     }
 
-    pub(crate) fn highest_precedence_binding_for_action_in(
+    pub(crate) fn shortcut_for_command_in(
         &self,
-        action: &dyn Action,
+        command: Command,
         focus: &FocusHandle,
     ) -> Option<KeyBinding> {
         let contexts = self.key_contexts_for(Some(focus.id()));
-        self.keymap
-            .borrow()
-            .highest_precedence_for_action(action, &contexts)
+        self.keymap.borrow().shortcut_for(command, &contexts)
     }
 }

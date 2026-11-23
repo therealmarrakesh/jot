@@ -344,6 +344,19 @@ impl Window {
         }
     }
 
+    pub(crate) fn command_listener_for<T: 'static>(
+        &self,
+        entity: &Entity<T>,
+        mut f: impl FnMut(&mut T, super::keymap::Command, &mut Window, &mut Context<T>) -> bool
+            + 'static,
+    ) -> impl FnMut(super::keymap::Command, &mut Window, &mut App) -> bool + 'static {
+        let weak = entity.downgrade();
+        move |command, window, app| {
+            weak.update(app, |this, cx| f(this, command, window, cx))
+                .unwrap_or(false)
+        }
+    }
+
     // ---- Observers ----
 
     pub(crate) fn on_activation_change(

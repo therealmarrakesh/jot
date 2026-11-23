@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 
 use super::app::App;
-use super::keymap::Action;
+use super::keymap::Command;
 use super::window::Window;
 
 static NEXT_FOCUS_ID: AtomicU64 = AtomicU64::new(1);
@@ -75,8 +75,8 @@ impl FocusHandle {
         window.focus_contains(self.id())
     }
 
-    pub(crate) fn dispatch_action(&self, action: &dyn Action, window: &mut Window, cx: &mut App) {
-        window.dispatch_action_on(self.id(), action.boxed_clone(), cx);
+    pub(crate) fn dispatch_command(&self, command: Command, window: &mut Window, cx: &mut App) {
+        window.dispatch_command_on(self.id(), command, cx);
     }
 }
 
