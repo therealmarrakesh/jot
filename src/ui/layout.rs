@@ -2093,7 +2093,7 @@ mod tests {
 
     #[test]
     fn single_line_text_field_min_h_full_centers_text_element() {
-        // Mirrors src/field.rs text_field + src/base/input/base/state.rs single-line EditorState.
+        // Mirrors src/field.rs text_field + src/editor/state.rs single-line EditorState.
         let mut engine = LayoutEngine::new();
         let text_el = engine.req(s().w_full().h(px(20.)), &[], 1.0);
         let input_state = engine.req(

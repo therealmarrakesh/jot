@@ -130,7 +130,7 @@ impl Element for EditorScrollbar {
         cx: &mut App,
     ) -> Self::PrepaintState {
         let state = self.state.read(cx);
-        let snapshot = state.editor_scrollbar_snapshot.get()?;
+        let snapshot = state.editor_scrollbar_snapshot?;
         let scroll_handle = state.scroll_handle.clone();
 
         if scroll_handle.offset() != snapshot.cursor_scroll_offset {
@@ -732,6 +732,7 @@ impl Element for TextElement {
             window,
         );
 
+        let mut new_longest_line = None;
         let mut longest_line_width = wrap_width.unwrap_or(px(0.));
         if state.is_single_line() || !state.soft_wrap {
             let longest_row = state.text_wrapper.longest_row();
@@ -744,22 +745,17 @@ impl Element for TextElement {
                 text_size,
                 wrap_width,
             };
-            let cached = state
-                .longest_line_width
-                .take()
-                .filter(|(cached_key, _)| *cached_key == key);
-            longest_line_width = match cached {
-                Some((_, width)) => width,
-                None => {
+            longest_line_width = match &state.longest_line_width {
+                Some((cached_key, width)) if *cached_key == key => *width,
+                _ => {
                     let longest_line: Cow<str> = longest_line.into();
-                    window
+                    let width = window
                         .text_system()
-                        .measure_line_width(&longest_line, &key.font, text_size)
+                        .measure_line_width(&longest_line, &key.font, text_size);
+                    new_longest_line = Some((key, width));
+                    width
                 }
             };
-            state
-                .longest_line_width
-                .set(Some((key, longest_line_width)));
         }
         last_layout.lines = Rc::new(lines);
 
@@ -787,7 +783,7 @@ impl Element for TextElement {
             } else {
                 clamped_scroll.y.clamp(safe_y_range.start, safe_y_range.end)
             };
-            let height = match state.caret_height.get() {
+            let height = match state.caret_height {
                 h if h > px(0.) => h,
                 _ => cursor_bounds.size.height,
             };
@@ -798,20 +794,19 @@ impl Element for TextElement {
             Bounds::new(origin, size(CARET_WIDTH, height))
         };
         self.state.update(cx, |state, _| {
+            if let Some(entry) = new_longest_line {
+                state.longest_line_width = Some(entry);
+            }
             state.caret_bounds = Some(caret_rect);
-        });
-
-        let selection_bounds = self.layout_selection(&last_layout, &bounds, window, cx);
-
-        let state = self.state.read(cx);
-        state
-            .editor_scrollbar_snapshot
-            .set(Some(EditorScrollbarSnapshot::new(
+            state.editor_scrollbar_snapshot = Some(EditorScrollbarSnapshot::new(
                 input_bounds,
                 scroll_size,
                 cursor_scroll_offset,
                 state,
-            )));
+            ));
+        });
+
+        let selection_bounds = self.layout_selection(&last_layout, &bounds, window, cx);
         let _hitbox = window.insert_hitbox(input_bounds, HitboxBehavior::Normal);
 
         PrepaintState {
@@ -839,7 +834,7 @@ impl Element for TextElement {
                 state.focus_handle.clone(),
                 state.show_cursor(window, cx),
                 state.selection,
-                state.caret_hidden.get(),
+                state.caret_hidden,
             )
         };
         let bounds = prepaint.bounds;

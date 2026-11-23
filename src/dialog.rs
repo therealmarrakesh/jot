@@ -128,6 +128,7 @@ impl Dialogs {
     pub(crate) fn new(window: &mut Window, cx: &mut Context<Jot>) -> Self {
         let line = cx.new(|cx| {
             EditorState::single_line(window, cx)
+                .caret_height(px(field::FIELD_CARET))
                 .validate(|text, _| text.chars().all(|c| c.is_ascii_digit()))
         });
         line.read(cx).focus_handle(cx);

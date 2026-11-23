@@ -10,7 +10,7 @@ const ACCENT_TOP_EDGE: f32 = 0x14 as f32 / 255.;
 const ACCENT_HOVER_OPACITY: f32 = 0.9;
 const ACCENT_PRESSED_OPACITY: f32 = 0.8;
 const FIELD_PADDING: f32 = 10.;
-const FIELD_CARET: f32 = 19.;
+pub(crate) const FIELD_CARET: f32 = 19.;
 const FIELD_GLYPH_WIDTH: f32 = 31.;
 const FIELD_GLYPH_RIGHT: f32 = 2.;
 const FIELD_GLYPH_SIZE: f32 = 12.;
@@ -214,7 +214,6 @@ pub(crate) fn text_field(
     let u = |v: f32| px(v * s);
     let focused = input.focus_handle(cx).is_focused(window);
     let empty = input.read(cx).text().len() == 0;
-    input.read(cx).caret_height.set(px(FIELD_CARET));
     let id = input.entity_id();
     let (trailing, clear_right) = if search_icon {
         (

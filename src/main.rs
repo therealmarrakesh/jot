@@ -577,7 +577,7 @@ impl Jot {
                     let status = status.map(|mut status| {
                         status.layout_as_root(AvailableSpace::min_size(), window, cx)
                     });
-                    let measured_menu = menu::bar_width(&menu_areas);
+                    let measured_menu = menu_areas.bar_width();
                     let menu_row =
                         MENU_BAR_LEFT + measured_menu + THEME_BUTTON_WIDTH + THEME_BUTTON_RIGHT;
                     let width = status
@@ -813,11 +813,12 @@ impl Jot {
     ) -> impl IntoElement {
         let p = palette(cx);
         let editor = self.active_editor().clone();
-        {
-            let state = editor.read(cx);
-            state.caret_height.set(self.caret_height());
-            state.caret_hidden.set(self.menu_bar.access_active());
-        }
+        let caret_height = self.caret_height();
+        let caret_hidden = self.menu_bar.access_active();
+        editor.update(cx, |state, _| {
+            state.set_caret_height(caret_height);
+            state.set_caret_hidden(caret_hidden);
+        });
         div()
             .id("editor-area")
             .relative()

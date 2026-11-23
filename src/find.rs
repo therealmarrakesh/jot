@@ -353,8 +353,16 @@ pub(crate) struct FindBar {
 
 impl FindBar {
     pub(crate) fn new(window: &mut Window, cx: &mut Context<Jot>) -> Self {
-        let query = cx.new(|cx| EditorState::single_line(window, cx).placeholder("Find"));
-        let replacement = cx.new(|cx| EditorState::single_line(window, cx).placeholder("Replace"));
+        let query = cx.new(|cx| {
+            EditorState::single_line(window, cx)
+                .caret_height(px(field::FIELD_CARET))
+                .placeholder("Find")
+        });
+        let replacement = cx.new(|cx| {
+            EditorState::single_line(window, cx)
+                .caret_height(px(field::FIELD_CARET))
+                .placeholder("Replace")
+        });
         Self {
             visible: false,
             closing: false,
