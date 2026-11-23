@@ -3,9 +3,36 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+const RC_TEMPLATE: &str = r#"1 ICON "{icon}"
+1 24 "{manifest}"
+
+1 VERSIONINFO
+FILEVERSION {major},{minor},{patch},0
+PRODUCTVERSION {major},{minor},{patch},0
+FILEOS 0x40004
+FILETYPE 0x1
+{
+    BLOCK "StringFileInfo"
+    {
+        BLOCK "040904B0"
+        {
+            VALUE "FileDescription", "Jot"
+            VALUE "FileVersion", "{version}"
+            VALUE "InternalName", "Jot"
+            VALUE "OriginalFilename", "Jot.exe"
+            VALUE "ProductName", "Jot"
+            VALUE "ProductVersion", "{version}"
+        }
+    }
+    BLOCK "VarFileInfo"
+    {
+        VALUE "Translation", 0x409, 1200
+    }
+}
+"#;
+
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
-    println!("cargo:rerun-if-changed=assets/jot.rc");
     println!("cargo:rerun-if-changed=assets/jot.ico");
     println!("cargo:rerun-if-changed=assets/jot.manifest.xml");
     println!("cargo:rerun-if-changed=Cargo.toml");
@@ -21,8 +48,7 @@ fn compile_resources() {
     let icon = escape(assets.join("jot.ico"));
     let manifest = escape(assets.join("jot.manifest.xml"));
 
-    let script = fs::read_to_string(assets.join("jot.rc"))
-        .unwrap()
+    let script = RC_TEMPLATE
         .replace("{icon}", &icon)
         .replace("{manifest}", &manifest)
         .replace("{version}", &var("CARGO_PKG_VERSION"))
