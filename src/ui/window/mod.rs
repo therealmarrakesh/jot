@@ -28,7 +28,7 @@ use super::platform::window::NativeWindow;
 use super::platform::{CursorStyle, WindowAppearance, WindowBounds, WindowOptions};
 use super::runtime::Task;
 use super::style::TextStyle;
-use super::types::anyhow::Result;
+use super::types::UiResult;
 
 use frame::{DeferredDraw, FrameState};
 
@@ -68,6 +68,8 @@ pub(crate) struct Window {
     prev_frame: FrameState,
     element_states: HashMap<(GlobalElementId, TypeId), Box<dyn Any>>,
     next_element_states: HashMap<(GlobalElementId, TypeId), Box<dyn Any>>,
+    anim_tracks: HashMap<(GlobalElementId, TypeId), Box<dyn Any>>,
+    next_anim_tracks: HashMap<(GlobalElementId, TypeId), Box<dyn Any>>,
     id_stack: Vec<ElementId>,
     text_style_stack: Vec<TextStyle>,
     content_mask_stack: Vec<Bounds<Pixels>>,
@@ -95,7 +97,7 @@ pub(crate) struct Window {
 }
 
 impl Window {
-    pub(crate) fn new(id: WindowId, options: WindowOptions, cx: &App) -> Result<Self> {
+    pub(crate) fn new(id: WindowId, options: WindowOptions, cx: &App) -> UiResult<Self> {
         let appearance = cx.window_appearance();
         let native = NativeWindow::create(id, &options, appearance)?;
         let (pw, ph) = native.physical_size();
@@ -120,6 +122,8 @@ impl Window {
             prev_frame: FrameState::default(),
             element_states: HashMap::new(),
             next_element_states: HashMap::new(),
+            anim_tracks: HashMap::new(),
+            next_anim_tracks: HashMap::new(),
             id_stack: Vec::new(),
             text_style_stack: vec![TextStyle::default()],
             content_mask_stack: Vec::new(),
@@ -473,6 +477,7 @@ impl Window {
         self.layout_engine.clear();
         self.frame = FrameState::default();
         self.next_element_states.clear();
+        self.next_anim_tracks.clear();
         self.deferred_draws.clear();
         self.id_stack.clear();
         self.text_style_stack.clear();
@@ -553,8 +558,14 @@ impl Window {
 
         self.text_system.finish_frame();
         self.element_states = std::mem::take(&mut self.next_element_states);
+        self.anim_tracks = std::mem::take(&mut self.next_anim_tracks);
         self.prev_frame = std::mem::take(&mut self.frame);
         self.update_cursor_for_position();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn anim_track_count(&self) -> usize {
+        self.anim_tracks.len()
     }
 
     fn update_hovered_hitboxes_in(hovered: bool, pos: Point<Pixels>, frame: &mut FrameState) {

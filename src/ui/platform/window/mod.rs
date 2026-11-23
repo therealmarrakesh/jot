@@ -70,7 +70,7 @@ use super::{
     ACTIVE_APP, CursorStyle, ExternalPaths, WindowAppearance, WindowBackgroundAppearance,
     WindowControlArea, WindowKind, WindowOptions, WindowsDisplay, drive_frames,
 };
-use crate::ui::anyhow::Result;
+use crate::ui::types::UiResult;
 use crate::ui::app::AppCell;
 use crate::ui::geometry::{Bounds, Pixels, Point, Size, point, px, size};
 use crate::ui::keymap::{Keystroke, Modifiers};
@@ -205,7 +205,7 @@ pub(super) fn drain_pending_win32_events(app_cell: &Rc<AppCell>) {
                     let _ = app.update_window_impl(entry.window_id, |_, window, cx| {
                         let appearance = cx.window_appearance();
                         window.apply_appearance(appearance, cx);
-                        crate::ui::reduce_motion::init(cx);
+                        cx.sync_system_reduce_motion();
                     });
                 }
             }
@@ -227,7 +227,7 @@ pub(super) fn drain_pending_win32_events(app_cell: &Rc<AppCell>) {
     }
 }
 
-pub(crate) fn register_window_class() -> Result<()> {
+pub(crate) fn register_window_class() -> UiResult<()> {
     let hinstance: HINSTANCE = unsafe { GetModuleHandleW(None)? }.into();
     let hicon =
         unsafe { LoadIconW(Some(hinstance), PCWSTR(std::ptr::without_provenance(1))) }
@@ -273,7 +273,7 @@ impl NativeWindow {
         window_id: WindowId,
         options: &WindowOptions,
         appearance: WindowAppearance,
-    ) -> Result<Self> {
+    ) -> UiResult<Self> {
         let hinstance: HINSTANCE = unsafe { GetModuleHandleW(None)? }.into();
         let is_overlay = matches!(options.kind, WindowKind::Overlay);
 
@@ -1218,7 +1218,7 @@ unsafe extern "system" fn window_wnd_proc(
             let delivered = with_window_for_hwnd(hwnd, |window, cx| {
                 let appearance = cx.window_appearance();
                 window.apply_appearance(appearance, cx);
-                crate::ui::reduce_motion::init(cx);
+                cx.sync_system_reduce_motion();
             });
             if delivered.is_none() && hwnd_entry(hwnd).is_some() {
                 queue_pending_win32_event(PendingWin32Event::ThemeChanged {

@@ -2,7 +2,7 @@ use super::*;
 use field::{BODY_LINE, BODY_SIZE, text_field};
 use crate::ui::futures::channel::oneshot;
 use crate::editor::{EditorState, Position};
-use crate::ui::{MotionStatus, transition_from};
+use crate::ui::{AnimStatus, animate_from};
 
 const CONTEXT: &str = "JotDialog";
 const TITLE_FONT: &str = "Segoe UI Variable Display";
@@ -70,7 +70,7 @@ struct OpenDialog {
 
 impl OpenDialog {
     fn sample(&mut self, window: &mut Window, cx: &mut App) -> bool {
-        let shown = transition_from(
+        let shown = animate_from(
             ("jot-dialog-show", self.serial),
             0.0_f32,
             1.0_f32,
@@ -80,7 +80,7 @@ impl OpenDialog {
             cx,
         )
         .value;
-        let faded_in = transition_from(
+        let faded_in = animate_from(
             ("jot-dialog-fade-in", self.serial),
             0.0_f32,
             1.0_f32,
@@ -90,7 +90,7 @@ impl OpenDialog {
             cx,
         )
         .value;
-        let hidden = transition_from(
+        let hidden = animate_from(
             ("jot-dialog-hide", self.serial),
             0.0_f32,
             if self.closing { 1. } else { 0. },
@@ -99,7 +99,7 @@ impl OpenDialog {
             window,
             cx,
         );
-        let fade_out = transition_from(
+        let fade_out = animate_from(
             ("jot-dialog-fade-out", self.serial),
             1.0_f32,
             if self.closing { 0. } else { 1. },
@@ -111,7 +111,7 @@ impl OpenDialog {
         let growth = OPEN_SCALE - 1.;
         self.scale = 1. + growth * (1. - shown) + growth * hidden.value;
         self.opacity = faded_in * fade_out.value;
-        self.closing && fade_out.status == MotionStatus::Finished
+        self.closing && fade_out.status == AnimStatus::Finished
     }
 }
 

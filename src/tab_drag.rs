@@ -26,7 +26,7 @@ enum Phase {
 }
 
 #[derive(Clone)]
-struct TabDrag {
+pub(crate) struct TabDrag {
     owner: Owner,
     source: Owner,
     tab: EntityId,
@@ -37,8 +37,6 @@ struct TabDrag {
     source_index: usize,
     source_placement: Option<WindowPlacement>,
 }
-
-impl Global for TabDrag {}
 
 pub(crate) fn owner(window: &Window) -> Option<Owner> {
     Some(Owner {
@@ -75,7 +73,7 @@ pub(crate) fn press(
     if alone && !owner.hwnd.is_maximized() {
         cx.defer(lift);
     }
-    cx.set_global(TabDrag {
+    cx.shared.tab_drag = Some(TabDrag {
         owner,
         source: owner,
         tab,
@@ -86,20 +84,25 @@ pub(crate) fn press(
         source_index: index,
         source_placement: None,
     });
+    cx.refresh_windows();
 }
 
 pub(crate) fn active(cx: &App) -> bool {
-    cx.has_global::<TabDrag>()
+    cx.shared.tab_drag.is_some()
 }
 
 pub(crate) fn dragging(cx: &App) -> bool {
-    cx.try_global::<TabDrag>()
+    cx.shared
+        .tab_drag
+        .as_ref()
         .is_some_and(|drag| matches!(drag.phase, Phase::Dragging))
 }
 
 pub(crate) fn forget(tab: EntityId, cx: &mut App) {
     if cx
-        .try_global::<TabDrag>()
+        .shared
+        .tab_drag
+        .as_ref()
         .is_some_and(|drag| drag.tab == tab)
     {
         end(cx);
@@ -127,15 +130,13 @@ pub(crate) fn listeners() -> impl IntoElement {
 }
 
 fn end(cx: &mut App) -> Option<TabDrag> {
-    let drag = cx
-        .has_global::<TabDrag>()
-        .then(|| cx.remove_global::<TabDrag>());
+    let drag = cx.shared.tab_drag.take();
     cx.refresh_windows();
     drag
 }
 
 fn moved(cx: &mut App) {
-    let Some(mut drag) = cx.try_global::<TabDrag>().cloned() else {
+    let Some(mut drag) = cx.shared.tab_drag.clone() else {
         return;
     };
     let point = cursor_screen_pos();
@@ -162,22 +163,26 @@ fn moved(cx: &mut App) {
     } else {
         detach(&mut drag, alone, point, cx);
     }
-    cx.set_global(drag);
+    cx.shared.tab_drag = Some(drag);
+    cx.refresh_windows();
 }
 
 fn lift(cx: &mut App) {
-    let Some(mut drag) = cx.try_global::<TabDrag>().cloned() else {
+    let Some(mut drag) = cx.shared.tab_drag.clone() else {
         return;
     };
     let point = drag.press;
     drag.source_placement = drag.owner.hwnd.saved_placement();
     start_move_loop(&mut drag, point, cx);
-    cx.set_global(drag);
+    cx.shared.tab_drag = Some(drag);
+    cx.refresh_windows();
 }
 
 fn released(cx: &mut App) {
     if cx
-        .try_global::<TabDrag>()
+        .shared
+        .tab_drag
+        .as_ref()
         .is_none_or(|drag| matches!(drag.phase, Phase::Entering { .. } | Phase::Moving { .. }))
     {
         return;
@@ -304,7 +309,7 @@ fn start_move_loop(drag: &mut TabDrag, point: ScreenPoint, cx: &mut App) {
 }
 
 fn poll(cx: &mut App) -> bool {
-    let Some(mut drag) = cx.try_global::<TabDrag>().cloned() else {
+    let Some(mut drag) = cx.shared.tab_drag.clone() else {
         return false;
     };
     let attaching = match drag.phase {
@@ -320,7 +325,7 @@ fn poll(cx: &mut App) -> bool {
             hwnd.cancel_mode();
         }
         drag.phase = Phase::Moving { attaching };
-        cx.set_global(drag);
+        cx.shared.tab_drag = Some(drag);
         return true;
     }
     if let Phase::Entering { since } = drag.phase
@@ -331,15 +336,17 @@ fn poll(cx: &mut App) -> bool {
     let pressed = primary_mouse_button_down();
     if let Some(target) = strip_window(point, Some(hwnd), cx) {
         attach(&mut drag, target, point, cx);
-        cx.set_global(drag);
+        cx.shared.tab_drag = Some(drag);
+        cx.refresh_windows();
         if !pressed {
             released(cx);
         }
     } else if pressed && attaching {
         run_move_loop(&mut drag, point, cx);
-        cx.set_global(drag);
+        cx.shared.tab_drag = Some(drag);
+        cx.refresh_windows();
     } else if pressed {
-        cx.set_global(drag);
+        cx.shared.tab_drag = Some(drag);
         cancel(cx);
     } else {
         end(cx);

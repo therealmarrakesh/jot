@@ -228,12 +228,39 @@ fn caption_buttons(window: &Window, p: Palette) -> impl IntoElement {
         .child(div().flex_1().window_control_area(WindowControlArea::Drag))
 }
 
-struct ViewSettings {
-    status_bar: bool,
-    word_wrap: bool,
+pub(crate) struct ViewSettings {
+    pub(crate) status_bar: bool,
+    pub(crate) word_wrap: bool,
 }
 
-impl Global for ViewSettings {}
+impl Default for ViewSettings {
+    fn default() -> Self {
+        Self {
+            status_bar: true,
+            word_wrap: true,
+        }
+    }
+}
+
+/// Typed app-wide shared state owned directly by `ui::App` (replaces dynamic `Global` maps).
+#[derive(Default)]
+pub(crate) struct AppShared {
+    pub(crate) palette: Palette,
+    pub(crate) view: ViewSettings,
+    pub(crate) tooltips: tooltip::Tooltips,
+    pub(crate) keytips: keytips::KeyTips,
+    pub(crate) tab_drag: Option<tab_drag::TabDrag>,
+}
+
+fn apply_word_wrap_to_windows(word_wrap: bool, cx: &mut App) {
+    for handle in cx.windows() {
+        if let Some(window) = handle.downcast::<Jot>() {
+            let _ = window.update(cx, |jot, window, cx| {
+                jot.set_word_wrap(word_wrap, window, cx);
+            });
+        }
+    }
+}
 
 fn key_bindings() -> Vec<KeyBinding> {
     vec![
@@ -434,15 +461,6 @@ impl Jot {
                     cx.notify();
                 }
             }),
-            cx.observe_global_in::<ViewSettings>(window, |this, window, cx| {
-                let word_wrap = cx.global::<ViewSettings>().word_wrap;
-                for tab in &this.tabs {
-                    tab.data
-                        .editor
-                        .update(cx, |editor, cx| editor.set_soft_wrap(word_wrap, window, cx));
-                }
-                cx.notify();
-            }),
         ];
 
         let mut jot = Self {
@@ -463,6 +481,15 @@ impl Jot {
                 .unwrap_or(true)
         });
         jot
+    }
+
+    fn set_word_wrap(&mut self, word_wrap: bool, window: &mut Window, cx: &mut Context<Self>) {
+        for tab in &self.tabs {
+            tab.data
+                .editor
+                .update(cx, |editor, cx| editor.set_soft_wrap(word_wrap, window, cx));
+        }
+        cx.notify();
     }
 
     fn active_editor(&self) -> &Entity<EditorState> {
@@ -897,7 +924,8 @@ impl Render for Jot {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
         let status_metrics = cx
-            .global::<ViewSettings>()
+            .shared
+            .view
             .status_bar
             .then(|| self.status_metrics(cx));
         let strip = self.sample_tabs(window, cx);
@@ -997,7 +1025,7 @@ fn main() {
         crate::ui::WindowsPlatform::new().expect("Failed to initialize Windows platform"),
     );
     Application::with_platform(platform).run(move |cx| {
-        ui::reduce_motion::init(cx);
+        cx.sync_system_reduce_motion();
         editor::init(cx);
 
         let (handoff_tx, mut handoff_rx) = crate::ui::futures::channel::mpsc::unbounded::<Vec<PathBuf>>();
@@ -1025,11 +1053,6 @@ fn main() {
         .detach();
 
         theme::apply(cx.window_appearance(), cx);
-
-        cx.set_global(ViewSettings {
-            status_bar: true,
-            word_wrap: true,
-        });
         cx.bind_keys(key_bindings());
         cx.bind_keys(menu::key_bindings());
         cx.bind_keys(dialog::key_bindings());
@@ -1050,9 +1073,8 @@ fn main() {
                     open_jot_window(None, None, cx);
                 }
                 Command::ToggleStatusBar => {
-                    cx.update_global::<ViewSettings, _>(|view, _| {
-                        view.status_bar = !view.status_bar;
-                    });
+                    cx.shared.view.status_bar = !cx.shared.view.status_bar;
+                    cx.refresh_windows();
                 }
                 Command::ToggleTheme => {
                     cx.set_window_appearance(Some(if palette(cx).dark {
@@ -1062,9 +1084,10 @@ fn main() {
                     }));
                 }
                 Command::ToggleWordWrap => {
-                    cx.update_global::<ViewSettings, _>(|view, _| {
-                        view.word_wrap = !view.word_wrap;
-                    });
+                    cx.shared.view.word_wrap = !cx.shared.view.word_wrap;
+                    let word_wrap = cx.shared.view.word_wrap;
+                    cx.defer(move |cx| apply_word_wrap_to_windows(word_wrap, cx));
+                    cx.refresh_windows();
                 }
                 _ => return false,
             }
@@ -1225,10 +1248,6 @@ mod ui_regression_tests {
                 app.set_reduce_motion(true);
                 editor::init(&mut app);
                 theme::apply(app.window_appearance(), &mut app);
-                app.set_global(ViewSettings {
-                    status_bar: true,
-                    word_wrap: true,
-                });
                 app.bind_keys(key_bindings());
                 app.bind_keys(menu::key_bindings());
                 app.bind_keys(dialog::key_bindings());
@@ -1244,9 +1263,8 @@ mod ui_regression_tests {
                             });
                         }
                         Command::ToggleStatusBar => {
-                            cx.update_global::<ViewSettings, _>(|view, _| {
-                                view.status_bar = !view.status_bar;
-                            });
+                            cx.shared.view.status_bar = !cx.shared.view.status_bar;
+                            cx.refresh_windows();
                         }
                         Command::ToggleTheme => {
                             cx.set_window_appearance(Some(if palette(cx).dark {
@@ -1256,9 +1274,10 @@ mod ui_regression_tests {
                             }));
                         }
                         Command::ToggleWordWrap => {
-                            cx.update_global::<ViewSettings, _>(|view, _| {
-                                view.word_wrap = !view.word_wrap;
-                            });
+                            cx.shared.view.word_wrap = !cx.shared.view.word_wrap;
+                            let word_wrap = cx.shared.view.word_wrap;
+                            cx.defer(move |cx| apply_word_wrap_to_windows(word_wrap, cx));
+                            cx.refresh_windows();
                         }
                         _ => return false,
                     }
@@ -1624,11 +1643,11 @@ mod ui_regression_tests {
         // Open View menu -> toggle Word wrap (row 2) and Status bar (row 1).
         h.click_id("View");
         h.click_id(("menu-row", 2));
-        h.read_jot(|_, cx| assert!(!cx.global::<ViewSettings>().word_wrap));
+        h.read_jot(|_, cx| assert!(!cx.shared.view.word_wrap));
 
         h.click_id("View");
         h.click_id(("menu-row", 1));
-        h.read_jot(|_, cx| assert!(!cx.global::<ViewSettings>().status_bar));
+        h.read_jot(|_, cx| assert!(!cx.shared.view.status_bar));
 
         // Open File menu -> hover Edit trigger -> switches open menu; click editor -> closes menu.
         h.click_id("File");
@@ -2282,13 +2301,9 @@ mod ui_regression_tests {
             crate::ui::WindowsPlatform::new().expect("WindowsPlatform::new failed"),
         );
         Application::with_platform(platform).run(|cx| {
-            ui::reduce_motion::init(cx);
+            cx.sync_system_reduce_motion();
             editor::init(cx);
             theme::apply(cx.window_appearance(), cx);
-            cx.set_global(ViewSettings {
-                status_bar: true,
-                word_wrap: true,
-            });
             let mut opts = window_options(None, cx);
             opts.show = false;
             opts.focus = false;
@@ -2305,6 +2320,68 @@ mod ui_regression_tests {
                 });
             })
             .detach();
+        });
+    }
+
+    #[test]
+    fn window_anim_tracks_prune_unused_tracks_and_word_wrap_updates_tabs() {
+        let mut h = TestHarness::new();
+        let baseline_tracks = {
+            let app = h.app_cell.inner.borrow();
+            app.windows
+                .get(&h.handle.id)
+                .and_then(Option::as_ref)
+                .unwrap()
+                .anim_track_count()
+        };
+
+        // Opening Go To dialog creates its per-window animation tracks (zero Entities).
+        h.press_key("ctrl-g");
+        let open_tracks = {
+            let app = h.app_cell.inner.borrow();
+            app.windows
+                .get(&h.handle.id)
+                .and_then(Option::as_ref)
+                .unwrap()
+                .anim_track_count()
+        };
+        assert!(
+            open_tracks > baseline_tracks,
+            "dialog open must allocate anim tracks on Window ({open_tracks} > {baseline_tracks})"
+        );
+
+        // Closing the dialog prunes its animation tracks on the following settled frame.
+        h.press_key("escape");
+        h.draw();
+        let closed_tracks = {
+            let app = h.app_cell.inner.borrow();
+            app.windows
+                .get(&h.handle.id)
+                .and_then(Option::as_ref)
+                .unwrap()
+                .anim_track_count()
+        };
+        assert_eq!(
+            closed_tracks, baseline_tracks,
+            "closing dialog must prune unused anim tracks back to baseline"
+        );
+
+        // Toggling word wrap via typed AppShared updates all open tabs directly.
+        h.press_key("ctrl-n");
+        h.read_jot(|j, cx| {
+            assert_eq!(j.tabs.len(), 2);
+            assert!(cx.shared.view.word_wrap);
+            for tab in &j.tabs {
+                assert!(tab.data.editor.read(cx).soft_wrap_enabled());
+            }
+        });
+        h.click_id("View");
+        h.click_id(("menu-row", 2));
+        h.read_jot(|j, cx| {
+            assert!(!cx.shared.view.word_wrap);
+            for tab in &j.tabs {
+                assert!(!tab.data.editor.read(cx).soft_wrap_enabled());
+            }
         });
     }
 }

@@ -20,7 +20,6 @@ use super::window::Window;
 pub(crate) enum ElementId {
     Name(SharedString),
     NamedInteger(SharedString, u64),
-    NamedChild(Box<ElementId>, SharedString),
     Integer(u64),
 }
 

@@ -601,11 +601,6 @@ impl BackgroundExecutor {
         }
     }
 
-    #[inline]
-    pub(crate) fn now(&self) -> Instant {
-        Instant::now()
-    }
-
     pub(crate) fn timer(&self, duration: Duration) -> Timer {
         Timer {
             deadline: Instant::now() + duration,

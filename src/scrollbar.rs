@@ -11,7 +11,7 @@ use crate::ui::{
     Style, Window, fill, point, px, relative, rgba, size,
 };
 
-use crate::ui::motion::{Easing, TimedTransition};
+use crate::ui::anim::{Easing, TimedTransition};
 use crate::theme::palette;
 
 const TRACK_WIDTH: Pixels = px(16.);

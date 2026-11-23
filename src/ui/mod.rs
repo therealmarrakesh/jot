@@ -1,5 +1,6 @@
 //! Clean-room Win32 + Direct2D 1.1 + DirectWrite UI core.
 
+pub(crate) mod anim;
 pub(crate) mod app;
 pub(crate) mod color;
 pub(crate) mod div;
@@ -9,9 +10,7 @@ pub(crate) mod focus;
 pub(crate) mod geometry;
 pub(crate) mod graphics;
 pub(crate) mod keymap;
-pub(crate) mod motion;
 pub(crate) mod platform;
-pub(crate) mod reduce_motion;
 pub(crate) mod runtime;
 pub(crate) mod style;
 pub(crate) mod styled;
@@ -19,6 +18,7 @@ pub(crate) mod types;
 pub(crate) mod util;
 pub(crate) mod window;
 
+pub(crate) use anim::{AnimStatus, Easing, Lerp, animate, animate_from};
 pub(crate) use app::*;
 pub(crate) use color::*;
 pub(crate) use div::*;
@@ -34,7 +34,6 @@ pub(crate) use graphics::dwrite::{
     UnderlineStyle, font,
 };
 pub(crate) use keymap::*;
-pub(crate) use motion::{Easing, Interpolate, MotionStatus, transition, transition_from};
 pub(crate) use platform::dialogs::prompt_for_save_path;
 pub(crate) use platform::{
     CursorStyle, ExternalPaths, PathPromptOptions, SaveChoice, SavePathOptions, TitlebarOptions,
@@ -45,8 +44,7 @@ pub(crate) use runtime::futures;
 pub(crate) use runtime::Task;
 pub(crate) use style::*;
 pub(crate) use styled::*;
-pub(crate) use types::anyhow;
-pub(crate) use types::{SharedString, smallvec};
+pub(crate) use types::{SharedString, UiError, UiResult};
 pub(crate) use util::FluentBuilder;
 pub(crate) use window::*;
 

@@ -1,7 +1,7 @@
 use super::*;
 use field::{BODY_SIZE, CONTROL_HEIGHT, CONTROL_RADIUS, OVERLAY_RADIUS, text_field};
 use crate::editor::EditorState;
-use crate::ui::{MotionStatus, transition_from};
+use crate::ui::{AnimStatus, animate_from};
 use menu::Entry;
 
 const QUERY_CONTEXT: &str = "JotFindQuery";
@@ -421,7 +421,7 @@ impl FindBar {
         if !self.visible {
             return None;
         }
-        let shown = transition_from(
+        let shown = animate_from(
             ("jot-find-show", self.serial),
             0.0_f32,
             1.0_f32,
@@ -436,7 +436,7 @@ impl FindBar {
             cx,
         )
         .value;
-        let hidden = transition_from(
+        let hidden = animate_from(
             ("jot-find-hide", self.serial),
             0.0_f32,
             if self.closing { 1. } else { 0. },
@@ -461,7 +461,7 @@ impl FindBar {
             }
         };
         let scale = point(axis(width), axis(height));
-        if self.closing && hidden.status == MotionStatus::Finished {
+        if self.closing && hidden.status == AnimStatus::Finished {
             self.visible = false;
             return None;
         }

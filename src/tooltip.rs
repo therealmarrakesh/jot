@@ -1,5 +1,5 @@
 use super::*;
-use crate::ui::transition;
+use crate::ui::animate;
 use crate::win32::{cursor_screen_pos, monitor_work_area_and_scale, mouse_hover_time_ms};
 use std::collections::HashMap;
 use std::time::Instant;
@@ -67,7 +67,7 @@ struct TooltipView {
 impl Render for TooltipView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
-        let opacity = transition(
+        let opacity = animate(
             "tooltip-fade",
             if self.visible { 1. } else { 0. },
             FADE,
@@ -186,7 +186,7 @@ struct Shown {
 }
 
 #[derive(Default)]
-struct Tooltips {
+pub(crate) struct Tooltips {
     popup: Option<overlay::Overlay<TooltipView>>,
     owners: HashMap<AnyWindowHandle, Vec<Entry>>,
     state: State,
@@ -198,8 +198,6 @@ struct Tooltips {
     opening: Option<(u64, Task<()>)>,
     hiding: Option<Task<()>>,
 }
-
-impl Global for Tooltips {}
 
 pub(crate) fn owner(
     id: impl Into<ElementId>,
@@ -221,7 +219,8 @@ pub(crate) fn register(
 ) {
     let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
     let owners = cx
-        .default_global::<Tooltips>()
+        .shared
+        .tooltips
         .owners
         .entry(window.window_handle())
         .or_default();
@@ -264,7 +263,8 @@ impl Element for Host {
         window: &mut Window,
         cx: &mut App,
     ) {
-        cx.default_global::<Tooltips>()
+        cx.shared
+            .tooltips
             .owners
             .insert(window.window_handle(), Vec::new());
         self.child.prepaint(window, cx);
@@ -281,24 +281,24 @@ impl Element for Host {
     ) {
         window.on_mouse_event(|event: &MouseMoveEvent, phase, window, cx| {
             if phase == DispatchPhase::Capture {
-                cx.default_global::<Tooltips>().pressed = event.pressed_button.is_some();
+                cx.shared.tooltips.pressed = event.pressed_button.is_some();
                 evaluate(window, cx);
             }
         });
         window.on_mouse_event(|_: &MouseDownEvent, phase, window, cx| {
             if phase == DispatchPhase::Capture {
-                cx.default_global::<Tooltips>().pressed = true;
+                cx.shared.tooltips.pressed = true;
                 report(Report::Suppress(window.window_handle()), cx);
             }
         });
         window.on_mouse_event(|_: &MouseUpEvent, phase, _, cx| {
             if phase == DispatchPhase::Capture {
-                cx.default_global::<Tooltips>().pressed = false;
+                cx.shared.tooltips.pressed = false;
             }
         });
         window.on_key_event(|_: &KeyDownEvent, phase, _, cx| {
             if phase == DispatchPhase::Capture {
-                cx.default_global::<Tooltips>().control_only = false;
+                cx.shared.tooltips.control_only = false;
             }
         });
         window.on_modifiers_changed(|event, _, cx| modifiers_changed(&event.modifiers, cx));
@@ -320,7 +320,7 @@ fn evaluate(window: &mut Window, cx: &mut App) {
     let position = window.mouse_position();
     let scale = window.scale_factor();
     let origin = window.hwnd().client_origin();
-    let tips = cx.default_global::<Tooltips>();
+    let tips = &cx.shared.tooltips;
     let entries = tips.owners.get(&handle).map_or(&[][..], Vec::as_slice);
     let gone = tips
         .state
@@ -369,19 +369,20 @@ fn evaluate(window: &mut Window, cx: &mut App) {
 }
 
 fn report(report: Report, cx: &mut App) {
-    let tips = cx.default_global::<Tooltips>();
+    let tips = &mut cx.shared.tooltips;
     let state = std::mem::take(&mut tips.state);
     tips.state = transition_state(state, report, &mut tips.epoch);
     cx.defer(render);
 }
 
 fn render(cx: &mut App) {
-    let tips = cx.default_global::<Tooltips>();
-    let showing = match &tips.state {
+    let showing = match &cx.shared.tooltips.state {
         State::Showing { snap } => Some(snap.clone()),
         _ => None,
     };
-    if tips
+    if cx
+        .shared
+        .tooltips
         .shown
         .as_ref()
         .is_some_and(|shown| showing.as_ref().is_none_or(|snap| snap.key != shown.key))
@@ -389,23 +390,26 @@ fn render(cx: &mut App) {
         hide(cx);
     }
     if let Some(snap) = showing
-        && cx.default_global::<Tooltips>().shown.is_none()
+        && cx.shared.tooltips.shown.is_none()
     {
         show(snap, cx);
     }
-    let tips = cx.default_global::<Tooltips>();
-    let waiting = match &tips.state {
+    let waiting = match &cx.shared.tooltips.state {
         State::Waiting { snap, epoch } => Some((snap.key.clone(), *epoch)),
         _ => None,
     };
     match waiting {
         Some((_, epoch))
-            if tips
+            if cx
+                .shared
+                .tooltips
                 .opening
                 .as_ref()
                 .is_some_and(|(opening, _)| *opening == epoch) => {}
         Some((key, epoch)) => {
-            let reshow = tips
+            let reshow = cx
+                .shared
+                .tooltips
                 .closed_at
                 .is_some_and(|closed| closed.elapsed() < RESHOW_WINDOW);
             let delay = show_delay(reshow);
@@ -422,14 +426,14 @@ fn render(cx: &mut App) {
                     report(Report::Timer(epoch), cx);
                 });
             });
-            cx.default_global::<Tooltips>().opening = Some((epoch, task));
+            cx.shared.tooltips.opening = Some((epoch, task));
         }
-        None => tips.opening = None,
+        None => cx.shared.tooltips.opening = None,
     }
 }
 
 pub(crate) fn window_closed(window: WindowId, cx: &mut App) {
-    let tips = cx.default_global::<Tooltips>();
+    let tips = &mut cx.shared.tooltips;
     tips.owners.retain(|handle, _| handle.window_id() != window);
     if let Some(key) = tips
         .state
@@ -448,8 +452,7 @@ pub(crate) fn window_deactivated(window: AnyWindowHandle, cx: &mut App) {
 fn modifiers_changed(modifiers: &Modifiers, cx: &mut App) {
     let only_control = *modifiers == Modifiers::control();
     let released = !modifiers.modified();
-    let tips = cx.default_global::<Tooltips>();
-    let was = std::mem::replace(&mut tips.control_only, only_control);
+    let was = std::mem::replace(&mut cx.shared.tooltips.control_only, only_control);
     if released && was {
         report(Report::Dismiss, cx);
     }
@@ -466,7 +469,7 @@ fn show_delay(reshow: bool) -> Duration {
 }
 
 fn hide(cx: &mut App) {
-    let tips = cx.default_global::<Tooltips>();
+    let tips = &mut cx.shared.tooltips;
     if tips.shown.take().is_none() {
         return;
     }
@@ -482,18 +485,18 @@ fn hide(cx: &mut App) {
     let task = cx.spawn(async move |cx| {
         cx.background_executor().timer(FADE).await;
         cx.update(|cx| {
-            let tips = cx.default_global::<Tooltips>();
+            let tips = &mut cx.shared.tooltips;
             if tips.shown.is_none() {
                 overlay::hide(hwnd);
             }
             tips.hiding = None;
         });
     });
-    cx.default_global::<Tooltips>().hiding = Some(task);
+    cx.shared.tooltips.hiding = Some(task);
 }
 
 fn popup(cx: &mut App) -> Option<overlay::Overlay<TooltipView>> {
-    if let Some(popup) = &cx.default_global::<Tooltips>().popup {
+    if let Some(popup) = &cx.shared.tooltips.popup {
         return Some(popup.clone());
     }
     let popup = overlay::open(
@@ -504,7 +507,7 @@ fn popup(cx: &mut App) -> Option<overlay::Overlay<TooltipView>> {
         },
         cx,
     )?;
-    cx.default_global::<Tooltips>().popup = Some(popup.clone());
+    cx.shared.tooltips.popup = Some(popup.clone());
     Some(popup)
 }
 
@@ -591,7 +594,7 @@ fn show(snap: Snap, cx: &mut App) {
         },
     );
     overlay::show(popup.hwnd);
-    let tips = cx.default_global::<Tooltips>();
+    let tips = &mut cx.shared.tooltips;
     tips.hiding = None;
     tips.shown = Some(Shown {
         key: snap.key,

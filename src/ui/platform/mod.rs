@@ -41,8 +41,7 @@ use windows::core::{PCWSTR, w};
 use super::app::{App, AppCell};
 use super::geometry::{Bounds, Pixels, Size, point, px, size};
 use super::graphics::d2d_renderer::Direct2DDevices;
-use super::types::SharedString;
-use super::types::anyhow::{Context as _, Result};
+use super::types::{SharedString, UiError, UiResult};
 
 pub(crate) use window::set_window_min_size;
 
@@ -280,7 +279,7 @@ pub(crate) struct WindowsPlatform {
 const WAKE_CLASS_NAME: PCWSTR = w!("JotD2DWakeWindow");
 
 impl WindowsPlatform {
-    pub(crate) fn new() -> Result<Self> {
+    pub(crate) fn new() -> UiResult<Self> {
         unsafe {
             let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
             let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
@@ -314,7 +313,8 @@ impl WindowsPlatform {
             )?
         };
 
-        let devices = Direct2DDevices::new().context("initializing Direct3D11/Direct2D devices")?;
+        let devices = Direct2DDevices::new()
+            .map_err(|err| UiError::new(format!("initializing Direct3D11/Direct2D devices: {err}")))?;
         let vsync = VsyncPacer::spawn(wake_hwnd.0 as isize);
 
         Ok(Self {

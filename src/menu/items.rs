@@ -232,7 +232,7 @@ impl MenuKind {
                 ]
             }
             Self::View => {
-                let view = cx.global::<ViewSettings>();
+                let view = &cx.shared.view;
                 vec![
                     Entry::Submenu(
                         "&Zoom",

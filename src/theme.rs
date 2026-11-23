@@ -52,7 +52,11 @@ pub(crate) struct Palette {
     pub accent_bottom_edge: f32,
 }
 
-impl Global for Palette {}
+impl Default for Palette {
+    fn default() -> Self {
+        LIGHT
+    }
+}
 
 impl Palette {
     pub(crate) fn selection(self) -> Rgba {
@@ -193,7 +197,7 @@ const DARK: Palette = Palette {
 };
 
 pub(crate) fn palette(cx: &App) -> Palette {
-    cx.try_global::<Palette>().copied().unwrap_or(LIGHT)
+    cx.shared.palette
 }
 
 const BLUR_RADIUS_PER_SIGMA: f32 = 3.;
@@ -230,5 +234,6 @@ pub(crate) fn apply(appearance: WindowAppearance, cx: &mut App) {
     if let Some(accent) = crate::win32::system_accent_color(palette.dark) {
         palette.accent = accent;
     }
-    cx.set_global(palette);
+    cx.shared.palette = palette;
+    cx.refresh_windows();
 }

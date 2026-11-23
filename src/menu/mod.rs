@@ -2,7 +2,7 @@ mod items;
 mod render;
 
 use crate::*;
-use crate::ui::{MotionStatus, transition_from};
+use crate::ui::{AnimStatus, animate_from};
 use items::{
     BORDER, CONTEXT_WIDTH, CommandButton, FLYOUT_GAP, FLYOUT_MIN_WIDTH, MIN_WIDTH, MenuKind,
     Panel, ROW_INSET, ROW_MARGIN_Y, context_menu, cycle, menu_show_delay,
@@ -86,7 +86,7 @@ impl Motion {
 
     fn sample(&mut self, window: &mut Window, cx: &mut App) -> bool {
         if !self.closing {
-            self.unroll = transition_from(
+            self.unroll = animate_from(
                 ("jot-menu-unroll", self.serial),
                 0.0_f32,
                 1.0_f32,
@@ -98,7 +98,7 @@ impl Motion {
             .value;
         }
         let appear = if self.fade_in {
-            transition_from(
+            animate_from(
                 ("jot-menu-appear", self.serial),
                 0.0_f32,
                 1.0_f32,
@@ -111,7 +111,7 @@ impl Motion {
         } else {
             1.
         };
-        let fade = transition_from(
+        let fade = animate_from(
             ("jot-menu-fade", self.serial),
             1.0_f32,
             if self.closing { 0. } else { 1. },
@@ -121,7 +121,7 @@ impl Motion {
             cx,
         );
         self.opacity = fade.value * appear;
-        self.closing && fade.status == MotionStatus::Finished
+        self.closing && fade.status == AnimStatus::Finished
     }
 }
 

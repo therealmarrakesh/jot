@@ -1,7 +1,6 @@
 use std::borrow::Cow;
 use std::ops::{Range, RangeInclusive};
 
-use crate::ui::smallvec::SmallVec;
 use crate::ui::{
     App, Boundary, Font, FontRun, MAX_WRAP_INDENT, Pixels, Point, ShapedLine, Size, TextAlign,
     Window, point, px, size,
@@ -212,7 +211,7 @@ pub(crate) struct LineItem {
     /// Number of leading spaces reserved as continuation indent.
     pub(crate) indent: u32,
     /// Relative byte ranges (`0..len`) of each visual row (including the first).
-    pub(crate) wrapped_lines: SmallVec<[Range<usize>; 1]>,
+    pub(crate) wrapped_lines: Vec<Range<usize>>,
 }
 
 impl LineItem {
@@ -653,7 +652,7 @@ impl TextWrapper {
                 changed_text.slice(0..0)
             };
             let line_len = line.len();
-            let mut wrapped_lines = SmallVec::<[Range<usize>; 1]>::new();
+            let mut wrapped_lines = Vec::<Range<usize>>::new();
             let mut prev_boundary_ix = 0;
             let mut indent_chars = 0;
 
@@ -780,7 +779,7 @@ impl WrapDisplayPoint {
 /// Shaped visual rows for a single visible buffer line.
 pub(crate) struct BufferLineLayout {
     len: usize,
-    pub(crate) wrapped_lines: SmallVec<[InputLine; 1]>,
+    pub(crate) wrapped_lines: Vec<InputLine>,
     pub(crate) wrap_indent: Pixels,
     longest_width: Pixels,
 }
@@ -790,7 +789,7 @@ impl BufferLineLayout {
         Self {
             len: 0,
             longest_width: px(0.),
-            wrapped_lines: SmallVec::new(),
+            wrapped_lines: Vec::new(),
             wrap_indent: px(0.),
         }
     }
@@ -809,12 +808,12 @@ impl BufferLineLayout {
         }
     }
 
-    pub(crate) fn lines(mut self, wrapped_lines: SmallVec<[ShapedLine; 1]>) -> Self {
+    pub(crate) fn lines(mut self, wrapped_lines: Vec<ShapedLine>) -> Self {
         self.set_wrapped_lines(wrapped_lines);
         self
     }
 
-    pub(crate) fn set_wrapped_lines(&mut self, wrapped_lines: SmallVec<[ShapedLine; 1]>) {
+    pub(crate) fn set_wrapped_lines(&mut self, wrapped_lines: Vec<ShapedLine>) {
         self.len = wrapped_lines.iter().map(|l| l.len).sum();
         self.longest_width = wrapped_lines
             .iter()
@@ -824,7 +823,7 @@ impl BufferLineLayout {
         self.wrapped_lines = wrapped_lines.into_iter().map(InputLine::from).collect();
     }
 
-    pub(crate) fn inline_lines(mut self, lines: SmallVec<[InputLine; 1]>) -> Self {
+    pub(crate) fn inline_lines(mut self, lines: Vec<InputLine>) -> Self {
         self.len = lines.iter().map(InputLine::len).sum();
         self.longest_width = lines
             .iter()
@@ -1244,17 +1243,17 @@ mod tests {
             LineItem {
                 len: 2,
                 indent: 0,
-                wrapped_lines: crate::ui::smallvec::smallvec![0..2],
+                wrapped_lines: std::iter::once(0..2).collect(),
             },
             LineItem {
                 len: 4,
                 indent: 0,
-                wrapped_lines: crate::ui::smallvec::smallvec![0..2, 2..4],
+                wrapped_lines: vec![0..2, 2..4],
             },
             LineItem {
                 len: 1,
                 indent: 0,
-                wrapped_lines: crate::ui::smallvec::smallvec![0..1],
+                wrapped_lines: std::iter::once(0..1).collect(),
             },
         ]);
 
@@ -1319,7 +1318,7 @@ mod tests {
         let mut line_layout = BufferLineLayout::new();
         let line1 = ShapedLine::default().with_len(100);
         let line2 = ShapedLine::default().with_len(50);
-        line_layout.set_wrapped_lines(crate::ui::smallvec::smallvec![line1, line2]);
+        line_layout.set_wrapped_lines(vec![line1, line2]);
         assert_eq!(line_layout.len(), 150);
         assert_eq!(line_layout.wrapped_lines.len(), 2);
     }
@@ -1341,7 +1340,7 @@ mod tests {
     #[test]
     fn test_position_for_index_prefers_first_leading_empty_visual_line() {
         let mut line_layout = BufferLineLayout::new();
-        line_layout.set_wrapped_lines(crate::ui::smallvec::smallvec![
+        line_layout.set_wrapped_lines(vec![
             ShapedLine::default(),
             ShapedLine::default(),
             ShapedLine::default().with_len(3),
@@ -1356,7 +1355,7 @@ mod tests {
     #[test]
     fn clicking_past_a_wrapped_row_keeps_the_caret_on_that_row() {
         let mut line_layout = BufferLineLayout::new();
-        line_layout.set_wrapped_lines(crate::ui::smallvec::smallvec![
+        line_layout.set_wrapped_lines(vec![
             ShapedLine::default().with_len(10),
             ShapedLine::default().with_len(5),
         ]);
@@ -1396,12 +1395,12 @@ mod tests {
             LineItem {
                 len: Rope::from("first line").len(),
                 indent: 0,
-                wrapped_lines: crate::ui::smallvec::smallvec![0..10],
+                wrapped_lines: std::iter::once(0..10).collect(),
             },
             LineItem {
                 len: Rope::from("this one wraps").len(),
                 indent: 0,
-                wrapped_lines: crate::ui::smallvec::smallvec![0..9, 9..14],
+                wrapped_lines: vec![0..9, 9..14],
             },
         ]);
 
@@ -1436,22 +1435,22 @@ mod tests {
             LineItem {
                 len: Rope::from("Hello, 世界!\r").len(),
                 indent: 0,
-                wrapped_lines: crate::ui::smallvec::smallvec![0..15],
+                wrapped_lines: std::iter::once(0..15).collect(),
             },
             LineItem {
                 len: Rope::from("This is second line.\n").len(),
                 indent: 0,
-                wrapped_lines: crate::ui::smallvec::smallvec![0..10, 10..20],
+                wrapped_lines: vec![0..10, 10..20],
             },
             LineItem {
                 len: Rope::from("This is third line.\n").len(),
                 indent: 0,
-                wrapped_lines: crate::ui::smallvec::smallvec![0..9, 9..15, 15..20],
+                wrapped_lines: vec![0..9, 9..15, 15..20],
             },
             LineItem {
                 len: Rope::from("这里是第 4 行。").len(),
                 indent: 0,
-                wrapped_lines: crate::ui::smallvec::smallvec![0..22],
+                wrapped_lines: std::iter::once(0..22).collect(),
             },
         ]);
 
@@ -1540,7 +1539,7 @@ mod tests {
     #[test]
     fn test_wrap_indent_offsets_continuation_lines() {
         let mut line_layout = BufferLineLayout::new();
-        line_layout.set_wrapped_lines(crate::ui::smallvec::smallvec![
+        line_layout.set_wrapped_lines(vec![
             ShapedLine::default().with_len(5),
             ShapedLine::default().with_len(10),
         ]);

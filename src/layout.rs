@@ -10,7 +10,6 @@
 
 use std::fmt::Debug;
 
-use crate::ui::smallvec::SmallVec;
 use crate::ui::{
     AlignItems, AlignSelf, App, Bounds, DefiniteLength, Display, Edges,
     FlexDirection, JustifyContent, Length, Overflow, Pixels, Point, Position, Size, Style, Window,
@@ -899,11 +898,11 @@ impl LayoutEngine {
             .or(style_h)
             .map(|h| clamp_dim(h, Some(floor_h), max_h));
 
-        let children: SmallVec<[LayoutId; 8]> = {
+        let children: Vec<LayoutId> = {
             let node = &self.nodes[id.idx()];
             let start = node.children_start as usize;
             let end = start + node.children_len as usize;
-            SmallVec::from_slice(&self.children_arena[start..end])
+            self.children_arena[start..end].to_vec()
         };
 
         // 1. Determine container width.
@@ -1092,11 +1091,11 @@ impl LayoutEngine {
             .or(style_cross)
             .map(|v| clamp_dim(v, Some(floor_cross), max_cross));
 
-        let children: SmallVec<[LayoutId; 8]> = {
+        let children: Vec<LayoutId> = {
             let node = &self.nodes[id.idx()];
             let start = node.children_start as usize;
             let end = start + node.children_len as usize;
-            SmallVec::from_slice(&self.children_arena[start..end])
+            self.children_arena[start..end].to_vec()
         };
 
         let in_flow_count = children
@@ -1153,7 +1152,7 @@ impl LayoutEngine {
             frozen: bool,
         }
 
-        let mut items: SmallVec<[FlexItem; 8]> = SmallVec::with_capacity(in_flow_count);
+        let mut items: Vec<FlexItem> = Vec::with_capacity(in_flow_count);
         for &child in &children {
             let cs = self.nodes[child.idx()].style;
             if cs.position == Position::Absolute {
@@ -1382,7 +1381,7 @@ impl LayoutEngine {
                 }
 
                 let mut total_violation = 0.0f32;
-                let mut violations: SmallVec<[f32; 8]> = SmallVec::with_capacity(items.len());
+                let mut violations: Vec<f32> = Vec::with_capacity(items.len());
                 for item in &mut items {
                     if item.frozen {
                         violations.push(0.0);
@@ -1461,7 +1460,7 @@ impl LayoutEngine {
         let inner_cross = (container_cross - pb_cross).max(0.0);
         let final_inner_size = size_from(Some(inner_main), Some(inner_cross), row);
 
-        let mut final_sizes: SmallVec<[Size<f32>; 8]> = SmallVec::with_capacity(items.len());
+        let mut final_sizes: Vec<Size<f32>> = Vec::with_capacity(items.len());
         let mut used_main = total_gaps;
         for item in &items {
             let c_min_cross = item.style.min_size.cross(row).resolve(Some(inner_cross));

@@ -24,8 +24,8 @@ use windows::core::{HSTRING, Interface, PCWSTR};
 use crate::win32::WindowHwnd;
 
 use super::{PathPromptOptions, SavePathOptions};
-use crate::ui::anyhow::Result;
 use crate::ui::runtime::{ForegroundExecutor, futures::channel::oneshot};
+use crate::ui::types::UiResult;
 
 const ENCODING_COMBO_ID: u32 = 1001;
 
@@ -40,7 +40,7 @@ fn path_to_wide_null(p: &Path) -> Vec<u16> {
         .collect()
 }
 
-unsafe fn shell_item_path(item: &IShellItem) -> Result<PathBuf> {
+unsafe fn shell_item_path(item: &IShellItem) -> UiResult<PathBuf> {
     let pwstr = unsafe { item.GetDisplayName(SIGDN_FILESYSPATH)? };
     let path = unsafe {
         let mut len = 0;
@@ -61,7 +61,7 @@ fn is_cancelled(err: &windows::core::Error) -> bool {
 
 pub(crate) fn prompt_for_paths(
     options: PathPromptOptions,
-) -> oneshot::Receiver<Result<Option<Vec<PathBuf>>>> {
+) -> oneshot::Receiver<UiResult<Option<Vec<PathBuf>>>> {
     let (tx, rx) = oneshot::channel();
     thread::Builder::new()
         .name("jot-open-dialog".into())
@@ -73,11 +73,11 @@ pub(crate) fn prompt_for_paths(
     rx
 }
 
-fn run_open_dialog(options: PathPromptOptions) -> Result<Option<Vec<PathBuf>>> {
+fn run_open_dialog(options: PathPromptOptions) -> UiResult<Option<Vec<PathBuf>>> {
     unsafe {
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
     }
-    let result = (|| -> Result<Option<Vec<PathBuf>>> {
+    let result = (|| -> UiResult<Option<Vec<PathBuf>>> {
         let dialog: IFileOpenDialog =
             unsafe { CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER)? };
         let mut flags = unsafe { dialog.GetOptions()? } | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST;
@@ -111,7 +111,7 @@ fn run_open_dialog(options: PathPromptOptions) -> Result<Option<Vec<PathBuf>>> {
     result
 }
 
-pub(crate) type SavePathResult = Result<Option<(PathBuf, Option<usize>)>>;
+pub(crate) type SavePathResult = UiResult<Option<(PathBuf, Option<usize>)>>;
 
 pub(crate) fn prompt_for_save_path(
     owner: WindowHwnd,
@@ -133,11 +133,11 @@ pub(crate) fn prompt_for_save_path(
 fn run_save_dialog(
     owner: HWND,
     options: SavePathOptions,
-) -> Result<Option<(PathBuf, Option<usize>)>> {
+) -> UiResult<Option<(PathBuf, Option<usize>)>> {
     unsafe {
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
     }
-    let result = (|| -> Result<Option<(PathBuf, Option<usize>)>> {
+    let result = (|| -> UiResult<Option<(PathBuf, Option<usize>)>> {
         let dialog: IFileSaveDialog =
             unsafe { CoCreateInstance(&FileSaveDialog, None, CLSCTX_INPROC_SERVER)? };
         let flags = unsafe { dialog.GetOptions()? }

@@ -1,6 +1,6 @@
 use std::borrow::Cow;
 
-use crate::ui::anyhow::Result;
+use crate::ui::{UiError, UiResult};
 use windows::Win32::{
     Foundation::{HANDLE, HGLOBAL},
     System::{
@@ -25,7 +25,7 @@ pub(crate) fn write_clipboard_text(text: &str) {
     let Some(_clip) = ClipboardGuard::open() else {
         return;
     };
-    let _ = (|| -> Result<()> {
+    let _ = (|| -> UiResult<()> {
         unsafe { EmptyClipboard()? };
         let sanitized = if text.contains('\0') {
             Cow::Owned(text.replace('\0', " "))
@@ -69,11 +69,13 @@ where
     }
 }
 
-fn set_clipboard_bytes<T>(data: &[T], format: u32) -> Result<()> {
+fn set_clipboard_bytes<T>(data: &[T], format: u32) -> UiResult<()> {
     unsafe {
         let global = Owned::new(GlobalAlloc(GMEM_MOVEABLE, std::mem::size_of_val(data))?);
         let ptr = GlobalLock(*global);
-        crate::ui::anyhow::ensure!(!ptr.is_null(), "GlobalLock returned null");
+        if ptr.is_null() {
+            return Err(UiError::new("GlobalLock returned null"));
+        }
         std::ptr::copy_nonoverlapping(data.as_ptr(), ptr as _, data.len());
         GlobalUnlock(*global).ok();
         SetClipboardData(format, Some(HANDLE(global.0)))?;

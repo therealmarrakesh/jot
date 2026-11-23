@@ -18,13 +18,11 @@ use windows::Win32::Graphics::DirectWrite::{
 };
 use windows::core::{BOOL, HSTRING};
 
-use crate::ui::anyhow::Result;
 use crate::ui::app::App;
 use crate::ui::color::Rgba;
 use crate::ui::geometry::{Bounds, Pixels, Point, Size, point, px, size};
 use crate::ui::graphics::d2d_renderer::fill;
-use crate::ui::smallvec::SmallVec;
-use crate::ui::types::SharedString;
+use crate::ui::types::{SharedString, UiResult};
 use crate::ui::window::Window;
 
 const MAX_LAYOUT_CACHE: usize = 512;
@@ -230,7 +228,7 @@ impl ShapedLine {
         align_width: Option<Pixels>,
         window: &mut Window,
         _cx: &mut App,
-    ) -> Result<()> {
+    ) -> UiResult<()> {
         let Some(layout) = &self.layout else {
             return Ok(());
         };
@@ -304,7 +302,7 @@ impl WrappedLine {
         color: Rgba,
         window: &mut Window,
         _cx: &mut App,
-    ) -> Result<()> {
+    ) -> UiResult<()> {
         let Some(layout) = &self.layout else {
             return Ok(());
         };
@@ -486,8 +484,8 @@ struct TextSystemState {
     dw: DirectWriteCore,
     char_widths: HashMap<(Font, u32), CharWidths>,
     shaped_cache: HashMap<ShapedCacheKey, ShapedLine>,
-    prev_wrapped_cache: HashMap<WrappedCacheKey, SmallVec<[WrappedLine; 1]>>,
-    curr_wrapped_cache: HashMap<WrappedCacheKey, SmallVec<[WrappedLine; 1]>>,
+    prev_wrapped_cache: HashMap<WrappedCacheKey, Vec<WrappedLine>>,
+    curr_wrapped_cache: HashMap<WrappedCacheKey, Vec<WrappedLine>>,
 }
 
 impl TextSystem {
@@ -704,7 +702,7 @@ impl TextSystem {
         underline: Option<UnderlineStyle>,
         wrap_width: Option<Pixels>,
         line_clamp: Option<usize>,
-    ) -> SmallVec<[WrappedLine; 1]> {
+    ) -> Vec<WrappedLine> {
         self.shape_text_trimmed(
             text,
             font_size,
@@ -730,7 +728,7 @@ impl TextSystem {
         line_clamp: Option<usize>,
         trim_width: Option<Pixels>,
         align: TextAlign,
-    ) -> SmallVec<[WrappedLine; 1]> {
+    ) -> Vec<WrappedLine> {
         let key = WrappedCacheKey {
             text: text.clone(),
             font_size_hundredths: (font_size.as_f32() * 100.0).round().max(1.0) as u32,
@@ -758,7 +756,7 @@ impl TextSystem {
         } else {
             None
         };
-        let mut out = SmallVec::new();
+        let mut out = Vec::new();
         let mut remaining_lines = line_clamp;
 
         for segment in text.as_str().split('\n') {

@@ -115,20 +115,6 @@ impl Window {
         })
     }
 
-    pub(crate) fn use_keyed_state<T: 'static>(
-        &mut self,
-        id: impl Into<ElementId>,
-        cx: &mut App,
-        init: impl FnOnce(&mut Window, &mut Context<T>) -> T,
-    ) -> Entity<T> {
-        self.with_id(id.into(), |gid, window| {
-            window.with_element_state(gid, |prev: Option<Entity<T>>, window| {
-                let entity = prev.unwrap_or_else(|| cx.new(|cx| init(window, cx)));
-                (entity.clone(), entity)
-            })
-        })
-    }
-
     pub(crate) fn with_element_state<S: 'static, R>(
         &mut self,
         id: &GlobalElementId,
@@ -144,6 +130,25 @@ impl Window {
         let (result, next) = f(prev, self);
         self.next_element_states.insert(key, Box::new(next));
         result
+    }
+
+    pub(crate) fn with_anim_track<S: 'static, R>(
+        &mut self,
+        id: ElementId,
+        f: impl FnOnce(Option<S>) -> (R, S),
+    ) -> R {
+        self.with_id(id, |gid, window| {
+            let key = (gid.clone(), TypeId::of::<S>());
+            let prev = window
+                .anim_tracks
+                .remove(&key)
+                .or_else(|| window.next_anim_tracks.remove(&key))
+                .and_then(|boxed| boxed.downcast::<S>().ok())
+                .map(|b| *b);
+            let (result, next) = f(prev);
+            window.next_anim_tracks.insert(key, Box::new(next));
+            result
+        })
     }
 
     #[cfg(test)]

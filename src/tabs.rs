@@ -1,5 +1,5 @@
 use super::*;
-use crate::ui::{MotionStatus, transition_from};
+use crate::ui::{AnimStatus, animate_from};
 
 const TAB_WIDTH: f32 = 240.;
 const TAB_MIN_WIDTH: f32 = 80.;
@@ -228,8 +228,8 @@ fn slide(
     cx: &mut App,
 ) -> (f32, bool) {
     let duration = if snap { Duration::ZERO } else { SLIDE_DURATION };
-    let sample = transition_from(id, seed, target, duration, SLIDE_EASING, window, cx);
-    (sample.value.round(), sample.status == MotionStatus::Running)
+    let sample = animate_from(id, seed, target, duration, SLIDE_EASING, window, cx);
+    (sample.value.round(), sample.status == AnimStatus::Running)
 }
 
 pub(crate) fn window_listeners(register: impl FnOnce(&mut Window) + 'static) -> impl IntoElement {
@@ -367,7 +367,7 @@ impl Jot {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Tab {
-        let word_wrap = cx.global::<ViewSettings>().word_wrap;
+        let word_wrap = cx.shared.view.word_wrap;
         let (path, text, format) = match content {
             Some((path, loaded)) => (Some(path), loaded.text, loaded.format),
             None => (None, Rope::new(), document::Format::default()),

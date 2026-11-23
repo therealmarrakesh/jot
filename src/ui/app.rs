@@ -1,7 +1,7 @@
-//! Clean-room `App`, `Context<T>`, `AsyncApp`, `AsyncWindowContext`, globals, observers,
+//! Clean-room `App`, `Context<T>`, `AsyncApp`, `AsyncWindowContext`, observers,
 //! subscriptions, and window handles.
 
-use std::any::{Any, TypeId};
+use std::any::TypeId;
 use std::borrow::{Borrow, BorrowMut};
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -19,11 +19,8 @@ use super::platform::{
     DisplayId, PathPromptOptions, WindowAppearance, WindowOptions, WindowsDisplay, WindowsPlatform,
 };
 use super::runtime::{BackgroundExecutor, ForegroundExecutor, Task, futures::channel::oneshot};
-use super::types::anyhow::{Context as _, Result};
+use super::types::{UiError, UiResult};
 use super::window::{KeyDownEvent, Window, WindowId};
-
-/// Marker trait for singleton state stored in `App`.
-pub(crate) trait Global: 'static {}
 
 /// RAII handle that unregisters an observer/callback when dropped unless `.detach()`ed.
 pub(crate) struct Subscription {
@@ -78,7 +75,7 @@ impl AnyWindowHandle {
         self,
         cx: &mut App,
         f: impl FnOnce(AnyView, &mut Window, &mut App) -> R,
-    ) -> Result<R> {
+    ) -> UiResult<R> {
         cx.update_window_impl(self.id, f)
     }
 }
@@ -120,12 +117,12 @@ impl<V: 'static> WindowHandle<V> {
         }
     }
 
-    pub(crate) fn read(self, cx: &App) -> Result<&V> {
+    pub(crate) fn read(self, cx: &App) -> UiResult<&V> {
         let view = cx
             .window_root(self.id)
-            .context("window is closed")?
+            .ok_or_else(|| UiError::new("window is closed"))?
             .downcast::<V>()
-            .context("window root type mismatch")?;
+            .ok_or_else(|| UiError::new("window root type mismatch"))?;
         Ok(view.read(cx))
     }
 
@@ -133,7 +130,7 @@ impl<V: 'static> WindowHandle<V> {
         self,
         cx: &mut App,
         f: impl FnOnce(&mut V, &mut Window, &mut Context<V>) -> R,
-    ) -> Result<R> {
+    ) -> UiResult<R> {
         cx.update_window_impl(self.id, |root, window, app| {
             let entity = root
                 .downcast::<V>()
@@ -144,7 +141,6 @@ impl<V: 'static> WindowHandle<V> {
 }
 
 type EntityObserver = Box<dyn FnMut(&mut App) -> bool>;
-type GlobalObserver = Box<dyn FnMut(&mut App) -> bool>;
 type KeystrokeInterceptor = Box<dyn FnMut(&KeyDownEvent, &mut Window, &mut App) -> bool>;
 type GlobalCommandHandler = Box<dyn FnMut(Command, &mut App) -> bool>;
 type WindowClosedCallback = Box<dyn FnMut(&mut App, WindowId)>;
@@ -154,7 +150,7 @@ pub(crate) struct AppCell {
     pub(crate) inner: RefCell<App>,
 }
 
-/// Central application state owning all entities, globals, windows, keymap, and executors.
+/// Central application state owning all entities, shared app state, windows, keymap, and executors.
 pub(crate) struct App {
     pub(crate) self_weak: Weak<AppCell>,
     pub(crate) platform: Rc<WindowsPlatform>,
@@ -162,21 +158,20 @@ pub(crate) struct App {
     pub(crate) foreground: ForegroundExecutor,
     pub(crate) background: BackgroundExecutor,
     pub(crate) entities: EntityStore,
-    pub(crate) globals: HashMap<TypeId, Option<Box<dyn Any>>>,
+    pub(crate) shared: crate::AppShared,
     pub(crate) keymap: Rc<RefCell<Keymap>>,
     pub(crate) reduce_motion: bool,
+    system_reduce_motion_applied: Option<bool>,
     pub(crate) appearance_override: Option<WindowAppearance>,
     pub(crate) windows: HashMap<WindowId, Option<Box<Window>>>,
     pub(crate) window_order: Vec<WindowId>,
     pub(crate) active_window: Option<WindowId>,
     pub(crate) dirty_entities: HashSet<EntityId>,
-    dirty_globals: Vec<TypeId>,
     pending_focus_events: VecDeque<(WindowId, super::focus::FocusId, bool)>,
     pub(crate) deferred: VecDeque<DeferredAppCallback>,
     update_depth: usize,
     pub(crate) flushing: bool,
     entity_observers: HashMap<EntityId, Vec<CallbackSlot<EntityObserver>>>,
-    global_observers: HashMap<TypeId, Vec<CallbackSlot<GlobalObserver>>>,
     keystroke_interceptors: Vec<CallbackSlot<KeystrokeInterceptor>>,
     global_commands: Vec<GlobalCommandHandler>,
     window_closed_listeners: Vec<CallbackSlot<WindowClosedCallback>>,
@@ -197,21 +192,20 @@ impl App {
                 foreground,
                 background,
                 entities: EntityStore::default(),
-                globals: HashMap::new(),
+                shared: crate::AppShared::default(),
                 keymap: Rc::new(RefCell::new(Keymap::default())),
                 reduce_motion: false,
+                system_reduce_motion_applied: None,
                 appearance_override: None,
                 windows: HashMap::new(),
                 window_order: Vec::new(),
                 active_window: None,
                 dirty_entities: HashSet::new(),
-                dirty_globals: Vec::new(),
                 pending_focus_events: VecDeque::new(),
                 deferred: VecDeque::new(),
                 update_depth: 0,
                 flushing: false,
                 entity_observers: HashMap::new(),
-                global_observers: HashMap::new(),
                 keystroke_interceptors: Vec::new(),
                 global_commands: Vec::new(),
                 window_closed_listeners: Vec::new(),
@@ -230,10 +224,6 @@ impl App {
 
     pub(crate) fn foreground_executor(&self) -> &ForegroundExecutor {
         &self.foreground
-    }
-
-    pub(crate) fn background_executor(&self) -> &BackgroundExecutor {
-        &self.background
     }
 
     pub(crate) fn text_system(&self) -> &Rc<TextSystem> {
@@ -296,92 +286,6 @@ impl App {
         result
     }
 
-    // ---- Globals ----
-
-    pub(crate) fn has_global<G: Global>(&self) -> bool {
-        self.globals
-            .get(&TypeId::of::<G>())
-            .is_some_and(Option::is_some)
-    }
-
-    pub(crate) fn global<G: Global>(&self) -> &G {
-        self.try_global::<G>()
-            .unwrap_or_else(|| panic!("missing global {}", std::any::type_name::<G>()))
-    }
-
-    pub(crate) fn try_global<G: Global>(&self) -> Option<&G> {
-        self.globals
-            .get(&TypeId::of::<G>())
-            .and_then(|opt| opt.as_deref())
-            .and_then(|any| any.downcast_ref::<G>())
-    }
-
-    pub(crate) fn global_mut<G: Global>(&mut self) -> &mut G {
-        self.globals
-            .get_mut(&TypeId::of::<G>())
-            .and_then(|opt| opt.as_deref_mut())
-            .and_then(|any| any.downcast_mut::<G>())
-            .unwrap_or_else(|| panic!("missing global {}", std::any::type_name::<G>()))
-    }
-
-    pub(crate) fn default_global<G: Global + Default>(&mut self) -> &mut G {
-        let entry = self
-            .globals
-            .entry(TypeId::of::<G>())
-            .or_insert_with(|| Some(Box::new(G::default())));
-        if entry.is_none() {
-            *entry = Some(Box::new(G::default()));
-        }
-        entry
-            .as_deref_mut()
-            .unwrap()
-            .downcast_mut::<G>()
-            .unwrap()
-    }
-
-    pub(crate) fn set_global<G: Global>(&mut self, global: G) {
-        self.globals
-            .insert(TypeId::of::<G>(), Some(Box::new(global)));
-        self.queue_global_notify::<G>();
-        self.flush_effects();
-    }
-
-    pub(crate) fn remove_global<G: Global>(&mut self) -> G {
-        let boxed = self
-            .globals
-            .remove(&TypeId::of::<G>())
-            .flatten()
-            .expect("remove_global called for missing global");
-        *boxed.downcast::<G>().unwrap()
-    }
-
-    pub(crate) fn update_global<G: Global, R>(
-        &mut self,
-        f: impl FnOnce(&mut G, &mut App) -> R,
-    ) -> R {
-        let mut boxed = self
-            .globals
-            .get_mut(&TypeId::of::<G>())
-            .and_then(Option::take)
-            .unwrap_or_else(|| panic!("missing or leased global {}", std::any::type_name::<G>()));
-        let g = boxed.downcast_mut::<G>().unwrap();
-        self.update_depth += 1;
-        let result = f(g, self);
-        self.globals.insert(TypeId::of::<G>(), Some(boxed));
-        self.update_depth -= 1;
-        self.queue_global_notify::<G>();
-        self.flush_effects();
-        result
-    }
-
-    fn queue_global_notify<G: Global>(&mut self) {
-        let type_id = TypeId::of::<G>();
-        if !self.dirty_globals.contains(&type_id) {
-            self.dirty_globals.push(type_id);
-        }
-        self.refresh_windows();
-    }
-
     pub(crate) fn queue_focus_event(
         &mut self,
         window_id: WindowId,
@@ -420,17 +324,6 @@ impl App {
                         window.fire_focus_out(fid, cx);
                     }
                 });
-            }
-
-            let globals: Vec<TypeId> = std::mem::take(&mut self.dirty_globals);
-            for type_id in globals {
-                if let Some(mut observers) = self.global_observers.remove(&type_id) {
-                    ran_any = true;
-                    observers.retain_mut(|slot| slot.active.get() && (slot.callback)(self));
-                    let existing = self.global_observers.entry(type_id).or_default();
-                    observers.append(existing);
-                    *existing = observers;
-                }
             }
 
             let dirty: Vec<EntityId> = self.dirty_entities.drain().collect();
@@ -530,8 +423,23 @@ impl App {
         self.reduce_motion
     }
 
+    #[cfg(test)]
     pub(crate) fn set_reduce_motion(&mut self, reduce: bool) {
         self.reduce_motion = reduce;
+    }
+
+    /// Synchronizes `reduce_motion` with Windows' `SPI_GETCLIENTAREAANIMATION` preference unless
+    /// an explicit caller override (such as tests) changed `reduce_motion` directly.
+    pub(crate) fn sync_system_reduce_motion(&mut self) {
+        let Some(animations_enabled) = crate::win32::client_area_animations_enabled() else {
+            return;
+        };
+        let reduce = !animations_enabled;
+        if self.reduce_motion != self.system_reduce_motion_applied.unwrap_or(false) {
+            return;
+        }
+        self.reduce_motion = reduce;
+        self.system_reduce_motion_applied = Some(reduce);
     }
 
     pub(crate) fn window_appearance(&self) -> WindowAppearance {
@@ -580,7 +488,7 @@ impl App {
     pub(crate) fn prompt_for_paths(
         &self,
         options: PathPromptOptions,
-    ) -> oneshot::Receiver<Result<Option<Vec<PathBuf>>>> {
+    ) -> oneshot::Receiver<UiResult<Option<Vec<PathBuf>>>> {
         super::platform::dialogs::prompt_for_paths(options)
     }
 
@@ -590,7 +498,7 @@ impl App {
         &mut self,
         options: WindowOptions,
         build_root: impl FnOnce(&mut Window, &mut App) -> Entity<V>,
-    ) -> Result<WindowHandle<V>> {
+    ) -> UiResult<WindowHandle<V>> {
         let id = WindowId::next();
         let will_activate = options.show && options.focus;
         let mut window = Box::new(Window::new(id, options, self)?);
@@ -646,13 +554,16 @@ impl App {
         &mut self,
         id: WindowId,
         f: impl FnOnce(AnyView, &mut Window, &mut App) -> R,
-    ) -> Result<R> {
+    ) -> UiResult<R> {
         let mut window = self
             .windows
             .get_mut(&id)
             .and_then(Option::take)
-            .context("window is closed or currently borrowed")?;
-        let root = window.root_view().cloned().context("window has no root view")?;
+            .ok_or_else(|| UiError::new("window is closed or currently borrowed"))?;
+        let root = window
+            .root_view()
+            .cloned()
+            .ok_or_else(|| UiError::new("window has no root view"))?;
         self.update_depth += 1;
         let result = f(root, &mut window, self);
         let removed = window.take_removed_flag();
@@ -739,17 +650,6 @@ impl App {
     ) {
         self.entity_observers
             .entry(entity_id)
-            .or_default()
-            .push(CallbackSlot { active, callback });
-    }
-
-    pub(crate) fn add_global_observer<G: Global>(
-        &mut self,
-        active: Rc<Cell<bool>>,
-        callback: GlobalObserver,
-    ) {
-        self.global_observers
-            .entry(TypeId::of::<G>())
             .or_default()
             .push(CallbackSlot { active, callback });
     }
@@ -879,29 +779,6 @@ impl<T: 'static> Context<'_, T> {
         Subscription::new(move || active.set(false))
     }
 
-    pub(crate) fn observe_global_in<G: Global>(
-        &mut self,
-        window: &Window,
-        mut f: impl FnMut(&mut T, &mut Window, &mut Context<T>) + 'static,
-    ) -> Subscription {
-        let observer = self.weak_entity();
-        let window_id = window.window_id();
-        let active = Rc::new(Cell::new(true));
-        self.app.add_global_observer::<G>(
-            active.clone(),
-            Box::new(move |app| {
-                let Some(obs) = observer.upgrade() else {
-                    return false;
-                };
-                app.update_window_impl(window_id, |_, window, app| {
-                    obs.update(app, |this, cx| f(this, window, cx));
-                })
-                .is_ok()
-            }),
-        );
-        Subscription::new(move || active.set(false))
-    }
-
     pub(crate) fn observe_window_activation(
         &mut self,
         window: &mut Window,
@@ -1014,8 +891,11 @@ impl AsyncWindowContext {
         &self.background
     }
 
-    pub(crate) fn update<R>(&self, f: impl FnOnce(&mut Window, &mut App) -> R) -> Result<R> {
-        let cell = self.app.upgrade().context("Application dropped")?;
+    pub(crate) fn update<R>(&self, f: impl FnOnce(&mut Window, &mut App) -> R) -> UiResult<R> {
+        let cell = self
+            .app
+            .upgrade()
+            .ok_or_else(|| UiError::new("Application dropped"))?;
         let mut app = cell.inner.borrow_mut();
         app.update_window_impl(self.window_id, |_, window, app| f(window, app))
     }

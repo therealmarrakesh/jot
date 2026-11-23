@@ -46,7 +46,7 @@ impl Render for KeyTipView {
 }
 
 #[derive(Default)]
-struct KeyTips {
+pub(crate) struct KeyTips {
     overlay: Option<overlay::Overlay<KeyTipView>>,
     owner: Option<AnyWindowHandle>,
     rect: ScreenRect,
@@ -61,8 +61,6 @@ impl KeyTips {
         }
     }
 }
-
-impl Global for KeyTips {}
 
 pub(crate) fn layout(
     window: &Window,
@@ -101,10 +99,9 @@ pub(crate) fn show(
     mut tips: Vec<KeyTip>,
     cx: &mut App,
 ) {
-    let state = cx.default_global::<KeyTips>();
     let Some(union) = tips.iter().map(|tip| tip.bounds).reduce(|a, b| a.union(&b)) else {
-        if state.owner == Some(owner) {
-            state.hide();
+        if cx.shared.keytips.owner == Some(owner) {
+            cx.shared.keytips.hide();
         }
         return;
     };
@@ -112,8 +109,8 @@ pub(crate) fn show(
         tip.bounds.origin -= union.origin;
     }
     let rect = overlay::screen_rect(union, scale, origin);
-    let unchanged = state.owner == Some(owner) && state.rect == rect;
-    let current = state.overlay.clone();
+    let unchanged = cx.shared.keytips.owner == Some(owner) && cx.shared.keytips.rect == rect;
+    let current = cx.shared.keytips.overlay.clone();
     if unchanged
         && current
             .as_ref()
@@ -127,7 +124,7 @@ pub(crate) fn show(
             let Some(overlay) = overlay::open(|_| KeyTipView { tips: Vec::new() }, cx) else {
                 return;
             };
-            cx.default_global::<KeyTips>().overlay = Some(overlay.clone());
+            cx.shared.keytips.overlay = Some(overlay.clone());
             overlay
         }
     };
@@ -137,28 +134,27 @@ pub(crate) fn show(
     });
     overlay::place(overlay.hwnd, rect);
     overlay::show(overlay.hwnd);
-    let state = cx.default_global::<KeyTips>();
-    state.owner = Some(owner);
-    state.rect = rect;
+    cx.shared.keytips.owner = Some(owner);
+    cx.shared.keytips.rect = rect;
 }
 
 pub(crate) fn is_owner(owner: AnyWindowHandle, cx: &App) -> bool {
-    cx.try_global::<KeyTips>()
-        .is_some_and(|state| state.owner == Some(owner))
+    cx.shared.keytips.owner == Some(owner)
 }
 
 pub(crate) fn hide_owner(owner: AnyWindowHandle, cx: &mut App) {
-    if cx.has_global::<KeyTips>() {
-        let state = cx.global_mut::<KeyTips>();
-        if state.owner == Some(owner) {
-            state.hide();
-        }
+    if cx.shared.keytips.owner == Some(owner) {
+        cx.shared.keytips.hide();
     }
 }
 
 pub(crate) fn window_closed(window: WindowId, cx: &mut App) {
-    let state = cx.default_global::<KeyTips>();
-    if state.owner.is_some_and(|owner| owner.window_id() == window) {
-        state.hide();
+    if cx
+        .shared
+        .keytips
+        .owner
+        .is_some_and(|owner| owner.window_id() == window)
+    {
+        cx.shared.keytips.hide();
     }
 }

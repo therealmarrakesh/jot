@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use super::app::{App, AsyncApp, AsyncWindowContext, Context};
 use super::element::{AnyElement, IntoElement, Render};
 use super::focus::{FocusHandle, Focusable};
-use super::types::anyhow::{Context as _, Result};
+use super::types::{UiError, UiResult};
 use super::window::Window;
 
 static NEXT_ENTITY_ID: AtomicU64 = AtomicU64::new(1);
@@ -217,8 +217,10 @@ impl<T: 'static> WeakEntity<T> {
         &self,
         cx: &mut C,
         f: impl FnOnce(&mut T, &mut Context<T>) -> R,
-    ) -> Result<R> {
-        let entity = self.upgrade().context("entity was dropped")?;
+    ) -> UiResult<R> {
+        let entity = self
+            .upgrade()
+            .ok_or_else(|| UiError::new("entity was dropped"))?;
         Ok(cx.with_app_mut(|app| entity.update(app, f)))
     }
 
@@ -226,8 +228,10 @@ impl<T: 'static> WeakEntity<T> {
         &self,
         cx: &mut AsyncWindowContext,
         f: impl FnOnce(&mut T, &mut Window, &mut Context<T>) -> R,
-    ) -> Result<R> {
-        let entity = self.upgrade().context("entity was dropped")?;
+    ) -> UiResult<R> {
+        let entity = self
+            .upgrade()
+            .ok_or_else(|| UiError::new("entity was dropped"))?;
         cx.update(|window, app| entity.update(app, |this, cx| f(this, window, cx)))
     }
 }

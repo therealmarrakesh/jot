@@ -297,6 +297,11 @@ impl EditorState {
         self
     }
 
+    #[cfg(test)]
+    pub(crate) fn soft_wrap_enabled(&self) -> bool {
+        self.soft_wrap
+    }
+
     pub(crate) fn set_soft_wrap(&mut self, wrap: bool, _: &mut Window, cx: &mut Context<Self>) {
         self.soft_wrap = wrap;
         if wrap {

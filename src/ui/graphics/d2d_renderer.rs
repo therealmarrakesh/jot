@@ -51,9 +51,9 @@ use windows::Win32::{
 use windows::core::Interface;
 use windows_numerics::{Matrix3x2, Vector2};
 
-use crate::ui::anyhow::{Context as _, Result};
 use crate::ui::color::Rgba;
 use crate::ui::geometry::{Bounds, Corners, Edges, Pixels, Point, Size};
+use crate::ui::types::{UiError, UiResult};
 
 const SWAPCHAIN_BUFFERS: u32 = 3;
 const MAX_SHADOW_CACHE_ENTRIES: usize = 24;
@@ -94,7 +94,7 @@ pub(crate) struct Direct2DDevices {
 }
 
 impl Direct2DDevices {
-    pub(crate) fn new() -> Result<Self> {
+    pub(crate) fn new() -> UiResult<Self> {
         let dxgi_factory: IDXGIFactory6 =
             unsafe { CreateDXGIFactory2(DXGI_CREATE_FACTORY_FLAGS(0))? };
         let feature_levels = [D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0];
@@ -128,7 +128,8 @@ impl Direct2DDevices {
                 )?;
             }
         }
-        let d3d_device = d3d_device.context("D3D11CreateDevice returned null device")?;
+        let d3d_device =
+            d3d_device.ok_or_else(|| UiError::new("D3D11CreateDevice returned null device"))?;
         let dxgi_device: IDXGIDevice = d3d_device.cast()?;
 
         let d2d_factory: ID2D1Factory1 = unsafe {
@@ -227,7 +228,7 @@ impl D2DRenderer {
         physical_width: u32,
         physical_height: u32,
         scale_factor: f32,
-    ) -> Result<Self> {
+    ) -> UiResult<Self> {
         let width = physical_width.max(1);
         let height = physical_height.max(1);
 
@@ -299,7 +300,7 @@ impl D2DRenderer {
         Ok(renderer)
     }
 
-    fn attach_backbuffer(&mut self) -> Result<()> {
+    fn attach_backbuffer(&mut self) -> UiResult<()> {
         let surface: IDXGISurface = unsafe { self.swap_chain.GetBuffer(0)? };
         let dpi = 96.0 * self.scale_factor;
         let props = D2D1_BITMAP_PROPERTIES1 {
@@ -329,7 +330,7 @@ impl D2DRenderer {
         physical_width: u32,
         physical_height: u32,
         scale_factor: f32,
-    ) -> Result<()> {
+    ) -> UiResult<()> {
         let width = physical_width.max(1);
         let height = physical_height.max(1);
         if width == self.physical_width
@@ -372,7 +373,7 @@ impl D2DRenderer {
 
     /// Ends the D2D frame and presents the composition swapchain. Returns `Ok(true)` if the GPU
     /// device was lost and the caller should recreate resources.
-    pub(crate) fn end_frame(&mut self) -> Result<bool> {
+    pub(crate) fn end_frame(&mut self) -> UiResult<bool> {
         while self.clip_depth > 0 {
             self.pop_clip();
         }

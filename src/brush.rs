@@ -1,5 +1,5 @@
 use super::*;
-use crate::ui::{Interpolate, transition};
+use crate::ui::{Lerp, animate};
 
 const FADE_DURATION: Duration = Duration::from_millis(83);
 
@@ -23,8 +23,8 @@ impl Brushes {
 #[derive(Clone, Copy, PartialEq)]
 struct Premultiplied(Rgba);
 
-impl Interpolate for Premultiplied {
-    fn interpolate(&self, target: &Self, progress: f32) -> Self {
+impl Lerp for Premultiplied {
+    fn lerp(&self, target: &Self, progress: f32) -> Self {
         let (from, to) = (self.0, target.0);
         let a = from.a + (to.a - from.a) * progress;
         let channel = |x: f32, y: f32| {
@@ -193,7 +193,7 @@ impl Element for BrushTransition {
         } else {
             rest
         };
-        let Premultiplied(color) = transition(
+        let Premultiplied(color) = animate(
             "brush",
             Premultiplied(target),
             FADE_DURATION,

@@ -1,4 +1,3 @@
-use crate::ui::smallvec::SmallVec;
 use crate::ui::{
     AnyElement, App, Bounds, ContentMask, Corners, Edges, Element, ElementId, ElementInputHandler,
     Entity, GlobalElementId, Half, HitboxBehavior, IntoElement, LayoutId, MouseButton,
@@ -503,14 +502,12 @@ impl TextElement {
             let aligned_runs = align_runs_to_char_boundaries(&text, runs);
             let line_runs = aligned_runs.as_deref().unwrap_or(runs);
             let shaped_line = window.text_system().shape_line(text, font_size, line_runs);
-            return vec![
-                BufferLineLayout::new().lines(crate::ui::smallvec::smallvec![shaped_line]),
-            ];
+            return vec![BufferLineLayout::new().lines(vec![shaped_line])];
         }
 
         if state.text.len() == 0 {
             let placeholder_text = display_text.to_string();
-            let mut placeholder_lines = SmallVec::new();
+            let mut placeholder_lines = Vec::new();
             for (line, line_runs) in placeholder_line_runs(&placeholder_text, runs) {
                 let shaped_line = window.text_system().shape_line(
                     line.to_string().into(),
@@ -541,8 +538,8 @@ impl TextElement {
 
             debug_assert_eq!(line_item.len(), line_len);
 
-            let mut wrapped_lines: SmallVec<[InputLine; 1]> =
-                SmallVec::with_capacity(line_item.wrapped_lines.len());
+            let mut wrapped_lines: Vec<InputLine> =
+                Vec::with_capacity(line_item.wrapped_lines.len());
 
             for (sub_ix, range) in line_item.wrapped_lines.iter().enumerate() {
                 let sub_start = line_byte_start + range.start;
@@ -719,8 +716,7 @@ impl Element for TextElement {
             0..display_text.len(),
             ime_marked_range,
             marked_underline,
-        )
-        .into_vec();
+        );
 
         let lines = Self::layout_lines(
             state,
@@ -988,9 +984,9 @@ fn split_run_for_ime_underline(
     run_range: Range<usize>,
     marked_range: Option<Range<usize>>,
     marked_underline: Option<UnderlineStyle>,
-) -> SmallVec<[TextRun; 3]> {
+) -> Vec<TextRun> {
     if run.len == 0 {
-        return SmallVec::new();
+        return Vec::new();
     }
 
     let Some(marked) = marked_range else {

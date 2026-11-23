@@ -21,7 +21,6 @@ use super::platform::{ExternalPaths, WindowControlArea};
 use super::style::{Overflow, Style, StyleRefinement, TextOverflow, WhiteSpace};
 use super::styled::Styled;
 use super::types::SharedString;
-use super::types::smallvec::SmallVec;
 use super::window::{
     ClickEvent, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
     ScrollWheelEvent, Window,
@@ -828,7 +827,7 @@ impl<E: Element> IntoElement for Stateful<E> {
 struct MeasuredText {
     wrap_width: Option<Pixels>,
     trim_width: Option<Pixels>,
-    lines: SmallVec<[WrappedLine; 1]>,
+    lines: Vec<WrappedLine>,
     size: Size<Pixels>,
 }
 
@@ -954,41 +953,35 @@ impl Element for TextLeaf {
         let bound_w = bounds.size.width.max(px(1.0));
         if let Some(prev) = self.measured.borrow_mut().take() {
             if needs_trim && prev.trim_width.is_none() {
-                self.lines = window
-                    .text_system()
-                    .shape_text_trimmed(
-                        self.text.clone(),
-                        text_style.font_size,
-                        &text_style.font(),
-                        text_style.color,
-                        None,
-                        prev.wrap_width,
-                        text_style.line_clamp,
-                        Some(bound_w),
-                        text_style.text_align,
-                    )
-                    .into_vec();
+                self.lines = window.text_system().shape_text_trimmed(
+                    self.text.clone(),
+                    text_style.font_size,
+                    &text_style.font(),
+                    text_style.color,
+                    None,
+                    prev.wrap_width,
+                    text_style.line_clamp,
+                    Some(bound_w),
+                    text_style.text_align,
+                );
             } else {
-                self.lines = prev.lines.into_vec();
+                self.lines = prev.lines;
             }
             return;
         }
         let wrap_width = (text_style.white_space != WhiteSpace::Nowrap).then_some(bound_w);
         let trim_width = needs_trim.then_some(bound_w);
-        self.lines = window
-            .text_system()
-            .shape_text_trimmed(
-                self.text.clone(),
-                text_style.font_size,
-                &text_style.font(),
-                text_style.color,
-                None,
-                wrap_width,
-                text_style.line_clamp,
-                trim_width,
-                text_style.text_align,
-            )
-            .into_vec();
+        self.lines = window.text_system().shape_text_trimmed(
+            self.text.clone(),
+            text_style.font_size,
+            &text_style.font(),
+            text_style.color,
+            None,
+            wrap_width,
+            text_style.line_clamp,
+            trim_width,
+            text_style.text_align,
+        );
     }
 
     fn paint(
