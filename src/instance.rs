@@ -1,10 +1,12 @@
+//! Single-instance named-pipe handoff for forwarding CLI file paths to a running Jot process.
+
 use std::fs::OpenOptions;
 use std::io::Write as _;
 use std::path::PathBuf;
 #[cfg(test)]
 use std::sync::mpsc;
 
-use crate::win32::{allow_any_set_foreground_window, start_inbound_pipe_listener};
+use crate::platform::{allow_any_set_foreground_window, start_inbound_pipe_listener};
 
 const MAX_PAYLOAD_BYTES: usize = 256 * 1024;
 
@@ -42,7 +44,6 @@ fn decode_paths(bytes: &[u8]) -> Vec<PathBuf> {
 }
 
 /// Attempts to hand `paths` to an already-running Jot instance.
-/// Returns `true` if the running instance accepted them.
 pub(crate) fn try_handoff(paths: &[PathBuf]) -> bool {
     try_handoff_to(&pipe_name(), paths)
 }
@@ -59,7 +60,7 @@ fn try_handoff_to(pipe: &str, paths: &[PathBuf]) -> bool {
     file.write_all(&payload).is_ok() && file.flush().is_ok()
 }
 
-/// Starts a lightweight background listener thread on the session's named pipe.
+/// Starts a background listener thread on the session's named pipe.
 pub(crate) fn start_listener(on_receive: impl Fn(Vec<PathBuf>) + Send + 'static) {
     start_listener_on(&pipe_name(), on_receive);
 }
@@ -101,7 +102,6 @@ mod tests {
     fn named_pipe_handoff_delivers_paths_to_running_listener() {
         let pipe = format!(r"\\.\pipe\Jot.Test.{}", std::process::id());
         let rx = _channel_smoke(&pipe);
-        // Give the listener thread a moment to enter ConnectNamedPipe.
         std::thread::sleep(Duration::from_millis(20));
 
         let sent = vec![

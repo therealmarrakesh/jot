@@ -1,4 +1,4 @@
-//! Shared Windows 11 Fluent controls built directly on `src2/ui/scene`.
+//! Shared Windows 11 Fluent controls built directly on `ui::scene`.
 
 use crate::color::{Rgba, rgb, rgba};
 use crate::geom::Edges;

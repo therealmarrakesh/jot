@@ -657,7 +657,7 @@ fn dirty_window_close_file_drop_and_multi_window() {
     let mut h = TestHarness::new();
 
     // File drop opens a real file from disk into the blank initial tab.
-    let tmp = std::env::temp_dir().join(format!("jot2-drop-test-{}.txt", std::process::id()));
+    let tmp = std::env::temp_dir().join(format!("jot-drop-test-{}.txt", std::process::id()));
     std::fs::write(&tmp, "dropped content 123").unwrap();
     h.app.borrow_mut().on_event(PlatformEvent::FilesDropped {
         window_id: h.window_id,
@@ -995,7 +995,7 @@ mod large_file_smoke {
 
     fn run_profile(target_mb: usize) {
         let dir = std::env::temp_dir()
-            .join(format!("jot2-bench-{target_mb}mb-{}", std::process::id()));
+            .join(format!("jot-bench-{target_mb}mb-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("big.txt");
 

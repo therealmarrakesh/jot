@@ -1,5 +1,5 @@
-//! Clean-room editor view layout, DirectWrite shaping, caret/selection/IME painting, pointer
-//! hit-testing, blink timer, drag auto-scroll, and integrated scrollbar widget.
+//! Direct editor view layout, DirectWrite shaping, caret/selection/IME painting, pointer
+//! hit-testing, blink timer, drag auto-scroll, and integrated scrollbar coordination.
 
 use std::borrow::Cow;
 use std::ops::Range;
@@ -8,29 +8,47 @@ use std::time::{Duration, Instant};
 
 use ropey::Rope;
 
-use crate::scrollbar::{PreparedAxis, ScrollbarState, ScrollbarViewport};
-use crate::theme::palette;
-use crate::ui::{
-    App, Bounds, ContentMask, Corners, CustomWidget, Edges, ElementId, Font, Half, HitboxBehavior,
-    InputHandler, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
-    Point, Position as CssPosition, ScrollDelta, ScrollWheelEvent, SharedString, Size, Style,
-    TextRun, TimerHandle, UTF16Selection, UiNode, UnderlineStyle, Window, fill, point, px,
-    relative, rgb, rgba, size,
-};
+use crate::color::{Rgba, rgb, rgba};
+use crate::geom::{Edges, Point, Rect, Size, point, size};
+use crate::gfx::{D2DRenderer, Font, TextRun, TextSystem, UnderlineStyle, fill};
+use crate::platform::{Modifiers, MouseButton, TimerHandle, caret_blink_interval, os};
+use crate::scrollbar::ScrollbarViewport;
+use crate::theme::Palette;
+use crate::types::SharedStr;
 
 use super::buffer::RopeExt as _;
 use super::wrap::{RowLayout, VisualRow};
-use super::{Editor, EditorHost, MoveDirection};
+use super::{Editor, EditorTimer, EditorTimers, MoveDirection};
 
 const BOTTOM_MARGIN_ROWS: usize = 3;
-const CARET_WIDTH: Pixels = px(1.);
-pub(super) const RIGHT_MARGIN: Pixels = px(10.);
+const CARET_WIDTH: f32 = 1.0;
+pub(super) const RIGHT_MARGIN: f32 = 10.0;
 const DEFAULT_WHEEL_LINES: u32 = 3;
 const WHEEL_VIEWPORT_SHARE: f32 = 0.15;
-const MIN_WHEEL_STEP: f32 = 48.;
+const MIN_WHEEL_STEP: f32 = 48.0;
+
+#[derive(Clone, Debug)]
+pub(crate) struct EditorPaintStyle {
+    pub(crate) font: Font,
+    pub(crate) font_size: f32,
+    pub(crate) line_height: f32,
+    pub(crate) color: Rgba,
+}
+
+#[derive(Copy, Clone, Debug, Default)]
+pub(crate) struct EditorPaintOutcome {
+    pub(crate) needs_redraw: bool,
+    pub(crate) needs_vsync: bool,
+}
+
+#[derive(Copy, Clone, Debug, Default)]
+pub(crate) struct EditorMouseOutcome {
+    pub(crate) dirty: bool,
+    pub(crate) open_context_menu: Option<Point>,
+}
 
 // ---------------------------------------------------------------------------
-// Owned caret blink state (zero Entity, drop-cancelling TimerHandle)
+// Owned caret blink state
 // ---------------------------------------------------------------------------
 
 pub(crate) struct BlinkState {
@@ -73,37 +91,38 @@ impl BlinkState {
         self.epoch
     }
 
-    pub(crate) fn start(&mut self, host: &EditorHost, cx: &App) {
+    pub(crate) fn start(&mut self, timers: &mut dyn EditorTimers) {
         self.visible = false;
         let epoch = self.epoch;
-        self.step(epoch, host, cx);
+        self.step(epoch, timers);
     }
 
-    pub(crate) fn pause(&mut self, host: &EditorHost, cx: &App) {
+    pub(crate) fn pause(&mut self, timers: &mut dyn EditorTimers) {
         if self.epoch == 0 {
             return;
         }
         self.paused = true;
         self.visible = true;
         let epoch = self.bump_epoch();
-        let Some(delay) = crate::win32::caret_blink_interval() else {
+        let Some(delay) = caret_blink_interval() else {
             self.timer.cancel();
             return;
         };
-        let host = *host;
-        self.timer = cx.after(delay, move |cx| {
-            host.with_mut(cx, |ed, cx| {
-                if ed.blink.epoch != epoch {
-                    return;
-                }
-                ed.blink.paused = false;
-                ed.blink.step(epoch, &host, cx);
-            });
-            host.notify(cx);
-        });
+        self.timer = timers.after(delay, EditorTimer::Blink(epoch));
     }
 
-    fn step(&mut self, epoch: usize, host: &EditorHost, cx: &App) {
+    pub(crate) fn on_timer(&mut self, epoch: usize, timers: &mut dyn EditorTimers) -> bool {
+        if epoch != self.epoch {
+            return false;
+        }
+        if self.paused {
+            self.paused = false;
+        }
+        self.step(epoch, timers);
+        true
+    }
+
+    fn step(&mut self, epoch: usize, timers: &mut dyn EditorTimers) {
         if epoch != self.epoch {
             return;
         }
@@ -111,50 +130,44 @@ impl BlinkState {
             self.visible = true;
             return;
         }
-        let Some(interval) = crate::win32::caret_blink_interval() else {
+        let Some(interval) = caret_blink_interval() else {
             self.visible = true;
             self.timer.cancel();
             return;
         };
         self.visible = !self.visible;
         let next_epoch = self.bump_epoch();
-        let host = *host;
-        self.timer = cx.after(interval, move |cx| {
-            host.with_mut(cx, |ed, cx| {
-                ed.blink.step(next_epoch, &host, cx);
-            });
-            host.notify(cx);
-        });
+        self.timer = timers.after(interval, EditorTimer::Blink(next_epoch));
     }
 }
 
 // ---------------------------------------------------------------------------
-// Owned drag auto-scroll state (zero Entity, drop-cancelling TimerHandle)
+// Owned drag auto-scroll state
 // ---------------------------------------------------------------------------
 
 #[derive(Default)]
 pub(crate) struct AutoScroll {
-    delta: Option<Pixels>,
+    delta: Option<f32>,
     timer: TimerHandle,
-    pub(crate) last_drag_pos: Option<Point<Pixels>>,
+    pub(crate) last_drag_pos: Option<Point>,
 }
 
 impl AutoScroll {
-    pub(crate) fn compute_delta(y: Pixels, bounds: Bounds<Pixels>) -> Option<Pixels> {
+    pub(crate) fn compute_delta(y: f32, bounds: Rect) -> Option<f32> {
         const MIN_SPEED: f32 = 12.0;
         const MAX_SPEED: f32 = 64.0;
         const INNER_ZONE: f32 = 16.0;
         const OUTER_RAMP: f32 = 80.0;
 
-        let bottom = bounds.bottom() - px(INNER_ZONE);
-        let top = bounds.top() + px(INNER_ZONE);
+        let bottom = bounds.bottom() - INNER_ZONE;
+        let top = bounds.top() + INNER_ZONE;
 
         if y > bottom {
-            let t = ((y - bottom) / px(INNER_ZONE + OUTER_RAMP)).min(1.0);
-            Some(px(MIN_SPEED + t * (MAX_SPEED - MIN_SPEED)))
+            let t = ((y - bottom) / (INNER_ZONE + OUTER_RAMP)).min(1.0);
+            Some(MIN_SPEED + t * (MAX_SPEED - MIN_SPEED))
         } else if y < top {
-            let t = ((top - y) / px(INNER_ZONE + OUTER_RAMP)).min(1.0);
-            Some(px(-(MIN_SPEED + t * (MAX_SPEED - MIN_SPEED))))
+            let t = ((top - y) / (INNER_ZONE + OUTER_RAMP)).min(1.0);
+            Some(-(MIN_SPEED + t * (MAX_SPEED - MIN_SPEED)))
         } else {
             None
         }
@@ -171,7 +184,7 @@ impl AutoScroll {
         self.last_drag_pos = None;
     }
 
-    pub(crate) fn update(&mut self, delta: Option<Pixels>, host: &EditorHost, cx: &App) {
+    pub(crate) fn update(&mut self, delta: Option<f32>, timers: &mut dyn EditorTimers) {
         let was_active = self.delta.is_some();
         self.delta = delta;
         if delta.is_none() {
@@ -179,27 +192,8 @@ impl AutoScroll {
             return;
         }
         if !was_active {
-            let host = *host;
             let interval = Duration::from_millis(16);
-            self.timer = cx.every(interval, interval, move |cx| {
-                let mut keep_running = false;
-                host.with_mut(cx, |ed, _| {
-                    let Some(delta) = ed.auto_scroll.delta else {
-                        return;
-                    };
-                    keep_running = true;
-                    let next = point(ed.scroll_offset.x, ed.scroll_offset.y + delta);
-                    ed.clamp_and_set_scroll(next);
-                    if let Some(pos) = ed.auto_scroll.last_drag_pos {
-                        let (offset, aff) = ed.hit_test_point(pos);
-                        ed.select_to_with_affinity(offset, aff);
-                    }
-                });
-                if keep_running {
-                    host.notify(cx);
-                }
-                keep_running
-            });
+            self.timer = timers.every(interval, interval, EditorTimer::AutoScroll);
         }
     }
 }
@@ -214,21 +208,21 @@ pub(super) struct LongestLineCache {
     row: usize,
     len: usize,
     font: Font,
-    font_size: Pixels,
-    wrap_width: Option<Pixels>,
+    font_size: f32,
+    wrap_width: Option<f32>,
 }
 
 #[derive(Clone)]
 pub(super) struct ViewLayout {
     pub(super) visible_lines: Vec<usize>,
     pub(super) visible_byte_offsets: Vec<usize>,
-    pub(super) visible_top: Pixels,
+    pub(super) visible_top: f32,
     pub(super) visible_byte_range: Range<usize>,
     pub(super) rows: Rc<Vec<RowLayout>>,
-    pub(super) line_height: Pixels,
-    pub(super) wrap_width: Option<Pixels>,
-    pub(super) space_width: Pixels,
-    pub(super) caret_bounds: Option<Bounds<Pixels>>,
+    pub(super) line_height: f32,
+    pub(super) wrap_width: Option<f32>,
+    pub(super) space_width: f32,
+    pub(super) caret_bounds: Option<Rect>,
 }
 
 impl ViewLayout {
@@ -241,20 +235,20 @@ impl ViewLayout {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct ScrollbarSnapshot {
     pub(super) viewport: ScrollbarViewport,
-    pub(super) synced_offset: Point<Pixels>,
+    pub(super) synced_offset: Point,
 }
 
 impl ScrollbarSnapshot {
     fn compute(
-        input_bounds: Bounds<Pixels>,
-        content_size: Size<Pixels>,
-        synced_offset: Point<Pixels>,
-        paddings: Edges<Pixels>,
+        input_bounds: Rect,
+        content_size: Size,
+        synced_offset: Point,
+        paddings: Edges<f32>,
         soft_wrap: bool,
     ) -> Self {
         Self {
             viewport: ScrollbarViewport {
-                bounds: Bounds::new(
+                bounds: Rect::new(
                     point(input_bounds.origin.x, input_bounds.origin.y - paddings.top),
                     size(
                         input_bounds.size.width + paddings.right,
@@ -272,27 +266,31 @@ impl ScrollbarSnapshot {
     }
 }
 
-pub(super) fn clamp_horizontal_scroll(
-    offset_x: Pixels,
-    content_width: Pixels,
-    viewport_width: Pixels,
-) -> Pixels {
-    let min_x = (viewport_width - content_width).min(px(0.));
-    offset_x.clamp(min_x, px(0.))
+fn clamp_horizontal_scroll(offset_x: f32, content_width: f32, viewport_width: f32) -> f32 {
+    let min_x = (viewport_width - content_width).min(0.0);
+    offset_x.clamp(min_x, 0.0)
 }
 
-fn caret_vertical_margin(viewport_height: Pixels, line_height: Pixels) -> Pixels {
+fn caret_vertical_margin(viewport_height: f32, line_height: f32) -> f32 {
     let rows = (viewport_height / line_height) as usize;
     let raw = if rows < BOTTOM_MARGIN_ROWS * 8 {
         line_height
     } else {
-        BOTTOM_MARGIN_ROWS * line_height
+        BOTTOM_MARGIN_ROWS as f32 * line_height
     };
-    raw.min((rows as f32 * line_height).half())
+    raw.min(rows as f32 * line_height * 0.5)
+}
+
+#[inline]
+fn snap_point(pt: Point, scale: f32) -> Point {
+    point(
+        (pt.x * scale).round() / scale,
+        (pt.y * scale).round() / scale,
+    )
 }
 
 impl Editor {
-    pub(super) fn position_for_offset(&self, offset: usize) -> Option<Point<Pixels>> {
+    pub(super) fn position_for_offset(&self, offset: usize) -> Option<Point> {
         let layout = self.layout.as_ref()?;
         let mut y = layout.visible_top;
         for (vi, row_layout) in layout.rows.iter().enumerate() {
@@ -306,12 +304,12 @@ impl Editor {
         None
     }
 
-    pub(super) fn clamp_and_set_scroll(&mut self, mut offset: Point<Pixels>) -> bool {
-        let min_y = (-self.content_size.height + self.input_bounds.size.height).min(px(0.));
+    pub(super) fn clamp_and_set_scroll(&mut self, mut offset: Point) -> bool {
+        let min_y = (-self.content_size.height + self.input_bounds.size.height).min(0.0);
         offset.y = if self.multi_line {
-            offset.y.clamp(min_y, px(0.))
+            offset.y.clamp(min_y, 0.0)
         } else {
-            px(0.)
+            0.0
         };
         offset.x = clamp_horizontal_scroll(
             offset.x,
@@ -337,7 +335,7 @@ impl Editor {
 
         let pt = self.text.offset_to_point(offset);
         let disp = self.wrap.point_to_display(pt);
-        let row_y = lh * disp.row;
+        let row_y = lh * disp.row as f32;
 
         if let Ok(vi) = layout.visible_lines.binary_search(&pt.row) {
             let local = offset.saturating_sub(layout.visible_byte_offsets[vi]);
@@ -363,13 +361,13 @@ impl Editor {
             None => {}
         }
 
-        let min_y = (-self.content_size.height + self.input_bounds.size.height).min(px(0.));
-        next.x = next.x.min(px(0.));
-        next.y = next.y.clamp(min_y, px(0.));
+        let min_y = (-self.content_size.height + self.input_bounds.size.height).min(0.0);
+        next.x = next.x.min(0.0);
+        next.y = next.y.clamp(min_y, 0.0);
         self.pending_scroll = Some(next);
     }
 
-    pub(super) fn hit_test_point(&self, pos: Point<Pixels>) -> (usize, bool) {
+    pub(super) fn hit_test_point(&self, pos: Point) -> (usize, bool) {
         if self.text.len() == 0 {
             return (0, false);
         }
@@ -383,7 +381,7 @@ impl Editor {
 
         for (vi, row_layout) in layout.rows.iter().enumerate() {
             let base = layout.visible_byte_offsets[vi];
-            let local_pos = rel - point(px(0.), y);
+            let local_pos = rel - point(0.0, y);
 
             if !self.multi_line {
                 let col = row_layout.closest_index_for_x(local_pos.x);
@@ -391,7 +389,7 @@ impl Editor {
             }
             if let Some((col, aff)) = row_layout.closest_index_for_position(local_pos, lh) {
                 return ((base + col).min(self.text.len()), aff);
-            } else if local_pos.y < px(0.) {
+            } else if local_pos.y < 0.0 {
                 return (base.min(self.text.len()), false);
             }
             y += row_layout.size(lh).height;
@@ -406,165 +404,453 @@ impl Editor {
         (end, false)
     }
 
-    pub(super) fn on_mouse_down(
+    // ---- Direct pointer, wheel, and timer events ----
+
+    pub(crate) fn on_mouse_down(
         &mut self,
-        event: &MouseDownEvent,
-        host: &EditorHost,
-        window: &Window,
-        cx: &mut App,
-    ) {
-        if window.default_prevented() {
-            return;
+        button: MouseButton,
+        position: Point,
+        modifiers: Modifiers,
+        click_count: usize,
+        timers: &mut dyn EditorTimers,
+    ) -> EditorMouseOutcome {
+        if button == MouseButton::Left
+            && self.multi_line
+            && let Some(next) = self.scrollbar.on_mouse_down(position, self.scroll_offset)
+        {
+            self.clamp_and_set_scroll(next);
+            return EditorMouseOutcome {
+                dirty: true,
+                open_context_menu: None,
+            };
         }
+
         self.history.break_coalescing();
         if self.ime_marked.is_some_and(|m| m.is_empty()) {
             self.ime_marked = None;
         }
         self.selecting = true;
-        let (offset, aff) = self.hit_test_point(event.position);
+        let (offset, aff) = self.hit_test_point(position);
 
-        if event.button == MouseButton::Left && event.click_count >= 3 {
+        if button == MouseButton::Left && click_count >= 3 {
             self.select_line_at(offset);
-            return;
+            return EditorMouseOutcome {
+                dirty: true,
+                open_context_menu: None,
+            };
         }
-        if event.button == MouseButton::Left && event.click_count == 2 {
+        if button == MouseButton::Left && click_count == 2 {
             self.select_word_at(offset);
-            return;
+            return EditorMouseOutcome {
+                dirty: true,
+                open_context_menu: None,
+            };
         }
-        if event.button == MouseButton::Right {
+        if button == MouseButton::Right {
             if !self.selection.contains(offset) {
-                self.move_to(offset, None, Some(host), cx);
+                self.move_to(offset, None, Some(timers));
             }
-            self.pending_context_menu = Some((event.position, offset));
-            return;
+            self.pending_context_menu = Some((position, offset));
+            return EditorMouseOutcome {
+                dirty: true,
+                open_context_menu: None,
+            };
         }
-        if event.modifiers.shift {
+        if modifiers.shift {
             self.select_to_with_affinity(offset, aff);
         } else {
-            self.move_to_with_affinity(offset, None, aff, Some(host), cx);
+            self.move_to_with_affinity(offset, None, aff, Some(timers));
+        }
+        EditorMouseOutcome {
+            dirty: true,
+            open_context_menu: None,
         }
     }
 
-    pub(super) fn on_mouse_up(
+    pub(crate) fn on_mouse_move(
         &mut self,
-        event: &MouseUpEvent,
-        host: &EditorHost,
-        window: &mut Window,
-        cx: &mut App,
-    ) {
-        if event.button == MouseButton::Right
+        position: Point,
+        dragging_left: bool,
+        focused: bool,
+        timers: &mut dyn EditorTimers,
+    ) -> bool {
+        let mut dirty = false;
+        if self.multi_line {
+            let outcome = self.scrollbar.on_mouse_move(
+                position,
+                dragging_left,
+                self.scroll_offset,
+                |delay| timers.after(delay, EditorTimer::ScrollbarDrag),
+            );
+            if let Some(next) = outcome.new_offset {
+                self.clamp_and_set_scroll(next);
+            }
+            if outcome.consumed {
+                return outcome.notify_now;
+            }
+            dirty |= outcome.notify_now;
+        }
+
+        if dragging_left && self.selecting && focused && self.text.len() > 0 && self.layout.is_some()
+        {
+            self.auto_scroll.last_drag_pos = Some(position);
+            let (offset, aff) = self.hit_test_point(position);
+            self.select_to_with_affinity(offset, aff);
+            if self.multi_line {
+                let delta = AutoScroll::compute_delta(position.y, self.input_bounds);
+                self.auto_scroll.update(delta.map(|d| -d), timers);
+            }
+            dirty = true;
+        }
+        dirty
+    }
+
+    pub(crate) fn on_mouse_up(
+        &mut self,
+        button: MouseButton,
+        position: Point,
+        timers: &mut dyn EditorTimers,
+    ) -> EditorMouseOutcome {
+        let mut dirty = false;
+        let mut open_context_menu = None;
+
+        if self.multi_line
+            && let Some(next) = self.scrollbar.on_mouse_up(position, self.scroll_offset)
+        {
+            self.clamp_and_set_scroll(next);
+            dirty = true;
+        }
+
+        if button == MouseButton::Right
             && let Some((pos, offset)) = self.pending_context_menu.take()
             && self.multi_line
         {
             if !self.selection.contains(offset) {
-                self.move_to(offset, None, Some(host), cx);
+                self.move_to(offset, None, Some(timers));
             }
-            let h = *host;
-            window.defer(cx, move |window, cx| {
-                h.open_context_menu(pos, window, cx);
-            });
+            open_context_menu = Some(pos);
+            dirty = true;
         }
         if self.selection.is_empty() {
             self.selection.reversed = false;
         }
+        if self.selecting || self.auto_scroll.is_active() {
+            dirty = true;
+        }
         self.selecting = false;
         self.word_anchor = None;
         self.auto_scroll.stop();
-    }
-
-    pub(super) fn on_drag_move(
-        &mut self,
-        event: &MouseMoveEvent,
-        host: &EditorHost,
-        window: &Window,
-        cx: &mut App,
-    ) {
-        if self.text.len() == 0
-            || self.layout.is_none()
-            || !self.focus_handle.is_focused(window)
-            || !self.selecting
-        {
-            return;
-        }
-        self.auto_scroll.last_drag_pos = Some(event.position);
-        let (offset, aff) = self.hit_test_point(event.position);
-        self.select_to_with_affinity(offset, aff);
-
-        if self.multi_line {
-            let delta = AutoScroll::compute_delta(event.position.y, self.input_bounds);
-            self.auto_scroll.update(delta.map(|d| -d), host, cx);
+        EditorMouseOutcome {
+            dirty,
+            open_context_menu,
         }
     }
 
-    pub(super) fn on_scroll_wheel(
+    pub(crate) fn on_mouse_leave(&mut self) -> bool {
+        self.multi_line && self.scrollbar.on_mouse_leave()
+    }
+
+    pub(crate) fn on_scroll_wheel(
         &mut self,
-        event: &ScrollWheelEvent,
-        window: &Window,
-        cx: &mut App,
+        delta_lines: Point,
+        modifiers: Modifiers,
+        default_line_height: f32,
     ) -> bool {
-        if event.modifiers.control {
+        if modifiers.ctrl {
             return false;
         }
         let lh = self
             .layout
             .as_ref()
-            .map_or_else(|| window.line_height(), |l| l.line_height);
-        let delta = match event.delta {
-            ScrollDelta::Lines(lines) if self.viewport_wheel_step => {
-                let h_chars = crate::win32::wheel_scroll_amount(true)
-                    .unwrap_or(DEFAULT_WHEEL_LINES)
-                    .max(1) as f32;
-                let v_lines = crate::win32::wheel_scroll_amount(false)
-                    .unwrap_or(DEFAULT_WHEEL_LINES)
-                    .max(1) as f32;
-                let vp = self.input_bounds.size;
-                let step = |notches: f32, extent: Pixels| {
-                    let ext = extent.as_f32();
-                    let notch = (ext * WHEEL_VIEWPORT_SHARE).round().max(MIN_WHEEL_STEP);
-                    px((notches * notch).round().clamp(-ext.floor(), ext.floor()))
-                };
-                point(
-                    step(lines.x / h_chars, vp.width),
-                    step(lines.y / v_lines, vp.height),
-                )
-            }
-            _ => event.delta.pixel_delta(lh),
+            .map_or(default_line_height, |l| l.line_height);
+        let delta = if self.viewport_wheel_step {
+            let h_chars = os::wheel_scroll_amount(true)
+                .unwrap_or(DEFAULT_WHEEL_LINES)
+                .max(1) as f32;
+            let v_lines = os::wheel_scroll_amount(false)
+                .unwrap_or(DEFAULT_WHEEL_LINES)
+                .max(1) as f32;
+            let vp = self.input_bounds.size;
+            let step = |notches: f32, extent: f32| {
+                let notch = (extent * WHEEL_VIEWPORT_SHARE).round().max(MIN_WHEEL_STEP);
+                (notches * notch).round().clamp(-extent.floor(), extent.floor())
+            };
+            point(
+                step(delta_lines.x / h_chars, vp.width),
+                step(delta_lines.y / v_lines, vp.height),
+            )
+        } else {
+            point(delta_lines.x * lh, delta_lines.y * lh)
         };
 
         let moved = self.clamp_and_set_scroll(self.scroll_offset + delta);
         if moved {
             self.scrollbar.on_wheel(self.scroll_offset, Instant::now());
-            cx.stop_propagation();
         }
         moved
     }
 
+    pub(crate) fn on_timer(&mut self, kind: EditorTimer, timers: &mut dyn EditorTimers) -> bool {
+        match kind {
+            EditorTimer::Blink(epoch) => self.blink.on_timer(epoch, timers),
+            EditorTimer::AutoScroll => {
+                let Some(delta) = self.auto_scroll.delta else {
+                    self.auto_scroll.stop();
+                    return false;
+                };
+                let next = point(self.scroll_offset.x, self.scroll_offset.y + delta);
+                self.clamp_and_set_scroll(next);
+                if let Some(pos) = self.auto_scroll.last_drag_pos {
+                    let (offset, aff) = self.hit_test_point(pos);
+                    self.select_to_with_affinity(offset, aff);
+                }
+                true
+            }
+            EditorTimer::ScrollbarIdle => {
+                self.scrollbar.on_idle_timer_fired();
+                true
+            }
+            EditorTimer::ScrollbarDrag => self.scrollbar.on_drag_timer_fired(Instant::now()),
+        }
+    }
+
+    // ---- Direct layout + Direct2D painting (zero CustomWidget / EditorHost) ----
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn paint(
+        &mut self,
+        input_bounds: Rect,
+        style: &EditorPaintStyle,
+        p: Palette,
+        window_active: bool,
+        focused: bool,
+        show_selection: bool,
+        scale: f32,
+        reduce_motion: bool,
+        now: Instant,
+        ts: &TextSystem,
+        renderer: &mut D2DRenderer,
+        timers: &mut dyn EditorTimers,
+    ) -> EditorPaintOutcome {
+        let font = &style.font;
+        let font_size = style.font_size;
+        let line_height = style.line_height;
+        let space_width = ts.space_width(font, font_size);
+
+        let wrap_width =
+            (self.multi_line && self.soft_wrap).then_some(input_bounds.size.width - RIGHT_MARGIN);
+        self.wrap
+            .sync_layout(&self.text, font.clone(), font_size, wrap_width, ts);
+
+        let placeholder_rope = Rope::from(self.placeholder.as_str());
+        let is_empty = self.text.len() == 0;
+        let (display_text, text_color) = if is_empty {
+            (&placeholder_rope, rgba(p.text_secondary))
+        } else {
+            (&self.text, style.color)
+        };
+
+        let (vis_range, visible_lines, visible_top, shape_rows) =
+            self.visible_slice(line_height, input_bounds.size.height);
+        let start_off = self.text.line_start_offset(vis_range.start);
+        let end_off = self.text.line_end_offset(vis_range.end.saturating_sub(1));
+        let visible_byte_offsets: Vec<usize> = visible_lines
+            .iter()
+            .map(|&l| self.text.line_start_offset(l))
+            .collect();
+
+        let mut layout = ViewLayout {
+            visible_lines,
+            visible_byte_offsets,
+            visible_top,
+            visible_byte_range: start_off..end_off,
+            rows: Rc::new(Vec::new()),
+            line_height,
+            wrap_width,
+            space_width,
+            caret_bounds: None,
+        };
+
+        let base_run = TextRun {
+            len: display_text.len(),
+            font: font.clone(),
+            color: text_color,
+            underline: None,
+        };
+        let ime_underline = Some(UnderlineStyle {
+            thickness: 1.0,
+            color: Some(text_color),
+        });
+        let marked = self.ime_marked.map(|m| m.start..m.end);
+        let runs = split_ime_underline(base_run, 0..display_text.len(), marked, ime_underline);
+        let rows = self.shape_visible_lines(display_text, &layout, &shape_rows, font_size, &runs, ts);
+        layout.rows = Rc::new(rows);
+
+        let mut max_line_w = wrap_width.unwrap_or(0.0);
+        if !self.multi_line || !self.soft_wrap {
+            let longest_row = self.wrap.longest_line();
+            let slice = self.text.slice_line(longest_row);
+            let key = LongestLineCache {
+                revision: self.revision,
+                row: longest_row,
+                len: slice.len(),
+                font: font.clone(),
+                font_size,
+                wrap_width,
+            };
+            max_line_w = match &self.longest_line_cache {
+                Some((cached, w)) if *cached == key => *w,
+                _ => {
+                    let s: Cow<str> = slice.into();
+                    let w = ts.measure_line_width(&s, &key.font, font_size);
+                    self.longest_line_cache = Some((key, w));
+                    w
+                }
+            };
+        }
+
+        let total_rows = self.wrap.visual_row_count();
+        let content_size = size(
+            if max_line_w + RIGHT_MARGIN > input_bounds.size.width {
+                max_line_w + RIGHT_MARGIN
+            } else {
+                max_line_w
+            },
+            (total_rows as f32 * line_height).max(input_bounds.size.height),
+        );
+
+        let mut scrolled_bounds = input_bounds;
+        let (caret_bounds, synced_scroll) =
+            self.layout_caret_and_scroll(&layout, &mut scrolled_bounds, content_size);
+        layout.caret_bounds = Some(caret_bounds);
+
+        let safe_y_min = (-content_size.height + input_bounds.size.height).min(0.0);
+        let clamped_y = if self.multi_line {
+            synced_scroll.y.clamp(safe_y_min, 0.0)
+        } else {
+            0.0
+        };
+        let caret_h = if self.caret_height > 0.0 {
+            self.caret_height
+        } else {
+            caret_bounds.size.height
+        };
+        let caret_origin = snap_point(
+            point(caret_bounds.origin.x, caret_bounds.origin.y + clamped_y),
+            scale,
+        );
+        let caret_rect = Rect::new(caret_origin, size(CARET_WIDTH, caret_h));
+        let selection_rects = if window_active && show_selection {
+            self.selection_rects(&layout, &scrolled_bounds)
+        } else {
+            Vec::new()
+        };
+
+        // Paint selection, text rows, and caret clipped to `input_bounds`.
+        renderer.push_clip(input_bounds);
+        if !selection_rects.is_empty() {
+            let sel_color = p.selection();
+            for rect in selection_rects {
+                renderer.paint_quad(fill(rect, sel_color));
+            }
+        }
+
+        let origin = scrolled_bounds.origin;
+        let mut y = layout.visible_top;
+        for row_layout in layout.rows.iter() {
+            row_layout.paint(point(origin.x, origin.y + y), line_height, renderer);
+            y += row_layout.size(line_height).height;
+        }
+
+        let show_caret = focused && window_active && self.blink.visible() && !self.caret_hidden;
+        if show_caret && self.selection.is_empty() {
+            renderer.paint_quad(fill(caret_rect, rgb(p.caret)));
+        }
+        renderer.pop_clip();
+
+        // Commit state & prepare overlay scrollbar snapshot.
+        let geom_changed = self.content_bounds != Some(scrolled_bounds)
+            || self.input_bounds != input_bounds
+            || self.content_size != content_size
+            || self.layout.as_ref().is_none_or(|prev| {
+                prev.caret_bounds != layout.caret_bounds || prev.line_height != layout.line_height
+            });
+        let width_changed = self.input_bounds.size.width != input_bounds.size.width;
+        let selection = self.selection;
+
+        self.caret_bounds = Some(caret_rect);
+        self.layout = Some(layout);
+        self.content_bounds = Some(scrolled_bounds);
+        self.last_cursor = Some(self.cursor());
+        self.input_bounds = input_bounds;
+        let mut needs_redraw = geom_changed;
+        if width_changed && let Some(l) = self.layout.as_ref() {
+            let w = self.soft_wrap.then_some(l.wrap_width).flatten();
+            self.wrap.set_wrap_width(w, ts);
+            needs_redraw = true;
+        }
+        self.last_selection = Some(selection);
+        self.content_size = content_size;
+        needs_redraw |= self.clamp_and_set_scroll(synced_scroll);
+        self.pending_scroll = None;
+
+        let mut needs_vsync = false;
+        if self.multi_line {
+            let snap = ScrollbarSnapshot::compute(
+                input_bounds,
+                content_size,
+                self.scroll_offset,
+                self.paddings,
+                self.soft_wrap,
+            );
+            self.scrollbar_snapshot = Some(snap);
+            needs_vsync = self.scrollbar.prepare(
+                snap.viewport,
+                self.scroll_offset,
+                reduce_motion,
+                p,
+                now,
+                |delay| timers.after(delay, EditorTimer::ScrollbarIdle),
+            );
+        }
+
+        EditorPaintOutcome {
+            needs_redraw,
+            needs_vsync,
+        }
+    }
+
+    pub(crate) fn paint_scrollbar(&self, renderer: &mut D2DRenderer) {
+        if self.multi_line {
+            self.scrollbar.paint(renderer);
+        }
+    }
+
+    // ---- Internal shaping & geometry helpers ----
+
     fn visible_slice(
         &self,
-        line_height: Pixels,
-        viewport_height: Pixels,
-    ) -> (Range<usize>, Vec<usize>, Pixels, Range<usize>) {
+        line_height: f32,
+        viewport_height: f32,
+    ) -> (Range<usize>, Vec<usize>, f32, Range<usize>) {
         if !self.multi_line {
-            return (0..1, vec![0], px(0.), 0..1);
+            return (0..1, vec![0], 0.0, 0..1);
         }
         let total_rows = self.wrap.visual_row_count();
         let total_lines = self.wrap.line_count();
         if total_rows == 0 || total_lines == 0 {
-            return (0..0, Vec::new(), px(0.), 0..0);
+            return (0..0, Vec::new(), 0.0, 0..0);
         }
-        let scroll_y = self
-            .pending_scroll
-            .map_or(self.scroll_offset.y, |p| p.y);
-        let top = (-scroll_y).max(px(0.));
+        let scroll_y = self.pending_scroll.map_or(self.scroll_offset.y, |p| p.y);
+        let top = (-scroll_y).max(0.0);
         let bottom = top + viewport_height;
-        let lh = f32::from(line_height);
-        let first_row = ((f32::from(top) / lh).floor() as usize).min(total_rows - 1);
-        let last_row = ((f32::from(bottom) / lh).ceil() as usize).min(total_rows - 1);
+        let first_row = ((top / line_height).floor() as usize).min(total_rows - 1);
+        let last_row = ((bottom / line_height).ceil() as usize).min(total_rows - 1);
         let shape_rows = first_row.saturating_sub(2)..(last_row + 3).min(total_rows);
 
         let start_line = self.wrap.visual_row_to_line(first_row);
         let end_line = self.wrap.visual_row_to_line(last_row);
-        let visible_top = line_height * self.wrap.first_visual_row(start_line);
+        let visible_top = line_height * self.wrap.first_visual_row(start_line) as f32;
         let line_range = start_line..(end_line + 2).min(total_lines);
         let lines: Vec<usize> = line_range.clone().collect();
         (line_range, lines, visible_top, shape_rows)
@@ -575,15 +861,15 @@ impl Editor {
         display_text: &Rope,
         layout: &ViewLayout,
         shape_rows: &Range<usize>,
-        font_size: Pixels,
+        font_size: f32,
         runs: &[TextRun],
-        window: &mut Window,
+        ts: &TextSystem,
     ) -> Vec<RowLayout> {
         if !self.multi_line {
-            let text: SharedString = display_text.to_string().into();
+            let text: SharedStr = display_text.to_string().into();
             let aligned = align_runs(&text, runs);
             let line_runs = aligned.as_deref().unwrap_or(runs);
-            let shaped = window.text_system().shape_line(text, font_size, line_runs);
+            let shaped = ts.shape_line(text, font_size, line_runs);
             return vec![RowLayout::from_shaped(vec![shaped])];
         }
 
@@ -593,11 +879,7 @@ impl Editor {
             let mut off = 0;
             for part in text.split('\n') {
                 let line_runs = slice_runs(runs, off, &(0..part.len()));
-                shaped.push(
-                    window
-                        .text_system()
-                        .shape_line(part.to_string().into(), font_size, &line_runs),
-                );
+                shaped.push(ts.shape_line(part.to_string().into(), font_size, &line_runs));
                 off += part.len() + 1;
             }
             return vec![RowLayout::from_shaped(shaped)];
@@ -627,11 +909,9 @@ impl Editor {
                     || (sub_ix == 0 && wrapped.indent_spaces > 0);
                 if must_shape {
                     let sub_runs = slice_runs(runs, run_offset, range);
-                    let sub_text: SharedString = line_slice.slice(range.clone()).to_string().into();
+                    let sub_text: SharedStr = line_slice.slice(range.clone()).to_string().into();
                     let sub_runs = align_runs(&sub_text, &sub_runs).unwrap_or(sub_runs);
-                    let shaped = window
-                        .text_system()
-                        .shape_line(sub_text, font_size, &sub_runs);
+                    let shaped = ts.shape_line(sub_text, font_size, &sub_runs);
                     rows.push(VisualRow::from(shaped));
                 } else {
                     rows.push(VisualRow::Placeholder(range.len()));
@@ -647,7 +927,7 @@ impl Editor {
                     .sum();
                 rows[0].x_for_index(indent_bytes)
             } else {
-                px(0.)
+                0.0
             };
             result.push(RowLayout::from_rows(rows, hanging_indent));
             run_offset += line_len + 1;
@@ -658,15 +938,15 @@ impl Editor {
     fn layout_caret_and_scroll(
         &self,
         layout: &ViewLayout,
-        bounds: &mut Bounds<Pixels>,
-        content_size: Size<Pixels>,
-    ) -> (Bounds<Pixels>, Point<Pixels>) {
+        bounds: &mut Rect,
+        content_size: Size,
+    ) -> (Rect, Point) {
         let lh = layout.line_height;
         let mut scroll = self.scroll_offset;
         let v_margin = caret_vertical_margin(bounds.size.height, lh);
 
-        let pos_for = |row: usize, offset: usize, aff: bool| -> Point<Pixels> {
-            let origin = point(px(0.), lh * self.wrap.first_visual_row(row));
+        let pos_for = |row: usize, offset: usize, aff: bool| -> Point {
+            let origin = point(0.0, lh * self.wrap.first_visual_row(row) as f32);
             if let Ok(vi) = layout.visible_lines.binary_search(&row) {
                 let local = offset.saturating_sub(layout.visible_byte_offsets[vi]);
                 if let Some(p) = layout.rows[vi].position_for_index(local, lh, aff) {
@@ -697,7 +977,7 @@ impl Editor {
         if sel_changed && !all_selected {
             if scroll.x + head_pt.x > bounds.size.width - RIGHT_MARGIN {
                 scroll.x = bounds.size.width - RIGHT_MARGIN - head_pt.x;
-            } else if scroll.x + head_pt.x < px(0.) {
+            } else if scroll.x + head_pt.x < 0.0 {
                 scroll.x = -head_pt.x;
             }
 
@@ -705,22 +985,22 @@ impl Editor {
                 if scroll.y + head_pt.y > bounds.size.height - v_margin {
                     scroll.y = bounds.size.height - v_margin - head_pt.y;
                 } else if scroll.y + head_pt.y < v_margin {
-                    scroll.y = (v_margin - head_pt.y).min(px(0.));
+                    scroll.y = (v_margin - head_pt.y).min(0.0);
                 }
             }
 
             if self.selection.reversed {
-                if scroll.x + start_pt.x < px(0.) {
+                if scroll.x + start_pt.x < 0.0 {
                     scroll.x = -start_pt.x;
                 }
-                if !auto_scrolling && scroll.y + start_pt.y < px(0.) {
+                if !auto_scrolling && scroll.y + start_pt.y < 0.0 {
                     scroll.y = -start_pt.y;
                 }
             } else {
-                if scroll.x + end_pt.x <= px(0.) {
+                if scroll.x + end_pt.x <= 0.0 {
                     scroll.x = -end_pt.x;
                 }
-                if !auto_scrolling && scroll.y + end_pt.y <= px(0.) {
+                if !auto_scrolling && scroll.y + end_pt.y <= 0.0 {
                     scroll.y = -end_pt.y;
                 }
             }
@@ -732,10 +1012,10 @@ impl Editor {
         scroll.x = clamp_horizontal_scroll(scroll.x, content_size.width, bounds.size.width);
 
         let caret_h = 0.85 * lh;
-        let caret_bounds = Bounds::new(
+        let caret_bounds = Rect::new(
             point(
                 bounds.left() + head_pt.x + scroll.x,
-                bounds.top() + head_pt.y + ((lh - caret_h) / 2.),
+                bounds.top() + head_pt.y + (lh - caret_h) * 0.5,
             ),
             size(CARET_WIDTH, caret_h),
         );
@@ -743,16 +1023,7 @@ impl Editor {
         (caret_bounds, scroll)
     }
 
-    fn selection_rects(
-        &self,
-        layout: &ViewLayout,
-        bounds: &Bounds<Pixels>,
-        window: &Window,
-        cx: &App,
-    ) -> Vec<Bounds<Pixels>> {
-        if !self.has_selection_focus(window, cx) {
-            return Vec::new();
-        }
+    fn selection_rects(&self, layout: &ViewLayout, bounds: &Rect) -> Vec<Rect> {
         let mut sel = self.selection;
         if let Some(marked) = self.ime_marked
             && !marked.is_empty()
@@ -767,21 +1038,18 @@ impl Editor {
         if vis.is_empty() {
             return Vec::new();
         }
-        let Some(corners) = range_corners(&vis, layout) else {
+        let Some(rects) = range_rects(&vis, layout) else {
             return Vec::new();
         };
         let origin = bounds.origin;
-        corners
+        rects
             .into_iter()
-            .map(|c| Bounds::from_corners(origin + c.top_left, origin + c.bottom_right))
+            .map(|r| r.translate(origin))
             .collect()
     }
 }
 
-fn range_corners(
-    range: &Range<usize>,
-    layout: &ViewLayout,
-) -> Option<Vec<Corners<Point<Pixels>>>> {
+fn range_rects(range: &Range<usize>, layout: &ViewLayout) -> Option<Vec<Rect>> {
     let range = range.start.max(layout.visible_byte_range.start)
         ..range.end.min(layout.visible_byte_range.end);
     if range.is_empty() {
@@ -811,12 +1079,10 @@ fn range_corners(
                     } else {
                         row.x_for_index(e - off)
                     };
-                out.push(Corners {
-                    top_left: point(left, y),
-                    top_right: point(right, y),
-                    bottom_left: point(left, y + layout.line_height),
-                    bottom_right: point(right, y + layout.line_height),
-                });
+                out.push(Rect::from_corners(
+                    point(left, y),
+                    point(right, y + layout.line_height),
+                ));
             }
             off = end;
             y += layout.line_height;
@@ -917,586 +1183,24 @@ fn split_ime_underline(
     .collect()
 }
 
-// ---------------------------------------------------------------------------
-// IME InputHandler bridging Window -> EditorHost -> Editor
-// ---------------------------------------------------------------------------
-
-struct EditorInputHandler {
-    host: EditorHost,
-    bounds: Bounds<Pixels>,
-}
-
-impl InputHandler for EditorInputHandler {
-    fn selected_text_range(&mut self, _: &mut Window, cx: &mut App) -> Option<UTF16Selection> {
-        self.host.with(cx, Editor::selected_utf16_range)
-    }
-
-    fn replace_text_in_range(
-        &mut self,
-        range_utf16: Option<Range<usize>>,
-        new_text: &str,
-        _: &mut Window,
-        cx: &mut App,
-    ) {
-        let host = self.host;
-        host.with_mut(cx, |ed, cx| {
-            ed.replace_text_in_range(range_utf16, new_text, Some(&host), cx);
-        });
-        host.notify(cx);
-    }
-
-    fn replace_and_mark_text_in_range(
-        &mut self,
-        range_utf16: Option<Range<usize>>,
-        new_text: &str,
-        new_selected_range_utf16: Option<Range<usize>>,
-        _: &mut Window,
-        cx: &mut App,
-    ) {
-        self.host.with_mut(cx, |ed, cx| {
-            ed.replace_and_mark_text_in_range(
-                range_utf16,
-                new_text,
-                new_selected_range_utf16,
-                cx,
-            );
-        });
-        self.host.notify(cx);
-    }
-
-    fn bounds_for_range(
-        &mut self,
-        range_utf16: Range<usize>,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> Option<Bounds<Pixels>> {
-        let bounds = self.bounds;
-        self.host
-            .with(cx, |ed| ed.bounds_for_utf16_range(range_utf16, bounds, window))
-            .flatten()
-    }
-}
-
-// ---------------------------------------------------------------------------
-// CustomWidget: EditorTextWidget
-// ---------------------------------------------------------------------------
-
-struct TextPrepaint {
-    layout: ViewLayout,
-    content_size: Size<Pixels>,
-    caret_rect: Bounds<Pixels>,
-    synced_scroll: Point<Pixels>,
-    selection_rects: Vec<Bounds<Pixels>>,
-    scrolled_bounds: Bounds<Pixels>,
-}
-
-pub(super) struct EditorTextWidget {
-    host: EditorHost,
-    placeholder: SharedString,
-    prepaint: Option<TextPrepaint>,
-}
-
-impl EditorTextWidget {
-    pub(super) fn new(host: EditorHost, placeholder: SharedString) -> Self {
-        Self {
-            host,
-            placeholder,
-            prepaint: None,
-        }
-    }
-}
-
-impl From<EditorTextWidget> for UiNode {
-    fn from(w: EditorTextWidget) -> Self {
-        UiNode::widget(w)
-    }
-}
-
-impl CustomWidget for EditorTextWidget {
-    fn request_layout(&mut self, window: &mut Window, cx: &mut App) -> LayoutId {
-        let multi_line = self.host.with(cx, |ed| ed.multi_line).unwrap_or(false);
-        let lh = window.line_height();
-        let mut style = Style::default();
-        style.size.width = relative(1.).into();
-        if multi_line {
-            style.flex_grow = 1.0;
-            style.size.height = relative(1.).into();
-            style.min_size.height = (2 * lh).into();
-        } else {
-            style.size.height = lh.into();
-        }
-        window.request_layout(style, [], cx)
-    }
-
-    fn prepaint(&mut self, input_bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
-        let style = window.text_style();
-        let font = style.font();
-        let font_size = style.font_size;
-        let line_height = window.line_height();
-        let space_width = window.text_system().space_width(&font, font_size);
-
-        let wrap_width = self
-            .host
-            .with(cx, |ed| {
-                (ed.multi_line && ed.soft_wrap).then_some(input_bounds.size.width - RIGHT_MARGIN)
-            })
-            .flatten();
-
-        let font_for_wrap = font.clone();
-        self.host.with_mut(cx, |ed, cx| {
-            ed.wrap
-                .sync_layout(&ed.text, font_for_wrap, font_size, wrap_width, cx);
-        });
-
-        let p = palette(cx);
-        let placeholder_rope = Rope::from(self.placeholder.as_str());
-
-        let prep = self.host.with(cx, |ed| {
-            let is_empty = ed.text.len() == 0;
-            let (display_text, color) = if is_empty {
-                (&placeholder_rope, rgba(p.text_secondary))
-            } else {
-                (&ed.text, style.color)
-            };
-
-            let (vis_range, visible_lines, visible_top, shape_rows) =
-                ed.visible_slice(line_height, input_bounds.size.height);
-            let start_off = ed.text.line_start_offset(vis_range.start);
-            let end_off = ed.text.line_end_offset(vis_range.end.saturating_sub(1));
-            let visible_byte_offsets: Vec<usize> = visible_lines
-                .iter()
-                .map(|&l| ed.text.line_start_offset(l))
-                .collect();
-
-            let mut layout = ViewLayout {
-                visible_lines,
-                visible_byte_offsets,
-                visible_top,
-                visible_byte_range: start_off..end_off,
-                rows: Rc::new(Vec::new()),
-                line_height,
-                wrap_width,
-                space_width,
-                caret_bounds: None,
-            };
-
-            let base_run = TextRun {
-                len: display_text.len(),
-                font: font.clone(),
-                color,
-                underline: None,
-            };
-            let ime_underline = Some(UnderlineStyle {
-                thickness: px(1.),
-                color: Some(color),
-            });
-            let marked = ed.ime_marked.map(|m| m.start..m.end);
-            let runs = split_ime_underline(base_run, 0..display_text.len(), marked, ime_underline);
-            let rows =
-                ed.shape_visible_lines(display_text, &layout, &shape_rows, font_size, &runs, window);
-            layout.rows = Rc::new(rows);
-
-            let mut new_longest = None;
-            let mut max_line_w = wrap_width.unwrap_or(px(0.));
-            if !ed.multi_line || !ed.soft_wrap {
-                let longest_row = ed.wrap.longest_line();
-                let slice = ed.text.slice_line(longest_row);
-                let key = LongestLineCache {
-                    revision: ed.revision,
-                    row: longest_row,
-                    len: slice.len(),
-                    font: font.clone(),
-                    font_size,
-                    wrap_width,
-                };
-                max_line_w = match &ed.longest_line_cache {
-                    Some((cached, w)) if *cached == key => *w,
-                    _ => {
-                        let s: Cow<str> = slice.into();
-                        let w = window
-                            .text_system()
-                            .measure_line_width(&s, &key.font, font_size);
-                        new_longest = Some((key, w));
-                        w
-                    }
-                };
-            }
-
-            let total_rows = ed.wrap.visual_row_count();
-            let content_size = size(
-                if max_line_w + RIGHT_MARGIN > input_bounds.size.width {
-                    max_line_w + RIGHT_MARGIN
-                } else {
-                    max_line_w
-                },
-                (total_rows as f32 * line_height).max(input_bounds.size.height),
-            );
-
-            let mut scrolled_bounds = input_bounds;
-            let (caret_bounds, synced_scroll) =
-                ed.layout_caret_and_scroll(&layout, &mut scrolled_bounds, content_size);
-            layout.caret_bounds = Some(caret_bounds);
-
-            let safe_y_min = (-content_size.height + input_bounds.size.height).min(px(0.));
-            let clamped_y = if ed.multi_line {
-                synced_scroll.y.clamp(safe_y_min, px(0.))
-            } else {
-                px(0.)
-            };
-            let caret_h = if ed.caret_height > px(0.) {
-                ed.caret_height
-            } else {
-                caret_bounds.size.height
-            };
-            let caret_origin = window.pixel_snap_point(point(
-                caret_bounds.origin.x,
-                caret_bounds.origin.y + clamped_y,
-            ));
-            let caret_rect = Bounds::new(caret_origin, size(CARET_WIDTH, caret_h));
-            let selection_rects = ed.selection_rects(&layout, &scrolled_bounds, window, cx);
-            let sb_snap = ScrollbarSnapshot::compute(
-                input_bounds,
-                content_size,
-                synced_scroll,
-                ed.paddings,
-                ed.soft_wrap,
-            );
-
-            (
-                TextPrepaint {
-                    layout,
-                    content_size,
-                    caret_rect,
-                    synced_scroll,
-                    selection_rects,
-                    scrolled_bounds,
-                },
-                new_longest,
-                sb_snap,
-            )
-        });
-
-        let Some((tp, new_longest, sb_snap)) = prep else {
-            return;
-        };
-
-        self.host.with_mut(cx, |ed, _| {
-            if let Some(entry) = new_longest {
-                ed.longest_line_cache = Some(entry);
-            }
-            ed.caret_bounds = Some(tp.caret_rect);
-            ed.scrollbar_snapshot = Some(sb_snap);
-        });
-
-        let _ = window.insert_hitbox(input_bounds, HitboxBehavior::Normal);
-        self.prepaint = Some(tp);
-    }
-
-    fn paint(&mut self, input_bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
-        let Some(tp) = self.prepaint.as_mut() else {
-            return;
-        };
-        let Some((focus_handle, show_caret, selection, caret_hidden)) = self.host.with(cx, |ed| {
-            (
-                ed.focus_handle.clone(),
-                ed.show_caret(window),
-                ed.selection,
-                ed.caret_hidden,
-            )
-        }) else {
-            return;
-        };
-
-        let bounds = tp.scrolled_bounds;
-        window.handle_input(
-            &focus_handle,
-            EditorInputHandler {
-                host: self.host,
-                bounds,
-            },
-        );
-
-        let p = palette(cx);
-        let lh = window.line_height();
-        let origin = bounds.origin;
-
-        if window.is_window_active() {
-            let sel_color = p.selection();
-            for rect in tp.selection_rects.drain(..) {
-                window.paint_quad(fill(rect, sel_color));
-            }
-        }
-
-        let mut y = tp.layout.visible_top;
-        for row_layout in tp.layout.rows.iter() {
-            row_layout.paint(point(origin.x, origin.y + y), lh, window, cx);
-            y += row_layout.size(lh).height;
-        }
-
-        if show_caret && !caret_hidden && selection.is_empty() {
-            let caret = tp.caret_rect;
-            window.with_content_mask(
-                Some(ContentMask {
-                    bounds: input_bounds,
-                }),
-                |window| window.paint_quad(fill(caret, rgb(p.caret))),
-            );
-        }
-
-        let mut needs_notify = false;
-        self.host.with_mut(cx, |ed, cx| {
-            let geom_changed = ed.content_bounds != Some(bounds)
-                || ed.input_bounds != input_bounds
-                || ed.content_size != tp.content_size
-                || ed.layout.as_ref().is_none_or(|prev| {
-                    prev.caret_bounds != tp.layout.caret_bounds
-                        || prev.line_height != tp.layout.line_height
-                });
-            let width_changed = ed.input_bounds.size.width != input_bounds.size.width;
-            ed.layout = Some(tp.layout.clone());
-            ed.content_bounds = Some(bounds);
-            ed.last_cursor = Some(ed.cursor());
-            ed.input_bounds = input_bounds;
-            if width_changed && let Some(layout) = ed.layout.as_ref() {
-                let w = ed.soft_wrap.then_some(layout.wrap_width).flatten();
-                ed.wrap.set_wrap_width(w, cx);
-                needs_notify = true;
-            }
-            ed.last_selection = Some(selection);
-            ed.content_size = tp.content_size;
-            needs_notify |= ed.clamp_and_set_scroll(tp.synced_scroll);
-            ed.pending_scroll = None;
-            needs_notify |= geom_changed;
-        });
-        if needs_notify {
-            self.host.notify(cx);
-        }
-
-        // Drag-select & mouse-up release listeners
-        let host = self.host;
-        window.on_mouse_event(move |event: &MouseMoveEvent, _, window, cx| {
-            if event.pressed_button == Some(MouseButton::Left) {
-                let mut changed = false;
-                host.with_mut(cx, |ed, cx| {
-                    if ed.selecting {
-                        ed.on_drag_move(event, &host, window, cx);
-                        changed = true;
-                    }
-                });
-                if changed {
-                    host.notify(cx);
-                }
-            }
-        });
-
-        window.on_mouse_event(move |_: &MouseUpEvent, phase, _, cx| {
-            if !phase.bubble() {
-                return;
-            }
-            host.with_mut(cx, |ed, _| {
-                ed.auto_scroll.stop();
-                ed.selecting = false;
-            });
-        });
-    }
-}
-
-// ---------------------------------------------------------------------------
-// CustomWidget: EditorScrollbarWidget (direct bridge to Editor.scrollbar)
-// ---------------------------------------------------------------------------
-
-struct ScrollbarPrepaint {
-    viewport_bounds: Bounds<Pixels>,
-    axes: Vec<PreparedAxis>,
-}
-
-pub(super) struct EditorScrollbarWidget {
-    host: EditorHost,
-    prepaint: Option<ScrollbarPrepaint>,
-}
-
-impl EditorScrollbarWidget {
-    pub(super) fn new(host: EditorHost) -> Self {
-        Self {
-            host,
-            prepaint: None,
-        }
-    }
-}
-
-impl From<EditorScrollbarWidget> for UiNode {
-    fn from(w: EditorScrollbarWidget) -> Self {
-        UiNode::widget(w)
-    }
-}
-
-impl CustomWidget for EditorScrollbarWidget {
-    fn id(&self) -> Option<ElementId> {
-        Some("editor-scrollbar".into())
-    }
-
-    fn request_layout(&mut self, window: &mut Window, cx: &mut App) -> LayoutId {
-        let style = Style {
-            position: CssPosition::Absolute,
-            size: Size {
-                width: relative(1.).into(),
-                height: relative(1.).into(),
-            },
-            ..Style::default()
-        };
-        window.request_layout(style, [], cx)
-    }
-
-    fn prepaint(&mut self, _: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
-        let p = palette(cx);
-        let reduce_motion = cx.reduce_motion();
-        let host = self.host;
-
-        let prepared = host.with_mut(cx, |ed, cx| {
-            let snap = ed.scrollbar_snapshot?;
-            ed.clamp_and_set_scroll(snap.synced_offset);
-            let offset = ed.scroll_offset;
-            let axes = ed.scrollbar.prepare(
-                snap.viewport,
-                offset,
-                reduce_motion,
-                p,
-                window,
-                |delay| {
-                    cx.after(delay, move |cx| {
-                        host.with_mut(cx, |ed, _| ed.scrollbar.on_idle_timer_fired());
-                        host.notify(cx);
-                    })
-                },
-            );
-            Some(ScrollbarPrepaint {
-                viewport_bounds: snap.viewport.bounds,
-                axes,
-            })
-        });
-        self.prepaint = prepared.flatten();
-    }
-
-    fn paint(&mut self, _: Bounds<Pixels>, window: &mut Window, _: &mut App) {
-        let Some(sp) = self.prepaint.as_ref() else {
-            return;
-        };
-        let viewport = sp.viewport_bounds;
-        ScrollbarState::paint_axes(&sp.axes, viewport, window);
-        let host = self.host;
-
-        for item in &sp.axes {
-            let item = item.clone();
-
-            // Wheel wakeup
-            window.on_mouse_event(move |event: &ScrollWheelEvent, phase, _, cx| {
-                if phase.bubble() && viewport.contains(&event.position) {
-                    let mut woke = false;
-                    host.with_mut(cx, |ed, _| {
-                        woke = ed.scrollbar.on_wheel(ed.scroll_offset, Instant::now());
-                    });
-                    if woke {
-                        host.notify(cx);
-                    }
-                }
-            });
-
-            // Track click & thumb grab (registered AFTER editor container -> wins Bubble!)
-            if item.interactive {
-                let down_item = item.clone();
-                window.on_mouse_event(move |event: &MouseDownEvent, phase, _, cx| {
-                    if phase.bubble() && down_item.track_bounds.contains(&event.position) {
-                        cx.stop_propagation();
-                        host.with_mut(cx, |ed, _| {
-                            let next = ed.scrollbar.on_mouse_down(
-                                &down_item,
-                                event.position,
-                                ed.scroll_offset,
-                            );
-                            ed.clamp_and_set_scroll(next);
-                        });
-                        host.notify(cx);
-                    }
-                });
-            }
-
-            // Hover & thumb drag
-            let move_item = item.clone();
-            window.on_mouse_event(move |event: &MouseMoveEvent, _, _, cx| {
-                let outcome = host.with_mut(cx, |ed, cx| {
-                    let out = ed.scrollbar.on_mouse_move(
-                        &move_item,
-                        event.position,
-                        event.dragging(),
-                        ed.scroll_offset,
-                        |delay| {
-                            cx.after(delay, move |cx| {
-                                let mut fire = false;
-                                host.with_mut(cx, |ed, _| {
-                                    fire = ed.scrollbar.on_drag_timer_fired(Instant::now());
-                                });
-                                if fire {
-                                    host.notify(cx);
-                                }
-                            })
-                        },
-                    );
-                    if let Some(next) = out.new_offset {
-                        ed.clamp_and_set_scroll(next);
-                    }
-                    out
-                });
-                if let Some(out) = outcome {
-                    if out.stop_propagation {
-                        cx.stop_propagation();
-                    }
-                    if out.notify_now {
-                        host.notify(cx);
-                    }
-                }
-            });
-
-            // End thumb drag
-            let up_item = item;
-            window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
-                if !phase.bubble() {
-                    return;
-                }
-                let mut dragged = false;
-                host.with_mut(cx, |ed, _| {
-                    if let Some(next) =
-                        ed.scrollbar
-                            .on_mouse_up(&up_item, event.position, ed.scroll_offset)
-                    {
-                        ed.clamp_and_set_scroll(next);
-                        dragged = true;
-                    }
-                });
-                if dragged {
-                    host.notify(cx);
-                }
-            });
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::geom::rect;
 
     #[test]
     fn auto_scroll_delta_has_dead_zone_and_symmetric_ramps() {
-        let bounds = Bounds::new(point(px(0.), px(100.)), size(px(200.), px(100.)));
-        assert_eq!(AutoScroll::compute_delta(px(150.), bounds), None);
+        let bounds = rect(0., 100., 200., 100.);
+        assert_eq!(AutoScroll::compute_delta(150., bounds), None);
 
-        let top = AutoScroll::compute_delta(px(80.), bounds).unwrap();
-        let bottom = AutoScroll::compute_delta(px(220.), bounds).unwrap();
+        let top = AutoScroll::compute_delta(80., bounds).unwrap();
+        let bottom = AutoScroll::compute_delta(220., bounds).unwrap();
         assert_eq!(top, -bottom);
-        assert!(top < px(-12.));
+        assert!(top < -12.);
 
         let mut scroll = AutoScroll {
-            delta: Some(px(20.)),
-            last_drag_pos: Some(point(px(1.), px(2.))),
+            delta: Some(20.),
+            last_drag_pos: Some(point(1., 2.)),
             ..Default::default()
         };
         scroll.stop();

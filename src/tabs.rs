@@ -1,7 +1,20 @@
-use std::sync::atomic::{AtomicU64, Ordering};
+//! Animated tab strip, tab data, overflow scrolling, ghost close animations, and width freezing.
 
-use super::*;
-use crate::ui::{AnimStatus, animate_from};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
+
+use crate::color::{rgba, transparent_black};
+use crate::document::{self, Format};
+use crate::editor::{Editor, Rope};
+use crate::geom::Edges;
+use crate::platform::{CursorStyle, TimerHandle};
+use crate::theme::Palette;
+use crate::types::SharedStr;
+use crate::ui::controls::{CONTROL_RADIUS, IconButtonStyle, OVERLAY_RADIUS, SMALL_FONT, icon_button};
+use crate::ui::{
+    AnimKey, AnimStatus, Brushes, Easing, HitId, Node, UiState, box_, row, text,
+};
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct TabId(pub(crate) u64);
@@ -13,20 +26,8 @@ impl TabId {
     }
 }
 
-impl From<TabId> for ElementId {
-    fn from(id: TabId) -> Self {
-        ElementId::Integer(id.0)
-    }
-}
-
-impl From<(&'static str, TabId)> for ElementId {
-    fn from((name, id): (&'static str, TabId)) -> Self {
-        ElementId::NamedInteger(SharedString::new_static(name), id.0)
-    }
-}
-
-const TAB_WIDTH: f32 = 240.;
-const TAB_MIN_WIDTH: f32 = 80.;
+pub(crate) const TAB_WIDTH: f32 = 240.;
+pub(crate) const TAB_MIN_WIDTH: f32 = 80.;
 pub(crate) const TAB_HEIGHT: f32 = 32.;
 const TAB_LABEL_INSET: f32 = 8.;
 const TAB_LABEL_TRAILING: f32 = 44.;
@@ -40,6 +41,7 @@ pub(crate) const HEADER_WIDTH: f32 = 5.;
 const LIST_PAD: f32 = 4.;
 pub(crate) const STRIP_LEFT: f32 = HEADER_WIDTH + LIST_PAD;
 pub(crate) const STRIP_TOP: f32 = 10.;
+pub(crate) const CAPTION_BUTTON_WIDTH: f32 = 46.;
 pub(crate) const CAPTION_WIDTH: f32 = 3. * CAPTION_BUTTON_WIDTH;
 const DRAG_RESERVE: f32 = 43.;
 const STRIP_RESERVED: f32 = CAPTION_WIDTH + DRAG_RESERVE + NEW_TAB_GAP_SCROLLING + BUTTON_WIDTH;
@@ -47,10 +49,10 @@ pub(crate) const TITLE_BAR_MIN_WIDTH: f32 = HEADER_WIDTH + 2. * LIST_PAD + STRIP
 const SCROLL_AREA: f32 = SCROLL_OUTER_PAD + BUTTON_WIDTH + SCROLL_INNER_PAD;
 const SCROLL_OUTER_PAD: f32 = 8.;
 const SCROLL_INNER_PAD: f32 = 3.;
-const SCROLL_STEP: f32 = 50.;
-const SCROLL_REPEAT_DELAY: Duration = Duration::from_millis(50);
-const SCROLL_REPEAT_INTERVAL: Duration = Duration::from_millis(100);
-const WHEEL_SHARE: f32 = 0.15;
+pub(crate) const SCROLL_STEP: f32 = 50.;
+pub(crate) const SCROLL_REPEAT_DELAY: Duration = Duration::from_millis(50);
+pub(crate) const SCROLL_REPEAT_INTERVAL: Duration = Duration::from_millis(100);
+pub(crate) const WHEEL_SHARE: f32 = 0.15;
 const BUTTON_WIDTH: f32 = 32.;
 const BUTTON_HEIGHT: f32 = 24.;
 const BUTTON_TOP: f32 = 6.;
@@ -68,23 +70,69 @@ const REORDER_THRESHOLD: f32 = 16.;
 const CARET_LEFT: &str = "\u{EDD9}";
 const CARET_RIGHT: &str = "\u{EDDA}";
 const ADD_GLYPH: &str = "\u{E710}";
+pub(crate) const CLOSE_GLYPH: &str = "\u{E711}";
 const BUTTON_GLYPH_SIZE: f32 = 12.;
 
 #[derive(Clone, Copy, Default)]
 pub(crate) struct SlotKey(usize);
 
-impl SlotKey {
-    fn x(self) -> ElementId {
-        ElementId::from(("tab-x", self.0))
+pub(crate) struct TabData {
+    pub(crate) id: TabId,
+    pub(crate) editor: Editor,
+    pub(crate) zoom: f32,
+    pub(crate) path: Option<PathBuf>,
+    pub(crate) format: Format,
+}
+
+impl TabData {
+    pub(crate) fn is_dirty(&self) -> bool {
+        if self.path.is_some() {
+            !self.editor.is_clean()
+        } else {
+            !self.editor.is_clean() && self.editor.text().len() > 0
+        }
     }
 
-    fn width(self) -> ElementId {
-        ElementId::from(("tab-width", self.0))
+    pub(crate) fn create(
+        content: Option<(PathBuf, document::Loaded)>,
+        word_wrap: bool,
+        paddings: Edges<f32>,
+    ) -> Self {
+        let (path, text, format) = match content {
+            Some((path, loaded)) => (Some(path), loaded.text, loaded.format),
+            None => (None, Rope::new(), Format::default()),
+        };
+        let editor = Editor::multi_line()
+            .with_soft_wrap(word_wrap)
+            .with_viewport_wheel_step()
+            .with_rope(text)
+            .with_paddings(paddings);
+        Self {
+            id: TabId::next(),
+            editor,
+            zoom: 1.,
+            path,
+            format,
+        }
+    }
+}
+
+pub(crate) struct Tab {
+    pub(crate) data: TabData,
+    pub(crate) slot: SlotKey,
+}
+
+impl Tab {
+    pub(crate) fn adopt(data: TabData) -> Self {
+        Self {
+            data,
+            slot: SlotKey::default(),
+        }
     }
 }
 
 struct Ghost {
-    name: SharedString,
+    name: SharedStr,
     key: SlotKey,
     x: f32,
 }
@@ -101,26 +149,24 @@ pub(crate) struct StripFrame {
     shift: f32,
     viewport: f32,
     tabs: Vec<(f32, f32)>,
-    ghosts: Vec<(SharedString, f32, f32)>,
+    ghosts: Vec<(SharedStr, f32, f32)>,
 }
 
 pub(crate) struct TabStrip {
-    extent: f32,
-    scroll: f32,
-    snap_layout: bool,
-    snap_scroll: bool,
+    pub(crate) extent: f32,
+    pub(crate) scroll: f32,
+    pub(crate) snap_layout: bool,
+    pub(crate) snap_scroll: bool,
     next_key: usize,
     column: f32,
-    width: f32,
-    overflow: bool,
+    pub(crate) width: f32,
+    pub(crate) overflow: bool,
     buttons: bool,
     frozen: Option<f32>,
     ghosts: Vec<Ghost>,
     drag: Option<Drag>,
     lifted: Option<TabId>,
-    hovered: Option<TabId>,
-    area: Rc<Cell<Bounds<Pixels>>>,
-    repeat: TimerHandle,
+    pub(crate) repeat: TimerHandle,
 }
 
 impl TabStrip {
@@ -139,13 +185,11 @@ impl TabStrip {
             ghosts: Vec::new(),
             drag: None,
             lifted: None,
-            hovered: None,
-            area: Rc::new(Cell::new(Bounds::default())),
             repeat: TimerHandle::default(),
         }
     }
 
-    fn measure(&mut self, count: usize) {
+    pub(crate) fn measure(&mut self, count: usize) {
         let alone = count <= 1;
         let count = count.max(1) as f32;
         let room = (self.column - 2. * LIST_PAD).max(0.);
@@ -164,25 +208,31 @@ impl TabStrip {
         }
     }
 
-    fn key(&mut self) -> SlotKey {
+    pub(crate) fn next_slot(&mut self) -> SlotKey {
         self.next_key += 1;
         SlotKey(self.next_key)
     }
 
-    fn snap(&mut self) {
+    pub(crate) fn snap(&mut self) {
         self.snap_layout = true;
         self.snap_scroll = true;
+    }
+
+    pub(crate) fn layout(&mut self, count: usize) {
+        self.measure(count);
+        self.extent = count as f32 * self.width;
+        self.scroll_to(self.scroll);
     }
 
     fn scroll_area(&self) -> f32 {
         if self.buttons { SCROLL_AREA } else { 0. }
     }
 
-    fn scroll_viewport(&self) -> f32 {
+    pub(crate) fn scroll_viewport(&self) -> f32 {
         self.column - 2. * self.scroll_area()
     }
 
-    fn max_scroll(&self) -> f32 {
+    pub(crate) fn max_scroll(&self) -> f32 {
         if self.overflow {
             (2. * LIST_PAD + self.extent - self.scroll_viewport()).max(0.)
         } else {
@@ -190,7 +240,7 @@ impl TabStrip {
         }
     }
 
-    fn origin(&self) -> f32 {
+    pub(crate) fn origin(&self) -> f32 {
         HEADER_WIDTH + self.scroll_area() + LIST_PAD - self.scroll
     }
 
@@ -202,29 +252,57 @@ impl TabStrip {
         }
     }
 
-    fn depart(&mut self, id: TabId) {
+    pub(crate) fn is_frozen(&self) -> bool {
+        self.frozen.is_some()
+    }
+
+    pub(crate) fn freeze(&mut self, width: f32) {
+        self.frozen = Some(width);
+    }
+
+    pub(crate) fn thaw(&mut self, count: usize) -> bool {
+        if self.frozen.take().is_some() {
+            self.layout(count);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub(crate) fn push_ghost(&mut self, name: SharedStr, key: SlotKey, ix: usize, width: f32) {
+        self.ghosts.push(Ghost {
+            name,
+            key,
+            x: ix as f32 * width,
+        });
+    }
+
+    pub(crate) fn depart(&mut self, id: TabId) {
         if self.drag.is_some_and(|drag| drag.id == id) {
             self.drag = None;
         }
         if self.lifted == Some(id) {
             self.lifted = None;
         }
-        if self.hovered == Some(id) {
-            self.hovered = None;
-        }
     }
 
-    fn place(&self, x: f32, grab: f32, last: usize) -> (f32, f32, usize) {
+    pub(crate) fn place(&self, x: f32, grab: f32, last: usize) -> (f32, f32, usize) {
         let x = x - self.origin();
         let left = (x - grab).clamp(0., last as f32 * self.width);
         (x, left, slot_index(left, self.width, last))
     }
 
-    fn scroll_to(&mut self, target: f32) {
+    pub(crate) fn scroll_to(&mut self, target: f32) {
         self.scroll = target.clamp(0., self.max_scroll()).round();
     }
 
-    fn reveal(&mut self, left: f32, right: f32) {
+    pub(crate) fn scroll_by(&mut self, delta: f32) -> bool {
+        let before = self.scroll;
+        self.scroll_to(before + delta);
+        self.scroll != before
+    }
+
+    pub(crate) fn reveal(&mut self, left: f32, right: f32) {
         if !self.overflow {
             self.scroll = 0.;
             self.snap_scroll = true;
@@ -241,38 +319,293 @@ impl TabStrip {
         };
         self.scroll_to(target);
     }
+
+    pub(crate) fn tab_target(&self, tabs: &[Tab], ix: usize) -> f32 {
+        let id = tabs[ix].data.id;
+        self.drag
+            .filter(|drag| drag.id == id)
+            .map_or(ix as f32 * self.width, |drag| drag.left)
+    }
+
+    pub(crate) fn reveal_tab(&mut self, tabs: &[Tab], ix: usize) {
+        if ix < tabs.len() {
+            let left = self.tab_target(tabs, ix);
+            self.reveal(left, left + self.width);
+        }
+    }
+
+    /// Updates dragged tab position and reorders `tabs` when crossing `REORDER_THRESHOLD`.
+    /// Returns the updated active tab index.
+    pub(crate) fn drag_tab(
+        &mut self,
+        tabs: &mut Vec<Tab>,
+        active_id: TabId,
+        id: TabId,
+        x: f32,
+        grab: f32,
+        start: f32,
+    ) -> Option<usize> {
+        let from = tabs.iter().position(|t| t.data.id == id)?;
+        let origin = self.origin();
+        let mut drag = self.drag.filter(|d| d.id == id).unwrap_or(Drag {
+            id,
+            grab,
+            last_move: start - origin,
+            left: 0.,
+        });
+        self.lifted = Some(id);
+        let width = self.width;
+        let last = tabs.len() - 1;
+        let (x, left, to) = self.place(x, drag.grab, last);
+        drag.left = left;
+        self.snap_scroll = true;
+        self.reveal(left, left + width);
+        let mut next_active = None;
+        if to != from && (x - drag.last_move).abs() > REORDER_THRESHOLD {
+            let tab = tabs.remove(from);
+            tabs.insert(to, tab);
+            next_active = Some(
+                tabs.iter()
+                    .position(|t| t.data.id == active_id)
+                    .unwrap_or(to),
+            );
+            drag.last_move = x;
+        }
+        self.drag = Some(drag);
+        self.layout(tabs.len());
+        next_active
+    }
+
+    pub(crate) fn begin_inserted_drag(
+        &mut self,
+        id: TabId,
+        x: f32,
+        grab: f32,
+        count_before: usize,
+    ) -> usize {
+        self.measure(count_before + 1);
+        let (x, left, ix) = self.place(x, grab, count_before);
+        self.drag = Some(Drag {
+            id,
+            grab,
+            last_move: x,
+            left,
+        });
+        self.lifted = Some(id);
+        self.snap();
+        ix
+    }
+
+    pub(crate) fn release_drag(&mut self, count: usize) -> bool {
+        if self.drag.take().is_some() {
+            self.layout(count);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub(crate) fn clear_drag(&mut self) {
+        self.drag = None;
+    }
+
+    pub(crate) fn stop_repeat(&mut self) {
+        self.repeat.cancel();
+    }
+
+    pub(crate) fn sample(
+        &mut self,
+        tabs: &[Tab],
+        active: usize,
+        viewport_width: f32,
+        ui: &mut UiState,
+    ) -> StripFrame {
+        let column = viewport_width - HEADER_WIDTH - STRIP_RESERVED;
+        if column != self.column {
+            self.column = column;
+            self.snap();
+            self.layout(tabs.len());
+            self.reveal_tab(tabs, active);
+        }
+        let snap = std::mem::take(&mut self.snap_layout);
+        let snap_scroll = std::mem::take(&mut self.snap_scroll);
+        let (scroll, _) = slide(AnimKey::TabScroll, 0., self.scroll, snap_scroll, ui);
+        let (extent, _) = slide(AnimKey::TabExtent, TAB_WIDTH, self.extent, snap, ui);
+        let mut right = 0.;
+        let mut lifted_moving = false;
+        let mut sampled_tabs = Vec::with_capacity(tabs.len());
+        for (ix, tab) in tabs.iter().enumerate() {
+            let id = tab.data.id;
+            let dragged = self.drag.is_some_and(|drag| drag.id == id);
+            let (x, moving) = slide(
+                AnimKey::TabX(tab.slot.0),
+                right,
+                self.tab_target(tabs, ix),
+                snap || dragged,
+                ui,
+            );
+            let (width, _) = slide(AnimKey::TabWidth(tab.slot.0), 0., self.width, snap, ui);
+            if self.lifted == Some(id) {
+                lifted_moving = moving;
+            }
+            right = x + width;
+            sampled_tabs.push((x, width));
+        }
+        let mut ghosts = Vec::new();
+        self.ghosts.retain(|ghost| {
+            let (x, sliding) = slide(AnimKey::TabX(ghost.key.0), ghost.x, ghost.x, false, ui);
+            let (width, shrinking) = slide(AnimKey::TabWidth(ghost.key.0), 0., 0., false, ui);
+            let moving = sliding || shrinking;
+            if moving {
+                ghosts.push((ghost.name.clone(), x, width));
+            }
+            moving
+        });
+        if self.drag.is_none() && !lifted_moving {
+            self.lifted = None;
+        }
+        let viewport = if self.overflow {
+            self.scroll_viewport()
+        } else {
+            LIST_PAD + extent
+        };
+        StripFrame {
+            shift: LIST_PAD - scroll,
+            viewport,
+            tabs: sampled_tabs,
+            ghosts,
+        }
+    }
+
+    pub(crate) fn render(
+        &self,
+        tabs: &[Tab],
+        active: usize,
+        sampled: &StripFrame,
+        p: Palette,
+        ui: &mut UiState,
+    ) -> Node {
+        let shift = sampled.shift;
+        let viewport = sampled.viewport;
+        let lifted = self
+            .lifted
+            .and_then(|id| tabs.iter().position(|t| t.data.id == id));
+        let cover = lifted.map(|ix| {
+            let (x, width) = sampled.tabs[ix];
+            (shift + x, shift + x + width)
+        });
+        let hovered_ix = tabs
+            .iter()
+            .position(|t| ui.is_hovered(HitId::Tab(t.data.id.0)));
+
+        let ghosts: Vec<Node> = sampled
+            .ghosts
+            .iter()
+            .map(|(name, x, width)| {
+                tab_frame(
+                    shift + x,
+                    *width,
+                    cover,
+                    tab_face(
+                        p,
+                        false,
+                        transparent_black(),
+                        TAB_LABEL_TRAILING_BARE,
+                        name.clone(),
+                    ),
+                )
+            })
+            .collect();
+
+        let tab_nodes: Vec<Node> = (0..tabs.len())
+            .filter(|&ix| Some(ix) != lifted)
+            .chain(lifted)
+            .map(|ix| {
+                let (x, width) = sampled.tabs[ix];
+                tab_frame(
+                    shift + x,
+                    width,
+                    cover.filter(|_| Some(ix) != lifted),
+                    render_tab(tabs, ix, active, hovered_ix, p, ui),
+                )
+            })
+            .collect();
+
+        let scroll_back = self.buttons.then(|| self.scroll_button(false, p, ui));
+        let scroll_fwd = self.buttons.then(|| self.scroll_button(true, p, ui));
+        let new_tab = strip_button(
+            p,
+            HitId::NewTab,
+            "New tab (Ctrl+N)",
+            ADD_GLYPH,
+            BUTTON_GLYPH_SIZE,
+            true,
+            ui,
+        )
+        .ml(self.new_tab_gap())
+        .mt(BUTTON_TOP);
+
+        row()
+            .hit(HitId::TabStrip)
+            .relative()
+            .h(TAB_HEIGHT)
+            .when_some(scroll_back, |this, btn| this.child(btn))
+            .child(
+                box_()
+                    .hit(HitId::TabList)
+                    .relative()
+                    .flex_none()
+                    .h_full()
+                    .w(viewport)
+                    .overflow_hidden()
+                    .children(ghosts)
+                    .children(tab_nodes),
+            )
+            .when_some(scroll_fwd, |this, btn| this.child(btn))
+            .child(new_tab)
+    }
+
+    fn scroll_button(&self, forward: bool, p: Palette, ui: &mut UiState) -> Node {
+        let target = self.scroll;
+        let enabled = if forward {
+            target < self.max_scroll() - 0.1
+        } else {
+            target > 0.1
+        };
+        let (hit, tip, glyph) = if forward {
+            (
+                HitId::TabScrollRight,
+                "Scroll tab list forward",
+                CARET_RIGHT,
+            )
+        } else {
+            (
+                HitId::TabScrollLeft,
+                "Scroll tab list backward",
+                CARET_LEFT,
+            )
+        };
+        let (left, right) = if forward {
+            (SCROLL_INNER_PAD, SCROLL_OUTER_PAD)
+        } else {
+            (SCROLL_OUTER_PAD, SCROLL_INNER_PAD)
+        };
+        let button = strip_button(p, hit, tip, glyph, SCROLL_GLYPH_SIZE, enabled, ui)
+            .mt(BUTTON_TOP)
+            .when(enabled, |this| this.text_color(rgba(p.text_secondary)));
+        box_()
+            .flex_none()
+            .h_full()
+            .pl(left)
+            .pr(right)
+            .child(button)
+    }
 }
 
-fn slide(
-    id: impl Into<ElementId>,
-    seed: f32,
-    target: f32,
-    snap: bool,
-    window: &mut Window,
-    cx: &mut App,
-) -> (f32, bool) {
+fn slide(key: AnimKey, seed: f32, target: f32, snap: bool, ui: &mut UiState) -> (f32, bool) {
     let duration = if snap { Duration::ZERO } else { SLIDE_DURATION };
-    let sample = animate_from(id, seed, target, duration, SLIDE_EASING, window, cx);
+    let sample = ui.animate_f32_from(key, seed, target, duration, SLIDE_EASING);
     (sample.value.round(), sample.status == AnimStatus::Running)
-}
-
-pub(crate) fn window_listeners(register: impl FnOnce(&mut Window) + 'static) -> CanvasNode {
-    canvas(|_, _, _| {}, move |_, _, window, _| register(window))
-        .absolute()
-        .size_full()
-}
-
-fn repeat(
-    window_id: WindowId,
-    cx: &App,
-    delay: Duration,
-    interval: Duration,
-    mut tick: impl FnMut(&mut Jot, &mut App) -> bool + 'static,
-) -> TimerHandle {
-    cx.every(delay, interval, move |cx| {
-        cx.with_jot(window_id, |jot, cx| tick(jot, cx))
-            .unwrap_or(false)
-    })
 }
 
 fn slot_index(left: f32, width: f32, last: usize) -> usize {
@@ -292,685 +625,184 @@ fn visible(x: f32, right: f32, cover: Option<(f32, f32)>) -> (f32, f32) {
     }
 }
 
-fn frame(x: f32, width: f32, cover: Option<(f32, f32)>, content: impl Into<UiNode>) -> Div {
+fn tab_frame(x: f32, width: f32, cover: Option<(f32, f32)>, content: Node) -> Node {
     let (left, right) = visible(x, x + width, cover);
-    div()
+    box_()
         .absolute()
-        .top_0()
-        .left(px(left))
-        .w(px((right - left).max(0.)))
-        .h(px(TAB_HEIGHT))
+        .top(0.)
+        .left(left)
+        .w((right - left).max(0.))
+        .h(TAB_HEIGHT)
         .overflow_hidden()
         .child(
-            div()
+            box_()
                 .absolute()
-                .top_0()
-                .left(px(x - left))
-                .w(px(width))
+                .top(0.)
+                .left(x - left)
+                .w(width)
                 .h_full()
                 .child(content),
         )
 }
 
-fn tab_face(p: Palette, active: bool, trailing: f32, name: impl Into<SharedString>) -> Div {
-    div()
-        .flex()
+fn render_tab(
+    tabs: &[Tab],
+    ix: usize,
+    active_ix: usize,
+    hovered_ix: Option<usize>,
+    p: Palette,
+    ui: &mut UiState,
+) -> Node {
+    let tab = &tabs[ix];
+    let id = tab.data.id;
+    let active = ix == active_ix;
+    let is_hovered = hovered_ix == Some(ix);
+    let separator =
+        !active && ix + 1 != active_ix && hovered_ix != Some(ix) && hovered_ix != Some(ix + 1);
+    let dirty = tab.data.is_dirty();
+    let show_close = is_hovered || (active && !dirty);
+    let show_dot = dirty && !show_close;
+    let trailing = if show_close || show_dot {
+        TAB_LABEL_TRAILING
+    } else {
+        TAB_LABEL_TRAILING_BARE
+    };
+    let inset = if active { 1. } else { 0. };
+    let name = document::display_name(tab.data.path.as_deref());
+    let tip: SharedStr = tab
+        .data
+        .path
+        .as_ref()
+        .map_or_else(|| name.clone(), |path| path.display().to_string())
+        .into();
+
+    let hit = HitId::Tab(id.0);
+    let face_bg = if active {
+        rgba(p.layer)
+    } else {
+        ui.brush(
+            hit,
+            Brushes {
+                rest: transparent_black(),
+                hover: rgba(p.layer_hover),
+                pressed: rgba(p.layer_hover),
+            },
+            true,
+        )
+    };
+
+    let close_node = show_close.then(|| {
+        strip_button(
+            p,
+            HitId::TabClose(id.0),
+            "Close tab (Ctrl+W)",
+            CLOSE_GLYPH,
+            BUTTON_GLYPH_SIZE,
+            true,
+            ui,
+        )
+        .absolute()
+        .top(CLOSE_BUTTON_TOP - inset)
+        .right(CLOSE_BUTTON_RIGHT - inset)
+    });
+
+    box_()
+        .hit(hit)
+        .tooltip(tip)
+        .cursor(CursorStyle::Arrow)
+        .relative()
+        .size_full()
+        .overflow_hidden()
+        .when(active, |this| {
+            this.border_t(1.)
+                .border_l(1.)
+                .border_r(1.)
+                .border_color(rgba(p.stroke))
+                .rounded_t(OVERLAY_RADIUS)
+        })
+        .child(tab_face(p, active, face_bg, trailing, name))
+        .when(show_dot, |this| this.child(unsaved_dot(p, inset)))
+        .when(separator, |this| this.child(tab_separator(p)))
+        .when_some(close_node, |this, btn| this.child(btn))
+}
+
+fn tab_face(
+    p: Palette,
+    active: bool,
+    bg: crate::color::Rgba,
+    trailing: f32,
+    name: impl Into<SharedStr>,
+) -> Node {
+    row()
         .items_center()
         .size_full()
-        .pl(px(TAB_LABEL_INSET))
-        .pr(px(trailing))
+        .pl(TAB_LABEL_INSET)
+        .pr(trailing)
         .font_family(SMALL_FONT)
-        .text_size(px(12.))
-        .map(|this| {
-            if active {
-                this.rounded_t(px(field::OVERLAY_RADIUS - 1.))
-                    .bg(rgba(p.layer))
-                    .text_color(rgba(p.text_primary))
-                    .font_weight(FontWeight::SEMIBOLD)
-            } else {
-                this.rounded_t(px(field::OVERLAY_RADIUS))
-                    .text_color(rgba(p.text_secondary))
-            }
+        .text_size(12.)
+        .bg(bg)
+        .when(active, |this| {
+            this.rounded_t(OVERLAY_RADIUS - 1.)
+                .text_color(rgba(p.text_primary))
+                .font_semibold()
+        })
+        .when(!active, |this| {
+            this.rounded_t(OVERLAY_RADIUS)
+                .text_color(rgba(p.text_secondary))
         })
         .child(
-            div()
+            box_()
                 .flex_1()
                 .min_w_0()
                 .overflow_hidden()
-                .whitespace_nowrap()
-                .child(name.into()),
+                .nowrap()
+                .child(text(name)),
         )
 }
 
-fn unsaved_dot(p: Palette, inset: f32) -> Div {
-    div()
+fn unsaved_dot(p: Palette, inset: f32) -> Node {
+    box_()
         .absolute()
-        .top(px(UNSAVED_DOT_TOP - inset))
-        .right(px(UNSAVED_DOT_RIGHT - inset))
-        .size(px(UNSAVED_DOT))
+        .top(UNSAVED_DOT_TOP - inset)
+        .right(UNSAVED_DOT_RIGHT - inset)
+        .size(UNSAVED_DOT)
         .rounded_full()
         .bg(rgba(p.text_tertiary))
 }
 
 fn strip_button(
     p: Palette,
-    id: impl Into<ElementId>,
+    hit: HitId,
     tip: &'static str,
     glyph: &'static str,
     glyph_size: f32,
     enabled: bool,
-) -> Div {
-    field::icon_button(
+    ui: &mut UiState,
+) -> Node {
+    icon_button(
         p,
-        id,
+        hit,
         tip,
         glyph,
-        field::IconButtonStyle {
-            glyph_size: px(glyph_size),
-            size: size(px(BUTTON_WIDTH), px(BUTTON_HEIGHT)),
-            radius: px(field::CONTROL_RADIUS),
+        IconButtonStyle {
+            glyph_size,
+            width: BUTTON_WIDTH,
+            height: BUTTON_HEIGHT,
+            radius: CONTROL_RADIUS,
         },
         enabled,
+        ui,
     )
 }
 
-fn tab_separator(p: Palette) -> Div {
-    div()
+fn tab_separator(p: Palette) -> Node {
+    box_()
         .absolute()
-        .right_0()
-        .top(px(8.))
-        .w(px(1.))
-        .h(px(16.))
+        .right(0.)
+        .top(8.)
+        .w(1.)
+        .h(16.)
         .bg(rgba(p.divider))
-}
-
-impl Jot {
-    pub(crate) fn create_tab(
-        content: Option<(PathBuf, document::Loaded)>,
-        window: &Window,
-        cx: &App,
-    ) -> Tab {
-        let word_wrap = cx.shared.view.word_wrap;
-        let (path, text, format) = match content {
-            Some((path, loaded)) => (Some(path), loaded.text, loaded.format),
-            None => (None, Rope::new(), document::Format::default()),
-        };
-        let editor = Editor::multi_line(window, cx)
-            .with_soft_wrap(word_wrap)
-            .with_viewport_wheel_step()
-            .with_rope(text)
-            .with_paddings(EDITOR_PADDINGS);
-        Self::adopt_tab(TabData {
-            id: TabId::next(),
-            editor,
-            zoom: 1.,
-            path,
-            format,
-        })
-    }
-
-    pub(crate) fn adopt_tab(data: TabData) -> Tab {
-        Tab {
-            data,
-            slot: SlotKey::default(),
-        }
-    }
-
-    pub(crate) fn tab_name(&self, ix: usize) -> String {
-        document::display_name(self.tabs[ix].data.path.as_deref())
-    }
-
-    pub(crate) fn tab_index(&self, id: TabId) -> Option<usize> {
-        self.tabs.iter().position(|tab| tab.data.id == id)
-    }
-
-    pub(crate) fn add_tab(&mut self, window: &mut Window, cx: &mut App) {
-        let tab = Self::create_tab(None, window, cx);
-        self.push_tab(tab, window, cx);
-    }
-
-    pub(crate) fn push_tab(&mut self, mut tab: Tab, window: &mut Window, cx: &mut App) {
-        tab.slot = self.strip.key();
-        self.tabs.push(tab);
-        self.layout_tabs();
-        self.activate_tab(self.tabs.len() - 1, window, cx);
-    }
-
-    pub(crate) fn replace_tab(
-        &mut self,
-        ix: usize,
-        mut tab: Tab,
-        window: &mut Window,
-        cx: &mut App,
-    ) {
-        tab.slot = self.tabs[ix].slot;
-        let replaced = std::mem::replace(&mut self.tabs[ix], tab);
-        self.forget_tab(replaced.data.id, cx);
-        self.activate_tab(ix, window, cx);
-    }
-
-    fn forget_tab(&mut self, id: TabId, cx: &mut App) {
-        self.strip.depart(id);
-        tab_drag::forget(id, cx);
-    }
-
-    pub(crate) fn remove_tab(&mut self, ix: usize, window: &mut Window, cx: &mut App) {
-        if self.tabs.len() == 1 {
-            window.remove_window();
-            return;
-        }
-        let width = self.strip.width;
-        let name = self.tab_name(ix).into();
-        let tab = self.tabs.remove(ix);
-        self.forget_tab(tab.data.id, cx);
-        if ix < self.tabs.len() && self.strip.area.get().contains(&window.mouse_position()) {
-            self.strip.frozen = Some(width);
-        }
-        self.strip.ghosts.push(Ghost {
-            name,
-            key: tab.slot,
-            x: ix as f32 * width,
-        });
-        self.settle_after_removal(ix, window, cx);
-    }
-
-    fn settle_after_removal(&mut self, ix: usize, window: &mut Window, cx: &mut App) {
-        if ix < self.active || self.active == self.tabs.len() {
-            self.active -= 1;
-        }
-        self.layout_tabs();
-        self.activate_tab(self.active, window, cx);
-    }
-
-    fn layout_tabs(&mut self) {
-        self.strip.measure(self.tabs.len());
-        self.strip.extent = self.tabs.len() as f32 * self.strip.width;
-        self.strip.scroll_to(self.strip.scroll);
-    }
-
-    fn tab_target(&self, ix: usize) -> f32 {
-        let id = self.tabs[ix].data.id;
-        self.strip
-            .drag
-            .filter(|drag| drag.id == id)
-            .map_or(ix as f32 * self.strip.width, |drag| drag.left)
-    }
-
-    pub(crate) fn reveal_tab(&mut self, ix: usize) {
-        if ix < self.tabs.len() {
-            let left = self.tab_target(ix);
-            self.strip.reveal(left, left + self.strip.width);
-        }
-    }
-
-    fn scroll_tabs(&mut self, delta: f32, cx: &mut App) -> bool {
-        let before = self.strip.scroll;
-        self.strip.scroll_to(before + delta);
-        self.notify(cx);
-        self.strip.scroll != before
-    }
-
-    fn thaw_tabs(&mut self, cx: &mut App) {
-        if self.strip.frozen.take().is_some() {
-            self.layout_tabs();
-            self.notify(cx);
-        }
-    }
-
-    fn thaw_listener(&self) -> CanvasNode {
-        let area = self.strip.area.clone();
-        let window_id = self.window_id;
-        window_listeners(move |window| {
-            window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
-                if phase == DispatchPhase::Bubble && !area.get().contains(&event.position) {
-                    cx.with_jot(window_id, |jot, cx| jot.thaw_tabs(cx));
-                }
-            });
-        })
-    }
-
-    pub(crate) fn drag_tab(&mut self, id: TabId, x: f32, grab: f32, start: f32, cx: &mut App) {
-        let Some(from) = self.tab_index(id) else {
-            return;
-        };
-        let origin = self.strip.origin();
-        let mut drag = self
-            .strip
-            .drag
-            .filter(|drag| drag.id == id)
-            .unwrap_or(Drag {
-                id,
-                grab,
-                last_move: start - origin,
-                left: 0.,
-            });
-        self.strip.lifted = Some(id);
-        let width = self.strip.width;
-        let last = self.tabs.len() - 1;
-        let (x, left, to) = self.strip.place(x, drag.grab, last);
-        drag.left = left;
-        self.strip.snap_scroll = true;
-        self.strip.reveal(left, left + width);
-        if to != from && (x - drag.last_move).abs() > REORDER_THRESHOLD {
-            let active = self.active_tab_id();
-            let tab = self.tabs.remove(from);
-            self.tabs.insert(to, tab);
-            self.active = self.tab_index(active).unwrap_or(to);
-            drag.last_move = x;
-        }
-        self.strip.drag = Some(drag);
-        self.layout_tabs();
-        self.notify(cx);
-    }
-
-    pub(crate) fn release_tab(&mut self, cx: &mut App) {
-        if self.strip.drag.take().is_some() {
-            self.layout_tabs();
-            self.notify(cx);
-        }
-    }
-
-    pub(crate) fn take_tab(
-        &mut self,
-        id: TabId,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> Option<TabData> {
-        let ix = self.tab_index(id)?;
-        let tab = self.tabs.remove(ix);
-        self.strip.depart(id);
-        if self.tabs.is_empty() {
-            window.remove_window();
-        } else {
-            self.settle_after_removal(ix, window, cx);
-        }
-        Some(tab.data)
-    }
-
-    pub(crate) fn insert_dragged_tab(
-        &mut self,
-        data: TabData,
-        x: f32,
-        grab: f32,
-        window: &mut Window,
-        cx: &mut App,
-    ) {
-        let mut tab = Self::adopt_tab(data);
-        tab.slot = self.strip.key();
-        let id = tab.data.id;
-        let count = self.tabs.len();
-        self.strip.measure(count + 1);
-        let (x, left, ix) = self.strip.place(x, grab, count);
-        self.tabs.insert(ix, tab);
-        self.strip.drag = Some(Drag {
-            id,
-            grab,
-            last_move: x,
-            left,
-        });
-        self.strip.lifted = Some(id);
-        self.strip.snap();
-        self.layout_tabs();
-        self.activate_tab(ix, window, cx);
-    }
-
-    pub(crate) fn restore_tab(
-        &mut self,
-        data: TabData,
-        ix: usize,
-        window: &mut Window,
-        cx: &mut App,
-    ) {
-        let mut tab = Self::adopt_tab(data);
-        let ix = ix.min(self.tabs.len());
-        tab.slot = self.strip.key();
-        self.tabs.insert(ix, tab);
-        self.layout_tabs();
-        self.activate_tab(ix, window, cx);
-    }
-
-    pub(crate) fn return_tab(
-        &mut self,
-        id: TabId,
-        ix: usize,
-        window: &mut Window,
-        cx: &mut App,
-    ) {
-        self.strip.drag = None;
-        if let Some(from) = self.tab_index(id) {
-            let tab = self.tabs.remove(from);
-            let ix = ix.min(self.tabs.len());
-            self.tabs.insert(ix, tab);
-        }
-        self.layout_tabs();
-        if let Some(ix) = self.tab_index(id) {
-            self.activate_tab(ix, window, cx);
-        }
-        self.notify(cx);
-    }
-
-    pub(crate) fn sample_tabs(&mut self, window: &mut Window, cx: &mut App) -> StripFrame {
-        let column = window.viewport_size().width.as_f32() - HEADER_WIDTH - STRIP_RESERVED;
-        if column != self.strip.column {
-            self.strip.column = column;
-            self.strip.snap();
-            self.layout_tabs();
-            self.reveal_tab(self.active);
-        }
-        let snap = std::mem::take(&mut self.strip.snap_layout);
-        let snap_scroll = std::mem::take(&mut self.strip.snap_scroll);
-        let (scroll, _) = slide("tab-scroll", 0., self.strip.scroll, snap_scroll, window, cx);
-        let (extent, _) = slide("tab-extent", TAB_WIDTH, self.strip.extent, snap, window, cx);
-        let mut right = 0.;
-        let mut lifted_moving = false;
-        let mut tabs = Vec::with_capacity(self.tabs.len());
-        for (ix, tab) in self.tabs.iter().enumerate() {
-            let id = tab.data.id;
-            let dragged = self.strip.drag.is_some_and(|drag| drag.id == id);
-            let (x, moving) = slide(
-                tab.slot.x(),
-                right,
-                self.tab_target(ix),
-                snap || dragged,
-                window,
-                cx,
-            );
-            let (width, _) = slide(tab.slot.width(), 0., self.strip.width, snap, window, cx);
-            if self.strip.lifted == Some(id) {
-                lifted_moving = moving;
-            }
-            right = x + width;
-            tabs.push((x, width));
-        }
-        let mut ghosts = Vec::new();
-        self.strip.ghosts.retain(|ghost| {
-            let (x, sliding) = slide(ghost.key.x(), ghost.x, ghost.x, false, window, cx);
-            let (width, shrinking) = slide(ghost.key.width(), 0., 0., false, window, cx);
-            let moving = sliding || shrinking;
-            if moving {
-                ghosts.push((ghost.name.clone(), x, width));
-            }
-            moving
-        });
-        if self.strip.drag.is_none() && !lifted_moving {
-            self.strip.lifted = None;
-        }
-        let viewport = if self.strip.overflow {
-            self.strip.scroll_viewport()
-        } else {
-            LIST_PAD + extent
-        };
-        StripFrame {
-            shift: LIST_PAD - scroll,
-            viewport,
-            tabs,
-            ghosts,
-        }
-    }
-
-    fn tab(&self, ix: usize, left: f32, cx: &App) -> Div {
-        let p = palette(cx);
-        let tab = &self.tabs[ix];
-        let id = tab.data.id;
-        let active = ix == self.active;
-        let hovered = self
-            .strip
-            .hovered
-            .and_then(|hovered| self.tab_index(hovered));
-        let separator =
-            !active && ix + 1 != self.active && hovered != Some(ix) && hovered != Some(ix + 1);
-        let dirty = tab.data.is_dirty();
-        let show_close = self.strip.hovered == Some(id) || (active && !dirty);
-        let show_dot = dirty && !show_close;
-        let trailing = if show_close || show_dot {
-            TAB_LABEL_TRAILING
-        } else {
-            TAB_LABEL_TRAILING_BARE
-        };
-        let inset = if active { 1. } else { 0. };
-        let name = self.tab_name(ix);
-        let tip: SharedString = tab
-            .data
-            .path
-            .as_ref()
-            .map_or(name.clone(), |path| path.display().to_string())
-            .into();
-
-        div()
-            .id(("tab", id))
-            .relative()
-            .size_full()
-            .overflow_hidden()
-            .when(active, |this| {
-                this.border_t_1()
-                    .border_l_1()
-                    .border_r_1()
-                    .border_color(rgba(p.stroke))
-                    .rounded_t(px(field::OVERLAY_RADIUS))
-            })
-            .on_mouse_down(
-                MouseButton::Left,
-                self.on(move |this, event: &MouseDownEvent, window, cx| {
-                    if let Some(ix) = this.tab_index(id) {
-                        let owner = tab_drag::owner(window);
-                        this.activate_tab(ix, window, cx);
-                        let grab = point(
-                            event.position.x.as_f32() - left,
-                            event.position.y.as_f32() - STRIP_TOP,
-                        );
-                        let alone = this.tabs.len() == 1;
-                        tab_drag::press(owner, id, ix, grab, event.position, alone, cx);
-                        this.notify(cx);
-                    }
-                }),
-            )
-            .on_hover(self.on(move |this, hovered: &bool, _, cx| {
-                if *hovered {
-                    this.strip.hovered = Some(id);
-                } else if this.strip.hovered == Some(id) {
-                    this.strip.hovered = None;
-                }
-                this.notify(cx);
-            }))
-            .child(
-                tab_face(p, active, trailing, name)
-                    .id(("tab-face", id))
-                    .when(!active, |this| {
-                        this.hover(move |style| style.bg(rgba(p.layer_hover)))
-                    })
-                    .on_aux_click(self.on(move |this, event: &ClickEvent, window, cx| {
-                        if event.is_middle_click()
-                            && let Some(ix) = this.tab_index(id)
-                        {
-                            this.close_tab(ix, window, cx);
-                        }
-                    })),
-            )
-            .when(show_dot, |this| this.child(unsaved_dot(p, inset)))
-            .when(separator, |this| this.child(tab_separator(p)))
-            .when(show_close, |this| {
-                this.child(self.close_button(p, id, inset))
-            })
-            .tooltip(tip)
-    }
-
-    fn close_button(&self, p: Palette, id: TabId, inset: f32) -> Div {
-        strip_button(
-            p,
-            ("close-tab", id),
-            "Close tab (Ctrl+W)",
-            CLOSE_GLYPH,
-            BUTTON_GLYPH_SIZE,
-            true,
-        )
-        .absolute()
-        .top(px(CLOSE_BUTTON_TOP - inset))
-        .right(px(CLOSE_BUTTON_RIGHT - inset))
-        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-        .on_click(self.on(move |this, _, window, cx| {
-            if let Some(ix) = this.tab_index(id) {
-                this.close_tab(ix, window, cx);
-            }
-        }))
-    }
-
-    fn stop_repeat(&mut self, _: &MouseUpEvent, _: &mut Window, _: &mut App) {
-        self.strip.repeat.cancel();
-    }
-
-    fn new_tab_button(&self, cx: &App) -> Div {
-        let p = palette(cx);
-        strip_button(
-            p,
-            "new-tab",
-            "New tab (Ctrl+N)",
-            ADD_GLYPH,
-            BUTTON_GLYPH_SIZE,
-            true,
-        )
-        .ml(px(self.strip.new_tab_gap()))
-        .mt(px(BUTTON_TOP))
-        .on_click(self.on(|this, _, window, cx| this.add_tab(window, cx)))
-    }
-
-    fn scroll_button(&self, forward: bool, cx: &App) -> Div {
-        let p = palette(cx);
-        let target = self.strip.scroll;
-        let enabled = if forward {
-            target < self.strip.max_scroll() - 0.1
-        } else {
-            target > 0.1
-        };
-        let step = if forward { SCROLL_STEP } else { -SCROLL_STEP };
-        let (key, tip, glyph) = if forward {
-            (
-                "scroll-tabs-forward",
-                "Scroll tab list forward",
-                CARET_RIGHT,
-            )
-        } else {
-            (
-                "scroll-tabs-backward",
-                "Scroll tab list backward",
-                CARET_LEFT,
-            )
-        };
-        let (left, right) = if forward {
-            (SCROLL_INNER_PAD, SCROLL_OUTER_PAD)
-        } else {
-            (SCROLL_OUTER_PAD, SCROLL_INNER_PAD)
-        };
-        let button = strip_button(p, key, tip, glyph, SCROLL_GLYPH_SIZE, enabled)
-            .mt(px(BUTTON_TOP))
-            .when(enabled, |this| {
-                this.text_color(rgba(p.text_secondary)).on_mouse_down(
-                    MouseButton::Left,
-                    self.on(move |this, _, _, cx| {
-                        if this.scroll_tabs(step, cx) {
-                            this.strip.repeat = repeat(
-                                this.window_id,
-                                cx,
-                                SCROLL_REPEAT_DELAY,
-                                SCROLL_REPEAT_INTERVAL,
-                                move |jot, cx| jot.scroll_tabs(step, cx),
-                            );
-                        }
-                    }),
-                )
-            })
-            .on_mouse_up(MouseButton::Left, self.on(Self::stop_repeat))
-            .on_mouse_up_out(MouseButton::Left, self.on(Self::stop_repeat));
-        div()
-            .flex_none()
-            .h_full()
-            .pl(px(left))
-            .pr(px(right))
-            .child(button)
-    }
-
-    pub(crate) fn tab_strip(&self, sampled: &StripFrame, cx: &App) -> Div {
-        let p = palette(cx);
-        let shift = sampled.shift;
-        let viewport = sampled.viewport;
-        let lifted = self.strip.lifted.and_then(|id| self.tab_index(id));
-        let cover = lifted.map(|ix| {
-            let (x, width) = sampled.tabs[ix];
-            (shift + x, shift + x + width)
-        });
-        let ghosts = sampled.ghosts.iter().map(|(name, x, width)| {
-            frame(
-                shift + x,
-                *width,
-                cover,
-                tab_face(p, false, TAB_LABEL_TRAILING_BARE, name.clone()),
-            )
-        });
-        let origin = HEADER_WIDTH + self.strip.scroll_area() + shift;
-        let tabs: Vec<_> = (0..self.tabs.len())
-            .filter(|&ix| Some(ix) != lifted)
-            .chain(lifted)
-            .map(|ix| {
-                let (x, width) = sampled.tabs[ix];
-                frame(
-                    shift + x,
-                    width,
-                    cover.filter(|_| Some(ix) != lifted),
-                    self.tab(ix, origin + x, cx),
-                )
-            })
-            .collect();
-        let overflow = self.strip.overflow;
-        let buttons = self.strip.buttons;
-
-        let area = self.strip.area.clone();
-        div()
-            .relative()
-            .flex()
-            .h(px(TAB_HEIGHT))
-            .when(self.strip.frozen.is_some(), |this| {
-                this.child(self.thaw_listener())
-            })
-            .when(buttons, |this| this.child(self.scroll_button(false, cx)))
-            .child(
-                div()
-                    .id("tab-list")
-                    .relative()
-                    .flex_none()
-                    .h_full()
-                    .w(px(viewport))
-                    .overflow_hidden()
-                    .when(overflow, |this| {
-                        this.on_scroll_wheel(self.on(|this, event: &ScrollWheelEvent, _, cx| {
-                            let viewport = this.strip.scroll_viewport();
-                            match event.delta {
-                                ScrollDelta::Lines(lines) => {
-                                    let notches = if lines.y != 0. { lines.y } else { lines.x };
-                                    this.scroll_tabs(-notches * WHEEL_SHARE * viewport, cx);
-                                }
-                                ScrollDelta::Pixels(pixels) => {
-                                    let delta = if pixels.y != px(0.) {
-                                        pixels.y
-                                    } else {
-                                        pixels.x
-                                    };
-                                    let target = this.strip.scroll - delta.as_f32();
-                                    this.strip.snap_scroll = true;
-                                    this.strip.scroll_to(target);
-                                    this.notify(cx);
-                                }
-                            }
-                        }))
-                    })
-                    .children(ghosts)
-                    .children(tabs)
-                    .when(tab_drag::active(cx), |this| {
-                        this.child(tab_drag::listeners())
-                    }),
-            )
-            .when(buttons, |this| this.child(self.scroll_button(true, cx)))
-            .child(self.new_tab_button(cx))
-            .on_bounds(move |bounds, _, _| area.set(bounds))
-    }
 }
 
 #[cfg(test)]
@@ -1006,7 +838,6 @@ mod tests {
         assert!(!strip.overflow);
         assert!(!strip.buttons);
 
-        // Many tabs trigger overflow and scroll buttons.
         strip.measure(10);
         assert!(strip.overflow);
         assert!(strip.buttons);

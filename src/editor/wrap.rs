@@ -1,4 +1,4 @@
-//! Clean-room incremental soft-wrap index, chunked line tree, and shaped visual rows.
+//! Incremental soft-wrap index, chunked line tree, and shaped visual rows.
 
 use std::borrow::Cow;
 use std::ops::{Range, RangeInclusive};
@@ -6,12 +6,13 @@ use std::ops::{Range, RangeInclusive};
 use ropey::Rope;
 use unicode_segmentation::UnicodeSegmentation as _;
 
-use crate::ui::{
-    App, Boundary, Font, FontRun, MAX_WRAP_INDENT, Pixels, Point, ShapedLine, Size, TextAlign,
-    Window, point, px, size,
+use crate::geom::{Point, Size, point, size};
+use crate::gfx::{
+    Boundary, D2DRenderer, Font, FontRun, MAX_WRAP_INDENT, ShapedLine, TextAlign, TextSystem,
+    line_break_opportunities,
 };
 
-use super::buffer::{Point as TextPoint, RopeExt};
+use super::buffer::{RopeExt, TextPoint};
 
 const CHUNK_SIZE: usize = 256;
 
@@ -38,10 +39,10 @@ impl VisualRow {
     }
 
     #[inline]
-    pub(crate) fn width(&self) -> Pixels {
+    pub(crate) fn width(&self) -> f32 {
         match self {
             Self::Shaped(line) => line.width,
-            Self::Placeholder(_) => px(0.),
+            Self::Placeholder(_) => 0.0,
         }
     }
 
@@ -50,29 +51,23 @@ impl VisualRow {
         matches!(self, Self::Shaped(_))
     }
 
-    pub(crate) fn x_for_index(&self, ix: usize) -> Pixels {
+    pub(crate) fn x_for_index(&self, ix: usize) -> f32 {
         match self {
             Self::Shaped(line) => line.x_for_index(ix),
-            Self::Placeholder(_) => px(0.),
+            Self::Placeholder(_) => 0.0,
         }
     }
 
-    pub(crate) fn closest_index_for_x(&self, x: Pixels) -> usize {
+    pub(crate) fn closest_index_for_x(&self, x: f32) -> usize {
         match self {
             Self::Shaped(line) => line.closest_index_for_x(x),
             Self::Placeholder(_) => 0,
         }
     }
 
-    pub(crate) fn paint(
-        &self,
-        origin: Point<Pixels>,
-        line_height: Pixels,
-        window: &mut Window,
-        cx: &mut App,
-    ) {
+    pub(crate) fn paint(&self, origin: Point, line_height: f32, renderer: &mut D2DRenderer) {
         if let Self::Shaped(line) = self {
-            let _ = line.paint(origin, line_height, TextAlign::Left, None, window, cx);
+            line.paint(origin, line_height, TextAlign::Left, None, renderer);
         }
     }
 }
@@ -81,14 +76,14 @@ impl VisualRow {
 pub(crate) struct RowLayout {
     byte_len: usize,
     pub(crate) rows: Vec<VisualRow>,
-    pub(crate) hanging_indent: Pixels,
-    max_width: Pixels,
+    pub(crate) hanging_indent: f32,
+    max_width: f32,
 }
 
 impl RowLayout {
-    pub(crate) fn from_rows(rows: Vec<VisualRow>, hanging_indent: Pixels) -> Self {
+    pub(crate) fn from_rows(rows: Vec<VisualRow>, hanging_indent: f32) -> Self {
         let byte_len = rows.iter().map(VisualRow::byte_len).sum();
-        let max_width = rows.iter().map(VisualRow::width).max().unwrap_or_default();
+        let max_width = rows.iter().map(VisualRow::width).fold(0.0f32, f32::max);
         Self {
             byte_len,
             rows,
@@ -98,7 +93,7 @@ impl RowLayout {
     }
 
     pub(crate) fn from_shaped(lines: Vec<ShapedLine>) -> Self {
-        Self::from_rows(lines.into_iter().map(VisualRow::from).collect(), px(0.))
+        Self::from_rows(lines.into_iter().map(VisualRow::from).collect(), 0.0)
     }
 
     #[inline]
@@ -107,9 +102,9 @@ impl RowLayout {
     }
 
     #[inline]
-    pub(crate) fn indent_for(&self, sub_row: usize) -> Pixels {
+    pub(crate) fn indent_for(&self, sub_row: usize) -> f32 {
         if sub_row == 0 {
-            px(0.)
+            0.0
         } else {
             self.hanging_indent
         }
@@ -118,11 +113,11 @@ impl RowLayout {
     pub(crate) fn position_for_index(
         &self,
         local_offset: usize,
-        line_height: Pixels,
+        line_height: f32,
         end_affinity: bool,
-    ) -> Option<Point<Pixels>> {
+    ) -> Option<Point> {
         let mut cursor = 0;
-        let mut y = px(0.);
+        let mut y = 0.0;
         for (ix, row) in self.rows.iter().enumerate() {
             let is_last = ix + 1 == self.rows.len();
             let len = row.byte_len();
@@ -143,7 +138,7 @@ impl RowLayout {
         None
     }
 
-    pub(crate) fn closest_index_for_x(&self, x: Pixels) -> usize {
+    pub(crate) fn closest_index_for_x(&self, x: f32) -> usize {
         let mut cursor = 0;
         for (ix, row) in self.rows.iter().enumerate() {
             let indent = self.indent_for(ix);
@@ -157,11 +152,11 @@ impl RowLayout {
 
     pub(crate) fn closest_index_for_position(
         &self,
-        pos: Point<Pixels>,
-        line_height: Pixels,
+        pos: Point,
+        line_height: f32,
     ) -> Option<(usize, bool)> {
         let mut offset = 0;
-        let mut top = px(0.);
+        let mut top = 0.0;
         for (ix, row) in self.rows.iter().enumerate() {
             let bottom = top + line_height;
             if pos.y >= top && pos.y < bottom {
@@ -176,30 +171,22 @@ impl RowLayout {
         None
     }
 
-    pub(crate) fn size(&self, line_height: Pixels) -> Size<Pixels> {
+    pub(crate) fn size(&self, line_height: f32) -> Size {
         let width = self
             .rows
             .iter()
             .enumerate()
             .map(|(ix, row)| row.width() + self.indent_for(ix))
-            .max()
-            .unwrap_or(self.max_width);
-        size(width, self.rows.len() * line_height)
+            .fold(self.max_width, f32::max);
+        size(width, self.rows.len() as f32 * line_height)
     }
 
-    pub(crate) fn paint(
-        &self,
-        origin: Point<Pixels>,
-        line_height: Pixels,
-        window: &mut Window,
-        cx: &mut App,
-    ) {
+    pub(crate) fn paint(&self, origin: Point, line_height: f32, renderer: &mut D2DRenderer) {
         for (ix, row) in self.rows.iter().enumerate() {
             row.paint(
-                origin + point(self.indent_for(ix), ix * line_height),
+                origin + point(self.indent_for(ix), ix as f32 * line_height),
                 line_height,
-                window,
-                cx,
+                renderer,
             );
         }
     }
@@ -408,23 +395,23 @@ impl LineChunks {
 }
 
 const CHAR_WIDTH_RANGES: [RangeInclusive<u32>; 17] = [
-    0x0020..=0x007e, // Printable ASCII
-    0x00a0..=0x02ff, // Latin Extended + spacing modifiers
-    0x0370..=0x0482, // Greek + Cyrillic
-    0x048a..=0x052f, // Cyrillic after combining marks
-    0x1e00..=0x1fff, // Latin & Greek extended additional
-    0x2010..=0x2027, // Dashes, quotes, bullets
-    0x2030..=0x205e, // General punctuation
-    0x2070..=0x20cf, // Superscripts & currency
-    0x2100..=0x2bff, // Letterlike, arrows, math, symbols
-    0x3000..=0x3029, // CJK punctuation before tone marks
-    0x3030..=0x3098, // CJK punctuation & Hiragana
-    0x309b..=0x30ff, // Kana after voicing marks
-    0x3400..=0x4dbf, // CJK Extension A
-    0x4e00..=0x9fff, // CJK Unified Ideographs
-    0xac00..=0xd7a3, // Hangul Syllables
-    0xf900..=0xfaff, // CJK Compatibility Ideographs
-    0xff01..=0xffee, // Halfwidth & Fullwidth Forms
+    0x0020..=0x007e,
+    0x00a0..=0x02ff,
+    0x0370..=0x0482,
+    0x048a..=0x052f,
+    0x1e00..=0x1fff,
+    0x2010..=0x2027,
+    0x2030..=0x205e,
+    0x2070..=0x20cf,
+    0x2100..=0x2bff,
+    0x3000..=0x3029,
+    0x3030..=0x3098,
+    0x309b..=0x30ff,
+    0x3400..=0x4dbf,
+    0x4e00..=0x9fff,
+    0xac00..=0xd7a3,
+    0xf900..=0xfaff,
+    0xff01..=0xffee,
 ];
 
 #[inline]
@@ -440,13 +427,11 @@ fn can_wrap_with_char_widths(text: &str) -> bool {
         .all(|c| CHAR_WIDTH_RANGES.iter().any(|r| r.contains(&(c as u32))))
 }
 
-/// Breaks complex/shaped lines along Unicode break opportunities with grapheme fallback using
-/// exponential probing so long lines do not shape the entire remainder on each visual row.
 fn measured_wrap_breaks(
     text: &str,
-    width: Pixels,
+    width: f32,
     preserve_indent: bool,
-    mut measure: impl FnMut(&str) -> Pixels,
+    mut measure: impl FnMut(&str) -> f32,
     out: &mut Vec<Boundary>,
 ) {
     let indent = if preserve_indent {
@@ -460,13 +445,13 @@ fn measured_wrap_breaks(
     let indent_width = if indent > 0 {
         measure(&text[..indent])
     } else {
-        px(0.)
+        0.0
     };
     let grapheme_ends: Vec<usize> = text
         .grapheme_indices(true)
         .map(|(ix, g)| ix + g.len())
         .collect();
-    let opportunities: Vec<usize> = crate::win32::line_break_opportunities(text)
+    let opportunities: Vec<usize> = line_break_opportunities(text)
         .into_iter()
         .filter(|ix| grapheme_ends.binary_search(ix).is_ok())
         .collect();
@@ -520,14 +505,14 @@ fn measured_wrap_breaks(
 pub(crate) struct WrapIndex {
     text: Rope,
     font: Font,
-    font_size: Pixels,
-    wrap_width: Option<Pixels>,
+    font_size: f32,
+    wrap_width: Option<f32>,
     chunks: LineChunks,
     initialized: bool,
 }
 
 impl WrapIndex {
-    pub(crate) fn new(font: Font, font_size: Pixels, wrap_width: Option<Pixels>) -> Self {
+    pub(crate) fn new(font: Font, font_size: f32, wrap_width: Option<f32>) -> Self {
         Self {
             text: Rope::new(),
             font,
@@ -568,22 +553,22 @@ impl WrapIndex {
             .map_or_else(|| self.line_count().saturating_sub(1), |(line, _, _)| line)
     }
 
-    pub(crate) fn set_wrap_width(&mut self, wrap_width: Option<Pixels>, cx: &mut App) {
+    pub(crate) fn set_wrap_width(&mut self, wrap_width: Option<f32>, ts: &TextSystem) {
         if self.wrap_width == wrap_width {
             return;
         }
         self.wrap_width = wrap_width;
         let snapshot = self.text.clone();
-        self.rebuild_all(&snapshot, cx);
+        self.rebuild_all(&snapshot, ts);
     }
 
     pub(crate) fn sync_layout(
         &mut self,
         text: &Rope,
         font: Font,
-        font_size: Pixels,
-        wrap_width: Option<Pixels>,
-        cx: &mut App,
+        font_size: f32,
+        wrap_width: Option<f32>,
+        ts: &TextSystem,
     ) {
         let font_changed = self.font != font || self.font_size != font_size;
         let width_changed = self.wrap_width != wrap_width;
@@ -593,14 +578,14 @@ impl WrapIndex {
 
         if !self.initialized {
             self.initialized = true;
-            self.rebuild_all(text, cx);
+            self.rebuild_all(text, ts);
             return;
         }
         if wrap_width.is_none() && !width_changed {
             return;
         }
         if font_changed || width_changed {
-            self.rebuild_all(text, cx);
+            self.rebuild_all(text, ts);
         }
     }
 
@@ -609,7 +594,7 @@ impl WrapIndex {
         updated_text: &Rope,
         old_range: &Range<usize>,
         inserted_bytes: usize,
-        cx: &mut App,
+        ts: &TextSystem,
     ) {
         let Some(wrap_width) = self.wrap_width else {
             self.splice_lines(
@@ -622,13 +607,12 @@ impl WrapIndex {
             return;
         };
 
-        let text_system = cx.text_system().clone();
         let font = self.font.clone();
         let font_size = self.font_size;
-        text_system.with_char_widths(&font, font_size, |font_id, char_widths, dw| {
+        ts.with_char_widths(&font, font_size, |font_id, char_widths, dw| {
             let max_ascii = char_widths.max_printable_ascii();
-            let ascii_fit_len = if max_ascii > px(0.) {
-                (wrap_width / max_ascii).floor().max(0.) as usize
+            let ascii_fit_len = if max_ascii > 0.0 {
+                (wrap_width / max_ascii).floor().max(0.0) as usize
             } else {
                 0
             };
@@ -647,7 +631,7 @@ impl WrapIndex {
                             true,
                             |sub| {
                                 if sub.is_empty() {
-                                    return px(0.);
+                                    return 0.0;
                                 }
                                 dw.layout_line(
                                     sub,
@@ -667,26 +651,6 @@ impl WrapIndex {
         });
     }
 
-    #[cfg(test)]
-    pub(crate) fn update_for_bench<F>(
-        &mut self,
-        updated_text: &Rope,
-        old_range: &Range<usize>,
-        inserted_bytes: usize,
-        ascii_fit_len: usize,
-        wrap_line: &mut F,
-    ) where
-        F: FnMut(&str, Pixels, &mut Vec<Boundary>),
-    {
-        self.splice_lines(
-            updated_text,
-            old_range,
-            inserted_bytes,
-            ascii_fit_len,
-            wrap_line,
-        );
-    }
-
     fn splice_lines<F>(
         &mut self,
         updated_text: &Rope,
@@ -695,7 +659,7 @@ impl WrapIndex {
         ascii_fit_len: usize,
         wrap_line: &mut F,
     ) where
-        F: FnMut(&str, Pixels, &mut Vec<Boundary>),
+        F: FnMut(&str, f32, &mut Vec<Boundary>),
     {
         let existing_count = self.line_count();
         let old_start = self
@@ -765,8 +729,8 @@ impl WrapIndex {
         self.text = updated_text.clone();
     }
 
-    fn rebuild_all(&mut self, text: &Rope, cx: &mut App) {
-        self.apply_edit(text, &(0..self.text.len()), text.len(), cx);
+    fn rebuild_all(&mut self, text: &Rope, ts: &TextSystem) {
+        self.apply_edit(text, &(0..self.text.len()), text.len(), ts);
     }
 
     pub(crate) fn offset_to_display(&self, offset: usize, end_affinity: bool) -> DisplayPos {
@@ -814,7 +778,7 @@ impl WrapIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui::{font, px};
+    use crate::gfx::font;
 
     fn test_font() -> Font {
         font("Arial")
@@ -826,9 +790,9 @@ mod tests {
             let mut out = Vec::new();
             measured_wrap_breaks(
                 text,
-                px(width),
+                width,
                 preserve_indent,
-                |s| px(s.graphemes(true).count() as f32),
+                |s| s.graphemes(true).count() as f32,
                 &mut out,
             );
             out.into_iter().map(|b| b.ix).collect::<Vec<_>>()
@@ -841,17 +805,17 @@ mod tests {
         assert!(wrap("", 0., false).is_empty());
         assert_eq!(wrap("abc", 0., false), vec![1, 2]);
         assert_eq!(wrap("你好，世界", 2., false), vec![3, 9]);
-        assert!(crate::win32::line_break_opportunities("foo\u{00A0}bar").is_empty());
-        assert_eq!(crate::win32::line_break_opportunities("foo-bar"), vec![4]);
+        assert!(line_break_opportunities("foo\u{00A0}bar").is_empty());
+        assert_eq!(line_break_opportunities("foo-bar"), vec![4]);
         assert_eq!(wrap("👨‍👩‍👧‍👦 word", 4., false), vec!["👨‍👩‍👧‍👦 ".len()]);
         assert_eq!(wrap("你好😀世界", 3., false), vec!["你好😀".len()]);
     }
 
     #[test]
     fn incremental_splice_longest_row_and_ascii_fast_fit() {
-        let mut index = WrapIndex::new(test_font(), px(14.), Some(px(10.)));
+        let mut index = WrapIndex::new(test_font(), 14., Some(10.));
         let mut text = Rope::from("aa\nbbbb\nc");
-        let mut fake = |line: &str, _: Pixels, out: &mut Vec<Boundary>| {
+        let mut fake = |line: &str, _: f32, out: &mut Vec<Boundary>| {
             if line.len() > 2 {
                 out.push(Boundary {
                     ix: 2,
@@ -874,7 +838,6 @@ mod tests {
         assert_eq!(index.visual_row_count(), 5);
         assert_eq!(index.longest_line(), 2);
 
-        // Full delete leaves 1 empty line.
         let all = 0..text.len();
         text.replace(all.clone(), "");
         index.splice_lines(&text, &all, 0, 0, &mut fake);
@@ -885,8 +848,7 @@ mod tests {
             std::slice::from_ref(&(0..0))
         );
 
-        // ASCII fast fit skips wrap callback for short printable ASCII lines.
-        let mut fast = WrapIndex::new(test_font(), px(14.), Some(px(100.)));
+        let mut fast = WrapIndex::new(test_font(), 14., Some(100.));
         let sample = Rope::from("short ascii\nlonger ascii line\n日本語\n");
         let mut called = Vec::new();
         fast.splice_lines(&sample, &(0..0), sample.len(), 12, &mut |line, _, _| {
@@ -897,7 +859,7 @@ mod tests {
 
     #[test]
     fn wrap_boundary_affinity_and_hanging_indent_geometry() {
-        let mut index = WrapIndex::new(test_font(), px(14.), None);
+        let mut index = WrapIndex::new(test_font(), 14., None);
         index.text = Rope::from("first line\nthis one wraps");
         index.chunks = LineChunks::from_vec(vec![
             WrappedLine {
@@ -915,25 +877,17 @@ mod tests {
         assert_eq!(index.offset_to_display(20, false), DisplayPos::new(2, 1, 0));
         assert_eq!(index.display_to_offset(DisplayPos::new(2, 1, 3)), 23);
 
-        let layout = RowLayout::from_rows(
-            vec![
-                VisualRow::from(ShapedLine::default().with_len(10)),
-                VisualRow::from(ShapedLine::default().with_len(5)),
-            ],
-            px(20.),
-        );
+        let mut s1 = ShapedLine::default();
+        s1.len = 10;
+        let mut s2 = ShapedLine::default();
+        s2.len = 5;
+        let layout = RowLayout::from_rows(vec![VisualRow::from(s1), VisualRow::from(s2)], 20.);
         let (ix, affinity) = layout
-            .closest_index_for_position(point(px(999.), px(5.)), px(20.))
+            .closest_index_for_position(point(999., 5.), 20.)
             .unwrap();
         assert_eq!(ix, 10);
         assert!(affinity);
-        assert_eq!(
-            layout.position_for_index(10, px(20.), true).map(|p| p.y),
-            Some(px(0.))
-        );
-        assert_eq!(
-            layout.position_for_index(10, px(20.), false),
-            Some(point(px(20.), px(20.)))
-        );
+        assert_eq!(layout.position_for_index(10, 20., true).map(|p| p.y), Some(0.));
+        assert_eq!(layout.position_for_index(10, 20., false), Some(point(20., 20.)));
     }
 }

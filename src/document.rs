@@ -1,9 +1,13 @@
-use crate::editor::{Rope, RopeBuilder};
-use crate::win32::{AnsiCodePage, ReplaceFileError, documents_dir, replace_file};
+//! Streaming file I/O, encoding/BOM/line-ending detection, lossy-ANSI checks, and atomic saves.
+
 use std::ffi::OsString;
 use std::fs;
 use std::io::{self, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+
+use ropey::{Rope, RopeBuilder};
+
+use crate::platform::{AnsiCodePage, ReplaceFileError, documents_dir, replace_file};
 
 const UTF8_BOM: &[u8] = b"\xef\xbb\xbf";
 const UTF16_LE_BOM: &[u8] = b"\xff\xfe";
@@ -669,7 +673,6 @@ mod tests {
             load_bytes(b"\xfe\xff\0h", 4).unwrap().format.encoding,
             Encoding::Utf16Be
         );
-        // Late invalid UTF-8 byte falls back to ANSI cleanly across chunks.
         let mut ansi = vec![b'a'; 20];
         ansi.extend_from_slice(&[0x80, 0xFF]);
         assert_eq!(load_bytes(&ansi, 5).unwrap().format.encoding, Encoding::Ansi);
@@ -718,7 +721,6 @@ mod tests {
                 assert!(!is_lossy(&rope, format).unwrap());
                 let mut bytes = Vec::new();
                 stream_encode(&rope, format, &mut bytes).unwrap();
-                // Torture-test tiny chunk sizes splitting multi-byte UTF-8, CRLF, and UTF-16 surrogates.
                 for chunk in [4, 5, 7, 64] {
                     let loaded = load_bytes(&bytes, chunk).unwrap();
                     assert_eq!(loaded.text.to_string(), sample);
@@ -726,7 +728,6 @@ mod tests {
                 }
             }
         }
-        // Reject odd-length UTF-16 payload and invalid UTF-8-with-BOM.
         assert!(load_bytes(&[0xff, 0xfe, b'a'], 4).is_err());
         assert!(load_bytes(&[0xef, 0xbb, 0xbf, 0xff], 4).is_err());
     }
@@ -763,12 +764,10 @@ mod tests {
         assert_eq!(loaded.format.encoding, Encoding::Utf8Bom);
         assert_eq!(loaded.format.line_ending, LineEnding::Lf);
 
-        // Overwrite via ReplaceFileW path
         write_rope(&file, &Rope::from("second\nline"), format).unwrap();
         let loaded = load(&file).unwrap();
         assert_eq!(loaded.text.to_string(), "second\nline");
 
-        // Read-only rejection
         let original = fs::metadata(&file).unwrap().permissions();
         let mut readonly = original.clone();
         readonly.set_readonly(true);
@@ -786,7 +785,6 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         let file = dir.join("large.txt");
 
-        // Build a >200 KB Rope spanning many IO_CHUNK (64 KB) boundaries with ASCII + Unicode + emoji.
         let mut builder = RopeBuilder::new();
         for i in 0..4000 {
             builder.append(&format!("line {i:04}: alpha beta — 日本語 😀\n"));

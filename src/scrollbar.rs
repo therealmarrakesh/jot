@@ -1,21 +1,21 @@
-//! Clean-room owned overlay scrollbar state, geometry, and painting.
+//! Owned overlay scrollbar state, track geometry, hover/drag handling, and Direct2D painting.
 
 use std::time::{Duration, Instant};
 
+use crate::color::{Rgba, rgba};
+use crate::geom::{Axis, Corners, Point, Rect, Size, point, size};
+use crate::gfx::{D2DRenderer, fill};
+use crate::platform::TimerHandle;
 use crate::theme::Palette;
-use crate::ui::anim::{Easing, TimedTransition};
-use crate::ui::{
-    Anchor, Axis, Bounds, ContentMask, CursorStyle, Hitbox, HitboxBehavior, Pixels, Point, Rgba,
-    Size, TimerHandle, Window, fill, point, px, rgba, size,
-};
+use crate::ui::{Easing, TimedTransition};
 
-const TRACK_THICKNESS: Pixels = px(16.);
-const MIN_THUMB_LENGTH: Pixels = px(48.);
-const THUMB_MARGIN: Pixels = px(3.);
-const THUMB_REST_THICKNESS: Pixels = px(6.);
-const THUMB_ACTIVE_THICKNESS: Pixels = px(8.);
-const THUMB_REST_RADIUS: Pixels = px(3.);
-const THUMB_ACTIVE_RADIUS: Pixels = px(4.);
+const TRACK_THICKNESS: f32 = 16.;
+const MIN_THUMB_LENGTH: f32 = 48.;
+const THUMB_MARGIN: f32 = 3.;
+const THUMB_REST_THICKNESS: f32 = 6.;
+const THUMB_ACTIVE_THICKNESS: f32 = 8.;
+const THUMB_REST_RADIUS: f32 = 3.;
+const THUMB_ACTIVE_RADIUS: f32 = 4.;
 
 const IDLE_HOLD: Duration = Duration::from_secs(2);
 const FADE_IN_DURATION: Duration = Duration::from_millis(120);
@@ -24,34 +24,35 @@ const EXPAND_DURATION: Duration = Duration::from_millis(120);
 const DRAG_NOTIFY_INTERVAL: Duration = Duration::from_micros(8_333);
 
 #[inline]
-fn clamp_radius(radius: Pixels, bounds: Bounds<Pixels>) -> Pixels {
+fn clamp_radius(radius: f32, bounds: Rect) -> f32 {
     radius
-        .min(bounds.size.width / 2.)
-        .min(bounds.size.height / 2.)
+        .min(bounds.size.width * 0.5)
+        .min(bounds.size.height * 0.5)
+        .max(0.0)
 }
 
 /// 1D geometry along a single scrollbar axis shared by painting, track clicks, and dragging.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct TrackMetrics {
-    origin: Pixels,
-    margin: Pixels,
-    pub(crate) thumb_len: Pixels,
-    travel: Pixels,
-    max_scroll: Pixels,
+    origin: f32,
+    margin: f32,
+    pub(crate) thumb_len: f32,
+    travel: f32,
+    max_scroll: f32,
 }
 
 impl TrackMetrics {
     pub(crate) fn compute(
-        origin: Pixels,
-        viewport_span: Pixels,
-        content_span: Pixels,
-        corner_reserve: Pixels,
+        origin: f32,
+        viewport_span: f32,
+        content_span: f32,
+        corner_reserve: f32,
     ) -> Self {
-        let track_span = (viewport_span - corner_reserve).max(px(0.));
+        let track_span = (viewport_span - corner_reserve).max(0.);
         let raw_thumb = (viewport_span / content_span * viewport_span)
             .max(MIN_THUMB_LENGTH)
             .min(track_span);
-        let margin = THUMB_MARGIN.clamp(px(0.), raw_thumb / 2.);
+        let margin = THUMB_MARGIN.clamp(0., raw_thumb * 0.5);
         Self {
             origin,
             margin,
@@ -61,14 +62,14 @@ impl TrackMetrics {
         }
     }
 
-    pub(crate) fn thumb_start(self, scroll_offset: Pixels) -> Pixels {
+    pub(crate) fn thumb_start(self, scroll_offset: f32) -> f32 {
         let ratio = (-scroll_offset / self.max_scroll).clamp(0., 1.);
         self.origin + self.margin + ratio * self.travel
     }
 
-    fn scroll_for_pointer(self, pointer: Pixels, grab: Pixels) -> Pixels {
-        if self.travel <= px(0.) {
-            return px(0.);
+    fn scroll_for_pointer(self, pointer: f32, grab: f32) -> f32 {
+        if self.travel <= 0. {
+            return 0.;
         }
         let ratio = ((pointer - self.origin - self.margin - grab) / self.travel).clamp(0., 1.);
         -self.max_scroll * ratio
@@ -77,11 +78,11 @@ impl TrackMetrics {
     pub(crate) fn apply_drag(
         self,
         axis: Axis,
-        pointer: Point<Pixels>,
-        grab: Point<Pixels>,
-        mut offset: Point<Pixels>,
-    ) -> Point<Pixels> {
-        if self.travel <= px(0.) {
+        pointer: Point,
+        grab: Point,
+        mut offset: Point,
+    ) -> Point {
+        if self.travel <= 0. {
             return offset;
         }
         match axis {
@@ -92,44 +93,43 @@ impl TrackMetrics {
     }
 }
 
-/// Viewport inputs supplied by the scrolled content (e.g., `Editor`) each frame.
+/// Viewport inputs supplied by the scrolled content (`Editor`) each frame.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct ScrollbarViewport {
-    pub(crate) bounds: Bounds<Pixels>,
-    pub(crate) content_size: Size<Pixels>,
+    pub(crate) bounds: Rect,
+    pub(crate) content_size: Size,
     pub(crate) horizontal: bool,
 }
 
-/// Prepainted geometry for one active scrollbar axis.
-#[derive(Clone)]
+/// Prepared geometry for one active scrollbar axis retained on `ScrollbarState` for direct
+/// hit-testing, dragging, and painting.
+#[derive(Clone, Copy, Debug)]
 pub(crate) struct PreparedAxis {
     pub(crate) axis: Axis,
-    pub(crate) bar_hitbox: Hitbox,
-    pub(crate) track_bounds: Bounds<Pixels>,
-    pub(crate) thumb_hit_bounds: Bounds<Pixels>,
-    pub(crate) thumb_paint_bounds: Bounds<Pixels>,
+    pub(crate) track_bounds: Rect,
+    pub(crate) thumb_hit_bounds: Rect,
+    pub(crate) thumb_paint_bounds: Rect,
     pub(crate) thumb_color: Rgba,
-    pub(crate) corner_radius: Pixels,
+    pub(crate) corner_radius: f32,
     pub(crate) metrics: TrackMetrics,
     pub(crate) opacity: f32,
     pub(crate) interactive: bool,
 }
 
-/// Result of routing a mouse move through `ScrollbarState`.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct ScrollbarMoveOutcome {
-    pub(crate) new_offset: Option<Point<Pixels>>,
+    pub(crate) new_offset: Option<Point>,
     pub(crate) notify_now: bool,
-    pub(crate) stop_propagation: bool,
+    pub(crate) consumed: bool,
 }
 
-/// Owned scrollbar interaction and animation state (stored directly on `Editor`).
+/// Owned scrollbar interaction, prepared geometry, and animation state (stored on `Editor`).
 pub(crate) struct ScrollbarState {
     hovered_axis: Option<Axis>,
     hovered_thumb: Option<Axis>,
     dragged_axis: Option<Axis>,
-    drag_grab: Point<Pixels>,
-    last_offset: Point<Pixels>,
+    drag_grab: Point,
+    last_offset: Point,
     last_activity: Option<Instant>,
     last_drag_notify: Instant,
     drag_timer_pending: bool,
@@ -137,8 +137,10 @@ pub(crate) struct ScrollbarState {
     idle_timer_pending: bool,
     idle_timer: TimerHandle,
     opacity: TimedTransition<f32>,
-    vertical_thickness: TimedTransition<Pixels>,
-    horizontal_thickness: TimedTransition<Pixels>,
+    vertical_thickness: TimedTransition<f32>,
+    horizontal_thickness: TimedTransition<f32>,
+    viewport_bounds: Rect,
+    axes: Vec<PreparedAxis>,
 }
 
 impl Default for ScrollbarState {
@@ -157,8 +159,8 @@ impl ScrollbarState {
             hovered_axis: None,
             hovered_thumb: None,
             dragged_axis: None,
-            drag_grab: point(px(0.), px(0.)),
-            last_offset: point(px(0.), px(0.)),
+            drag_grab: Point::ZERO,
+            last_offset: Point::ZERO,
             last_activity: None,
             last_drag_notify: now,
             drag_timer_pending: false,
@@ -168,7 +170,19 @@ impl ScrollbarState {
             opacity: TimedTransition::settled(0.0, now),
             vertical_thickness: TimedTransition::settled(THUMB_REST_THICKNESS, now),
             horizontal_thickness: TimedTransition::settled(THUMB_REST_THICKNESS, now),
+            viewport_bounds: Rect::ZERO,
+            axes: Vec::new(),
         }
+    }
+
+    pub(crate) fn is_dragging(&self) -> bool {
+        self.dragged_axis.is_some()
+    }
+
+    pub(crate) fn hits_track(&self, pos: Point) -> bool {
+        self.axes
+            .iter()
+            .any(|a| a.interactive && a.track_bounds.contains(pos))
     }
 
     fn wants_visible(&self, now: Instant) -> bool {
@@ -203,10 +217,10 @@ impl ScrollbarState {
     fn step_thickness(
         &mut self,
         axis: Axis,
-        target: Pixels,
+        target: f32,
         reduce_motion: bool,
         now: Instant,
-    ) -> (Pixels, bool) {
+    ) -> (f32, bool) {
         let transition = match axis {
             Axis::Vertical => &mut self.vertical_thickness,
             Axis::Horizontal => &mut self.horizontal_thickness,
@@ -233,7 +247,7 @@ impl ScrollbarState {
         true
     }
 
-    pub(crate) fn on_wheel(&mut self, offset: Point<Pixels>, now: Instant) -> bool {
+    pub(crate) fn on_wheel(&mut self, offset: Point, now: Instant) -> bool {
         if offset == self.last_offset {
             return false;
         }
@@ -244,16 +258,17 @@ impl ScrollbarState {
         true
     }
 
+    /// Updates scrollbar layout and animation state. Returns `true` if another vsync frame is needed.
     pub(crate) fn prepare(
         &mut self,
         viewport: ScrollbarViewport,
-        scroll_offset: Point<Pixels>,
+        scroll_offset: Point,
         reduce_motion: bool,
         p: Palette,
-        window: &mut Window,
+        now: Instant,
         schedule_idle: impl FnOnce(Duration) -> TimerHandle,
-    ) -> Vec<PreparedAxis> {
-        let now = Instant::now();
+    ) -> bool {
+        let mut animating = false;
         if scroll_offset != self.last_offset {
             self.last_offset = scroll_offset;
             self.last_activity = Some(now);
@@ -263,9 +278,7 @@ impl ScrollbarState {
 
         let visible = self.wants_visible(now);
         let (opacity, opacity_running) = self.step_opacity(visible, reduce_motion, now);
-        if opacity_running {
-            window.request_animation_frame();
-        }
+        animating |= opacity_running;
 
         let is_hovered = self.hovered_axis.is_some() || self.hovered_thumb.is_some();
         if !is_hovered
@@ -281,20 +294,23 @@ impl ScrollbarState {
         }
 
         let vp = viewport.bounds;
+        self.viewport_bounds = vp;
         let vertical_needed = viewport.content_size.height > vp.size.height;
         let horizontal_needed =
             viewport.horizontal && viewport.content_size.width > vp.size.width;
 
-        let mut axes_needed = Vec::with_capacity(2);
+        self.axes.clear();
+        let mut axes_needed = [None, None];
+        let mut count = 0;
         if horizontal_needed {
-            axes_needed.push(Axis::Horizontal);
+            axes_needed[count] = Some(Axis::Horizontal);
+            count += 1;
         }
         if vertical_needed {
-            axes_needed.push(Axis::Vertical);
+            axes_needed[count] = Some(Axis::Vertical);
         }
 
-        let mut prepared = Vec::with_capacity(axes_needed.len());
-        for axis in axes_needed {
+        for axis in axes_needed.into_iter().flatten() {
             let is_vertical = matches!(axis, Axis::Vertical);
             let (content_span, viewport_span, axis_offset) = if is_vertical {
                 (viewport.content_size.height, vp.size.height, scroll_offset.y)
@@ -304,16 +320,16 @@ impl ScrollbarState {
             let corner_reserve = if !is_vertical && vertical_needed {
                 TRACK_THICKNESS
             } else {
-                px(0.)
+                0.
             };
 
             let track_bounds = if is_vertical {
-                Bounds::new(
+                Rect::new(
                     point(vp.right() - TRACK_THICKNESS, vp.top()),
                     size(TRACK_THICKNESS, vp.size.height),
                 )
             } else {
-                Bounds::new(
+                Rect::new(
                     point(vp.left(), vp.bottom() - TRACK_THICKNESS),
                     size(vp.size.width, TRACK_THICKNESS),
                 )
@@ -322,78 +338,52 @@ impl ScrollbarState {
             let is_dragged = self.dragged_axis == Some(axis);
             let is_thumb_hovered = self.hovered_thumb == Some(axis);
             let (thumb_color, target_thickness, radius) = if is_dragged {
-                (
-                    rgba(p.text_primary),
-                    THUMB_ACTIVE_THICKNESS,
-                    THUMB_ACTIVE_RADIUS,
-                )
+                (rgba(p.text_primary), THUMB_ACTIVE_THICKNESS, THUMB_ACTIVE_RADIUS)
             } else if is_thumb_hovered {
-                (
-                    rgba(p.text_secondary),
-                    THUMB_ACTIVE_THICKNESS,
-                    THUMB_ACTIVE_RADIUS,
-                )
+                (rgba(p.text_secondary), THUMB_ACTIVE_THICKNESS, THUMB_ACTIVE_RADIUS)
             } else {
-                (
-                    rgba(p.text_tertiary),
-                    THUMB_REST_THICKNESS,
-                    THUMB_REST_RADIUS,
-                )
+                (rgba(p.text_tertiary), THUMB_REST_THICKNESS, THUMB_REST_RADIUS)
             };
 
             let (thickness, thickness_running) =
                 self.step_thickness(axis, target_thickness, reduce_motion, now);
-            if thickness_running {
-                window.request_animation_frame();
-            }
+            animating |= thickness_running;
 
             let origin = if is_vertical {
                 track_bounds.origin.y
             } else {
                 track_bounds.origin.x
             };
-            let metrics =
-                TrackMetrics::compute(origin, viewport_span, content_span, corner_reserve);
+            let metrics = TrackMetrics::compute(origin, viewport_span, content_span, corner_reserve);
             let thumb_offset = metrics.thumb_start(axis_offset) - origin;
 
             let (thumb_hit_bounds, thumb_paint_bounds) = if is_vertical {
+                let right = track_bounds.right() - THUMB_MARGIN;
+                let top = track_bounds.top() + thumb_offset;
                 (
-                    Bounds::from_anchor_and_size(
-                        Anchor::TopRight,
-                        track_bounds.top_right() + point(-THUMB_MARGIN, thumb_offset),
+                    Rect::new(
+                        point(right - TRACK_THICKNESS, top),
                         size(TRACK_THICKNESS, metrics.thumb_len),
                     ),
-                    Bounds::from_anchor_and_size(
-                        Anchor::TopRight,
-                        track_bounds.top_right() + point(-THUMB_MARGIN, thumb_offset),
-                        size(thickness, metrics.thumb_len),
-                    ),
+                    Rect::new(point(right - thickness, top), size(thickness, metrics.thumb_len)),
                 )
             } else {
+                let left = track_bounds.left() + thumb_offset;
+                let bottom = track_bounds.bottom() - THUMB_MARGIN;
                 (
-                    Bounds::from_anchor_and_size(
-                        Anchor::BottomLeft,
-                        track_bounds.bottom_left() + point(thumb_offset, -THUMB_MARGIN),
+                    Rect::new(
+                        point(left, bottom - TRACK_THICKNESS),
                         size(metrics.thumb_len, TRACK_THICKNESS),
                     ),
-                    Bounds::from_anchor_and_size(
-                        Anchor::BottomLeft,
-                        track_bounds.bottom_left() + point(thumb_offset, -THUMB_MARGIN),
+                    Rect::new(
+                        point(left, bottom - thickness),
                         size(metrics.thumb_len, thickness),
                     ),
                 )
             };
 
-            let bar_hitbox = window.with_content_mask(
-                Some(ContentMask {
-                    bounds: track_bounds,
-                }),
-                |window| window.insert_hitbox(track_bounds, HitboxBehavior::Normal),
-            );
-
-            prepared.push(PreparedAxis {
+            self.axes.push(PreparedAxis {
                 axis,
-                bar_hitbox,
                 track_bounds,
                 thumb_hit_bounds,
                 thumb_paint_bounds,
@@ -404,145 +394,141 @@ impl ScrollbarState {
                 interactive: visible || opacity > 0.0,
             });
         }
-
-        prepared
+        animating
     }
 
-    pub(crate) fn paint_axes(
-        axes: &[PreparedAxis],
-        viewport_bounds: Bounds<Pixels>,
-        window: &mut Window,
-    ) {
-        window.with_content_mask(
-            Some(ContentMask {
-                bounds: viewport_bounds,
-            }),
-            |window| {
-                for item in axes {
-                    window.set_cursor_style(CursorStyle::default(), &item.bar_hitbox);
-                    if item.opacity > 0.0 {
-                        window.paint_layer(viewport_bounds, |window| {
-                            window.paint_quad(
-                                fill(
-                                    item.thumb_paint_bounds,
-                                    item.thumb_color.opacity(item.opacity),
-                                )
-                                .corner_radii(item.corner_radius),
-                            );
-                        });
-                    }
-                }
-            },
-        );
+    pub(crate) fn paint(&self, renderer: &mut D2DRenderer) {
+        if self.axes.is_empty() || self.viewport_bounds.is_empty() {
+            return;
+        }
+        renderer.push_clip(self.viewport_bounds);
+        for item in &self.axes {
+            if item.opacity > 0.0 {
+                renderer.paint_quad(
+                    fill(item.thumb_paint_bounds, item.thumb_color.opacity(item.opacity))
+                        .corner_radii(Corners::all(item.corner_radius)),
+                );
+            }
+        }
+        renderer.pop_clip();
     }
 
-    pub(crate) fn on_mouse_down(
-        &mut self,
-        item: &PreparedAxis,
-        position: Point<Pixels>,
-        current_offset: Point<Pixels>,
-    ) -> Point<Pixels> {
-        if item.thumb_hit_bounds.contains(&position) {
+    /// Handles a left mouse-down; returns `Some(new_scroll_offset)` if a scrollbar track/thumb
+    /// consumed the click.
+    pub(crate) fn on_mouse_down(&mut self, position: Point, current_offset: Point) -> Option<Point> {
+        let item = self
+            .axes
+            .iter()
+            .rev()
+            .find(|a| a.interactive && a.track_bounds.contains(position))
+            .copied()?;
+        let next = if item.thumb_hit_bounds.contains(position) {
             let grab = position - item.thumb_hit_bounds.origin;
             self.dragged_axis = Some(item.axis);
             self.drag_grab = grab;
             item.metrics
                 .apply_drag(item.axis, position, grab, current_offset)
         } else {
-            let center = point(item.metrics.thumb_len / 2., item.metrics.thumb_len / 2.);
+            let center = point(item.metrics.thumb_len * 0.5, item.metrics.thumb_len * 0.5);
             item.metrics
                 .apply_drag(item.axis, position, center, current_offset)
-        }
+        };
+        Some(next)
     }
 
     pub(crate) fn on_mouse_move(
         &mut self,
-        item: &PreparedAxis,
-        position: Point<Pixels>,
+        position: Point,
         dragging_primary: bool,
-        current_offset: Point<Pixels>,
-        schedule_drag: impl FnOnce(Duration) -> TimerHandle,
+        current_offset: Point,
+        mut schedule_drag: impl FnMut(Duration) -> TimerHandle,
     ) -> ScrollbarMoveOutcome {
         let now = Instant::now();
-        let axis = item.axis;
         let mut notify = false;
+        let axes = self.axes.clone();
 
-        if item.track_bounds.contains(&position) && item.interactive {
-            if self.hovered_axis != Some(axis) {
-                self.hovered_axis = Some(axis);
+        for item in &axes {
+            let axis = item.axis;
+            if item.track_bounds.contains(position) && item.interactive {
+                if self.hovered_axis != Some(axis) {
+                    self.hovered_axis = Some(axis);
+                    notify = true;
+                }
+                self.last_activity = Some(now);
+            } else if self.hovered_axis == Some(axis) {
+                self.hovered_axis = None;
+                self.last_activity = Some(now);
                 notify = true;
             }
-            self.last_activity = Some(now);
-        } else if self.hovered_axis == Some(axis) {
-            self.hovered_axis = None;
-            self.last_activity = Some(now);
-            notify = true;
-        }
 
-        let thumb_hovered = item.interactive && item.thumb_hit_bounds.contains(&position);
-        if thumb_hovered {
-            if self.hovered_thumb != Some(axis) {
-                self.hovered_thumb = Some(axis);
+            let thumb_hovered = item.interactive && item.thumb_hit_bounds.contains(position);
+            if thumb_hovered {
+                if self.hovered_thumb != Some(axis) {
+                    self.hovered_thumb = Some(axis);
+                    notify = true;
+                }
+            } else if self.hovered_thumb == Some(axis) {
+                self.hovered_thumb = None;
                 notify = true;
             }
-        } else if self.hovered_thumb == Some(axis) {
-            self.hovered_thumb = None;
-            notify = true;
-        }
 
-        if self.dragged_axis == Some(axis) && dragging_primary {
-            let next = item
-                .metrics
-                .apply_drag(axis, position, self.drag_grab, current_offset);
-            let moved = next != current_offset;
-            if moved || notify {
-                let elapsed = now.saturating_duration_since(self.last_drag_notify);
-                if elapsed >= DRAG_NOTIFY_INTERVAL {
-                    self.last_drag_notify = now;
-                    self.drag_timer.cancel();
-                    self.drag_timer_pending = false;
-                    return ScrollbarMoveOutcome {
-                        new_offset: moved.then_some(next),
-                        notify_now: true,
-                        stop_propagation: true,
-                    };
+            if self.dragged_axis == Some(axis) && dragging_primary {
+                let next = item
+                    .metrics
+                    .apply_drag(axis, position, self.drag_grab, current_offset);
+                let moved = next != current_offset;
+                if moved || notify {
+                    let elapsed = now.saturating_duration_since(self.last_drag_notify);
+                    if elapsed >= DRAG_NOTIFY_INTERVAL {
+                        self.last_drag_notify = now;
+                        self.drag_timer.cancel();
+                        self.drag_timer_pending = false;
+                        return ScrollbarMoveOutcome {
+                            new_offset: moved.then_some(next),
+                            notify_now: true,
+                            consumed: true,
+                        };
+                    }
+                    if !self.drag_timer_pending {
+                        self.drag_timer_pending = true;
+                        self.drag_timer = schedule_drag(DRAG_NOTIFY_INTERVAL - elapsed);
+                    }
                 }
-                if !self.drag_timer_pending {
-                    self.drag_timer_pending = true;
-                    self.drag_timer = schedule_drag(DRAG_NOTIFY_INTERVAL - elapsed);
-                }
+                return ScrollbarMoveOutcome {
+                    new_offset: moved.then_some(next),
+                    notify_now: false,
+                    consumed: true,
+                };
             }
-            return ScrollbarMoveOutcome {
-                new_offset: moved.then_some(next),
-                notify_now: false,
-                stop_propagation: true,
-            };
         }
 
         ScrollbarMoveOutcome {
             new_offset: None,
             notify_now: notify,
-            stop_propagation: false,
+            consumed: false,
         }
     }
 
-    pub(crate) fn on_mouse_up(
-        &mut self,
-        item: &PreparedAxis,
-        position: Point<Pixels>,
-        current_offset: Point<Pixels>,
-    ) -> Option<Point<Pixels>> {
-        if self.dragged_axis != Some(item.axis) {
-            return None;
-        }
-        let next = item
-            .metrics
-            .apply_drag(item.axis, position, self.drag_grab, current_offset);
-        self.dragged_axis = None;
+    pub(crate) fn on_mouse_up(&mut self, position: Point, current_offset: Point) -> Option<Point> {
+        let axis = self.dragged_axis.take()?;
         self.drag_timer.cancel();
         self.drag_timer_pending = false;
         self.last_activity = Some(Instant::now());
-        Some(next)
+        let item = self.axes.iter().find(|a| a.axis == axis)?;
+        Some(
+            item.metrics
+                .apply_drag(axis, position, self.drag_grab, current_offset),
+        )
+    }
+
+    pub(crate) fn on_mouse_leave(&mut self) -> bool {
+        let had = self.hovered_axis.is_some() || self.hovered_thumb.is_some();
+        self.hovered_axis = None;
+        self.hovered_thumb = None;
+        if had {
+            self.last_activity = Some(Instant::now());
+        }
+        had
     }
 }
 
@@ -552,12 +538,12 @@ mod tests {
 
     #[test]
     fn thumb_radius_is_limited_by_its_actual_bounds() {
-        let vertical = Bounds::new(Point::default(), size(px(8.), px(80.)));
-        let horizontal = Bounds::new(Point::default(), size(px(80.), px(6.)));
+        let vertical = Rect::new(Point::ZERO, size(8., 80.));
+        let horizontal = Rect::new(Point::ZERO, size(80., 6.));
 
-        assert_eq!(clamp_radius(px(6.), vertical), px(4.));
-        assert_eq!(clamp_radius(px(6.), horizontal), px(3.));
-        assert_eq!(clamp_radius(Pixels::ZERO, vertical), Pixels::ZERO);
+        assert_eq!(clamp_radius(6., vertical), 4.);
+        assert_eq!(clamp_radius(6., horizontal), 3.);
+        assert_eq!(clamp_radius(0., vertical), 0.);
     }
 
     #[test]
@@ -578,7 +564,7 @@ mod tests {
         let (mid_exit, _) = state
             .opacity
             .sample(start + FADE_IN_DURATION + FADE_OUT_DURATION / 2);
-        assert!(mid_exit > 0.5, "ease-in must remain visible early in exit");
+        assert!(mid_exit > 0.5);
         assert_eq!(
             state
                 .opacity
@@ -596,7 +582,8 @@ mod tests {
         let start = Instant::now();
         let mut state = ScrollbarState::new_at(start);
 
-        let (w0, running) = state.step_thickness(Axis::Vertical, THUMB_ACTIVE_THICKNESS, false, start);
+        let (w0, running) =
+            state.step_thickness(Axis::Vertical, THUMB_ACTIVE_THICKNESS, false, start);
         assert_eq!(w0, THUMB_REST_THICKNESS);
         assert!(running);
         let (w_mid, _) = state.vertical_thickness.sample(start + EXPAND_DURATION / 2);
@@ -614,25 +601,25 @@ mod tests {
 
     #[test]
     fn full_track_thumb_preserves_scroll_offset() {
-        let metrics = TrackMetrics::compute(px(0.), px(200.), px(250.), px(0.));
-        assert!(metrics.travel > px(0.));
+        let metrics = TrackMetrics::compute(0., 200., 250., 0.);
+        assert!(metrics.travel > 0.);
         let dragged = metrics.apply_drag(
             Axis::Vertical,
-            point(px(0.), px(100.)),
-            point(px(0.), px(10.)),
-            point(px(-5.), px(0.)),
+            point(0., 100.),
+            point(0., 10.),
+            point(-5., 0.),
         );
-        assert_eq!(dragged.x, px(-5.));
-        assert!(dragged.y < px(0.));
+        assert_eq!(dragged.x, -5.);
+        assert!(dragged.y < 0.);
 
-        let zero_travel = TrackMetrics::compute(px(0.), px(40.), px(100.), px(0.));
-        assert_eq!(zero_travel.travel, px(0.));
+        let zero_travel = TrackMetrics::compute(0., 40., 100., 0.);
+        assert_eq!(zero_travel.travel, 0.);
         let kept = zero_travel.apply_drag(
             Axis::Vertical,
-            point(px(0.), px(20.)),
-            point(px(0.), px(5.)),
-            point(px(0.), px(-12.)),
+            point(0., 20.),
+            point(0., 5.),
+            point(0., -12.),
         );
-        assert_eq!(kept.y, px(-12.));
+        assert_eq!(kept.y, -12.);
     }
 }

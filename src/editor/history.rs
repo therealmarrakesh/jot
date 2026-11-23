@@ -1,11 +1,10 @@
-//! Clean-room coalescing undo/redo history with nested transactions and save-point tracking.
+//! Coalescing undo/redo history with nested transactions and save-point tracking.
 
 use super::buffer::{CaretSelection, Selection};
 
 const MAX_HISTORY_ENTRIES: usize = 1000;
 const MAX_CHANGES_PER_ENTRY: usize = 1000;
 
-/// Classification controlling whether adjacent edits coalesce into one undo entry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum EditKind {
     Insert,
@@ -14,7 +13,6 @@ pub(crate) enum EditKind {
     Atomic,
 }
 
-/// One single text replacement in document byte coordinates before the edit.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct EditRecord {
     pub(crate) old_range: Selection,
@@ -58,13 +56,11 @@ struct OpenGroup {
     selection_after: Option<CaretSelection>,
 }
 
-/// Sequence of edits and target caret selection returned by `undo` or `redo`.
 pub(crate) struct HistoryReplay {
     pub(crate) edits: Vec<EditRecord>,
     pub(crate) selection: Option<CaretSelection>,
 }
 
-/// Clean-room transactional undo/redo stack with dirty/clean save-version tracking.
 #[derive(Debug)]
 pub(crate) struct History {
     undo_stack: Vec<HistoryEntry>,
@@ -417,7 +413,6 @@ mod tests {
         assert_eq!(edits[0].new_text, "c");
         assert_eq!(edits[2].new_text, "a");
 
-        // Atomic group never coalesces with following insert.
         h.begin_group();
         h.record_edit(insert_edit(0, "x"), EditKind::Insert);
         h.end_group();
@@ -425,7 +420,6 @@ mod tests {
         assert_eq!(h.undo().unwrap().edits.len(), 1);
         assert_eq!(h.undo().unwrap().edits.len(), 1);
 
-        // Stack cap retains MAX_HISTORY_ENTRIES.
         let mut capped = History::new();
         for i in 0..1_100 {
             capped.record_edit(insert_edit(i, "a"), EditKind::Atomic);
@@ -456,7 +450,6 @@ mod tests {
         assert_eq!(h.undo().unwrap().edits, [insert_edit(1, "b")]);
         assert!(h.is_clean());
 
-        // Async save completes after another edit occurred.
         let snapshot = h.begin_save();
         h.record_edit(insert_edit(1, "c"), EditKind::Insert);
         h.mark_saved(snapshot);
@@ -464,7 +457,6 @@ mod tests {
         assert!(h.undo().is_some());
         assert!(h.is_clean());
 
-        // Branching edit diverges from saved version.
         assert!(h.undo().is_some());
         h.record_edit(insert_edit(0, "z"), EditKind::Insert);
         assert!(!h.is_clean());

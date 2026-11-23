@@ -33,13 +33,9 @@ pub(crate) enum Command {
     ToggleMatchCase,
     ToggleWrapAround,
     ShowContextMenu,
-    ToggleTheme,
 
-    // Shared menu / dialog / control navigation
-    Confirm,
+    // Shared cancellation
     Cancel,
-    FocusNext,
-    FocusPrev,
 
     // Editor editing, clipboard, history, and navigation
     Enter,

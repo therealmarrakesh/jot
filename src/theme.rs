@@ -1,55 +1,58 @@
-use super::*;
+//! Light and dark Windows 11 Fluent color palettes and elevation shadow presets.
 
-#[derive(Clone, Copy)]
+use crate::color::{Rgba, black, rgb};
+use crate::geom::{BoxShadow, Shadows, point};
+
+#[derive(Clone, Copy, Debug)]
 pub(crate) struct Surface {
-    pub panel: u32,
-    pub fill: u32,
-    pub field_stroke: u32,
-    pub field_bottom: u32,
-    pub hover: u32,
-    pub button_pressed: u32,
-    pub button_stroke: u32,
-    pub button_bottom: u32,
+    pub(crate) panel: u32,
+    pub(crate) fill: u32,
+    pub(crate) field_stroke: u32,
+    pub(crate) field_bottom: u32,
+    pub(crate) hover: u32,
+    pub(crate) button_pressed: u32,
+    pub(crate) button_stroke: u32,
+    pub(crate) button_bottom: u32,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub(crate) struct Palette {
-    pub dark: bool,
-    pub layer: u32,
-    pub stroke: u32,
-    pub stroke_on_layer: u32,
-    pub editor: u32,
-    pub text_primary: u32,
-    pub text_secondary: u32,
-    pub text_tertiary: u32,
-    pub text_disabled: u32,
-    pub subtle_secondary: u32,
-    pub subtle_tertiary: u32,
-    pub layer_hover: u32,
-    pub divider: u32,
-    pub on_accent_secondary: u32,
-    pub caption_glyph: u32,
-    pub caption_glyph_inactive: u32,
-    pub caption_glyph_pressed: u32,
-    pub caret: u32,
-    pub menu_fill: u32,
-    pub menu_separator: u32,
-    pub smoke: u32,
-    pub surface_stroke: u32,
-    pub dialog_divider: u32,
-    pub content_surface: Surface,
-    pub command_surface: Surface,
-    pub card_surface: Surface,
-    pub notice_fill: u32,
-    pub field_focused: u32,
-    pub focus_outer: u32,
-    pub focus_inner: u32,
-    pub acrylic_fallback: u32,
-    pub acrylic_luminosity: u32,
-    pub flyout_stroke: u32,
-    pub on_accent: u32,
-    pub accent: u32,
-    pub accent_bottom_edge: f32,
+    pub(crate) dark: bool,
+    pub(crate) layer: u32,
+    pub(crate) stroke: u32,
+    pub(crate) stroke_on_layer: u32,
+    pub(crate) editor: u32,
+    pub(crate) text_primary: u32,
+    pub(crate) text_secondary: u32,
+    pub(crate) text_tertiary: u32,
+    pub(crate) text_disabled: u32,
+    pub(crate) subtle_secondary: u32,
+    pub(crate) subtle_tertiary: u32,
+    pub(crate) layer_hover: u32,
+    pub(crate) divider: u32,
+    pub(crate) on_accent_secondary: u32,
+    pub(crate) caption_glyph: u32,
+    pub(crate) caption_glyph_inactive: u32,
+    pub(crate) caption_glyph_pressed: u32,
+    pub(crate) caret: u32,
+    pub(crate) menu_fill: u32,
+    pub(crate) menu_separator: u32,
+    pub(crate) smoke: u32,
+    pub(crate) surface_stroke: u32,
+    pub(crate) dialog_divider: u32,
+    pub(crate) content_surface: Surface,
+    pub(crate) command_surface: Surface,
+    pub(crate) card_surface: Surface,
+    pub(crate) notice_fill: u32,
+    pub(crate) field_focused: u32,
+    pub(crate) focus_outer: u32,
+    pub(crate) focus_inner: u32,
+    pub(crate) acrylic_fallback: u32,
+    pub(crate) acrylic_luminosity: u32,
+    pub(crate) flyout_stroke: u32,
+    pub(crate) on_accent: u32,
+    pub(crate) accent: u32,
+    pub(crate) accent_bottom_edge: f32,
 }
 
 impl Default for Palette {
@@ -59,12 +62,20 @@ impl Default for Palette {
 }
 
 impl Palette {
+    pub(crate) fn for_appearance(dark: bool, system_accent: Option<u32>) -> Self {
+        let mut palette = if dark { DARK } else { LIGHT };
+        if let Some(accent) = system_accent {
+            palette.accent = accent;
+        }
+        palette
+    }
+
     pub(crate) fn selection(self) -> Rgba {
         rgb(if self.dark { 0x1d4ed8 } else { 0x55a0fc }).alpha(0.3)
     }
 }
 
-const LIGHT: Palette = Palette {
+pub(crate) const LIGHT: Palette = Palette {
     dark: false,
     layer: 0xffffffb3,
     stroke: 0x0000000f,
@@ -130,7 +141,7 @@ const LIGHT: Palette = Palette {
     accent_bottom_edge: 0x66 as f32 / 255.,
 };
 
-const DARK: Palette = Palette {
+pub(crate) const DARK: Palette = Palette {
     dark: true,
     layer: 0x3a3a3a73,
     stroke: 0x00000019,
@@ -196,14 +207,10 @@ const DARK: Palette = Palette {
     accent_bottom_edge: 0x23 as f32 / 255.,
 };
 
-pub(crate) fn palette(cx: &App) -> Palette {
-    cx.shared.palette
-}
-
 const BLUR_RADIUS_PER_SIGMA: f32 = 3.;
 const CASTER_INSET: f32 = 1.;
 
-pub(crate) fn theme_shadow(dark: bool, z: f32, scale: f32) -> Vec<BoxShadow> {
+pub(crate) fn theme_shadow(dark: bool, z: f32, scale: f32) -> Shadows {
     let elevation = (z / 2.).min(64.);
     let (ambient, directional) = match (elevation, dark) {
         (e, _) if e < 2. => (0., 0.),
@@ -212,28 +219,16 @@ pub(crate) fn theme_shadow(dark: bool, z: f32, scale: f32) -> Vec<BoxShadow> {
         (_, false) => (0.15, 0.19),
         (_, true) => (0.37, 0.37),
     };
-    [
-        (ambient, elevation / 3., 2.),
-        (directional, elevation, elevation / 2.),
-    ]
-    .into_iter()
-    .filter(|(opacity, ..)| *opacity > 0.)
-    .map(|(opacity, blur, y)| BoxShadow {
-        color: black().alpha((opacity * 255.).floor() / 255.),
-        offset: point(px(0.), px(y * scale)),
-        blur_radius: px((blur + CASTER_INSET) * scale / BLUR_RADIUS_PER_SIGMA),
-        spread_radius: px(-CASTER_INSET * scale),
-        inset: false,
-    })
-    .collect()
-}
-
-pub(crate) fn apply(appearance: WindowAppearance, cx: &mut App) {
-    let dark = matches!(appearance, WindowAppearance::Dark);
-    let mut palette = if dark { DARK } else { LIGHT };
-    if let Some(accent) = crate::win32::system_accent_color(palette.dark) {
-        palette.accent = accent;
-    }
-    cx.shared.palette = palette;
-    cx.refresh_windows();
+    let make = |opacity: f32, blur: f32, y: f32| -> Option<BoxShadow> {
+        (opacity > 0.).then(|| BoxShadow {
+            color: black().alpha((opacity * 255.).floor() / 255.),
+            offset: point(0., y * scale),
+            blur_radius: (blur + CASTER_INSET) * scale / BLUR_RADIUS_PER_SIGMA,
+            spread_radius: -CASTER_INSET * scale,
+        })
+    };
+    Shadows([
+        make(ambient, elevation / 3., 2.),
+        make(directional, elevation, elevation / 2.),
+    ])
 }

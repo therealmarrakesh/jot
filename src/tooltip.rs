@@ -1,8 +1,20 @@
-use super::*;
-use crate::ui::animate;
-use crate::win32::{cursor_screen_pos, monitor_work_area_and_scale, mouse_hover_time_ms};
-use std::collections::HashMap;
-use std::time::Instant;
+//! Win11 Acrylic-style floating tooltip overlay with hover/reshow delay state machine,
+//! monitor work-area clamping, and smooth opacity fade.
+
+use std::time::{Duration, Instant};
+
+use crate::app::AppEvent;
+use crate::color::{rgb, rgba, transparent_black};
+use crate::geom::{Rect, ScreenPoint, ScreenRect, Size, point, size};
+use crate::gfx::{Direct2DDevices, TextAlign, TextSystem, font};
+use crate::platform::{
+    Jobs, Modifiers, NativeWindow, TimerHandle, WindowAppearance, WindowBackdrop, WindowId,
+    WindowKind, WindowOptions, cursor_screen_pos, monitor_work_area_and_scale, mouse_hover_time_ms,
+};
+use crate::theme::{Palette, theme_shadow};
+use crate::types::SharedStr;
+use crate::ui::controls::{CONTROL_RADIUS, SMALL_FONT};
+use crate::ui::{AnimKey, AvailSize, Easing, Frame, HitId, Node, UiState, box_, text};
 
 const PADDING_X: f32 = 9.;
 const PADDING_TOP: f32 = 6.;
@@ -23,90 +35,16 @@ const RESHOW_DELAY_FACTOR: f32 = 1.5;
 const RESHOW_WINDOW: Duration = Duration::from_millis(200);
 const FADE: Duration = Duration::from_millis(167);
 
-fn card(p: Palette, text: SharedString, size: Size<Pixels>) -> Div {
-    div()
-        .w(size.width)
-        .h(size.height)
-        .rounded(px(field::CONTROL_RADIUS))
-        .border_1()
-        .border_color(rgba(p.flyout_stroke))
-        .shadow(theme_shadow(p.dark, ELEVATION * 2., 1.))
-        .child(
-            div()
-                .relative()
-                .size_full()
-                .rounded(px(field::CONTROL_RADIUS - BORDER))
-                .overflow_hidden()
-                .bg(rgb(p.acrylic_fallback))
-                .child(div().absolute().size_full().bg(rgba(p.acrylic_luminosity)))
-                .child(
-                    div()
-                        .relative()
-                        .size_full()
-                        .px(px(PADDING_X))
-                        .pt(px(PADDING_TOP))
-                        .pb(px(PADDING_BOTTOM))
-                        .font_family(SMALL_FONT)
-                        .text_size(px(FONT_SIZE))
-                        .line_height(px(LINE_HEIGHT))
-                        .text_color(rgba(p.text_primary))
-                        .when(size.height <= px(SINGLE_HEIGHT), |this| {
-                            this.whitespace_nowrap()
-                        })
-                        .child(text),
-                ),
-        )
-}
-
-pub(crate) struct TooltipView {
-    text: SharedString,
-    size: Size<Pixels>,
-    visible: bool,
-}
-
-impl TooltipView {
-    pub(crate) fn new(text: impl Into<SharedString>, size: Size<Pixels>, visible: bool) -> Self {
-        Self {
-            text: text.into(),
-            size,
-            visible,
-        }
-    }
-
-    pub(crate) fn render(&mut self, window: &mut Window, cx: &mut App) -> UiNode {
-        let p = palette(cx);
-        let opacity = animate(
-            "tooltip-fade",
-            if self.visible { 1. } else { 0. },
-            FADE,
-            Easing::EaseOutCubic,
-            window,
-            cx,
-        );
-        div()
-            .size_full()
-            .opacity(opacity)
-            .child(
-                div()
-                    .absolute()
-                    .left(px(SHADOW_SIDE))
-                    .top(px(SHADOW_TOP))
-                    .child(card(p, self.text.clone(), self.size)),
-            )
-            .into()
-    }
-}
-
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 struct Key {
     window: WindowId,
-    id: ElementId,
+    hit: HitId,
 }
 
 #[derive(Clone)]
 struct Snap {
     key: Key,
-    text: SharedString,
+    text: SharedStr,
     owner: ScreenRect,
     entered: ScreenPoint,
 }
@@ -128,11 +66,11 @@ enum State {
 }
 
 impl State {
-    fn key(&self) -> Option<&Key> {
+    fn key(&self) -> Option<Key> {
         match self {
             Self::Idle => None,
-            Self::Waiting { snap, .. } | Self::Showing { snap } => Some(&snap.key),
-            Self::Suppressed { key } => Some(key),
+            Self::Waiting { snap, .. } | Self::Showing { snap } => Some(snap.key),
+            Self::Suppressed { key } => Some(*key),
         }
     }
 }
@@ -165,12 +103,12 @@ fn transition_state(state: State, report: Report, epoch: &mut u64) -> State {
                 epoch,
             }
         }
-        (state, Report::Owner(snap)) if state.key() == Some(&snap.key) => state,
+        (state, Report::Owner(snap)) if state.key() == Some(snap.key) => state,
         (_, Report::Owner(snap)) => wait(snap),
-        (state, Report::NoneIn(window)) if state.key().is_some_and(|key| key.window == window) => {
+        (state, Report::NoneIn(window)) if state.key().is_some_and(|k| k.window == window) => {
             State::Idle
         }
-        (state, Report::Gone(key)) if state.key() == Some(&key) => State::Idle,
+        (state, Report::Gone(key)) if state.key() == Some(key) => State::Idle,
         (State::Waiting { snap, .. } | State::Showing { snap }, Report::Suppress(window))
             if snap.key.window == window =>
         {
@@ -186,12 +124,6 @@ fn transition_state(state: State, report: Report, epoch: &mut u64) -> State {
     }
 }
 
-struct Entry {
-    id: ElementId,
-    text: SharedString,
-    hitbox: Hitbox,
-}
-
 struct Shown {
     key: Key,
     owner: ScreenRect,
@@ -199,8 +131,12 @@ struct Shown {
 
 #[derive(Default)]
 pub(crate) struct Tooltips {
-    popup: Option<overlay::Overlay>,
-    owners: HashMap<WindowId, Vec<Entry>>,
+    popup: Option<NativeWindow>,
+    ui: UiState,
+    text: SharedStr,
+    card_size: Size,
+    visible: bool,
+    dirty: bool,
     state: State,
     epoch: u64,
     pressed: bool,
@@ -211,216 +147,335 @@ pub(crate) struct Tooltips {
     hiding: Option<TimerHandle>,
 }
 
-pub(crate) fn register(
-    id: ElementId,
-    text: SharedString,
-    bounds: Bounds<Pixels>,
-    window: &mut Window,
-    cx: &mut App,
-) {
-    let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
-    let owners = cx
-        .shared
-        .tooltips
-        .owners
-        .entry(window.window_id())
-        .or_default();
-    owners.retain(|entry| entry.id != id);
-    owners.push(Entry { id, text, hitbox });
-}
-
-pub(crate) struct Host {
-    child: UiNode,
-}
-
-pub(crate) fn host(child: impl Into<UiNode>) -> Host {
-    Host {
-        child: child.into(),
-    }
-}
-
-impl CustomWidget for Host {
-    fn request_layout(&mut self, window: &mut Window, cx: &mut App) -> LayoutId {
-        self.child.request_layout(window, cx)
+impl Tooltips {
+    pub(crate) fn on_mouse_down(&mut self, window: WindowId, jobs: &Jobs<AppEvent>) {
+        self.pressed = true;
+        self.apply_report(Report::Suppress(window), jobs);
     }
 
-    fn prepaint(&mut self, _: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
-        cx.shared
-            .tooltips
-            .owners
-            .insert(window.window_id(), Vec::new());
-        self.child.prepaint(window, cx);
+    pub(crate) fn on_mouse_up(&mut self) {
+        self.pressed = false;
     }
 
-    fn paint(&mut self, _: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
-        window.on_mouse_event(|event: &MouseMoveEvent, phase, window, cx| {
-            if phase == DispatchPhase::Capture {
-                cx.shared.tooltips.pressed = event.pressed_button.is_some();
-                evaluate(window, cx);
-            }
-        });
-        window.on_mouse_event(|_: &MouseDownEvent, phase, window, cx| {
-            if phase == DispatchPhase::Capture {
-                cx.shared.tooltips.pressed = true;
-                report(Report::Suppress(window.window_id()), cx);
-            }
-        });
-        window.on_mouse_event(|_: &MouseUpEvent, phase, _, cx| {
-            if phase == DispatchPhase::Capture {
-                cx.shared.tooltips.pressed = false;
-            }
-        });
-        window.on_key_event(|_: &KeyDownEvent, phase, _, cx| {
-            if phase == DispatchPhase::Capture {
-                cx.shared.tooltips.control_only = false;
-            }
-        });
-        window.on_modifiers_changed(|event, _, cx| modifiers_changed(&event.modifiers, cx));
-        window.defer(cx, evaluate);
-        self.child.paint(window, cx);
+    pub(crate) fn on_key_down(&mut self) {
+        self.control_only = false;
     }
-}
 
-impl From<Host> for UiNode {
-    fn from(host: Host) -> Self {
-        UiNode::widget(host)
+    pub(crate) fn on_modifiers_changed(&mut self, mods: Modifiers, jobs: &Jobs<AppEvent>) {
+        let only_ctrl = mods.ctrl_only();
+        let released = mods.none();
+        let was = std::mem::replace(&mut self.control_only, only_ctrl);
+        if released && was {
+            self.apply_report(Report::Dismiss, jobs);
+        }
     }
-}
 
-fn evaluate(window: &mut Window, cx: &mut App) {
-    let handle = window.window_id();
-    let position = window.mouse_position();
-    let scale = window.scale_factor();
-    let origin = window.hwnd().client_origin();
-    let tips = &cx.shared.tooltips;
-    let entries = tips.owners.get(&handle).map_or(&[][..], Vec::as_slice);
-    let gone = tips
-        .state
-        .key()
-        .filter(|key| key.window == handle)
-        .filter(|key| {
-            entries
-                .iter()
-                .find(|entry| entry.id == key.id)
-                .is_none_or(|entry| {
-                    tips.shown.as_ref().is_some_and(|shown| {
-                        shown.key == **key
-                            && shown.owner
-                                != overlay::screen_rect(entry.hitbox.bounds, scale, origin)
+    pub(crate) fn window_deactivated(&mut self, window: WindowId, jobs: &Jobs<AppEvent>) {
+        self.apply_report(Report::Suppress(window), jobs);
+    }
+
+    pub(crate) fn window_closed(&mut self, window: WindowId, jobs: &Jobs<AppEvent>) {
+        if let Some(key) = self.state.key().filter(|k| k.window == window) {
+            self.apply_report(Report::Gone(key), jobs);
+        }
+    }
+
+    pub(crate) fn on_mouse_leave(&mut self, window: WindowId, jobs: &Jobs<AppEvent>) {
+        self.apply_report(Report::NoneIn(window), jobs);
+    }
+
+    /// Evaluates the currently hovered tooltip in `window` directly from its laid-out `Frame`.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn evaluate(
+        &mut self,
+        window: WindowId,
+        hovered: bool,
+        pressed_any: bool,
+        pos: crate::geom::Point,
+        origin: ScreenPoint,
+        scale: f32,
+        frame: &Frame,
+        devices: &Direct2DDevices,
+        appearance: WindowAppearance,
+        ts: &TextSystem,
+        jobs: &Jobs<AppEvent>,
+    ) {
+        self.pressed = pressed_any;
+        let gone = self
+            .state
+            .key()
+            .filter(|k| k.window == window)
+            .filter(|k| {
+                frame.rect_of(k.hit).is_none_or(|r| {
+                    self.shown.as_ref().is_some_and(|shown| {
+                        shown.key == *k && shown.owner != r.to_screen(scale, origin)
                     })
                 })
-        })
-        .cloned();
-    let observed = if !window.is_window_hovered() {
-        Some(Report::NoneIn(handle))
-    } else if tips.pressed {
-        None
-    } else {
-        let hovered = entries
-            .iter()
-            .rev()
-            .find(|entry| entry.hitbox.is_hovered_at(position, window));
-        Some(hovered.map_or(Report::NoneIn(handle), |entry| {
-            Report::Owner(Snap {
-                key: Key {
-                    window: handle,
-                    id: entry.id.clone(),
-                },
-                text: entry.text.clone(),
-                owner: overlay::screen_rect(entry.hitbox.bounds, scale, origin),
-                entered: cursor_screen_pos(),
-            })
-        }))
-    };
-    if let Some(key) = gone {
-        report(Report::Gone(key), cx);
-    }
-    if let Some(observed) = observed {
-        report(observed, cx);
-    }
-}
-
-fn report(report: Report, cx: &mut App) {
-    let tips = &mut cx.shared.tooltips;
-    let state = std::mem::take(&mut tips.state);
-    tips.state = transition_state(state, report, &mut tips.epoch);
-    cx.defer(render);
-}
-
-fn render(cx: &mut App) {
-    let showing = match &cx.shared.tooltips.state {
-        State::Showing { snap } => Some(snap.clone()),
-        _ => None,
-    };
-    if cx
-        .shared
-        .tooltips
-        .shown
-        .as_ref()
-        .is_some_and(|shown| showing.as_ref().is_none_or(|snap| snap.key != shown.key))
-    {
-        hide(cx);
-    }
-    if let Some(snap) = showing
-        && cx.shared.tooltips.shown.is_none()
-    {
-        show(snap, cx);
-    }
-    let waiting = match &cx.shared.tooltips.state {
-        State::Waiting { snap, epoch } => Some((snap.key.clone(), *epoch)),
-        _ => None,
-    };
-    match waiting {
-        Some((_, epoch))
-            if cx
-                .shared
-                .tooltips
-                .opening
-                .as_ref()
-                .is_some_and(|(opening, _)| *opening == epoch) => {}
-        Some((key, epoch)) => {
-            let reshow = cx
-                .shared
-                .tooltips
-                .closed_at
-                .is_some_and(|closed| closed.elapsed() < RESHOW_WINDOW);
-            let delay = show_delay(reshow);
-            let timer = cx.after(delay, move |cx| {
-                let window = key.window;
-                if cx.update_window(window, evaluate).is_err() {
-                    report(Report::Gone(key), cx);
-                }
-                report(Report::Timer(epoch), cx);
             });
-            cx.shared.tooltips.opening = Some((epoch, timer));
+        let observed = if !hovered {
+            Some(Report::NoneIn(window))
+        } else if self.pressed {
+            None
+        } else {
+            Some(match frame.tooltip_at(pos) {
+                Some((hit, tip, rect)) => Report::Owner(Snap {
+                    key: Key { window, hit },
+                    text: tip,
+                    owner: rect.to_screen(scale, origin),
+                    entered: cursor_screen_pos(),
+                }),
+                None => Report::NoneIn(window),
+            })
+        };
+
+        if let Some(key) = gone {
+            self.transition(Report::Gone(key));
         }
-        None => cx.shared.tooltips.opening = None,
+        if let Some(obs) = observed {
+            self.transition(obs);
+        }
+        self.sync(devices, appearance, ts, jobs);
     }
-}
 
-pub(crate) fn window_closed(window: WindowId, cx: &mut App) {
-    let tips = &mut cx.shared.tooltips;
-    tips.owners.retain(|&id, _| id != window);
-    if let Some(key) = tips
-        .state
-        .key()
-        .filter(|key| key.window == window)
-        .cloned()
-    {
-        report(Report::Gone(key), cx);
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn on_show_timer(
+        &mut self,
+        window: WindowId,
+        epoch: u64,
+        window_state: Option<(bool, crate::geom::Point, ScreenPoint, f32, &Frame)>,
+        devices: &Direct2DDevices,
+        appearance: WindowAppearance,
+        ts: &TextSystem,
+        jobs: &Jobs<AppEvent>,
+    ) {
+        match window_state {
+            Some((hovered, pos, origin, scale, frame)) => {
+                self.evaluate(
+                    window,
+                    hovered,
+                    self.pressed,
+                    pos,
+                    origin,
+                    scale,
+                    frame,
+                    devices,
+                    appearance,
+                    ts,
+                    jobs,
+                );
+            }
+            None => {
+                if let Some(key) = self.state.key().filter(|k| k.window == window) {
+                    self.transition(Report::Gone(key));
+                }
+            }
+        }
+        self.transition(Report::Timer(epoch));
+        self.sync(devices, appearance, ts, jobs);
     }
-}
 
-pub(crate) fn window_deactivated(window: WindowId, cx: &mut App) {
-    report(Report::Suppress(window), cx);
-}
+    pub(crate) fn on_hide_timer(&mut self) {
+        if self.shown.is_none()
+            && let Some(popup) = &self.popup
+        {
+            popup.hwnd().hide();
+        }
+        self.hiding = None;
+    }
 
-fn modifiers_changed(modifiers: &Modifiers, cx: &mut App) {
-    let only_control = *modifiers == Modifiers::control();
-    let released = !modifiers.modified();
-    let was = std::mem::replace(&mut cx.shared.tooltips.control_only, only_control);
-    if released && was {
-        report(Report::Dismiss, cx);
+    pub(crate) fn recreate_renderer(&mut self, devices: Direct2DDevices) {
+        if let Some(popup) = &mut self.popup {
+            let _ = popup.recreate_renderer(devices);
+            if self.visible {
+                self.dirty = true;
+            }
+        }
+    }
+
+    fn transition(&mut self, report: Report) {
+        let prev = std::mem::take(&mut self.state);
+        self.state = transition_state(prev, report, &mut self.epoch);
+    }
+
+    fn apply_report(&mut self, report: Report, jobs: &Jobs<AppEvent>) {
+        self.transition(report);
+        self.sync_hide_and_timer(jobs);
+    }
+
+    fn sync_hide_and_timer(&mut self, jobs: &Jobs<AppEvent>) {
+        let showing = match &self.state {
+            State::Showing { snap } => Some(snap.key),
+            _ => None,
+        };
+        if self
+            .shown
+            .as_ref()
+            .is_some_and(|shown| showing != Some(shown.key))
+        {
+            self.hide(jobs);
+        }
+        let waiting = match &self.state {
+            State::Waiting { snap, epoch } => Some((snap.key.window, *epoch)),
+            _ => None,
+        };
+        match waiting {
+            Some((_, epoch)) if self.opening.as_ref().is_some_and(|(e, _)| *e == epoch) => {}
+            Some((window, epoch)) => {
+                let reshow = self
+                    .closed_at
+                    .is_some_and(|closed| closed.elapsed() < RESHOW_WINDOW);
+                let delay = show_delay(reshow);
+                let timer = jobs.after(delay, AppEvent::TooltipShowTimer { window, epoch });
+                self.opening = Some((epoch, timer));
+            }
+            None => self.opening = None,
+        }
+    }
+
+    fn sync(
+        &mut self,
+        devices: &Direct2DDevices,
+        appearance: WindowAppearance,
+        ts: &TextSystem,
+        jobs: &Jobs<AppEvent>,
+    ) {
+        self.sync_hide_and_timer(jobs);
+        let showing = match &self.state {
+            State::Showing { snap } => Some(snap.clone()),
+            _ => None,
+        };
+        if let Some(snap) = showing
+            && self.shown.is_none()
+        {
+            self.show(snap, devices, appearance, ts);
+        }
+    }
+
+    fn hide(&mut self, jobs: &Jobs<AppEvent>) {
+        if self.shown.take().is_none() {
+            return;
+        }
+        self.closed_at = Some(Instant::now());
+        self.visible = false;
+        self.dirty = true;
+        self.hiding = Some(jobs.after(FADE, AppEvent::TooltipHideTimer));
+    }
+
+    fn show(
+        &mut self,
+        snap: Snap,
+        devices: &Direct2DDevices,
+        appearance: WindowAppearance,
+        ts: &TextSystem,
+    ) {
+        if self.popup.is_none() {
+            let opts = WindowOptions {
+                bounds: Some(Rect::new(point(0., 0.), size(1., 1.))),
+                title: "".into(),
+                hide_titlebar: true,
+                focus: false,
+                show: false,
+                kind: WindowKind::Overlay,
+                is_resizable: false,
+                is_minimizable: false,
+                display_id: None,
+                backdrop: WindowBackdrop::Transparent,
+                min_size: None,
+            };
+            let Ok(win) = NativeWindow::create(devices.clone(), &opts, appearance) else {
+                return;
+            };
+            self.popup = Some(win);
+        }
+
+        let entered = snap.entered;
+        let (work, scale) = monitor_work_area_and_scale(entered);
+        let measured = measure_tooltip(&snap.text, ts);
+        let phys = |v: f32| (v * scale).round() as i32;
+        let (w, h) = (phys(measured.width), phys(measured.height));
+        let gap = phys(POINTER_OFFSET);
+        let left = (entered.x - w / 2).clamp(work.left, (work.right - w).max(work.left));
+        let mut top = entered.y - gap - h;
+        if top < work.top {
+            top = entered.y + gap;
+        }
+        let (side, above, below) = (phys(SHADOW_SIDE), phys(SHADOW_TOP), phys(SHADOW_BOTTOM));
+        let rect = ScreenRect {
+            left: left - side,
+            top: top - above,
+            right: left + w + side,
+            bottom: top + h + below,
+        };
+
+        self.text = snap.text;
+        self.card_size = measured;
+        self.visible = true;
+        self.dirty = true;
+        self.hiding = None;
+        self.shown = Some(Shown {
+            key: snap.key,
+            owner: snap.owner,
+        });
+
+        if let Some(popup) = &self.popup {
+            let hwnd = popup.hwnd();
+            hwnd.place_topmost_noactivate(rect);
+            hwnd.show_noactivate();
+        }
+    }
+
+    /// Paints the tooltip overlay if dirty. Returns `(needs_vsync, device_lost)`.
+    pub(crate) fn paint(
+        &mut self,
+        p: Palette,
+        reduce_motion: bool,
+        now: Instant,
+        ts: &TextSystem,
+    ) -> (bool, bool) {
+        if !self.dirty {
+            return (false, false);
+        }
+        self.dirty = false;
+        let Some(popup) = &mut self.popup else {
+            return (false, false);
+        };
+        if !popup.sync_live_metrics() {
+            return (false, false);
+        }
+        let logical = popup.logical_size;
+        let scale = popup.scale_factor;
+
+        self.ui.begin_frame(now, reduce_motion);
+        let opacity = self.ui.animate_f32(
+            AnimKey::TooltipFade,
+            if self.visible { 1. } else { 0. },
+            FADE,
+            Easing::EaseOutCubic,
+        );
+        let tree = box_()
+            .size_full()
+            .opacity(opacity)
+            .child(
+                box_()
+                    .absolute()
+                    .left(SHADOW_SIDE)
+                    .top(SHADOW_TOP)
+                    .child(tooltip_card(p, self.text.clone(), self.card_size)),
+            );
+        let frame = Frame::layout(
+            tree,
+            AvailSize::definite(logical.width, logical.height),
+            scale,
+            ts,
+        );
+        popup.renderer.begin_frame(transparent_black());
+        frame.paint(&mut popup.renderer, &mut |_, _, _| {});
+        let lost = popup.renderer.end_frame().unwrap_or(false);
+        let animating = self.ui.finish_frame(frame);
+        if animating {
+            self.dirty = true;
+        }
+        (animating, lost)
     }
 }
 
@@ -434,149 +489,74 @@ fn show_delay(reshow: bool) -> Duration {
     Duration::from_millis((hover * factor) as u64)
 }
 
-fn hide(cx: &mut App) {
-    let tips = &mut cx.shared.tooltips;
-    if tips.shown.take().is_none() {
-        return;
-    }
-    tips.closed_at = Some(Instant::now());
-    let Some(popup) = tips.popup else {
-        return;
-    };
-    cx.with_tooltip(popup.window_id, |view, cx| {
-        view.visible = false;
-        cx.refresh_window(popup.window_id);
-    });
-    let hwnd = popup.hwnd;
-    let timer = cx.after(FADE, move |cx| {
-        let tips = &mut cx.shared.tooltips;
-        if tips.shown.is_none() {
-            overlay::hide(hwnd);
-        }
-        tips.hiding = None;
-    });
-    cx.shared.tooltips.hiding = Some(timer);
-}
-
-fn popup(cx: &mut App) -> Option<overlay::Overlay> {
-    if let Some(popup) = cx.shared.tooltips.popup {
-        return Some(popup);
-    }
-    let popup = overlay::open(
-        WindowContent::Tooltip(TooltipView::new("", size(px(0.), px(0.)), false)),
-        cx,
-    )?;
-    cx.shared.tooltips.popup = Some(popup);
-    Some(popup)
-}
-
-fn measure(text: &SharedString, window: &mut Window) -> Size<Pixels> {
+fn measure_tooltip(content: &SharedStr, ts: &TextSystem) -> Size {
     let chrome = 2. * (PADDING_X + BORDER);
     let wrap = MAX_WIDTH - chrome;
-    let lines = window.text_system().shape_text(
-        text.clone(),
-        px(FONT_SIZE),
+    let lines = ts.shape_wrapped(
+        content.clone(),
+        FONT_SIZE,
         &font(SMALL_FONT),
-        black(),
+        Some(wrap),
         None,
-        Some(px(wrap)),
         None,
+        TextAlign::Left,
     );
-    let count: usize = lines
-        .iter()
-        .map(|line| line.wrap_boundaries().len() + 1)
-        .sum();
+    let count: usize = lines.iter().map(|l| l.line_count.max(1)).sum();
     let widest = lines
         .iter()
-        .map(|line| {
-            if line.wrap_boundaries().is_empty() {
-                line.width().as_f32()
-            } else {
-                wrap
-            }
-        })
+        .map(|l| if l.line_count <= 1 { l.width } else { wrap })
         .fold(0., f32::max);
     size(
-        px((widest.ceil() + chrome).min(MAX_WIDTH)),
-        px(SINGLE_HEIGHT + count.saturating_sub(1) as f32 * LINE_HEIGHT),
+        (widest.ceil() + chrome).min(MAX_WIDTH),
+        SINGLE_HEIGHT + count.saturating_sub(1) as f32 * LINE_HEIGHT,
     )
 }
 
-fn show(snap: Snap, cx: &mut App) {
-    let Some(popup) = popup(cx) else {
-        return;
-    };
-    let entered = snap.entered;
-    let (work, scale) = monitor_work_area_and_scale(entered);
-    overlay::place(
-        popup.hwnd,
-        ScreenRect {
-            left: entered.x,
-            top: entered.y,
-            right: entered.x + 1,
-            bottom: entered.y + 1,
-        },
-    );
-    let text = snap.text.clone();
-    let Ok(measured) = cx.update_window(popup.window_id, |window, cx| {
-        let measured = measure(&text, window);
-        cx.with_tooltip(popup.window_id, |view, cx| {
-            view.text = text.clone();
-            view.size = measured;
-            view.visible = true;
-            cx.refresh_window(popup.window_id);
-        });
-        measured
-    }) else {
-        return;
-    };
-    let physical = |v: Pixels| (v.as_f32() * scale).round() as i32;
-    let (w, h) = (physical(measured.width), physical(measured.height));
-    let gap = physical(px(POINTER_OFFSET));
-    let left = (entered.x - w / 2).clamp(work.left, (work.right - w).max(work.left));
-    let mut top = entered.y - gap - h;
-    if top < work.top {
-        top = entered.y + gap;
-    }
-    let (side, above, below) = (
-        physical(px(SHADOW_SIDE)),
-        physical(px(SHADOW_TOP)),
-        physical(px(SHADOW_BOTTOM)),
-    );
-    overlay::place(
-        popup.hwnd,
-        ScreenRect {
-            left: left - side,
-            top: top - above,
-            right: left + w + side,
-            bottom: top + h + below,
-        },
-    );
-    overlay::show(popup.hwnd);
-    let tips = &mut cx.shared.tooltips;
-    tips.hiding = None;
-    tips.shown = Some(Shown {
-        key: snap.key,
-        owner: snap.owner,
-    });
+fn tooltip_card(p: Palette, content: SharedStr, sz: Size) -> Node {
+    box_()
+        .w(sz.width)
+        .h(sz.height)
+        .rounded(CONTROL_RADIUS)
+        .border(BORDER, rgba(p.flyout_stroke))
+        .shadows(theme_shadow(p.dark, ELEVATION * 2., 1.))
+        .child(
+            box_()
+                .relative()
+                .size_full()
+                .rounded(CONTROL_RADIUS - BORDER)
+                .overflow_hidden()
+                .bg(rgb(p.acrylic_fallback))
+                .child(
+                    box_()
+                        .absolute()
+                        .size_full()
+                        .bg(rgba(p.acrylic_luminosity)),
+                )
+                .child(
+                    box_()
+                        .relative()
+                        .size_full()
+                        .px(PADDING_X)
+                        .pt(PADDING_TOP)
+                        .pb(PADDING_BOTTOM)
+                        .font_family(SMALL_FONT)
+                        .text_size(FONT_SIZE)
+                        .line_height(LINE_HEIGHT)
+                        .text_color(rgba(p.text_primary))
+                        .when(sz.height <= SINGLE_HEIGHT, Node::nowrap)
+                        .child(text(content)),
+                ),
+        )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui::WindowId;
 
-    fn win(id: u64) -> WindowId {
-        WindowId::from(id)
-    }
-
-    fn snap(window: WindowId, id: &'static str, text: &'static str) -> Snap {
+    fn snap(window: WindowId, hit: HitId, label: &'static str) -> Snap {
         Snap {
-            key: Key {
-                window,
-                id: ElementId::Name(id.into()),
-            },
-            text: text.into(),
+            key: Key { window, hit },
+            text: label.into(),
             owner: ScreenRect {
                 left: 0,
                 top: 0,
@@ -589,41 +569,51 @@ mod tests {
 
     #[test]
     fn tooltip_state_machine_transitions() {
-        let w1 = win(1);
-        let w2 = win(2);
+        let w1 = WindowId(1);
+        let w2 = WindowId(2);
         let mut epoch = 0;
 
-        // Idle -> Waiting on first owner hover.
-        let s = transition_state(State::Idle, Report::Owner(snap(w1, "a", "One")), &mut epoch);
+        let s = transition_state(
+            State::Idle,
+            Report::Owner(snap(w1, HitId::NewTab, "One")),
+            &mut epoch,
+        );
         assert_eq!(epoch, 1);
         assert!(matches!(s, State::Waiting { epoch: 1, .. }));
 
-        // Stale timer is ignored; matching timer promotes to Showing.
         let s = transition_state(s, Report::Timer(99), &mut epoch);
         assert!(matches!(s, State::Waiting { epoch: 1, .. }));
         let s = transition_state(s, Report::Timer(1), &mut epoch);
         assert!(matches!(s, State::Showing { .. }));
 
-        // Dismiss suppresses the current owner until another owner or leave.
         let s = transition_state(s, Report::Dismiss, &mut epoch);
         assert!(matches!(s, State::Suppressed { .. }));
-        let s = transition_state(s, Report::Owner(snap(w1, "a", "One")), &mut epoch);
+        let s = transition_state(
+            s,
+            Report::Owner(snap(w1, HitId::NewTab, "One")),
+            &mut epoch,
+        );
         assert!(matches!(s, State::Suppressed { .. }));
 
-        // Leaving the window resets to Idle; NoneIn for another window does not.
         let s = transition_state(s, Report::NoneIn(w2), &mut epoch);
         assert!(matches!(s, State::Suppressed { .. }));
         let s = transition_state(s, Report::NoneIn(w1), &mut epoch);
         assert!(matches!(s, State::Idle));
 
-        // Hovering a second owner replaces waiting with a new epoch.
-        let s = transition_state(s, Report::Owner(snap(w1, "a", "One")), &mut epoch);
+        let s = transition_state(
+            s,
+            Report::Owner(snap(w1, HitId::NewTab, "One")),
+            &mut epoch,
+        );
         assert_eq!(epoch, 2);
-        let s = transition_state(s, Report::Owner(snap(w1, "b", "Two")), &mut epoch);
+        let s = transition_state(
+            s,
+            Report::Owner(snap(w1, HitId::ThemeToggle, "Two")),
+            &mut epoch,
+        );
         assert_eq!(epoch, 3);
         assert!(matches!(s, State::Waiting { epoch: 3, .. }));
 
-        // Suppressing the active window moves Waiting -> Suppressed.
         let s = transition_state(s, Report::Suppress(w1), &mut epoch);
         assert!(matches!(s, State::Suppressed { .. }));
     }

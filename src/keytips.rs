@@ -1,4 +1,12 @@
-use super::*;
+//! Win32 transparent topmost overlay displaying Windows Alt/F10 KeyTip badges.
+
+use crate::color::{rgb, transparent_black, white};
+use crate::geom::{Rect, ScreenPoint, ScreenRect, point, size};
+use crate::gfx::{Direct2DDevices, TextSystem};
+use crate::platform::{
+    NativeWindow, WindowAppearance, WindowBackdrop, WindowId, WindowKind, WindowOptions,
+};
+use crate::ui::{AvailSize, Frame, Node, box_, text};
 
 const FILL: u32 = 0x767676;
 const PADDING: f32 = 4.;
@@ -15,148 +23,181 @@ pub(crate) enum Placement {
 
 #[derive(Clone, PartialEq)]
 pub(crate) struct KeyTip {
+    pub(crate) key: char,
+    pub(crate) bounds: Rect,
+}
+
+#[inline]
+pub(crate) fn round_half_up(value: f32) -> f32 {
+    (value + 0.5).floor()
+}
+
+pub(crate) fn layout_tip(
+    ts: &TextSystem,
     key: char,
-    bounds: Bounds<Pixels>,
-}
-
-pub(crate) struct KeyTipView {
-    tips: Vec<KeyTip>,
-}
-
-impl KeyTipView {
-    pub(crate) fn render(&self) -> UiNode {
-        div()
-            .size_full()
-            .children(self.tips.iter().map(|tip| {
-                div()
-                    .absolute()
-                    .left(tip.bounds.origin.x)
-                    .top(tip.bounds.origin.y)
-                    .w(tip.bounds.size.width)
-                    .h(tip.bounds.size.height)
-                    .bg(rgb(FILL))
-                    .pl(px(PADDING))
-                    .pt(px(PADDING))
-                    .font_family(FONT)
-                    .text_size(px(FONT_SIZE))
-                    .line_height(px(LINE_HEIGHT))
-                    .text_color(white())
-                    .whitespace_nowrap()
-                    .child(tip.key.to_string())
-            }))
-            .into()
+    anchor: Rect,
+    placement: Placement,
+) -> KeyTip {
+    let mut buf = [0u8; 4];
+    let width = ts.text_width(key.encode_utf8(&mut buf), FONT, FONT_SIZE);
+    let fill = size(width + 2. * PADDING, LINE_HEIGHT + 2. * PADDING);
+    let (outer_w, outer_h) = (fill.width + 2. * MARGIN, fill.height + 2. * MARGIN);
+    let (x, y) = match placement {
+        Placement::Below => (
+            round_half_up(anchor.center().x - outer_w / 2.),
+            anchor.bottom(),
+        ),
+        Placement::Left => (
+            anchor.left() - outer_w,
+            round_half_up(anchor.top() + (anchor.size.height - outer_h) / 2.),
+        ),
+    };
+    KeyTip {
+        key,
+        bounds: Rect::new(point(x + MARGIN, y + MARGIN), fill),
     }
 }
 
 #[derive(Default)]
 pub(crate) struct KeyTips {
-    overlay: Option<overlay::Overlay>,
+    overlay: Option<NativeWindow>,
     owner: Option<WindowId>,
     rect: ScreenRect,
+    tips: Vec<KeyTip>,
+    dirty: bool,
 }
 
 impl KeyTips {
-    fn hide(&mut self) {
+    pub(crate) fn is_owner(&self, owner: WindowId) -> bool {
+        self.owner == Some(owner)
+    }
+
+    pub(crate) fn hide(&mut self) {
         self.owner = None;
         self.rect = ScreenRect::default();
-        if let Some(overlay) = self.overlay {
-            overlay::hide(overlay.hwnd);
+        self.tips.clear();
+        self.dirty = false;
+        if let Some(overlay) = &self.overlay {
+            overlay.hwnd().hide();
         }
     }
-}
 
-pub(crate) fn layout(
-    window: &Window,
-    key: char,
-    anchor: Bounds<Pixels>,
-    placement: Placement,
-) -> KeyTip {
-    let width = text_width(window, &key.to_string(), FONT, FONT_SIZE);
-    let fill = size(width + 2. * PADDING, LINE_HEIGHT + 2. * PADDING);
-    let (outer_width, outer_height) = (fill.width + 2. * MARGIN, fill.height + 2. * MARGIN);
-    let (x, y) = match placement {
-        Placement::Below => (
-            round_half_up(anchor.center().x.as_f32() - outer_width / 2.),
-            anchor.bottom().as_f32(),
-        ),
-        Placement::Left => (
-            anchor.left().as_f32() - outer_width,
-            round_half_up(
-                anchor.top().as_f32() + (anchor.size.height.as_f32() - outer_height) / 2.,
-            ),
-        ),
-    };
-    KeyTip {
-        key,
-        bounds: Bounds::new(
-            point(px(x + MARGIN), px(y + MARGIN)),
-            size(px(fill.width), px(fill.height)),
-        ),
-    }
-}
-
-pub(crate) fn show(
-    owner: WindowId,
-    origin: ScreenPoint,
-    scale: f32,
-    mut tips: Vec<KeyTip>,
-    cx: &mut App,
-) {
-    let Some(union) = tips.iter().map(|tip| tip.bounds).reduce(|a, b| a.union(&b)) else {
-        if cx.shared.keytips.owner == Some(owner) {
-            cx.shared.keytips.hide();
+    pub(crate) fn hide_owner(&mut self, owner: WindowId) {
+        if self.owner == Some(owner) {
+            self.hide();
         }
-        return;
-    };
-    for tip in &mut tips {
-        tip.bounds.origin -= union.origin;
     }
-    let rect = overlay::screen_rect(union, scale, origin);
-    let unchanged = cx.shared.keytips.owner == Some(owner) && cx.shared.keytips.rect == rect;
-    let current = cx.shared.keytips.overlay;
-    if unchanged
-        && current.is_some_and(|overlay| {
-            cx.keytips_view(overlay.window_id)
-                .is_some_and(|view| view.tips == tips)
-        })
-    {
-        return;
+
+    pub(crate) fn window_closed(&mut self, window: WindowId) {
+        if self.owner == Some(window) {
+            self.hide();
+        }
     }
-    let overlay = match current {
-        Some(overlay) => overlay,
-        None => {
-            let Some(overlay) = overlay::open(
-                WindowContent::KeyTips(KeyTipView { tips: Vec::new() }),
-                cx,
-            ) else {
+
+    pub(crate) fn recreate_renderer(&mut self, devices: Direct2DDevices) {
+        if let Some(overlay) = &mut self.overlay {
+            let _ = overlay.recreate_renderer(devices);
+            if self.owner.is_some() {
+                self.dirty = true;
+            }
+        }
+    }
+
+    pub(crate) fn sync(
+        &mut self,
+        owner: WindowId,
+        origin: ScreenPoint,
+        scale: f32,
+        mut tips: Vec<KeyTip>,
+        devices: &Direct2DDevices,
+        appearance: WindowAppearance,
+    ) {
+        let Some(union) = tips.iter().map(|t| t.bounds).reduce(Rect::union) else {
+            self.hide_owner(owner);
+            return;
+        };
+        for tip in &mut tips {
+            tip.bounds.origin -= union.origin;
+        }
+        let rect = union.to_screen(scale, origin);
+        if self.owner == Some(owner) && self.rect == rect && self.tips == tips {
+            return;
+        }
+        if self.overlay.is_none() {
+            let opts = WindowOptions {
+                bounds: Some(Rect::new(point(0., 0.), size(1., 1.))),
+                title: "".into(),
+                hide_titlebar: true,
+                focus: false,
+                show: false,
+                kind: WindowKind::Overlay,
+                is_resizable: false,
+                is_minimizable: false,
+                display_id: None,
+                backdrop: WindowBackdrop::Transparent,
+                min_size: None,
+            };
+            let Ok(win) = NativeWindow::create(devices.clone(), &opts, appearance) else {
                 return;
             };
-            cx.shared.keytips.overlay = Some(overlay);
-            overlay
+            self.overlay = Some(win);
         }
-    };
-    cx.with_keytips(overlay.window_id, |view, cx| {
-        view.tips = tips;
-        cx.refresh_window(overlay.window_id);
-    });
-    overlay::place(overlay.hwnd, rect);
-    overlay::show(overlay.hwnd);
-    cx.shared.keytips.owner = Some(owner);
-    cx.shared.keytips.rect = rect;
-}
+        self.tips = tips;
+        self.owner = Some(owner);
+        self.rect = rect;
+        self.dirty = true;
+        if let Some(overlay) = &self.overlay {
+            let hwnd = overlay.hwnd();
+            hwnd.place_topmost_noactivate(rect);
+            hwnd.show_noactivate();
+        }
+    }
 
-pub(crate) fn is_owner(owner: WindowId, cx: &App) -> bool {
-    cx.shared.keytips.owner == Some(owner)
-}
-
-pub(crate) fn hide_owner(owner: WindowId, cx: &mut App) {
-    if cx.shared.keytips.owner == Some(owner) {
-        cx.shared.keytips.hide();
+    pub(crate) fn paint(&mut self, ts: &TextSystem) -> bool {
+        if !self.dirty {
+            return false;
+        }
+        self.dirty = false;
+        if self.owner.is_none() || self.tips.is_empty() {
+            return false;
+        }
+        let Some(overlay) = &mut self.overlay else {
+            return false;
+        };
+        if !overlay.sync_live_metrics() {
+            return false;
+        }
+        let logical = overlay.logical_size;
+        let scale = overlay.scale_factor;
+        let tree = render_tips(&self.tips);
+        let frame = Frame::layout(
+            tree,
+            AvailSize::definite(logical.width, logical.height),
+            scale,
+            ts,
+        );
+        overlay.renderer.begin_frame(transparent_black());
+        frame.paint(&mut overlay.renderer, &mut |_, _, _| {});
+        overlay.renderer.end_frame().unwrap_or(false)
     }
 }
 
-pub(crate) fn window_closed(window: WindowId, cx: &mut App) {
-    if cx.shared.keytips.owner == Some(window) {
-        cx.shared.keytips.hide();
-    }
+fn render_tips(tips: &[KeyTip]) -> Node {
+    box_().size_full().children(tips.iter().map(|tip| {
+        box_()
+            .absolute()
+            .left(tip.bounds.origin.x)
+            .top(tip.bounds.origin.y)
+            .w(tip.bounds.size.width)
+            .h(tip.bounds.size.height)
+            .bg(rgb(FILL))
+            .pl(PADDING)
+            .pt(PADDING)
+            .font_family(FONT)
+            .text_size(FONT_SIZE)
+            .line_height(LINE_HEIGHT)
+            .text_color(white())
+            .nowrap()
+            .child(text(tip.key.to_string()))
+    }))
 }

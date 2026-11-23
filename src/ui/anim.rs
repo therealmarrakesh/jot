@@ -1,12 +1,11 @@
-//! Clean-room easing curves, linear interpolation, and per-window keyed transitions.
+//! Easing curves, linear interpolation, standalone transitions, and typed per-window animation tracks.
 
+use std::collections::HashMap;
+use std::hash::Hash;
 use std::time::{Duration, Instant};
 
-use super::app::App;
-use super::color::Rgba;
-use super::element::ElementId;
-use super::geometry::{Pixels, Point, point, px};
-use super::window::Window;
+use crate::color::Rgba;
+use crate::geom::{Point, point};
 
 /// Evaluates a standard CSS `cubic-bezier(x1, y1, x2, y2)` timing curve at normalized time `t`.
 ///
@@ -21,8 +20,6 @@ pub(crate) fn cubic_bezier(x1: f32, y1: f32, x2: f32, y2: f32, t: f32) -> f32 {
         return 1.0;
     }
 
-    // Bernstein polynomial expanded into Horner coefficients for P0=(0,0), P3=(1,1):
-    // B(s) = ((a * s + b) * s + c) * s
     let cx = 3.0 * x1;
     let bx = 3.0 * (x2 - x1) - cx;
     let ax = 1.0 - cx - bx;
@@ -87,6 +84,13 @@ pub(crate) enum Easing {
 }
 
 impl Easing {
+    pub(crate) const DECELERATE: Self = Self::CubicBezier {
+        x1: 0.0,
+        y1: 0.0,
+        x2: 0.0,
+        y2: 1.0,
+    };
+
     #[inline]
     pub(crate) fn sample(self, t: f32) -> f32 {
         let t = t.clamp(0.0, 1.0);
@@ -100,41 +104,42 @@ impl Easing {
 }
 
 /// Linearly interpolatable value for smooth UI transitions.
-pub(crate) trait Lerp: Clone {
-    fn lerp(&self, target: &Self, t: f32) -> Self;
+pub(crate) trait Lerp: Copy + PartialEq {
+    fn lerp(self, target: Self, t: f32) -> Self;
 }
 
 impl Lerp for f32 {
     #[inline]
-    fn lerp(&self, target: &Self, t: f32) -> Self {
+    fn lerp(self, target: Self, t: f32) -> Self {
         self + (target - self) * t
     }
 }
 
-impl Lerp for Pixels {
+impl Lerp for Point {
     #[inline]
-    fn lerp(&self, target: &Self, t: f32) -> Self {
-        let a = self.as_f32();
-        let b = target.as_f32();
-        px(a + (b - a) * t)
-    }
-}
-
-impl Lerp for Point<Pixels> {
-    #[inline]
-    fn lerp(&self, target: &Self, t: f32) -> Self {
-        point(self.x.lerp(&target.x, t), self.y.lerp(&target.y, t))
+    fn lerp(self, target: Self, t: f32) -> Self {
+        point(self.x.lerp(target.x, t), self.y.lerp(target.y, t))
     }
 }
 
 impl Lerp for Rgba {
+    /// Premultiplied RGBA interpolation so fading from transparent does not flash dark fringes.
     #[inline]
-    fn lerp(&self, target: &Self, t: f32) -> Self {
+    fn lerp(self, target: Self, t: f32) -> Self {
+        let a = self.a + (target.a - self.a) * t;
+        let channel = |x: f32, y: f32| {
+            let premul = x * self.a + (y * target.a - x * self.a) * t;
+            if a > 0.0 {
+                (premul / a).clamp(0.0, 1.0)
+            } else {
+                0.0
+            }
+        };
         Rgba {
-            r: self.r.lerp(&target.r, t),
-            g: self.g.lerp(&target.g, t),
-            b: self.b.lerp(&target.b, t),
-            a: self.a.lerp(&target.a, t),
+            r: channel(self.r, target.r),
+            g: channel(self.g, target.g),
+            b: channel(self.b, target.b),
+            a,
         }
     }
 }
@@ -162,10 +167,10 @@ pub(crate) struct TimedTransition<T> {
     pub(crate) easing: Easing,
 }
 
-impl<T: Lerp + PartialEq> TimedTransition<T> {
+impl<T: Lerp> TimedTransition<T> {
     pub(crate) fn settled(value: T, now: Instant) -> Self {
         Self {
-            from: value.clone(),
+            from: value,
             target: value,
             started_at: now,
             duration: Duration::ZERO,
@@ -175,14 +180,14 @@ impl<T: Lerp + PartialEq> TimedTransition<T> {
 
     pub(crate) fn sample(&self, now: Instant) -> (T, bool) {
         if self.from == self.target || self.duration.is_zero() {
-            return (self.target.clone(), false);
+            return (self.target, false);
         }
         let elapsed = now.saturating_duration_since(self.started_at);
         if elapsed >= self.duration {
-            (self.target.clone(), false)
+            (self.target, false)
         } else {
             let linear = elapsed.as_secs_f32() / self.duration.as_secs_f32();
-            (self.from.lerp(&self.target, self.easing.sample(linear)), true)
+            (self.from.lerp(self.target, self.easing.sample(linear)), true)
         }
     }
 
@@ -202,100 +207,69 @@ impl<T: Lerp + PartialEq> TimedTransition<T> {
     }
 
     pub(crate) fn settle(&mut self, target: T, now: Instant) {
-        self.start(target.clone(), target, Duration::ZERO, Easing::Linear, now);
+        self.start(target, target, Duration::ZERO, Easing::Linear, now);
     }
 }
 
+#[derive(Clone, Copy, Debug)]
 struct AnimTrack<T> {
     from: T,
     target: T,
     started_at: Instant,
     reversing_scale: f32,
     duration: Duration,
+    last_frame: u64,
 }
 
-/// Smoothly animates toward `target`, starting already settled at `target` on first render.
-pub(crate) fn animate<T>(
-    id: impl Into<ElementId>,
-    target: T,
-    duration: Duration,
-    easing: Easing,
-    window: &mut Window,
-    cx: &App,
-) -> T
-where
-    T: Lerp + PartialEq + 'static,
-{
-    animate_from(id, target.clone(), target, duration, easing, window, cx).value
-}
-
-/// Smoothly animates toward `target`, seeding per-window track state at `initial` on first render.
-///
-/// Tracks are stored directly in `Window::anim_tracks` and automatically pruned after a frame in
-/// which they are no longer queried.
-pub(crate) fn animate_from<T>(
-    id: impl Into<ElementId>,
-    initial: T,
-    target: T,
-    duration: Duration,
-    easing: Easing,
-    window: &mut Window,
-    cx: &App,
-) -> AnimSample<T>
-where
-    T: Lerp + PartialEq + 'static,
-{
-    let now = Instant::now();
-    let reduce_motion = cx.reduce_motion();
-    let sample = window.with_anim_track(id.into(), |prev: Option<AnimTrack<T>>| {
-        let mut track = prev.unwrap_or_else(|| AnimTrack {
-            from: initial,
-            target: target.clone(),
-            started_at: now,
-            reversing_scale: 1.0,
-            duration,
-        });
+impl<T: Lerp> AnimTrack<T> {
+    fn sample_and_update(
+        &mut self,
+        target: T,
+        duration: Duration,
+        easing: Easing,
+        now: Instant,
+        reduce_motion: bool,
+        frame: u64,
+    ) -> AnimSample<T> {
+        self.last_frame = frame;
 
         if reduce_motion || duration.is_zero() {
-            track.from = target.clone();
-            track.target = target.clone();
-            track.started_at = now;
-            track.reversing_scale = 1.0;
-            track.duration = duration;
-            return (
-                AnimSample {
-                    value: target,
-                    status: AnimStatus::Finished,
-                },
-                track,
-            );
+            self.from = target;
+            self.target = target;
+            self.started_at = now;
+            self.reversing_scale = 1.0;
+            self.duration = duration;
+            return AnimSample {
+                value: target,
+                status: AnimStatus::Finished,
+            };
         }
 
-        let elapsed = now.saturating_duration_since(track.started_at);
-        let (progress, status) = if track.duration.is_zero() || elapsed >= track.duration {
+        let elapsed = now.saturating_duration_since(self.started_at);
+        let (progress, status) = if self.duration.is_zero() || elapsed >= self.duration {
             (1.0, AnimStatus::Finished)
         } else {
             (
-                elapsed.as_secs_f32() / track.duration.as_secs_f32(),
+                elapsed.as_secs_f32() / self.duration.as_secs_f32(),
                 AnimStatus::Running,
             )
         };
         let eased = easing.sample(progress);
-        let current = track.from.lerp(&track.target, eased);
+        let current = self.from.lerp(self.target, eased);
 
-        let result = if track.target != target {
-            let reversing = target == track.from;
+        if self.target != target {
+            let reversing = target == self.from;
             let reversing_scale = if reversing {
-                (eased * track.reversing_scale + (1.0 - track.reversing_scale)).clamp(0.0, 1.0)
+                (eased * self.reversing_scale + (1.0 - self.reversing_scale)).clamp(0.0, 1.0)
             } else {
                 1.0
             };
             let next_duration = duration.mul_f32(reversing_scale);
-            track.from = current.clone();
-            track.target = target.clone();
-            track.started_at = now;
-            track.reversing_scale = reversing_scale;
-            track.duration = next_duration;
+            self.from = current;
+            self.target = target;
+            self.started_at = now;
+            self.reversing_scale = reversing_scale;
+            self.duration = next_duration;
             if next_duration.is_zero() {
                 AnimSample {
                     value: target,
@@ -307,7 +281,7 @@ where
                     status: AnimStatus::Running,
                 }
             }
-        } else if track.from == track.target {
+        } else if self.from == self.target {
             AnimSample {
                 value: current,
                 status: AnimStatus::Idle,
@@ -317,15 +291,116 @@ where
                 value: current,
                 status,
             }
-        };
-
-        (result, track)
-    });
-
-    if sample.status == AnimStatus::Running {
-        window.request_animation_frame();
+        }
     }
-    sample
+}
+
+/// Typed, allocation-light per-window animation track store with automatic frame pruning.
+pub(crate) struct AnimTracks<K: Copy + Eq + Hash> {
+    frame: u64,
+    running_this_frame: bool,
+    scalars: HashMap<K, AnimTrack<f32>>,
+    colors: HashMap<K, AnimTrack<Rgba>>,
+}
+
+impl<K: Copy + Eq + Hash> Default for AnimTracks<K> {
+    fn default() -> Self {
+        Self {
+            frame: 0,
+            running_this_frame: false,
+            scalars: HashMap::new(),
+            colors: HashMap::new(),
+        }
+    }
+}
+
+impl<K: Copy + Eq + Hash> AnimTracks<K> {
+    pub(crate) fn begin_frame(&mut self) {
+        self.frame = self.frame.wrapping_add(1);
+        self.running_this_frame = false;
+    }
+
+    pub(crate) fn end_frame(&mut self) -> bool {
+        let frame = self.frame;
+        self.scalars.retain(|_, track| track.last_frame == frame);
+        self.colors.retain(|_, track| track.last_frame == frame);
+        self.running_this_frame
+    }
+
+    pub(crate) fn animate_f32(
+        &mut self,
+        key: K,
+        target: f32,
+        duration: Duration,
+        easing: Easing,
+        now: Instant,
+        reduce_motion: bool,
+    ) -> f32 {
+        self.animate_f32_from(key, target, target, duration, easing, now, reduce_motion)
+            .value
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn animate_f32_from(
+        &mut self,
+        key: K,
+        initial: f32,
+        target: f32,
+        duration: Duration,
+        easing: Easing,
+        now: Instant,
+        reduce_motion: bool,
+    ) -> AnimSample<f32> {
+        let frame = self.frame;
+        let track = self.scalars.entry(key).or_insert_with(|| AnimTrack {
+            from: initial,
+            target,
+            started_at: now,
+            reversing_scale: 1.0,
+            duration,
+            last_frame: frame,
+        });
+        let sample = track.sample_and_update(target, duration, easing, now, reduce_motion, frame);
+        if sample.status == AnimStatus::Running {
+            self.running_this_frame = true;
+        }
+        sample
+    }
+
+    pub(crate) fn animate_color(
+        &mut self,
+        key: K,
+        target: Rgba,
+        duration: Duration,
+        easing: Easing,
+        now: Instant,
+        reduce_motion: bool,
+    ) -> Rgba {
+        let frame = self.frame;
+        let track = self.colors.entry(key).or_insert_with(|| AnimTrack {
+            from: target,
+            target,
+            started_at: now,
+            reversing_scale: 1.0,
+            duration,
+            last_frame: frame,
+        });
+        let sample = track.sample_and_update(target, duration, easing, now, reduce_motion, frame);
+        if sample.status == AnimStatus::Running {
+            self.running_this_frame = true;
+        }
+        sample.value
+    }
+
+    pub(crate) fn remove(&mut self, key: K) {
+        self.scalars.remove(&key);
+        self.colors.remove(&key);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn track_count(&self) -> usize {
+        self.scalars.len() + self.colors.len()
+    }
 }
 
 #[cfg(test)]
@@ -450,5 +525,41 @@ mod tests {
 
         tr.settle(3.0, t0 + Duration::from_millis(120));
         assert_eq!(tr.sample(t0 + Duration::from_millis(120)), (3.0, false));
+    }
+
+    #[test]
+    fn anim_tracks_prune_unused_and_reverse_proportionally() {
+        let t0 = Instant::now();
+        let dur = Duration::from_millis(100);
+        let mut tracks: AnimTracks<u32> = AnimTracks::default();
+
+        // Frame 1: seed track 1 from 0 -> 100.
+        tracks.begin_frame();
+        let s0 = tracks.animate_f32_from(1, 0.0, 100.0, dur, Easing::Linear, t0, false);
+        assert_eq!(s0.status, AnimStatus::Running);
+        assert_eq!(s0.value, 0.0);
+        assert!(tracks.end_frame());
+        assert_eq!(tracks.track_count(), 1);
+
+        // Frame 2: halfway through, reverse back to 0 -> duration scales to ~50ms.
+        let t_mid = t0 + Duration::from_millis(50);
+        tracks.begin_frame();
+        let s1 = tracks.animate_f32_from(1, 0.0, 0.0, dur, Easing::Linear, t_mid, false);
+        assert_eq!(s1.status, AnimStatus::Running);
+        assert!((s1.value - 50.0).abs() < 1e-3);
+        assert!(tracks.end_frame());
+
+        // Frame 3: 50ms later, reversed track has settled at 0.
+        let t_done = t_mid + Duration::from_millis(50);
+        tracks.begin_frame();
+        let s2 = tracks.animate_f32_from(1, 0.0, 0.0, dur, Easing::Linear, t_done, false);
+        assert_eq!(s2.status, AnimStatus::Finished);
+        assert_eq!(s2.value, 0.0);
+        assert!(!tracks.end_frame());
+
+        // Frame 4: unqueried tracks are pruned automatically.
+        tracks.begin_frame();
+        assert!(!tracks.end_frame());
+        assert_eq!(tracks.track_count(), 0);
     }
 }

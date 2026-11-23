@@ -1,11 +1,28 @@
-use super::*;
-use crate::editor::{Editor, EditorSlot};
-use crate::ui::{AnimStatus, animate_from};
-use field::{BODY_SIZE, CONTROL_HEIGHT, CONTROL_RADIUS, OVERLAY_RADIUS, text_field};
-use menu::Entry;
+//! Streaming chunked Unicode-folded text matcher, animated Find & Replace bar,
+//! options flyout, and auto-dismissing wrap/not-found toast notice.
 
-const QUERY_CONTEXT: &str = "JotFindQuery";
-const REPLACEMENT_CONTEXT: &str = "JotFindReplacement";
+use std::ops::Range;
+use std::time::Duration;
+
+use crate::app::AppEvent;
+use crate::color::{rgb, rgba};
+use crate::command::Command;
+use crate::editor::{Editor, Rope};
+use crate::geom::{Point, point};
+use crate::gfx::TextSystem;
+use crate::menu::Entry;
+use crate::platform::{CursorStyle, Jobs, TimerHandle, WindowId};
+use crate::tabs::CLOSE_GLYPH;
+use crate::theme::{Palette, theme_shadow};
+use crate::types::SharedStr;
+use crate::ui::controls::{
+    BODY_LINE, BODY_SIZE, ButtonStyle, CONTROL_HEIGHT, CONTROL_RADIUS, FIELD_CARET,
+    IconButtonStyle, OVERLAY_RADIUS, TEXT_FONT, button, icon_button, text_field_frame,
+};
+use crate::ui::{
+    AnimKey, AnimStatus, Easing, EditorSlot, HitId, Node, UiState, box_, col, row, text,
+};
+
 const EXPAND_DURATION: Duration = Duration::from_millis(300);
 const CONTRACT_DURATION: Duration = Duration::from_millis(200);
 const CARD_Z: f32 = 32.;
@@ -41,14 +58,6 @@ const CHEVRON_DOWN_GLYPH: &str = "\u{E70D}";
 const ARROW_DOWN_GLYPH: &str = "\u{E74B}";
 const ARROW_UP_GLYPH: &str = "\u{E74A}";
 const OPTIONS_GLYPH: &str = "\u{E9E9}";
-
-pub(crate) fn key_bindings() -> Vec<KeyBinding> {
-    vec![
-        KeyBinding::new("enter", Command::FindNext, Some(QUERY_CONTEXT)),
-        KeyBinding::new("shift-enter", Command::FindPrevious, Some(QUERY_CONTEXT)),
-        KeyBinding::new("enter", Command::ReplaceNext, Some(REPLACEMENT_CONTEXT)),
-    ]
-}
 
 #[inline]
 fn fold_char(c: char) -> char {
@@ -185,7 +194,7 @@ impl Matcher {
         }
     }
 
-    fn is_match(&self, text: &str) -> bool {
+    pub(crate) fn is_match(&self, text: &str) -> bool {
         if self.match_case {
             text == self.query
         } else {
@@ -304,7 +313,7 @@ impl Matcher {
         }
     }
 
-    fn search(
+    pub(crate) fn search(
         &self,
         text: &Rope,
         selection: Range<usize>,
@@ -337,27 +346,32 @@ impl Matcher {
 pub(crate) struct FindBar {
     visible: bool,
     closing: bool,
-    replace: bool,
+    pub(crate) replace: bool,
     serial: usize,
-    match_case: bool,
-    wrap_around: bool,
-    focus: FocusHandle,
+    pub(crate) match_case: bool,
+    pub(crate) wrap_around: bool,
     pub(crate) query: Editor,
     pub(crate) replacement: Editor,
-    notice: Option<SharedString>,
+    notice: Option<SharedStr>,
     notice_timer: TimerHandle,
     matcher: Option<Matcher>,
     buffer: Vec<u8>,
-    options_bounds: Rc<Cell<Bounds<Pixels>>>,
+    last_scale: f32,
+}
+
+impl Default for FindBar {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl FindBar {
-    pub(crate) fn new(window: &Window, cx: &App) -> Self {
-        let query = Editor::single_line(window, cx)
-            .with_caret_height(px(field::FIELD_CARET))
+    pub(crate) fn new() -> Self {
+        let query = Editor::single_line()
+            .with_caret_height(FIELD_CARET)
             .with_placeholder("Find");
-        let replacement = Editor::single_line(window, cx)
-            .with_caret_height(px(field::FIELD_CARET))
+        let replacement = Editor::single_line()
+            .with_caret_height(FIELD_CARET)
             .with_placeholder("Replace");
         Self {
             visible: false,
@@ -366,38 +380,22 @@ impl FindBar {
             serial: 0,
             match_case: false,
             wrap_around: true,
-            focus: cx.focus_handle(),
             query,
             replacement,
             notice: None,
             notice_timer: TimerHandle::default(),
             matcher: None,
             buffer: Vec::new(),
-            options_bounds: Rc::new(Cell::new(Bounds::default())),
+            last_scale: 1.,
         }
-    }
-
-    fn prepare(&mut self) -> Option<String> {
-        let query = self.query.value().to_string();
-        if query.is_empty() {
-            return None;
-        }
-        let stale = self
-            .matcher
-            .as_ref()
-            .is_none_or(|matcher| matcher.query != query || matcher.match_case != self.match_case);
-        if stale {
-            self.matcher = Matcher::new(&query, self.match_case);
-        }
-        self.matcher.as_ref().map(|_| query)
-    }
-
-    pub(crate) fn selection_focus(&self) -> Option<FocusHandle> {
-        self.is_open().then(|| self.focus.clone())
     }
 
     pub(crate) fn is_open(&self) -> bool {
         self.visible && !self.closing
+    }
+
+    pub(crate) fn scale(&self) -> f32 {
+        self.last_scale
     }
 
     pub(crate) fn clear_notice(&mut self) {
@@ -405,36 +403,186 @@ impl FindBar {
         self.notice_timer.cancel();
     }
 
-    fn card_size(&self, window: &Window) -> (f32, f32) {
+    pub(crate) fn show_notice(
+        &mut self,
+        notice: impl Into<SharedStr>,
+        window: WindowId,
+        jobs: &Jobs<AppEvent>,
+    ) {
+        if !self.is_open() {
+            return;
+        }
+        self.notice = Some(notice.into());
+        self.notice_timer = jobs.after(NOTICE_DURATION, AppEvent::FindNoticeDismiss { window });
+    }
+
+    pub(crate) fn on_notice_dismiss(&mut self) -> bool {
+        self.notice.take().is_some()
+    }
+
+    pub(crate) fn open(&mut self, replace: bool, selected: &str, ts: &TextSystem) {
+        if !selected.is_empty() && !selected.contains('\n') {
+            self.query.set_value(selected, ts);
+        }
+        if !self.is_open() {
+            self.serial += 1;
+            self.visible = true;
+            self.closing = false;
+        }
+        self.replace = replace;
+        self.query.select_all();
+    }
+
+    pub(crate) fn close(&mut self) -> bool {
+        if !self.is_open() {
+            return false;
+        }
+        self.closing = true;
+        self.clear_notice();
+        true
+    }
+
+    pub(crate) fn options_entries(&self) -> Vec<Entry> {
+        vec![
+            Entry::toggle("Match case", self.match_case, Command::ToggleMatchCase),
+            Entry::toggle("Wrap around", self.wrap_around, Command::ToggleWrapAround),
+        ]
+    }
+
+    pub(crate) fn prepare(&mut self) -> Option<String> {
+        let query = self.query.value().to_string();
+        if query.is_empty() {
+            return None;
+        }
+        let stale = self
+            .matcher
+            .as_ref()
+            .is_none_or(|m| m.query != query || m.match_case != self.match_case);
+        if stale {
+            self.matcher = Matcher::new(&query, self.match_case);
+        }
+        self.matcher.as_ref().map(|_| query)
+    }
+
+    /// Searches `editor` forward or backward. Returns `false` if query was empty (caller should open bar).
+    pub(crate) fn step(
+        &mut self,
+        editor: &mut Editor,
+        forward: bool,
+        window: WindowId,
+        jobs: &Jobs<AppEvent>,
+    ) -> bool {
+        let Some(query) = self.prepare() else {
+            return false;
+        };
+        let text = editor.text().clone();
+        let selection = editor.selected_range();
+        let wrap = self.wrap_around;
+        let found = self
+            .matcher
+            .as_ref()
+            .and_then(|m| m.search(&text, selection, forward, wrap, &mut self.buffer));
+        match found {
+            Some((range, wrapped)) => {
+                editor.set_selected_range(range);
+                if wrapped {
+                    let msg = if forward {
+                        "Found next from the top"
+                    } else {
+                        "Found previous from the bottom"
+                    };
+                    self.show_notice(msg, window, jobs);
+                } else {
+                    self.notice = None;
+                }
+            }
+            None => self.show_notice(not_found(&query), window, jobs),
+        }
+        true
+    }
+
+    pub(crate) fn replace_next(
+        &mut self,
+        editor: &mut Editor,
+        window: WindowId,
+        ts: &TextSystem,
+        jobs: &Jobs<AppEvent>,
+    ) {
+        if self.prepare().is_none() {
+            return;
+        }
+        let selected = editor.selected_text().to_string();
+        let is_match = self
+            .matcher
+            .as_ref()
+            .is_some_and(|m| m.is_match(&selected));
+        if is_match {
+            let replacement = self.replacement.value();
+            editor.replace(replacement.as_str(), ts);
+        }
+        let _ = self.step(editor, true, window, jobs);
+    }
+
+    pub(crate) fn replace_all(
+        &mut self,
+        editor: &mut Editor,
+        window: WindowId,
+        ts: &TextSystem,
+        jobs: &Jobs<AppEvent>,
+    ) -> bool {
+        let Some(query) = self.prepare() else {
+            return false;
+        };
+        let text = editor.text().clone();
+        let cursor = editor.cursor();
+        let ranges = match self.matcher.as_ref() {
+            Some(m) => m.all(&text, &mut self.buffer),
+            None => return false,
+        };
+        if ranges.is_empty() {
+            self.show_notice(not_found(&query), window, jobs);
+            return false;
+        }
+        let replacement = self.replacement.value().to_string();
+        let next_cursor = cursor_after_replace_all(cursor, &ranges, replacement.len());
+        let edits = merge_edits(&text, ranges, &replacement);
+        editor.replace_ranges(&edits, ts);
+        let clamped = editor
+            .text()
+            .floor_char_boundary(next_cursor.min(editor.text().len()));
+        editor.set_selected_range(clamped..clamped);
+        true
+    }
+
+    fn card_size(&self, viewport_width: f32) -> (f32, f32) {
         let rows = if self.replace { 2. } else { 1. };
         let height =
             2. * BORDER + 2. * CARD_PADDING + rows * CONTROL_HEIGHT + (rows - 1.) * ROW_GAP;
-        let available = window.viewport_size().width.as_f32() - 2. * CARD_SIDE_MARGIN;
+        let available = viewport_width - 2. * CARD_SIDE_MARGIN;
         (CARD_WIDTH.min(available).max(0.), height)
     }
 
-    fn sample(&mut self, window: &mut Window, cx: &mut App) -> Option<Point<f32>> {
+    fn sample(&mut self, viewport_width: f32, ui: &mut UiState) -> Option<Point> {
         if !self.visible {
             return None;
         }
-        let shown = animate_from(
-            ("jot-find-show", self.serial),
-            0.0_f32,
-            1.0_f32,
-            EXPAND_DURATION,
-            Easing::CubicBezier {
-                x1: 0.1,
-                y1: 0.9,
-                x2: 0.2,
-                y2: 1.,
-            },
-            window,
-            cx,
-        )
-        .value;
-        let hidden = animate_from(
-            ("jot-find-hide", self.serial),
-            0.0_f32,
+        let shown = ui
+            .animate_f32_from(
+                AnimKey::FindShow(self.serial),
+                0.0,
+                1.0,
+                EXPAND_DURATION,
+                Easing::CubicBezier {
+                    x1: 0.1,
+                    y1: 0.9,
+                    x2: 0.2,
+                    y2: 1.,
+                },
+            )
+            .value;
+        let hidden = ui.animate_f32_from(
+            AnimKey::FindHide(self.serial),
+            0.0,
             if self.closing { 1. } else { 0. },
             CONTRACT_DURATION,
             Easing::CubicBezier {
@@ -443,12 +591,10 @@ impl FindBar {
                 x2: 1.,
                 y2: 0.5,
             },
-            window,
-            cx,
         );
-        let (width, height) = self.card_size(window);
-        let axis = |size: f32| {
-            let collapsed = COLLAPSED_SIZE / size.max(COLLAPSED_SIZE);
+        let (width, height) = self.card_size(viewport_width);
+        let axis = |sz: f32| {
+            let collapsed = COLLAPSED_SIZE / sz.max(COLLAPSED_SIZE);
             if self.closing {
                 1. - (1. - collapsed) * hidden.value
             } else {
@@ -457,438 +603,237 @@ impl FindBar {
             }
         };
         let scale = point(axis(width), axis(height));
+        self.last_scale = scale.x;
         if self.closing && hidden.status == AnimStatus::Finished {
             self.visible = false;
             return None;
         }
         Some(scale)
     }
-}
 
-impl Jot {
-    pub(crate) fn find(&mut self, window: &mut Window, cx: &mut App) {
-        if self.has_text() {
-            self.open_find(false, window, cx);
-        }
-    }
-
-    pub(crate) fn replace(&mut self, window: &mut Window, cx: &mut App) {
-        if self.has_text() {
-            self.open_find(true, window, cx);
-        }
-    }
-
-    pub(crate) fn find_next(&mut self, window: &mut Window, cx: &mut App) {
-        if self.has_text() {
-            self.find_step(true, window, cx);
-        }
-    }
-
-    pub(crate) fn find_previous(&mut self, window: &mut Window, cx: &mut App) {
-        if self.has_text() {
-            self.find_step(false, window, cx);
-        }
-    }
-
-    pub(crate) fn toggle_match_case(&mut self, window: &mut Window, cx: &mut App) {
-        self.find.match_case = !self.find.match_case;
-        self.refocus_find(window, cx);
-    }
-
-    pub(crate) fn toggle_wrap_around(&mut self, window: &mut Window, cx: &mut App) {
-        self.find.wrap_around = !self.find.wrap_around;
-        self.refocus_find(window, cx);
-    }
-
-    pub(crate) fn replace_next(&mut self, window: &mut Window, cx: &mut App) {
-        if self.find.prepare().is_none() {
-            return;
-        }
-        let selected = self.active_editor().selected_text().to_string();
-        let is_match = self
-            .find
-            .matcher
-            .as_ref()
-            .is_some_and(|matcher| matcher.is_match(&selected));
-        if is_match {
-            let replacement = self.find.replacement.value();
-            self.active_editor_mut().replace(replacement.as_str(), cx);
-        }
-        self.find_step(true, window, cx);
-    }
-
-    pub(crate) fn replace_all(&mut self, window: &mut Window, cx: &mut App) {
-        let Some(query) = self.find.prepare() else {
-            return;
-        };
-        let (text, cursor) = {
-            let editor = self.active_editor();
-            (editor.text().clone(), editor.cursor())
-        };
-        let ranges = match self.find.matcher.as_ref() {
-            Some(matcher) => matcher.all(&text, &mut self.find.buffer),
-            None => return,
-        };
-        if ranges.is_empty() {
-            self.show_notice(not_found(&query), cx);
-            return;
-        }
-        let replacement = self.find.replacement.value().to_string();
-        let next_cursor = cursor_after_replace_all(cursor, &ranges, replacement.len());
-        let edits = merge_edits(&text, ranges, &replacement);
-        let editor = self.active_editor_mut();
-        editor.replace_ranges(&edits, cx);
-        let clamped = editor
-            .text()
-            .floor_char_boundary(next_cursor.min(editor.text().len()));
-        editor.set_selected_range(clamped..clamped);
-        self.refocus_find(window, cx);
-    }
-
-    fn refocus_find(&mut self, window: &mut Window, cx: &mut App) {
-        if self.find.is_open() {
-            let slot = if self.find.replace
-                && self
-                    .find
-                    .replacement
-                    .focus_handle()
-                    .contains_focused(window, cx)
-            {
-                EditorSlot::FindReplace
-            } else {
-                EditorSlot::FindQuery
-            };
-            self.focus_editor(slot, window, cx);
-        }
-        self.notify(cx);
-    }
-
-    fn open_find(&mut self, replace: bool, window: &mut Window, cx: &mut App) {
-        let selected = self.active_editor().selected_text().to_string();
-        if !selected.is_empty() && !selected.contains('\n') {
-            self.find.query.set_value(&selected, cx);
-        }
-        if !self.find.is_open() {
-            self.find.serial += 1;
-            self.find.visible = true;
-            self.find.closing = false;
-        }
-        self.find.replace = replace;
-        self.find.query.select_all();
-        self.focus_editor(EditorSlot::FindQuery, window, cx);
-        self.sync_selection_focus();
-        self.notify(cx);
-    }
-
-    pub(crate) fn close_find(&mut self, window: &mut Window, cx: &mut App) {
-        if !self.find.is_open() {
-            return;
-        }
-        self.find.closing = true;
-        self.find.notice = None;
-        self.find.notice_timer.cancel();
-        self.sync_selection_focus();
-        self.focus_active_editor(window, cx);
-    }
-
-    fn find_step(&mut self, forward: bool, window: &mut Window, cx: &mut App) {
-        let Some(query) = self.find.prepare() else {
-            self.open_find(false, window, cx);
-            return;
-        };
-        let (text, selection) = {
-            let editor = self.active_editor();
-            (editor.text().clone(), editor.selected_range())
-        };
-        let wrap = self.find.wrap_around;
-        let found = self
-            .find
-            .matcher
-            .as_ref()
-            .and_then(|matcher| {
-                matcher.search(&text, selection, forward, wrap, &mut self.find.buffer)
-            });
-        match found {
-            Some((range, wrapped)) => {
-                self.active_editor_mut().set_selected_range(range);
-                if wrapped {
-                    let notice = if forward {
-                        "Found next from the top"
-                    } else {
-                        "Found previous from the bottom"
-                    };
-                    self.show_notice(notice, cx);
-                } else {
-                    self.find.notice = None;
-                }
-            }
-            None => self.show_notice(not_found(&query), cx),
-        }
-        if !self.find.is_open() {
-            self.focus_active_editor(window, cx);
-        }
-        self.notify(cx);
-    }
-
-    fn show_notice(&mut self, notice: impl Into<SharedString>, cx: &mut App) {
-        if !self.find.is_open() {
-            return;
-        }
-        self.find.notice = Some(notice.into());
-        let window_id = self.window_id;
-        self.find.notice_timer = cx.after(NOTICE_DURATION, move |cx| {
-            cx.with_jot(window_id, |this, cx| {
-                this.find.notice = None;
-                this.notify(cx);
-            });
-        });
-        self.notify(cx);
-    }
-
-    fn open_find_options(&mut self, window: &mut Window, cx: &mut App) {
-        let target = self.find.options_bounds.get();
-        let entries = vec![
-            Entry::toggle("Match case", self.find.match_case, Command::ToggleMatchCase),
-            Entry::toggle(
-                "Wrap around",
-                self.find.wrap_around,
-                Command::ToggleWrapAround,
-            ),
-        ];
-        let return_focus = self.find.query.focus_handle().clone();
-        self.open_flyout_above(entries, target, return_focus, window, cx);
-    }
-
-    pub(crate) fn render_find(&mut self, window: &mut Window, cx: &mut App) -> Option<Div> {
-        let p = palette(cx);
-        let scale = self.find.sample(window, cx)?;
-        let (width, height) = self.find.card_size(window);
-        let notice = self
-            .find
+    pub(crate) fn render(
+        &mut self,
+        viewport_width: f32,
+        focused_slot: Option<EditorSlot>,
+        p: Palette,
+        ui: &mut UiState,
+    ) -> Option<Node> {
+        let scale = self.sample(viewport_width, ui)?;
+        let (width, height) = self.card_size(viewport_width);
+        let notice_node = self
             .notice
             .clone()
-            .filter(|_| !self.find.closing)
-            .map(|text| notice(p, text, CARD_TOP + height + NOTICE_GAP));
+            .filter(|_| !self.closing)
+            .map(|msg| render_notice(p, msg, CARD_TOP + height + NOTICE_GAP));
+        let card = self.render_card(p, width, height, scale, focused_slot, ui);
 
         Some(
-            div()
+            box_()
                 .absolute()
-                .top_0()
-                .left_0()
-                .right_0()
+                .top(0.)
+                .left(0.)
+                .right(0.)
                 .child(
-                    div()
+                    row()
                         .absolute()
-                        .top(px(CARD_TOP - CARD_SHADOW_CLIP_TOP))
-                        .left_0()
-                        .right_0()
-                        .h(px(height + CARD_SHADOW_CLIP_TOP + CARD_SHADOW_CLIP_BOTTOM))
-                        .pt(px(CARD_SHADOW_CLIP_TOP))
-                        .pb(px(CARD_SHADOW_CLIP_BOTTOM))
+                        .top(CARD_TOP - CARD_SHADOW_CLIP_TOP)
+                        .left(0.)
+                        .right(0.)
+                        .h(height + CARD_SHADOW_CLIP_TOP + CARD_SHADOW_CLIP_BOTTOM)
+                        .pt(CARD_SHADOW_CLIP_TOP)
+                        .pb(CARD_SHADOW_CLIP_BOTTOM)
                         .overflow_hidden()
-                        .flex()
                         .items_center()
                         .justify_center()
-                        .child(self.find_card(p, width, height, scale, window, cx)),
+                        .child(card),
                 )
-                .children(notice),
+                .when_some(notice_node, |this, n| this.child(n)),
         )
     }
 
-    fn find_card(
+    fn render_card(
         &self,
         p: Palette,
         width: f32,
         height: f32,
-        scale: Point<f32>,
-        window: &Window,
-        cx: &App,
-    ) -> Div {
+        scale: Point,
+        focused_slot: Option<EditorSlot>,
+        ui: &mut UiState,
+    ) -> Node {
         let s = scale.x;
-        let u = |v: f32| px(v * s);
-        let card = div()
-            .w(px(width * scale.x))
-            .h(px(height * scale.y))
-            .border_1()
-            .border_color(rgba(p.surface_stroke))
-            .rounded(px(OVERLAY_RADIUS * scale.x.min(scale.y)))
-            .shadow(theme_shadow(p.dark, CARD_Z, s));
+        let u = |v: f32| v * s;
+        let card = box_()
+            .w(width * scale.x)
+            .h(height * scale.y)
+            .border(BORDER, rgba(p.surface_stroke))
+            .rounded(OVERLAY_RADIUS * scale.x.min(scale.y))
+            .shadows(theme_shadow(p.dark, CARD_Z, s));
         if s < MIN_VISIBLE_SCALE {
             return card;
         }
-        let buttons = field::ButtonStyle {
+        let buttons = ButtonStyle {
             surface: p.card_surface,
             accent: rgb(p.accent),
             scale: s,
         };
-        let query_row = self.find_query_row(p, s, window, cx);
+        let query_row = self.render_query_row(p, s, focused_slot, ui);
         let replace_row = self
-            .find
             .replace
-            .then(|| self.find_replace_row(p, buttons, window, cx));
+            .then(|| self.render_replace_row(p, buttons, focused_slot, ui));
+
         card.child(
-            div()
-                .id("find-bar")
-                .track_focus(&self.find.focus)
+            col()
+                .hit(HitId::FindCard)
+                .cursor(CursorStyle::Arrow)
                 .size_full()
-                .flex()
-                .flex_col()
                 .justify_center()
                 .p(u(CARD_PADDING))
                 .rounded(u(OVERLAY_RADIUS - BORDER))
                 .bg(rgb(p.card_surface.panel))
-                .occlude()
-                .cursor_default()
                 .child(query_row)
-                .children(replace_row),
+                .when_some(replace_row, |this, r| this.child(r)),
         )
     }
 
-    fn find_query_row(&self, p: Palette, s: f32, window: &Window, cx: &App) -> Div {
-        let u = |v: f32| px(v * s);
-        let options_bounds = self.find.options_bounds.clone();
-        let replace = self.find.replace;
-        div()
-            .flex()
-            .items_center()
-            .gap(u(ICON_GAP))
-            .child(
-                icon_button(
-                    p,
-                    "find-expand",
-                    if replace {
-                        "Close replace options"
-                    } else {
-                        "Open replace options"
-                    },
-                    if replace {
-                        CHEVRON_DOWN_GLYPH
-                    } else {
-                        CHEVRON_UP_GLYPH
-                    },
-                    CHEVRON_SIZE,
-                    s,
-                )
-                .on_click(self.on(|this, _, window, cx| {
-                    this.find.replace = !this.find.replace;
-                    this.refocus_find(window, cx);
-                })),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .key_context(QUERY_CONTEXT)
-                    .child(text_field(
-                        &self.find.query,
-                        self.editor_host(EditorSlot::FindQuery),
-                        true,
-                        p.card_surface,
-                        s,
-                        window,
-                        cx,
-                    )),
-            )
-            .child(
-                icon_button(
-                    p,
-                    "find-next",
-                    "Search down",
-                    ARROW_DOWN_GLYPH,
-                    ICON_SIZE,
-                    s,
-                )
-                .on_click(self.on(|this, _, window, cx| this.find_step(true, window, cx))),
-            )
-            .child(
-                icon_button(
-                    p,
-                    "find-previous",
-                    "Search up",
-                    ARROW_UP_GLYPH,
-                    ICON_SIZE,
-                    s,
-                )
-                .on_click(self.on(|this, _, window, cx| this.find_step(false, window, cx))),
-            )
-            .child(
-                icon_button(
-                    p,
-                    "find-options",
-                    "More options",
-                    OPTIONS_GLYPH,
-                    ICON_SIZE,
-                    s,
-                )
-                .on_click(self.on(|this, _, window, cx| this.open_find_options(window, cx)))
-                .on_bounds(move |bounds, _, _| options_bounds.set(bounds)),
-            )
-            .child(
-                icon_button(
-                    p,
-                    "find-close",
-                    "Exit Find and Replace",
-                    CLOSE_GLYPH,
-                    ICON_SIZE,
-                    s,
-                )
-                .on_click(self.on(|this, _, window, cx| this.close_find(window, cx))),
-            )
-    }
-
-    fn find_replace_row(
+    fn render_query_row(
         &self,
         p: Palette,
-        buttons: field::ButtonStyle,
-        window: &Window,
-        cx: &App,
-    ) -> Div {
+        s: f32,
+        focused_slot: Option<EditorSlot>,
+        ui: &mut UiState,
+    ) -> Node {
+        let u = |v: f32| v * s;
+        let replace = self.replace;
+        let expand_btn = find_icon_button(
+            p,
+            HitId::FindToggleReplace,
+            if replace {
+                "Close replace options"
+            } else {
+                "Open replace options"
+            },
+            if replace {
+                CHEVRON_DOWN_GLYPH
+            } else {
+                CHEVRON_UP_GLYPH
+            },
+            CHEVRON_SIZE,
+            s,
+            ui,
+        );
+        let query_editor = self.query.view(EditorSlot::FindQuery, u(BODY_LINE + 2.));
+        let query_field = text_field_frame(
+            p,
+            EditorSlot::FindQuery,
+            p.card_surface,
+            s,
+            focused_slot == Some(EditorSlot::FindQuery),
+            self.query.text().len() == 0,
+            true,
+            query_editor,
+            ui,
+        );
+        let next_btn = find_icon_button(
+            p,
+            HitId::FindNext,
+            "Search down",
+            ARROW_DOWN_GLYPH,
+            ICON_SIZE,
+            s,
+            ui,
+        );
+        let prev_btn = find_icon_button(
+            p,
+            HitId::FindPrev,
+            "Search up",
+            ARROW_UP_GLYPH,
+            ICON_SIZE,
+            s,
+            ui,
+        );
+        let opts_btn = find_icon_button(
+            p,
+            HitId::FindOptions,
+            "More options",
+            OPTIONS_GLYPH,
+            ICON_SIZE,
+            s,
+            ui,
+        );
+        let close_btn = find_icon_button(
+            p,
+            HitId::FindClose,
+            "Exit Find and Replace",
+            CLOSE_GLYPH,
+            ICON_SIZE,
+            s,
+            ui,
+        );
+
+        row()
+            .items_center()
+            .gap(u(ICON_GAP))
+            .child(expand_btn)
+            .child(box_().flex_1().min_w_0().child(query_field))
+            .child(next_btn)
+            .child(prev_btn)
+            .child(opts_btn)
+            .child(close_btn)
+    }
+
+    fn render_replace_row(
+        &self,
+        p: Palette,
+        buttons: ButtonStyle,
+        focused_slot: Option<EditorSlot>,
+        ui: &mut UiState,
+    ) -> Node {
         let s = buttons.scale;
-        let u = |v: f32| px(v * s);
-        let action = |button| {
-            div()
-                .flex_none()
-                .ml(u(ACTION_GAP))
-                .w(u(ACTION_WIDTH))
-                .child(button)
-        };
-        div()
-            .flex()
+        let u = |v: f32| v * s;
+        let replace_editor = self
+            .replacement
+            .view(EditorSlot::FindReplace, u(BODY_LINE + 2.));
+        let replace_field = text_field_frame(
+            p,
+            EditorSlot::FindReplace,
+            p.card_surface,
+            s,
+            focused_slot == Some(EditorSlot::FindReplace),
+            self.replacement.text().len() == 0,
+            false,
+            replace_editor,
+            ui,
+        );
+        let replace_btn = button(p, buttons, HitId::FindReplace, "Replace", false, false, ui);
+        let replace_all_btn = button(
+            p,
+            buttons,
+            HitId::FindReplaceAll,
+            "Replace all",
+            false,
+            false,
+            ui,
+        );
+
+        row()
             .items_center()
             .mt(u(ROW_GAP))
-            .child(div().flex_none().w(u(ICON_BUTTON_SIZE + ICON_GAP)))
+            .child(box_().flex_none().w(u(ICON_BUTTON_SIZE + ICON_GAP)))
+            .child(box_().flex_1().min_w_0().child(replace_field))
             .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .key_context(REPLACEMENT_CONTEXT)
-                    .child(text_field(
-                        &self.find.replacement,
-                        self.editor_host(EditorSlot::FindReplace),
-                        false,
-                        p.card_surface,
-                        s,
-                        window,
-                        cx,
-                    )),
+                box_()
+                    .flex_none()
+                    .ml(u(ACTION_GAP))
+                    .w(u(ACTION_WIDTH))
+                    .child(replace_btn),
             )
-            .child(action(
-                field::button(p, buttons, "find-replace", "Replace", false, None, window).on_click(
-                    self.on(|this, _, window, cx| this.replace_next(window, cx)),
-                ),
-            ))
-            .child(action(
-                field::button(
-                    p,
-                    buttons,
-                    "find-replace-all",
-                    "Replace all",
-                    false,
-                    None,
-                    window,
-                )
-                .on_click(self.on(|this, _, window, cx| this.replace_all(window, cx))),
-            ))
+            .child(
+                box_()
+                    .flex_none()
+                    .ml(u(ACTION_GAP))
+                    .w(u(ACTION_WIDTH))
+                    .child(replace_all_btn),
+            )
     }
 }
 
@@ -896,56 +841,57 @@ fn not_found(query: &str) -> String {
     format!("Cannot find \"{query}\"")
 }
 
-fn notice(p: Palette, text: SharedString, top: f32) -> Div {
-    div()
+fn render_notice(p: Palette, msg: SharedStr, top: f32) -> Node {
+    row()
         .absolute()
-        .top(px(top))
-        .left_0()
-        .right_0()
-        .flex()
+        .top(top)
+        .left(0.)
+        .right(0.)
         .justify_center()
         .child(
-            div()
-                .border_1()
-                .border_color(rgba(p.flyout_stroke))
-                .rounded(px(OVERLAY_RADIUS))
-                .shadow(theme_shadow(p.dark, NOTICE_Z, 1.))
+            box_()
+                .border(BORDER, rgba(p.flyout_stroke))
+                .rounded(OVERLAY_RADIUS)
+                .shadows(theme_shadow(p.dark, NOTICE_Z, 1.))
                 .child(
-                    div()
-                        .px(px(NOTICE_PADDING_X))
-                        .pt(px(NOTICE_PADDING_TOP))
-                        .pb(px(NOTICE_PADDING_BOTTOM))
-                        .rounded(px(OVERLAY_RADIUS - BORDER))
+                    box_()
+                        .px(NOTICE_PADDING_X)
+                        .pt(NOTICE_PADDING_TOP)
+                        .pb(NOTICE_PADDING_BOTTOM)
+                        .rounded(OVERLAY_RADIUS - BORDER)
                         .bg(rgb(p.notice_fill))
                         .font_family(TEXT_FONT)
-                        .text_size(px(BODY_SIZE))
-                        .line_height(px(NOTICE_LINE))
+                        .text_size(BODY_SIZE)
+                        .line_height(NOTICE_LINE)
                         .text_color(rgba(p.text_primary))
-                        .child(text),
+                        .child(text(msg)),
                 ),
         )
 }
 
-fn icon_button(
+fn find_icon_button(
     p: Palette,
-    id: &'static str,
+    hit: HitId,
     tip: &'static str,
     glyph: &'static str,
-    size: f32,
+    glyph_size: f32,
     s: f32,
-) -> Div {
-    let u = |v: f32| px(v * s);
-    field::icon_button(
+    ui: &mut UiState,
+) -> Node {
+    let u = |v: f32| v * s;
+    icon_button(
         p,
-        id,
+        hit,
         tip,
         glyph,
-        field::IconButtonStyle {
-            glyph_size: u(size),
-            size: crate::ui::size(u(ICON_BUTTON_SIZE), u(ICON_BUTTON_SIZE)),
+        IconButtonStyle {
+            glyph_size: u(glyph_size),
+            width: u(ICON_BUTTON_SIZE),
+            height: u(ICON_BUTTON_SIZE),
             radius: u(CONTROL_RADIUS),
         },
         true,
+        ui,
     )
 }
 
@@ -1031,7 +977,6 @@ mod tests {
 
     #[test]
     fn case_insensitive_unicode_folding_matches_across_chunk_boundary() {
-        // Kelvin sign U+212A (3 UTF-8 bytes) folds to ASCII 'k' (1 byte).
         let text = Rope::from("abc\u{212A}def");
         let matcher = chunked_matcher("k", false, 2);
         let mut buffer = Vec::new();
@@ -1054,7 +999,7 @@ mod tests {
 
     #[test]
     fn cursor_after_replace_all_handles_inside_and_around_matches() {
-        let ranges = vec![0..3, 8..11]; // "foo bar foo"
+        let ranges = vec![0..3, 8..11];
         assert_eq!(cursor_after_replace_all(0, &ranges, 1), 0);
         assert_eq!(cursor_after_replace_all(2, &ranges, 1), 1);
         assert_eq!(cursor_after_replace_all(2, &ranges, 0), 0);
@@ -1076,7 +1021,10 @@ mod tests {
 
         assert_eq!(
             edits,
-            vec![(0..5, "X X".to_string()), (second..second + 2, "X".to_string())]
+            vec![
+                (0..5, "X X".to_string()),
+                (second..second + 2, "X".to_string())
+            ]
         );
     }
 }

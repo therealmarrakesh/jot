@@ -1,16 +1,13 @@
-//! Clean-room rope coordinates, selections, UTF-16 conversion, and word/line boundaries.
+//! Rope coordinates, selections, UTF-16 conversion, and word/line boundaries.
 
 use std::ops::{Bound, Range, RangeBounds};
 
 use ropey::{LineType, Rope, RopeSlice};
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::ui::Pixels;
-
 const WORD_SCAN_WINDOW_BYTES: usize = 256;
 const DOUBLE_CLICK_SCAN_LIMIT: usize = 128;
 
-/// Rounding direction when clamping an arbitrary byte offset to a UTF-8 char boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum Bias {
     Left,
@@ -19,12 +16,12 @@ pub(crate) enum Bias {
 
 /// Zero-based logical `(row, byte_column)` coordinate within a `Rope`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) struct Point {
+pub(crate) struct TextPoint {
     pub(crate) row: usize,
     pub(crate) column: usize,
 }
 
-impl Point {
+impl TextPoint {
     #[inline]
     pub(crate) fn new(row: usize, column: usize) -> Self {
         Self { row, column }
@@ -94,7 +91,7 @@ pub(crate) struct CaretSelection {
     pub(crate) start: usize,
     pub(crate) end: usize,
     pub(crate) reversed: bool,
-    pub(crate) preferred_x: Option<(Pixels, usize)>,
+    pub(crate) preferred_x: Option<(f32, usize)>,
 }
 
 impl CaretSelection {
@@ -137,7 +134,7 @@ impl CaretSelection {
     }
 
     #[inline]
-    pub(crate) fn place_at(&mut self, offset: usize, preferred_x: Option<(Pixels, usize)>) {
+    pub(crate) fn place_at(&mut self, offset: usize, preferred_x: Option<(f32, usize)>) {
         self.start = offset;
         self.end = offset;
         self.reversed = false;
@@ -193,8 +190,8 @@ pub(crate) trait RopeExt {
     fn line_end_offset(&self, row: usize) -> usize;
     fn lines_len(&self) -> usize;
     fn char_at(&self, offset: usize) -> Option<char>;
-    fn offset_to_point(&self, offset: usize) -> Point;
-    fn point_to_offset(&self, point: Point) -> usize;
+    fn offset_to_point(&self, offset: usize) -> TextPoint;
+    fn point_to_offset(&self, point: TextPoint) -> usize;
     fn position_to_offset(&self, pos: &Position) -> usize;
     fn offset_utf16_to_offset(&self, utf16_offset: usize) -> usize;
     fn offset_to_offset_utf16(&self, byte_offset: usize) -> usize;
@@ -220,7 +217,7 @@ impl RopeExt for Rope {
     }
 
     fn line_start_offset(&self, row: usize) -> usize {
-        self.point_to_offset(Point::new(row, 0))
+        self.point_to_offset(TextPoint::new(row, 0))
     }
 
     fn line_end_offset(&self, row: usize) -> usize {
@@ -240,14 +237,14 @@ impl RopeExt for Rope {
             .flatten()
     }
 
-    fn offset_to_point(&self, offset: usize) -> Point {
+    fn offset_to_point(&self, offset: usize) -> TextPoint {
         let clamped = self.clip_offset(offset, Bias::Left);
         let row = self.byte_to_line_idx(clamped, LineType::LF);
         let start = self.line_to_byte_idx(row, LineType::LF);
-        Point::new(row, clamped.saturating_sub(start))
+        TextPoint::new(row, clamped.saturating_sub(start))
     }
 
-    fn point_to_offset(&self, point: Point) -> usize {
+    fn point_to_offset(&self, point: TextPoint) -> usize {
         if point.row >= self.lines_len() {
             return self.len();
         }
@@ -298,7 +295,6 @@ impl RopeExt for Rope {
     }
 }
 
-/// Line span excluding trailing `\n` for triple-click selection.
 pub(crate) fn line_range_at(text: &Rope, offset: usize) -> Range<usize> {
     let clamped = text.clip_offset(offset, Bias::Left);
     let row = text.offset_to_point(clamped).row;
@@ -334,7 +330,6 @@ fn classify_char(ch: char) -> TokenClass {
     }
 }
 
-/// Double-click word/whitespace span around `offset`.
 pub(crate) fn word_range_at(text: &Rope, offset: usize) -> Option<Range<usize>> {
     let start_pos = text.clip_offset(offset, Bias::Left);
     let ch = text.char_at(start_pos)?;
@@ -371,7 +366,6 @@ pub(crate) fn word_range_at(text: &Rope, offset: usize) -> Option<Range<usize>> 
     Some(left..right)
 }
 
-/// Start byte offset of the previous UAX #29 word before `offset` in O(word length) time.
 pub(crate) fn prev_word_start(text: &Rope, offset: usize) -> usize {
     let offset = text.floor_char_boundary(offset.min(text.len()));
     if offset == 0 {
@@ -407,7 +401,6 @@ pub(crate) fn prev_word_start(text: &Rope, offset: usize) -> usize {
     }
 }
 
-/// End byte offset of the next UAX #29 word after `offset` in O(word length) time.
 pub(crate) fn next_word_end(text: &Rope, offset: usize) -> usize {
     let len = text.len();
     let offset = text.floor_char_boundary(offset.min(len));
@@ -449,7 +442,6 @@ pub(crate) fn next_word_end(text: &Rope, offset: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui::px;
 
     #[test]
     fn selection_and_caret_basics() {
@@ -461,10 +453,10 @@ mod tests {
         assert_eq!(caret.head(), 10);
         caret.reversed = true;
         assert_eq!(caret.head(), 5);
-        caret.place_at(7, Some((px(12.), 3)));
+        caret.place_at(7, Some((12., 3)));
         assert!(caret.is_empty());
         assert!(!caret.reversed);
-        assert_eq!(caret.preferred_x, Some((px(12.), 3)));
+        assert_eq!(caret.preferred_x, Some((12., 3)));
     }
 
     #[test]
@@ -494,7 +486,7 @@ mod tests {
         );
         assert_eq!(
             sample.offset_to_point("hello 中文🎉\nR".len()),
-            Point::new(0, "hello 中文🎉\nR".len())
+            TextPoint::new(0, "hello 中文🎉\nR".len())
         );
 
         let mut edit = Rope::from("中文");

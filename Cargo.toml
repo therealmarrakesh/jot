@@ -8,10 +8,6 @@ publish = false
 name = "Jot"
 path = "src/main.rs"
 
-[[bin]]
-name = "Jot2"
-path = "src2/main.rs"
-
 [dependencies]
 ropey = { version = "=2.0.0-beta.1", features = [
     "metric_chars",
