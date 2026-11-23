@@ -188,8 +188,8 @@ impl ScrollbarState {
     fn wants_visible(&self, now: Instant) -> bool {
         let hovered = self.hovered_axis.is_some() || self.hovered_thumb.is_some();
         let dragging = self.dragged_axis.is_some();
-        let currently_visible = self.opacity.sample(now).0 > 0.0;
-        if hovered && currently_visible {
+        // Hovering the track edge reveals the overlay scrollbar even when faded out (W-9).
+        if hovered {
             return true;
         }
         dragging
@@ -429,9 +429,27 @@ impl ScrollbarState {
             item.metrics
                 .apply_drag(item.axis, position, grab, current_offset)
         } else {
-            let center = point(item.metrics.thumb_len * 0.5, item.metrics.thumb_len * 0.5);
-            item.metrics
-                .apply_drag(item.axis, position, center, current_offset)
+            // Standard Windows scrollbar track click pages by one viewport (W-9).
+            let mut paged = current_offset;
+            match item.axis {
+                Axis::Vertical => {
+                    let page = (self.viewport_bounds.size.height - 24.0).max(24.0);
+                    if position.y < item.thumb_hit_bounds.top() {
+                        paged.y += page;
+                    } else {
+                        paged.y -= page;
+                    }
+                }
+                Axis::Horizontal => {
+                    let page = (self.viewport_bounds.size.width - 24.0).max(24.0);
+                    if position.x < item.thumb_hit_bounds.left() {
+                        paged.x += page;
+                    } else {
+                        paged.x -= page;
+                    }
+                }
+            }
+            paged
         };
         Some(next)
     }
@@ -449,7 +467,8 @@ impl ScrollbarState {
 
         for item in &axes {
             let axis = item.axis;
-            if item.track_bounds.contains(position) && item.interactive {
+            // Hovering the track reveals a faded scrollbar (W-9).
+            if item.track_bounds.contains(position) {
                 if self.hovered_axis != Some(axis) {
                     self.hovered_axis = Some(axis);
                     notify = true;

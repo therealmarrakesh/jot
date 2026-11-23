@@ -71,6 +71,7 @@ pub(crate) const fn black() -> Rgba {
     Rgba::new(0.0, 0.0, 0.0, 1.0)
 }
 
+#[cfg(test)]
 #[inline]
 pub(crate) const fn white() -> Rgba {
     Rgba::new(1.0, 1.0, 1.0, 1.0)

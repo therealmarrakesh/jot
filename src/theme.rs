@@ -1,7 +1,8 @@
-//! Light and dark Windows 11 Fluent color palettes and elevation shadow presets.
+//! Light, dark, and Windows High Contrast color palettes and elevation shadow presets.
 
 use crate::color::{Rgba, black, rgb};
 use crate::geom::{BoxShadow, Shadows, point};
+use crate::platform::HighContrastColors;
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Surface {
@@ -18,6 +19,7 @@ pub(crate) struct Surface {
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Palette {
     pub(crate) dark: bool,
+    pub(crate) high_contrast: bool,
     pub(crate) layer: u32,
     pub(crate) stroke: u32,
     pub(crate) stroke_on_layer: u32,
@@ -34,6 +36,12 @@ pub(crate) struct Palette {
     pub(crate) caption_glyph: u32,
     pub(crate) caption_glyph_inactive: u32,
     pub(crate) caption_glyph_pressed: u32,
+    pub(crate) close_hover: u32,
+    pub(crate) close_pressed: u32,
+    pub(crate) close_glyph_hover: u32,
+    pub(crate) close_glyph_pressed: u32,
+    pub(crate) keytip_fill: u32,
+    pub(crate) keytip_text: u32,
     pub(crate) caret: u32,
     pub(crate) menu_fill: u32,
     pub(crate) menu_separator: u32,
@@ -53,12 +61,19 @@ pub(crate) struct Palette {
     pub(crate) on_accent: u32,
     pub(crate) accent: u32,
     pub(crate) accent_bottom_edge: f32,
+    pub(crate) selection_rgb: u32,
+    pub(crate) selection_alpha: f32,
 }
 
 impl Default for Palette {
     fn default() -> Self {
         LIGHT
     }
+}
+
+#[inline]
+fn opaque(rgb24: u32) -> u32 {
+    (rgb24 << 8) | 0xff
 }
 
 impl Palette {
@@ -70,13 +85,79 @@ impl Palette {
         palette
     }
 
+    /// Builds an opaque palette driven by Windows High Contrast system colors (A11Y-1).
+    pub(crate) fn from_high_contrast(hc: HighContrastColors) -> Self {
+        let r = ((hc.window >> 16) & 0xFF) as f32;
+        let g = ((hc.window >> 8) & 0xFF) as f32;
+        let b = (hc.window & 0xFF) as f32;
+        let dark = (0.299 * r + 0.587 * g + 0.114 * b) < 128.0;
+        let surface = Surface {
+            panel: hc.window,
+            fill: hc.btn_face,
+            field_stroke: hc.window_frame,
+            field_bottom: hc.window_text,
+            hover: hc.highlight,
+            button_pressed: hc.highlight,
+            button_stroke: hc.btn_text,
+            button_bottom: hc.btn_text,
+        };
+        Self {
+            dark,
+            high_contrast: true,
+            layer: opaque(hc.window),
+            stroke: opaque(hc.window_text),
+            stroke_on_layer: opaque(hc.window_text),
+            editor: hc.window,
+            text_primary: opaque(hc.window_text),
+            text_secondary: opaque(hc.window_text),
+            text_tertiary: opaque(hc.window_text),
+            text_disabled: opaque(hc.gray_text),
+            subtle_secondary: opaque(hc.highlight),
+            subtle_tertiary: opaque(hc.highlight),
+            layer_hover: opaque(hc.highlight),
+            divider: opaque(hc.window_text),
+            on_accent_secondary: opaque(hc.highlight_text),
+            caption_glyph: opaque(hc.window_text),
+            caption_glyph_inactive: opaque(hc.gray_text),
+            caption_glyph_pressed: opaque(hc.highlight_text),
+            close_hover: opaque(hc.highlight),
+            close_pressed: opaque(hc.highlight),
+            close_glyph_hover: opaque(hc.highlight_text),
+            close_glyph_pressed: opaque(hc.highlight_text),
+            keytip_fill: hc.highlight,
+            keytip_text: hc.highlight_text,
+            caret: hc.window_text,
+            menu_fill: hc.window,
+            menu_separator: hc.window_text,
+            smoke: 0x00000080,
+            surface_stroke: opaque(hc.window_text),
+            dialog_divider: hc.window_text,
+            content_surface: surface,
+            command_surface: surface,
+            card_surface: surface,
+            notice_fill: hc.window,
+            field_focused: opaque(hc.window),
+            focus_outer: hc.hotlight,
+            focus_inner: hc.window,
+            acrylic_fallback: hc.window,
+            acrylic_luminosity: opaque(hc.window),
+            flyout_stroke: opaque(hc.window_text),
+            on_accent: hc.highlight_text,
+            accent: hc.highlight,
+            accent_bottom_edge: 1.0,
+            selection_rgb: hc.highlight,
+            selection_alpha: 0.55,
+        }
+    }
+
     pub(crate) fn selection(self) -> Rgba {
-        rgb(if self.dark { 0x1d4ed8 } else { 0x55a0fc }).alpha(0.3)
+        rgb(self.selection_rgb).alpha(self.selection_alpha)
     }
 }
 
 pub(crate) const LIGHT: Palette = Palette {
     dark: false,
+    high_contrast: false,
     layer: 0xffffffb3,
     stroke: 0x0000000f,
     stroke_on_layer: 0xeaeaeab8,
@@ -93,6 +174,12 @@ pub(crate) const LIGHT: Palette = Palette {
     caption_glyph: 0x000000ff,
     caption_glyph_inactive: 0x0000005c,
     caption_glyph_pressed: 0x0000009e,
+    close_hover: 0xc42b1cff,
+    close_pressed: 0xc42b1ce6,
+    close_glyph_hover: 0xffffffff,
+    close_glyph_pressed: 0xffffffb3,
+    keytip_fill: 0x767676,
+    keytip_text: 0xffffff,
     caret: 0x060606,
     menu_fill: 0xfcfcfc,
     menu_separator: 0xededed,
@@ -139,10 +226,13 @@ pub(crate) const LIGHT: Palette = Palette {
     on_accent: 0xffffff,
     accent: 0x005fb8,
     accent_bottom_edge: 0x66 as f32 / 255.,
+    selection_rgb: 0x55a0fc,
+    selection_alpha: 0.3,
 };
 
 pub(crate) const DARK: Palette = Palette {
     dark: true,
+    high_contrast: false,
     layer: 0x3a3a3a73,
     stroke: 0x00000019,
     stroke_on_layer: 0x2f2f2f81,
@@ -159,6 +249,12 @@ pub(crate) const DARK: Palette = Palette {
     caption_glyph: 0xffffffff,
     caption_glyph_inactive: 0xffffff5d,
     caption_glyph_pressed: 0xffffffc5,
+    close_hover: 0xc42b1cff,
+    close_pressed: 0xc42b1ce6,
+    close_glyph_hover: 0xffffffff,
+    close_glyph_pressed: 0xffffffb3,
+    keytip_fill: 0x767676,
+    keytip_text: 0xffffff,
     caret: 0xffffff,
     menu_fill: 0x2c2c2c,
     menu_separator: 0x3d3d3d,
@@ -205,6 +301,8 @@ pub(crate) const DARK: Palette = Palette {
     on_accent: 0x000000,
     accent: 0x60cdff,
     accent_bottom_edge: 0x23 as f32 / 255.,
+    selection_rgb: 0x1d4ed8,
+    selection_alpha: 0.3,
 };
 
 const BLUR_RADIUS_PER_SIGMA: f32 = 3.;

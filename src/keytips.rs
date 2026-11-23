@@ -1,14 +1,14 @@
 //! Win32 transparent topmost overlay displaying Windows Alt/F10 KeyTip badges.
 
-use crate::color::{rgb, transparent_black, white};
+use crate::color::{rgb, transparent_black};
 use crate::geom::{Rect, ScreenPoint, ScreenRect, point, size};
 use crate::gfx::{Direct2DDevices, TextSystem};
 use crate::platform::{
     NativeWindow, WindowAppearance, WindowBackdrop, WindowId, WindowKind, WindowOptions,
 };
+use crate::theme::Palette;
 use crate::ui::{AvailSize, Frame, Node, box_, text};
 
-const FILL: u32 = 0x767676;
 const PADDING: f32 = 4.;
 const MARGIN: f32 = 1.;
 const FONT: &str = "Segoe UI";
@@ -61,6 +61,7 @@ pub(crate) fn layout_tip(
 #[derive(Default)]
 pub(crate) struct KeyTips {
     overlay: Option<NativeWindow>,
+    create_failed: bool,
     owner: Option<WindowId>,
     rect: ScreenRect,
     tips: Vec<KeyTip>,
@@ -95,8 +96,11 @@ impl KeyTips {
     }
 
     pub(crate) fn recreate_renderer(&mut self, devices: Direct2DDevices) {
+        self.create_failed = false;
         if let Some(overlay) = &mut self.overlay {
-            let _ = overlay.recreate_renderer(devices);
+            if let Err(err) = overlay.recreate_renderer(devices) {
+                crate::platform::debug_log(&format!("keytips recreate_renderer failed: {err}"));
+            }
             if self.owner.is_some() {
                 self.dirty = true;
             }
@@ -124,6 +128,9 @@ impl KeyTips {
             return;
         }
         if self.overlay.is_none() {
+            if self.create_failed {
+                return;
+            }
             let opts = WindowOptions {
                 bounds: Some(Rect::new(point(0., 0.), size(1., 1.))),
                 title: "".into(),
@@ -137,10 +144,14 @@ impl KeyTips {
                 backdrop: WindowBackdrop::Transparent,
                 min_size: None,
             };
-            let Ok(win) = NativeWindow::create(devices.clone(), &opts, appearance) else {
-                return;
-            };
-            self.overlay = Some(win);
+            match NativeWindow::create(devices.clone(), &opts, appearance) {
+                Ok(win) => self.overlay = Some(win),
+                Err(err) => {
+                    self.create_failed = true;
+                    crate::platform::debug_log(&format!("keytips overlay create failed: {err}"));
+                    return;
+                }
+            }
         }
         self.tips = tips;
         self.owner = Some(owner);
@@ -153,7 +164,7 @@ impl KeyTips {
         }
     }
 
-    pub(crate) fn paint(&mut self, ts: &TextSystem) -> bool {
+    pub(crate) fn paint(&mut self, p: Palette, ts: &TextSystem) -> bool {
         if !self.dirty {
             return false;
         }
@@ -169,20 +180,31 @@ impl KeyTips {
         }
         let logical = overlay.logical_size;
         let scale = overlay.scale_factor;
-        let tree = render_tips(&self.tips);
+        let tree = render_tips(&self.tips, p);
         let frame = Frame::layout(
             tree,
             AvailSize::definite(logical.width, logical.height),
             scale,
             ts,
         );
-        overlay.renderer.begin_frame(transparent_black());
-        frame.paint(&mut overlay.renderer, &mut |_, _, _| {});
-        overlay.renderer.end_frame().unwrap_or(false)
+        match overlay.renderer_mut() {
+            Some(renderer) => {
+                renderer.begin_frame(transparent_black());
+                frame.paint(renderer, &mut |_, _, _| {});
+                match renderer.end_frame() {
+                    Ok(lost) => lost,
+                    Err(err) => {
+                        crate::platform::debug_log(&format!("keytips end_frame failed: {err}"));
+                        true
+                    }
+                }
+            }
+            None => true,
+        }
     }
 }
 
-fn render_tips(tips: &[KeyTip]) -> Node {
+fn render_tips(tips: &[KeyTip], p: Palette) -> Node {
     box_().size_full().children(tips.iter().map(|tip| {
         box_()
             .absolute()
@@ -190,13 +212,13 @@ fn render_tips(tips: &[KeyTip]) -> Node {
             .top(tip.bounds.origin.y)
             .w(tip.bounds.size.width)
             .h(tip.bounds.size.height)
-            .bg(rgb(FILL))
+            .bg(rgb(p.keytip_fill))
             .pl(PADDING)
             .pt(PADDING)
             .font_family(FONT)
             .text_size(FONT_SIZE)
             .line_height(LINE_HEIGHT)
-            .text_color(white())
+            .text_color(rgb(p.keytip_text))
             .nowrap()
             .child(text(tip.key.to_string()))
     }))

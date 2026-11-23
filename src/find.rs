@@ -32,7 +32,7 @@ const EXPAND_START_SCALE: f32 = 0.01;
 const NOTICE_DURATION: Duration = Duration::from_secs(3);
 const BLOCK_SIZE: usize = 256 * 1024;
 const MAX_UTF8_LEN: usize = 4;
-const MERGE_GAP: usize = 512;
+const MAX_SEED_QUERY_CHARS: usize = 256;
 const CARD_WIDTH: f32 = 860.;
 const CARD_TOP: f32 = 12.;
 const CARD_SHADOW_CLIP_TOP: f32 = 6.;
@@ -132,12 +132,12 @@ impl Matcher {
         })
     }
 
-    fn fill(text: &Rope, range: Range<usize>, buffer: &mut Vec<u8>) -> usize {
+    fn fill(text: &Rope, range: Range<usize>, buffer: &mut String) -> usize {
         let start = text.floor_char_boundary(range.start);
         let end = text.ceil_char_boundary(range.end.min(text.len()));
         buffer.clear();
         for chunk in text.slice(start..end).chunks() {
-            buffer.extend_from_slice(chunk.as_bytes());
+            buffer.push_str(chunk);
         }
         start
     }
@@ -204,12 +204,20 @@ impl Matcher {
         }
     }
 
+    pub(crate) fn max_match_bytes(&self) -> usize {
+        if self.match_case {
+            self.query.len()
+        } else {
+            self.folded.len().saturating_mul(MAX_UTF8_LEN)
+        }
+    }
+
     pub(crate) fn next(
         &self,
         text: &Rope,
         from: usize,
         limit: usize,
-        buffer: &mut Vec<u8>,
+        buffer: &mut String,
     ) -> Option<Range<usize>> {
         let len = text.len();
         let limit = limit.min(len);
@@ -222,7 +230,7 @@ impl Matcher {
                 .min(len)
                 .min(limit + self.overlap);
             let start = Self::fill(text, pos..end, buffer);
-            let haystack = std::str::from_utf8(buffer).unwrap_or("");
+            let haystack = buffer.as_str();
             let safe = if end == len {
                 limit
             } else {
@@ -246,7 +254,7 @@ impl Matcher {
         text: &Rope,
         before: usize,
         floor: usize,
-        buffer: &mut Vec<u8>,
+        buffer: &mut String,
     ) -> Option<Range<usize>> {
         let len = text.len();
         let floor = floor.min(len);
@@ -254,7 +262,7 @@ impl Matcher {
         loop {
             let begin = before.saturating_sub(self.block).max(floor);
             let start = Self::fill(text, begin..(before + self.overlap).min(len), buffer);
-            let haystack = std::str::from_utf8(buffer).unwrap_or("");
+            let haystack = buffer.as_str();
             let limit = before - start;
             let mut found = None;
             let mut cursor = 0;
@@ -282,14 +290,14 @@ impl Matcher {
         }
     }
 
-    pub(crate) fn all(&self, text: &Rope, buffer: &mut Vec<u8>) -> Vec<Range<usize>> {
+    pub(crate) fn all(&self, text: &Rope, buffer: &mut String) -> Vec<Range<usize>> {
         let len = text.len();
         let mut ranges = Vec::new();
         let mut pos = 0;
         loop {
             let end = (pos + self.block + self.overlap).min(len);
             let start = Self::fill(text, pos..end, buffer);
-            let haystack = std::str::from_utf8(buffer).unwrap_or("");
+            let haystack = buffer.as_str();
             let safe = if end == len {
                 usize::MAX
             } else {
@@ -319,7 +327,7 @@ impl Matcher {
         selection: Range<usize>,
         forward: bool,
         wrap: bool,
-        buffer: &mut Vec<u8>,
+        buffer: &mut String,
     ) -> Option<(Range<usize>, bool)> {
         if forward {
             if let Some(range) = self.next(text, selection.end, usize::MAX, buffer) {
@@ -355,7 +363,7 @@ pub(crate) struct FindBar {
     notice: Option<SharedStr>,
     notice_timer: TimerHandle,
     matcher: Option<Matcher>,
-    buffer: Vec<u8>,
+    buffer: String,
     last_scale: f32,
 }
 
@@ -385,7 +393,7 @@ impl FindBar {
             notice: None,
             notice_timer: TimerHandle::default(),
             matcher: None,
-            buffer: Vec::new(),
+            buffer: String::new(),
             last_scale: 1.,
         }
     }
@@ -421,7 +429,12 @@ impl FindBar {
     }
 
     pub(crate) fn open(&mut self, replace: bool, selected: &str, ts: &TextSystem) {
-        if !selected.is_empty() && !selected.contains('\n') {
+        // Cap seeded Find query length so pressing Ctrl+F with a huge single-line selection
+        // never copies megabytes into the single-line search box (P-10).
+        if !selected.is_empty()
+            && !selected.contains('\n')
+            && selected.chars().take(MAX_SEED_QUERY_CHARS + 1).count() <= MAX_SEED_QUERY_CHARS
+        {
             self.query.set_value(selected, ts);
         }
         if !self.is_open() {
@@ -511,11 +524,14 @@ impl FindBar {
         if self.prepare().is_none() {
             return;
         }
-        let selected = editor.selected_text().to_string();
-        let is_match = self
-            .matcher
-            .as_ref()
-            .is_some_and(|m| m.is_match(&selected));
+        // Check selected byte length BEFORE materializing a String so a 50 MB selection never
+        // allocates just to fail a 3-char match check (P-10).
+        let sel_len = editor.selected_range().len();
+        let is_match = self.matcher.as_ref().is_some_and(|m| {
+            sel_len > 0
+                && sel_len <= m.max_match_bytes()
+                && m.is_match(&editor.selected_text().to_string())
+        });
         if is_match {
             let replacement = self.replacement.value();
             editor.replace(replacement.as_str(), ts);
@@ -545,12 +561,8 @@ impl FindBar {
         }
         let replacement = self.replacement.value().to_string();
         let next_cursor = cursor_after_replace_all(cursor, &ranges, replacement.len());
-        let edits = merge_edits(&text, ranges, &replacement);
-        editor.replace_ranges(&edits, ts);
-        let clamped = editor
-            .text()
-            .floor_char_boundary(next_cursor.min(editor.text().len()));
-        editor.set_selected_range(clamped..clamped);
+        let rebuilt = rebuild_replaced_rope(&text, &ranges, &replacement);
+        editor.replace_all_bulk(rebuilt, next_cursor, ts);
         true
     }
 
@@ -915,25 +927,27 @@ fn cursor_after_replace_all(
     offset
 }
 
-fn merge_edits(
-    text: &Rope,
-    ranges: Vec<Range<usize>>,
-    replacement: &str,
-) -> Vec<(Range<usize>, String)> {
-    let mut edits: Vec<(Range<usize>, String)> = Vec::new();
+/// Rebuilds the entire document in a single linear `RopeBuilder` pass for O(N) Replace All (P-10).
+fn rebuild_replaced_rope(text: &Rope, ranges: &[Range<usize>], replacement: &str) -> Rope {
+    let mut builder = ropey::RopeBuilder::new();
+    let mut cursor = 0usize;
     for range in ranges {
-        match edits.last_mut() {
-            Some((last, merged)) if range.start - last.end <= MERGE_GAP => {
-                for chunk in text.slice(last.end..range.start).chunks() {
-                    merged.push_str(chunk);
-                }
-                merged.push_str(replacement);
-                last.end = range.end;
+        if range.start > cursor {
+            for chunk in text.slice(cursor..range.start).chunks() {
+                builder.append(chunk);
             }
-            _ => edits.push((range, replacement.to_string())),
+        }
+        if !replacement.is_empty() {
+            builder.append(replacement);
+        }
+        cursor = range.end;
+    }
+    if cursor < text.len() {
+        for chunk in text.slice(cursor..text.len()).chunks() {
+            builder.append(chunk);
         }
     }
-    edits
+    builder.finish()
 }
 
 #[cfg(test)]
@@ -950,7 +964,7 @@ mod tests {
     fn chunked_search_matches_across_block_boundaries() {
         let text = Rope::from("alpha beta alpha gamma alpha");
         let matcher = chunked_matcher("alpha", true, 4);
-        let mut buffer = Vec::new();
+        let mut buffer = String::new();
 
         assert_eq!(matcher.all(&text, &mut buffer), vec![0..5, 11..16, 23..28]);
         assert_eq!(
@@ -979,7 +993,7 @@ mod tests {
     fn case_insensitive_unicode_folding_matches_across_chunk_boundary() {
         let text = Rope::from("abc\u{212A}def");
         let matcher = chunked_matcher("k", false, 2);
-        let mut buffer = Vec::new();
+        let mut buffer = String::new();
 
         assert_eq!(matcher.all(&text, &mut buffer), vec![3..6]);
         assert_eq!(matcher.next(&text, 0, usize::MAX, &mut buffer), Some(3..6));
@@ -990,7 +1004,7 @@ mod tests {
     fn previous_finds_rightmost_overlapping_match() {
         let text = Rope::from("aaaa");
         let matcher = chunked_matcher("aa", true, 2);
-        let mut buffer = Vec::new();
+        let mut buffer = String::new();
 
         assert_eq!(matcher.previous(&text, 2, 0, &mut buffer), Some(1..3));
         assert_eq!(matcher.previous(&text, 1, 0, &mut buffer), Some(0..2));
@@ -1012,19 +1026,9 @@ mod tests {
     }
 
     #[test]
-    fn merge_edits_combines_nearby_and_splits_distant_ranges() {
-        let gap = ".".repeat(MERGE_GAP + 10);
-        let source = format!("aa bb{gap}aa");
-        let text = Rope::from(source.as_str());
-        let second = 5 + gap.len();
-        let edits = merge_edits(&text, vec![0..2, 3..5, second..second + 2], "X");
-
-        assert_eq!(
-            edits,
-            vec![
-                (0..5, "X X".to_string()),
-                (second..second + 2, "X".to_string())
-            ]
-        );
+    fn rebuild_replaced_rope_streams_non_overlapping_ranges() {
+        let text = Rope::from("aa bb cc aa dd aa");
+        let rebuilt = rebuild_replaced_rope(&text, &[0..2, 9..11, 15..17], "XYZ");
+        assert_eq!(rebuilt.to_string(), "XYZ bb cc XYZ dd XYZ");
     }
 }

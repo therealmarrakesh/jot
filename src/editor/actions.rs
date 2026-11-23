@@ -6,16 +6,16 @@ use std::ops::Range;
 use ropey::Rope;
 
 use crate::command::Command;
-use crate::geom::{Point, Rect, point};
+use crate::geom::{Rect, point};
 use crate::gfx::TextSystem;
 use crate::platform::clipboard;
 
 use super::buffer::{
-    Bias, CaretSelection, Position, RopeExt as _, line_range_at, next_word_end, prev_word_start,
-    word_range_at,
+    Bias, CaretSelection, Position, RopeExt as _, line_range_at, next_grapheme_boundary,
+    next_word_end, prev_grapheme_boundary, prev_word_start, snap_grapheme_boundary, word_range_at,
 };
-use super::history::{EditKind, EditRecord};
-use super::{Editor, EditorTimers, MoveDirection};
+use super::history::{EditKind, EditRecord, ReplayPayload};
+use super::{Composition, Editor, EditorTimers, MoveDirection};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum IndentOp {
@@ -38,23 +38,23 @@ impl Editor {
             Command::DeletePrevWord => self.delete_prev_word(ts, timers),
             Command::DeleteNextWord => self.delete_next_word(ts, timers),
             Command::Enter => return self.enter(ts, timers),
-            Command::Escape => return self.escape(),
+            Command::Escape => return self.escape(ts),
             Command::Paste => self.paste(ts, timers),
             Command::Cut => self.cut(ts, timers),
             Command::Copy => self.copy(),
             Command::Undo => self.undo(ts, timers),
             Command::Redo => self.redo(ts, timers),
             Command::IndentInline if self.multi_line => {
-                return self.apply_indent(IndentOp::Indent, false, ts);
+                return self.apply_indent(IndentOp::Indent, false, ts, timers);
             }
             Command::OutdentInline if self.multi_line => {
-                return self.apply_indent(IndentOp::Outdent, false, ts);
+                return self.apply_indent(IndentOp::Outdent, false, ts, timers);
             }
             Command::Indent if self.multi_line => {
-                return self.apply_indent(IndentOp::Indent, true, ts);
+                return self.apply_indent(IndentOp::Indent, true, ts, timers);
             }
             Command::Outdent if self.multi_line => {
-                return self.apply_indent(IndentOp::Outdent, true, ts);
+                return self.apply_indent(IndentOp::Outdent, true, ts, timers);
             }
             Command::MoveLeft => return self.move_left(timers),
             Command::MoveRight => return self.move_right(timers),
@@ -66,14 +66,17 @@ impl Editor {
             Command::SelectDown if self.multi_line => self.select_vertical(1, timers),
             Command::MovePageUp if self.multi_line => self.move_page(-1, timers),
             Command::MovePageDown if self.multi_line => self.move_page(1, timers),
+            Command::SelectPageUp if self.multi_line => self.select_page(-1, timers),
+            Command::SelectPageDown if self.multi_line => self.select_page(1, timers),
             Command::SelectAll => self.select_all(),
             Command::SelectToStartOfLine => {
-                let target = self.line_start_for(self.selection.head());
+                let target = self.visual_line_start_for(self.selection.head(), self.line_end_affinity);
                 self.select_keyboard_to(target, false, false, timers);
             }
             Command::SelectToEndOfLine => {
-                let target = self.line_end_for(self.selection.head());
-                self.select_keyboard_to(target, true, false, timers);
+                let (target, aff) =
+                    self.visual_line_end_for(self.selection.head(), self.line_end_affinity);
+                self.select_keyboard_to(target, aff, false, timers);
             }
             Command::SelectPrevWord => {
                 let target = self.prev_word_at(self.selection.head());
@@ -84,14 +87,15 @@ impl Editor {
                 self.select_keyboard_to(target, false, false, timers);
             }
             Command::MoveHome => {
-                let target = self.line_start_for(self.selection.head());
+                let target = self.visual_line_start_for(self.selection.head(), self.line_end_affinity);
                 let anchor = self.preferred_x_for(target, false);
                 self.place_cursor(target, anchor, false, Some(MoveDirection::Up), timers);
             }
             Command::MoveEnd => {
-                let target = self.line_end_for(self.selection.head());
-                let anchor = self.preferred_x_for(target, false);
-                self.place_cursor(target, anchor, true, Some(MoveDirection::Down), timers);
+                let (target, aff) =
+                    self.visual_line_end_for(self.selection.head(), self.line_end_affinity);
+                let anchor = self.preferred_x_for(target, aff);
+                self.place_cursor(target, anchor, aff, Some(MoveDirection::Down), timers);
             }
             Command::MoveToStart => self.move_to(0, None, Some(timers)),
             Command::MoveToEnd => self.move_to(self.text.len(), None, Some(timers)),
@@ -117,16 +121,30 @@ impl Editor {
 
     // ---- Direct text & IME input ----
 
+    pub(crate) fn commit_composition(&mut self) {
+        if let Some(comp) = self.composition.take() {
+            let end = comp.end.min(self.text.len());
+            self.set_cursor_to(end);
+            self.history.end_group();
+            self.debug_assert_invariants();
+        }
+    }
+
     pub(crate) fn handle_text_input(
         &mut self,
         text: &str,
         ts: &TextSystem,
         timers: &mut dyn EditorTimers,
     ) {
-        self.replace_text_in_range(None, text, ts, Some(timers));
+        self.replace_text_in_range(None, text, None, ts, Some(timers));
     }
 
     pub(crate) fn handle_ime_composition(&mut self, text: &str, cursor: usize, ts: &TextSystem) {
+        // Ignore empty WM_IME_ENDCOMPOSITION when no composition is active so selection and
+        // history groups are never disturbed (E-2).
+        if text.is_empty() && self.composition.is_none() {
+            return;
+        }
         if text.is_empty() {
             self.replace_and_mark_text_in_range(None, "", None, ts);
         } else {
@@ -145,10 +163,11 @@ impl Editor {
     // ---- Public programmatic edits & selection ----
 
     pub(crate) fn set_value(&mut self, value: &str, ts: &TextSystem) {
+        self.commit_composition();
+        self.reset_pointer_selection_state();
         self.history.set_ignoring(true);
         let full_utf16 = 0..self.text.len_utf16();
-        self.history.set_next_kind(EditKind::Atomic);
-        self.replace_text_in_range(Some(full_utf16), value, ts, None);
+        self.replace_text_in_range(Some(full_utf16), value, Some(EditKind::Atomic), ts, None);
         self.history.set_ignoring(false);
 
         if self.multi_line {
@@ -157,118 +176,141 @@ impl Editor {
             let end = self.text.len();
             self.set_cursor_to(end);
         }
-        self.scroll_offset = Point::ZERO;
-        if !self.multi_line {
-            self.pending_scroll = Some(Point::ZERO);
-        }
+        self.scroll_x = 0.0;
+        self.scroll_y = 0.0;
+        self.reveal = None;
         self.history.clear();
+        self.debug_assert_invariants();
     }
 
     pub(crate) fn replace(&mut self, text: &str, ts: &TextSystem) {
-        self.history.set_next_kind(EditKind::Atomic);
-        self.replace_text_in_range(None, text, ts, None);
+        self.commit_composition();
+        self.replace_text_in_range(None, text, Some(EditKind::Atomic), ts, None);
         let end = self.selection.end;
         self.set_cursor_to(end);
+        self.debug_assert_invariants();
     }
 
-    pub(crate) fn replace_ranges(&mut self, edits: &[(Range<usize>, String)], ts: &TextSystem) {
-        self.history.set_next_kind(EditKind::Atomic);
-        self.apply_range_edits(edits, ts);
+    /// Applies an already-rebuilt `Rope` from a bulk Replace All in O(1) snapshot history (P-9, P-10).
+    pub(crate) fn replace_all_bulk(&mut self, new_rope: Rope, cursor: usize, ts: &TextSystem) {
+        self.commit_composition();
+        self.reset_pointer_selection_state();
+        let before = self.text.clone();
+        let sel_before = self.selection;
+
+        self.text = new_rope;
+        self.revision = self.revision.wrapping_add(1);
+        self.wrap.rebuild_all(&self.text, ts);
+
+        let target = self.cursor_boundary(cursor.min(self.text.len()), Bias::Left);
+        self.line_end_affinity = false;
+        self.set_cursor_to(target);
+        self.history
+            .record_snapshot(before, self.text.clone(), sel_before, self.selection);
+        self.request_reveal(target, false, None, true);
+        self.update_preferred_x();
+        self.debug_assert_invariants();
     }
 
     pub(crate) fn select_all(&mut self) {
+        self.commit_composition();
         self.history.break_coalescing();
         self.selection.start = 0;
         self.selection.end = self.text.len();
+        self.selection.reversed = false;
+        self.selection.preferred_x = None;
+        self.line_end_affinity = false;
+        self.debug_assert_invariants();
     }
 
     pub(crate) fn set_selected_range(&mut self, range: Range<usize>) {
+        self.commit_composition();
         let end_bias = if range.start == range.end {
             Bias::Left
         } else {
             Bias::Right
         };
-        let start = self.text.clip_offset(range.start, Bias::Left);
-        let end = self.text.clip_offset(range.end, end_bias);
+        let start = self.cursor_boundary(range.start, Bias::Left);
+        let end = self.cursor_boundary(range.end, end_bias);
 
         self.history.break_coalescing();
-        let start = self.cursor_boundary(start, Bias::Left);
         self.line_end_affinity = false;
         self.set_cursor_to(start);
         self.word_anchor = None;
         self.select_to_with_affinity(end, false);
-        self.scroll_to(self.cursor(), None);
+        self.request_reveal(self.cursor(), false, None, true);
         self.update_preferred_x();
+        self.debug_assert_invariants();
     }
 
     pub(crate) fn set_cursor_position(&mut self, position: Position) {
+        self.commit_composition();
         let offset = self.text.position_to_offset(&position);
         self.history.break_coalescing();
         let offset = self.cursor_boundary(offset, Bias::Left);
         self.line_end_affinity = false;
         self.set_cursor_to(offset);
-        self.scroll_to(offset, None);
+        self.request_reveal(offset, false, None, true);
         self.update_preferred_x();
+        self.debug_assert_invariants();
     }
 
-    // ---- Character / word / line boundary helpers ----
+    // ---- Grapheme / word / visual-line boundary helpers ----
 
     pub(super) fn cursor_boundary(&self, offset: usize, bias: Bias) -> usize {
-        let clamped = self.text.clip_offset(offset, bias);
-        if clamped > 0
-            && self.text.char_at(clamped - 1) == Some('\r')
-            && self.text.char_at(clamped) == Some('\n')
-        {
-            match bias {
-                Bias::Left => clamped - 1,
-                Bias::Right => clamped + 1,
-            }
-        } else {
-            clamped
-        }
+        snap_grapheme_boundary(&self.text, offset, bias)
     }
 
     fn prev_boundary(&self, offset: usize) -> usize {
-        self.cursor_boundary(offset.saturating_sub(1), Bias::Left)
+        prev_grapheme_boundary(&self.text, offset)
     }
 
     fn next_boundary(&self, offset: usize) -> usize {
-        self.cursor_boundary(offset.saturating_add(1), Bias::Right)
+        next_grapheme_boundary(&self.text, offset)
     }
 
     fn prev_word_at(&self, offset: usize) -> usize {
-        let aligned = self
-            .text
-            .offset_utf16_to_offset(self.text.offset_to_offset_utf16(offset));
-        prev_word_start(&self.text, aligned)
+        prev_word_start(&self.text, offset)
     }
 
     fn next_word_at(&self, offset: usize) -> usize {
-        let aligned = self
-            .text
-            .offset_utf16_to_offset(self.text.offset_to_offset_utf16(offset));
-        next_word_end(&self.text, aligned)
+        next_word_end(&self.text, offset)
     }
 
-    fn line_start_for(&self, offset: usize) -> usize {
+    fn visual_line_start_for(&self, offset: usize, end_affinity: bool) -> usize {
         if !self.multi_line {
             return 0;
         }
-        let row = self.text.offset_to_point(offset).row;
-        self.text.line_start_offset(row)
+        let pt = self.text.offset_to_point(offset);
+        let line_start = self.text.line_start_offset(pt.row);
+        if self.soft_wrap {
+            let disp = self.wrap.offset_to_display(offset, end_affinity);
+            if let Some((range, _)) = self.wrap.visual_row_range(pt.row, disp.sub_row) {
+                return line_start + range.start;
+            }
+        }
+        line_start
     }
 
-    fn line_end_for(&self, offset: usize) -> usize {
+    fn visual_line_end_for(&self, offset: usize, end_affinity: bool) -> (usize, bool) {
         if !self.multi_line {
-            return self.text.len();
+            return (self.text.len(), false);
         }
-        let row = self.text.offset_to_point(offset).row;
-        self.text.line_end_offset(row)
+        let pt = self.text.offset_to_point(offset);
+        let line_start = self.text.line_start_offset(pt.row);
+        if self.soft_wrap {
+            let disp = self.wrap.offset_to_display(offset, end_affinity);
+            if let Some((range, soft_end)) = self.wrap.visual_row_range(pt.row, disp.sub_row) {
+                return (line_start + range.end, soft_end);
+            }
+        }
+        (self.text.line_end_offset(pt.row), false)
     }
 
     pub(super) fn set_cursor_to(&mut self, offset: usize) {
-        self.selection.start = offset;
-        self.selection.end = offset;
+        let clamped = offset.min(self.text.len());
+        self.selection.start = clamped;
+        self.selection.end = clamped;
         self.selection.reversed = false;
     }
 
@@ -296,7 +338,7 @@ impl Editor {
         direction: Option<MoveDirection>,
         timers: Option<&mut dyn EditorTimers>,
     ) {
-        self.move_to_with_affinity(offset, direction, false, timers);
+        self.move_to_with_affinity(offset, direction, false, true, timers);
     }
 
     pub(super) fn move_to_with_affinity(
@@ -304,17 +346,20 @@ impl Editor {
         offset: usize,
         direction: Option<MoveDirection>,
         end_affinity: bool,
+        with_margin: bool,
         timers: Option<&mut dyn EditorTimers>,
     ) {
+        self.commit_composition();
         self.history.break_coalescing();
         let offset = self.cursor_boundary(offset, Bias::Left);
         self.line_end_affinity = end_affinity;
         self.set_cursor_to(offset);
-        self.scroll_to(offset, direction);
+        self.request_reveal(offset, end_affinity, direction, with_margin);
         if let Some(timers) = timers {
             self.pause_blink(timers);
         }
         self.update_preferred_x();
+        self.debug_assert_invariants();
     }
 
     fn place_cursor(
@@ -325,15 +370,18 @@ impl Editor {
         direction: Option<MoveDirection>,
         timers: &mut dyn EditorTimers,
     ) {
+        self.commit_composition();
         self.history.break_coalescing();
         let offset = self.cursor_boundary(offset, Bias::Left);
         self.selection.place_at(offset, anchor);
         self.line_end_affinity = end_affinity;
-        self.scroll_to(self.cursor(), direction);
+        self.request_reveal(self.cursor(), end_affinity, direction, true);
         self.pause_blink(timers);
+        self.debug_assert_invariants();
     }
 
     fn move_left(&mut self, timers: &mut dyn EditorTimers) -> bool {
+        self.commit_composition();
         if self.selection.is_empty() && self.cursor() == 0 {
             return false;
         }
@@ -348,6 +396,7 @@ impl Editor {
     }
 
     fn move_right(&mut self, timers: &mut dyn EditorTimers) -> bool {
+        self.commit_composition();
         if self.selection.is_empty() && self.cursor() == self.text.len() {
             return false;
         }
@@ -403,12 +452,19 @@ impl Editor {
                     target_offset = line_start + local_ix;
                     target_affinity = affinity;
                 }
+            } else if let Some((sub_range, soft_end)) =
+                self.wrap.visual_row_range(next_pt.row, next_disp.sub_row)
+            {
+                let max_col = sub_range.len();
+                let col = byte_col.min(max_col);
+                target_offset = line_start + sub_range.start + col;
+                target_affinity = soft_end && col == max_col;
             } else {
                 let max_len = self.text.slice_line(next_pt.row).len();
                 target_offset = line_start + byte_col.min(max_len);
             }
         }
-        (target_offset, target_affinity)
+        (self.cursor_boundary(target_offset, Bias::Left), target_affinity)
     }
 
     fn move_vertical(
@@ -420,22 +476,21 @@ impl Editor {
         if !self.multi_line {
             return;
         }
-        self.pause_blink(timers);
+        self.commit_composition();
         let direction = if delta_rows < 0 {
             MoveDirection::Up
         } else {
             MoveDirection::Down
         };
         let sel = self.selection;
+        // Up with selection collapses to `sel.start`, Down to `sel.end` before stepping (E-8).
         let (base_offset, anchor, affinity) = if sel.is_empty() || !collapse {
             (sel.head(), sel.preferred_x, self.line_end_affinity)
         } else if delta_rows < 0 {
-            let e = self.prev_boundary(sel.start.saturating_sub(1));
-            (e, self.preferred_x_for(e, false), false)
+            (sel.start, self.preferred_x_for(sel.start, false), false)
         } else {
-            let e = self.next_boundary(sel.end.saturating_sub(1));
-            let aff = e == self.cursor() && self.line_end_affinity;
-            (e, self.preferred_x_for(e, aff), aff)
+            let aff = sel.end == self.cursor() && self.line_end_affinity;
+            (sel.end, self.preferred_x_for(sel.end, aff), aff)
         };
         let anchor = anchor.or_else(|| self.preferred_x_for(base_offset, affinity));
         let (target, target_affinity) =
@@ -447,6 +502,7 @@ impl Editor {
         if !self.multi_line {
             return;
         }
+        self.commit_composition();
         let head = self.selection.head();
         let mut target = self.vertical_target(
             head,
@@ -464,21 +520,34 @@ impl Editor {
         self.select_keyboard_to(target.0, target.1, true, timers);
     }
 
+    fn page_rows(&self) -> isize {
+        let lh = self
+            .layout
+            .as_ref()
+            .map_or(self.last_line_height, |l| l.line_height)
+            .max(1.0);
+        ((self.input_bounds.size.height / lh).floor() as isize).max(1)
+    }
+
     fn move_page(&mut self, sign: isize, timers: &mut dyn EditorTimers) {
-        let Some(layout) = self.layout.as_ref() else {
-            return;
-        };
-        let rows = (self.input_bounds.size.height / layout.line_height) as isize;
+        let rows = self.page_rows();
         self.move_vertical(sign * rows, false, timers);
+    }
+
+    fn select_page(&mut self, sign: isize, timers: &mut dyn EditorTimers) {
+        let rows = self.page_rows();
+        self.select_vertical(sign * rows, timers);
     }
 
     pub(super) fn select_to_with_affinity(&mut self, offset: usize, end_affinity: bool) {
         self.line_end_affinity = end_affinity;
         let clamped = self.cursor_boundary(offset, Bias::Left);
-        self.selection.extend_to(clamped, self.word_anchor);
+        self.selection
+            .extend_to(clamped, self.word_anchor, self.text.len());
         if self.selection.is_empty() {
             self.update_preferred_x();
         }
+        self.debug_assert_invariants();
     }
 
     fn select_keyboard_to(
@@ -488,13 +557,14 @@ impl Editor {
         keep_column: bool,
         timers: &mut dyn EditorTimers,
     ) {
+        self.commit_composition();
         self.pause_blink(timers);
         self.history.break_coalescing();
 
         let prev_head = self.selection.head();
         let prev_aff = self.line_end_affinity;
         let clamped = self.cursor_boundary(offset, Bias::Left);
-        self.selection.extend_to(clamped, None);
+        self.selection.extend_to(clamped, None, self.text.len());
         self.line_end_affinity = end_affinity;
 
         if !keep_column {
@@ -502,7 +572,8 @@ impl Editor {
         } else if self.selection.preferred_x.is_none() {
             self.selection.preferred_x = self.preferred_x_for(prev_head, prev_aff);
         }
-        self.scroll_to(self.cursor(), None);
+        self.request_reveal(self.cursor(), end_affinity, None, true);
+        self.debug_assert_invariants();
     }
 
     pub(super) fn select_word_at(&mut self, offset: usize) {
@@ -514,6 +585,7 @@ impl Editor {
         self.selection.end = range.end;
         self.selection.reversed = false;
         self.word_anchor = Some(self.selection);
+        self.debug_assert_invariants();
     }
 
     pub(super) fn select_line_at(&mut self, offset: usize) {
@@ -523,6 +595,7 @@ impl Editor {
         self.selection.end = range.end;
         self.selection.reversed = false;
         self.word_anchor = None;
+        self.debug_assert_invariants();
     }
 
     // ---- Deleting, clipboard, enter, escape ----
@@ -534,6 +607,7 @@ impl Editor {
         ts: &TextSystem,
         timers: &mut dyn EditorTimers,
     ) {
+        self.commit_composition();
         let before = self.selection;
         let kind = if before.is_empty() {
             collapsed_kind
@@ -551,15 +625,14 @@ impl Editor {
         self.history.record_selection(before, before);
         self.selection.start = start;
         self.selection.end = end;
-        self.history.set_next_kind(kind);
 
-        self.replace_text_in_range(None, "", ts, Some(timers));
+        self.replace_text_in_range(None, "", Some(kind), ts, Some(timers));
         self.history.record_selection(before, self.selection);
         self.history.end_group();
-        self.pause_blink(timers);
     }
 
     fn backspace(&mut self, ts: &TextSystem, timers: &mut dyn EditorTimers) -> bool {
+        self.commit_composition();
         if self.selection.is_empty() && self.cursor() == 0 {
             return false;
         }
@@ -600,9 +673,9 @@ impl Editor {
     }
 
     fn enter(&mut self, ts: &TextSystem, timers: &mut dyn EditorTimers) -> bool {
+        self.commit_composition();
         if self.multi_line {
-            self.replace_text_in_range(None, "\n", ts, Some(timers));
-            self.pause_blink(timers);
+            self.replace_text_in_range(None, "\n", Some(EditKind::Atomic), ts, Some(timers));
             true
         } else {
             self.history.break_coalescing();
@@ -610,135 +683,178 @@ impl Editor {
         }
     }
 
-    fn escape(&mut self) -> bool {
-        if self.ime_marked.is_some() {
-            self.ime_marked = None;
-            self.history.end_group();
-        }
-        false
+    /// Cancels active IME composition and removes its preedit text cleanly (E-2).
+    fn escape(&mut self, ts: &TextSystem) -> bool {
+        let Some(comp) = self.composition.take() else {
+            return false;
+        };
+        let len = self.text.len();
+        let range = comp.start.min(len)..comp.end.min(len);
+        let before_text = self.text.clone();
+        let sel_before = self.selection;
+        self.reset_pointer_selection_state();
+        self.text.replace(range.clone(), "");
+        self.wrap.apply_edit(&self.text, &range, 0, ts);
+        self.set_cursor_to(range.start);
+        self.push_history(
+            &before_text,
+            &range,
+            "",
+            Some(EditKind::Atomic),
+            sel_before,
+            Some(self.selection),
+        );
+        self.history.end_group();
+        self.request_reveal(self.cursor(), false, None, true);
+        self.debug_assert_invariants();
+        true
     }
 
     fn copy(&self) {
         if !self.selection.is_empty() {
-            let text = self.text.slice(self.selection).to_string();
+            let text = self.selected_text().to_string();
             clipboard::write_clipboard_text(&text);
         }
     }
 
     fn cut(&mut self, ts: &TextSystem, timers: &mut dyn EditorTimers) {
+        self.commit_composition();
         if self.selection.is_empty() {
             return;
         }
-        let text = self.text.slice(self.selection).to_string();
-        clipboard::write_clipboard_text(&text);
-        self.history.set_next_kind(EditKind::Atomic);
-        self.replace_text_in_range(None, "", ts, Some(timers));
+        let text = self.selected_text().to_string();
+        if !clipboard::write_clipboard_text(&text) {
+            return;
+        }
+        self.replace_text_in_range(None, "", Some(EditKind::Atomic), ts, Some(timers));
     }
 
     fn paste(&mut self, ts: &TextSystem, timers: &mut dyn EditorTimers) {
-        let Some(mut text) = clipboard::read_clipboard_text().filter(|s| !s.is_empty()) else {
+        self.commit_composition();
+        let Some(raw) = clipboard::read_clipboard_text().filter(|s| !s.is_empty()) else {
             return;
         };
-        if text.contains('\r') {
-            text = text.replace("\r\n", "\n").replace('\r', "\n");
+        let text: Cow<'_, str> = if !self.multi_line {
+            // Single-line fields truncate pasted multiline text at the first line break (E-17).
+            Cow::Borrowed(raw.split(['\r', '\n']).next().unwrap_or(""))
+        } else if raw.contains('\r') {
+            Cow::Owned(raw.replace("\r\n", "\n").replace('\r', "\n"))
+        } else {
+            Cow::Borrowed(&raw)
+        };
+        if text.is_empty() {
+            return;
         }
-        if !self.multi_line {
-            text = text.replace('\n', "");
-        }
-        self.history.set_next_kind(EditKind::Atomic);
-        self.replace_text_in_range(None, &text, ts, Some(timers));
-        self.scroll_to(self.cursor(), None);
+        self.replace_text_in_range(None, &text, Some(EditKind::Atomic), ts, Some(timers));
     }
 
     // ---- Indentation ----
 
-    fn apply_indent(&mut self, op: IndentOp, block: bool, ts: &TextSystem) -> bool {
+    fn apply_indent(
+        &mut self,
+        op: IndentOp,
+        block: bool,
+        ts: &TextSystem,
+        timers: &mut dyn EditorTimers,
+    ) -> bool {
         if !self.multi_line {
             return false;
         }
+        self.commit_composition();
+        self.pause_blink(timers);
         let indent_str = self.tab_size.as_str();
-        let indent_len = indent_str.len();
-        let indent_chars = indent_str.chars().count();
         let before = self.selection;
 
-        let (edits, next_sel) = if !before.is_empty() || block {
-            let start_row = self.text.offset_to_point(before.start).row;
-            let end_row = self.text.offset_to_point(before.end).row;
-            let mut edits = Vec::new();
-            for row in start_row..=end_row {
-                let start = self.text.line_start_offset(row);
-                match op {
-                    IndentOp::Indent => edits.push((start..start, indent_str.to_string())),
-                    IndentOp::Outdent => {
-                        if self
-                            .text
-                            .slice(start..)
-                            .chars()
-                            .take(indent_chars)
-                            .eq(indent_str.chars())
-                        {
-                            edits.push((start..start + indent_len, String::new()));
-                        }
-                    }
-                }
-            }
-            let remap = |offset: usize| match op {
-                IndentOp::Indent => {
-                    offset + edits.partition_point(|(r, _)| r.start <= offset) * indent_len
-                }
-                IndentOp::Outdent => {
-                    let prior = edits.partition_point(|(r, _)| r.end <= offset);
-                    let partial = edits
-                        .get(prior)
-                        .map_or(0, |(r, _)| offset.saturating_sub(r.start));
-                    offset - prior * indent_len - partial
-                }
-            };
-            let mut next = before;
-            next.start = remap(before.start);
-            next.end = remap(before.end);
-            next.preferred_x = None;
-            (edits, next)
+        // Notepad Tab convention (E-11): inline Tab on a single-line selection (or caret)
+        // inserts/replaces with a tab rather than indenting line start.
+        let spans_multiple_lines = !before.is_empty()
+            && self.text.offset_to_point(before.start).row
+                != self.text.offset_to_point(before.end).row;
+        if !block && op == IndentOp::Indent && !spans_multiple_lines {
+            self.replace_text_in_range(
+                None,
+                indent_str.as_str(),
+                Some(EditKind::Atomic),
+                ts,
+                None,
+            );
+            return true;
+        }
+
+        let start_row = self.text.offset_to_point(before.start).row;
+        let end_pt = self.text.offset_to_point(before.end);
+        // Exclude trailing line when selection ends right at column 0 of the next line (E-11).
+        let end_row = if !before.is_empty() && end_pt.column == 0 && end_pt.row > start_row {
+            end_pt.row - 1
         } else {
-            let head = before.head();
+            end_pt.row
+        };
+
+        let mut edits: Vec<(Range<usize>, String)> = Vec::new();
+        for row in start_row..=end_row {
+            let line_start = self.text.line_start_offset(row);
             match op {
-                IndentOp::Indent => (
-                    vec![(head..head, indent_str.to_string())],
-                    CaretSelection::new(head + indent_len, head + indent_len),
-                ),
+                IndentOp::Indent => edits.push((line_start..line_start, indent_str.to_string())),
                 IndentOp::Outdent => {
-                    let row = self.text.offset_to_point(head).row;
-                    let start = self.text.line_start_offset(row);
-                    if self
-                        .text
-                        .slice(start..)
-                        .chars()
-                        .take(indent_chars)
-                        .eq(indent_str.chars())
-                    {
-                        let removed = (start + indent_len).min(head) - start.min(head);
-                        let next = head - removed;
-                        (
-                            vec![(start..start + indent_len, String::new())],
-                            CaretSelection::new(next, next),
-                        )
-                    } else {
-                        (Vec::new(), before)
+                    let remove_bytes = self.leading_outdent_bytes(line_start);
+                    if remove_bytes > 0 {
+                        edits.push((line_start..line_start + remove_bytes, String::new()));
                     }
                 }
             }
-        };
+        }
 
         if edits.is_empty() {
             return true;
         }
+
+        let remap = |offset: usize| -> usize {
+            let mut delta: isize = 0;
+            for (r, new_s) in &edits {
+                if r.end <= offset {
+                    delta += new_s.len() as isize - (r.end - r.start) as isize;
+                } else if r.start < offset {
+                    let removed = offset - r.start;
+                    delta -= removed as isize;
+                    break;
+                } else {
+                    break;
+                }
+            }
+            (offset as isize + delta).max(0) as usize
+        };
+        let mut next_sel = before;
+        next_sel.start = remap(before.start);
+        next_sel.end = remap(before.end);
+        next_sel.preferred_x = None;
+
         self.history.begin_group();
-        self.apply_range_edits(&edits, ts);
+        self.apply_range_edits(&edits, Some(EditKind::Atomic), ts);
+        let len = self.text.len();
+        next_sel.start = next_sel.start.min(len);
+        next_sel.end = next_sel.end.min(len);
         self.selection = next_sel;
         self.history.record_selection(before, next_sel);
         self.history.end_group();
-        self.scroll_to(self.cursor(), None);
+        self.request_reveal(self.cursor(), false, None, true);
+        self.debug_assert_invariants();
         true
+    }
+
+    fn leading_outdent_bytes(&self, line_start: usize) -> usize {
+        if self.text.char_at(line_start) == Some('\t') {
+            return 1;
+        }
+        let max_spaces = self.tab_size.tab_size.max(1);
+        let mut spaces = 0usize;
+        for ch in self.text.slice(line_start..).chars().take(max_spaces) {
+            if ch == ' ' {
+                spaces += 1;
+            } else {
+                break;
+            }
+        }
+        spaces
     }
 
     // ---- Undo / Redo ----
@@ -752,6 +868,7 @@ impl Editor {
     }
 
     fn replay_history(&mut self, is_undo: bool, ts: &TextSystem, timers: &mut dyn EditorTimers) {
+        self.commit_composition();
         let replay = if is_undo {
             self.history.undo()
         } else {
@@ -760,23 +877,43 @@ impl Editor {
         let Some(replay) = replay else {
             return;
         };
+        self.reset_pointer_selection_state();
+        self.pause_blink(timers);
         self.history.set_ignoring(true);
-        for edit in &replay.edits {
-            let (range, text) = if is_undo {
-                (Range::from(edit.new_range), edit.old_text.as_str())
-            } else {
-                (Range::from(edit.old_range), edit.new_text.as_str())
-            };
-            let range_utf16 = self.range_to_utf16(&range);
-            self.replace_text_in_range(Some(range_utf16), text, ts, Some(timers));
+        match replay.payload {
+            ReplayPayload::Edits(edits) => {
+                for edit in &edits {
+                    let (range, text) = if is_undo {
+                        (Range::from(edit.new_range), edit.old_text.as_str())
+                    } else {
+                        (Range::from(edit.old_range), edit.new_text.as_str())
+                    };
+                    let range_utf16 = self.range_to_utf16(&range);
+                    self.replace_text_in_range(
+                        Some(range_utf16),
+                        text,
+                        Some(EditKind::Atomic),
+                        ts,
+                        None,
+                    );
+                }
+            }
+            ReplayPayload::Snapshot(rope) => {
+                self.text = rope;
+                self.revision = self.revision.wrapping_add(1);
+                self.wrap.rebuild_all(&self.text, ts);
+            }
         }
         if let Some(mut sel) = replay.selection {
             let len = self.text.len();
-            sel.start = sel.start.min(len);
-            sel.end = sel.end.min(len);
+            sel.start = self.cursor_boundary(sel.start.min(len), Bias::Left);
+            sel.end = self.cursor_boundary(sel.end.min(len), Bias::Right);
             self.selection = sel;
         }
         self.history.set_ignoring(false);
+        self.request_reveal(self.cursor(), false, None, true);
+        self.update_preferred_x();
+        self.debug_assert_invariants();
     }
 
     // ---- History & range-edit core ----
@@ -836,17 +973,23 @@ impl Editor {
         recorded
     }
 
-    fn apply_range_edits(&mut self, edits: &[(Range<usize>, String)], ts: &TextSystem) {
+    fn apply_range_edits(
+        &mut self,
+        edits: &[(Range<usize>, String)],
+        requested: Option<EditKind>,
+        ts: &TextSystem,
+    ) {
         if edits.is_empty() {
             return;
         }
-        let mut descending: Vec<(Range<usize>, &str)> = edits
+        self.reset_pointer_selection_state();
+
+        let mut descending: Vec<(Range<usize>, Cow<'_, str>)> = edits
             .iter()
-            .map(|(r, s)| (r.clone(), s.as_str()))
+            .map(|(r, s)| (r.clone(), self.normalize_text(s.as_str())))
             .collect();
         descending.sort_by_key(|e| std::cmp::Reverse(e.0.start));
 
-        let requested = self.history.take_next_kind();
         let sel_before = Self::collapse_for_kind(
             requested.unwrap_or(EditKind::Atomic),
             self.selection,
@@ -886,16 +1029,25 @@ impl Editor {
             shift += new_text.len() as isize - (range.end as isize - range.start as isize);
         }
         self.selection.place_at(final_offset, None);
+        self.line_end_affinity = false;
         if recorded {
             self.history.record_selection(sel_before, self.selection);
         }
-        self.ime_marked = None;
+        self.composition = None;
+        self.request_reveal(self.cursor(), false, None, true);
         self.update_preferred_x();
+        self.debug_assert_invariants();
     }
 
-    fn normalize_single_line<'a>(&self, text: &'a str) -> Cow<'a, str> {
-        if !self.multi_line && text.contains(['\n', '\r']) {
-            Cow::Owned(text.replace(['\n', '\r'], ""))
+    fn normalize_text<'a>(&self, text: &'a str) -> Cow<'a, str> {
+        if !self.multi_line {
+            if text.contains(['\n', '\r']) {
+                Cow::Owned(text.replace(['\n', '\r'], ""))
+            } else {
+                Cow::Borrowed(text)
+            }
+        } else if text.contains('\r') {
+            Cow::Owned(text.replace("\r\n", "\n").replace('\r', "\n"))
         } else {
             Cow::Borrowed(text)
         }
@@ -911,36 +1063,35 @@ impl Editor {
         &mut self,
         range_utf16: Option<Range<usize>>,
         new_text: &str,
+        requested: Option<EditKind>,
         ts: &TextSystem,
         timers: Option<&mut dyn EditorTimers>,
     ) {
-        let requested = self.history.take_next_kind();
         let selection_before = self.selection;
-        let ends_composition = self.ime_marked.is_some();
+        let active_comp = self.composition;
+        let ends_composition = active_comp.is_some();
 
         if let Some(timers) = timers {
             self.pause_blink(timers);
         }
+        self.reset_pointer_selection_state();
 
-        let normalized = self.normalize_single_line(new_text);
+        let normalized = self.normalize_text(new_text);
         let new_text: &str = &normalized;
 
         let range = range_utf16
             .as_ref()
             .map(|r| self.range_from_utf16(r))
             .or_else(|| {
-                self.ime_marked.map(|m| {
-                    let utf16 = self.range_to_utf16(&(m.start..m.end));
-                    self.range_from_utf16(&utf16)
+                active_comp.map(|c| {
+                    let len = self.text.len();
+                    c.start.min(len)..c.end.min(len)
                 })
             })
             .unwrap_or_else(|| self.selected_range());
 
         if self.multi_line {
-            if let Some(kind) = requested {
-                self.history.set_next_kind(kind);
-            }
-            self.apply_range_edits(&[(range, new_text.to_string())], ts);
+            self.apply_range_edits(&[(range, new_text.to_string())], requested, ts);
             if ends_composition {
                 self.history.end_group();
             }
@@ -951,10 +1102,12 @@ impl Editor {
         self.text.replace(range.clone(), new_text);
         let new_offset = (range.start + new_text.len()).min(self.text.len());
 
-        let pending = self.text.to_string();
-        if !self.accepts_text(&pending) && self.accepts_text(&before_text.to_string()) {
-            self.text = before_text;
-            return;
+        if !self.history.is_ignoring() {
+            let pending = self.text.to_string();
+            if !self.accepts_text(&pending) && self.accepts_text(&before_text.to_string()) {
+                self.text = before_text;
+                return;
+            }
         }
 
         self.push_history(
@@ -966,14 +1119,17 @@ impl Editor {
             None,
         );
         self.wrap.apply_edit(&self.text, &range, new_text.len(), ts);
+        self.line_end_affinity = false;
         self.set_cursor_to(new_offset);
-        self.ime_marked = None;
+        self.composition = None;
         if ends_composition {
             self.history
                 .record_selection(selection_before, self.selection);
             self.history.end_group();
         }
+        self.request_reveal(self.cursor(), false, None, true);
         self.update_preferred_x();
+        self.debug_assert_invariants();
     }
 
     pub(crate) fn replace_and_mark_text_in_range(
@@ -983,25 +1139,24 @@ impl Editor {
         new_selected_utf16: Option<Range<usize>>,
         ts: &TextSystem,
     ) {
-        let requested = self.history.take_next_kind();
         let selection_before = self.selection;
-
-        let starts_composition = self.ime_marked.is_none();
+        let starts_composition = self.composition.is_none();
         if starts_composition {
             self.history.break_coalescing();
             self.history.begin_group();
         }
+        self.reset_pointer_selection_state();
 
-        let normalized = self.normalize_single_line(new_text);
+        let normalized = self.normalize_text(new_text);
         let new_text: &str = &normalized;
 
         let range = range_utf16
             .as_ref()
             .map(|r| self.range_from_utf16(r))
             .or_else(|| {
-                self.ime_marked.map(|m| {
-                    let utf16 = self.range_to_utf16(&(m.start..m.end));
-                    self.range_from_utf16(&utf16)
+                self.composition.map(|c| {
+                    let len = self.text.len();
+                    c.start.min(len)..c.end.min(len)
                 })
             })
             .unwrap_or_else(|| self.selected_range());
@@ -1024,9 +1179,16 @@ impl Editor {
 
         if new_text.is_empty() {
             self.set_cursor_to(range.start);
-            self.ime_marked = None;
+            self.composition = None;
         } else {
-            self.ime_marked = Some((range.start..range.start + new_text.len()).into());
+            let cursor_utf16 = new_selected_utf16
+                .as_ref()
+                .map_or_else(|| new_text.encode_utf16().count(), |r| r.end);
+            self.composition = Some(Composition {
+                start: range.start,
+                end: range.start + new_text.len(),
+                cursor_utf16,
+            });
             let sel = new_selected_utf16
                 .as_ref()
                 .map(|r| {
@@ -1037,13 +1199,14 @@ impl Editor {
                 .unwrap_or_else(|| range.start + new_text.len()..range.start + new_text.len());
             self.selection.start = sel.start;
             self.selection.end = sel.end;
+            self.selection.reversed = false;
         }
 
         if self.push_history(
             &before_text,
             &range,
             new_text,
-            requested,
+            Some(EditKind::Atomic),
             selection_before,
             Some(self.selection),
         ) {
@@ -1053,6 +1216,8 @@ impl Editor {
         if new_text.is_empty() {
             self.history.end_group();
         }
+        self.request_reveal(self.cursor(), false, None, true);
+        self.debug_assert_invariants();
     }
 
     fn bounds_for_utf16_range(&self, range_utf16: Range<usize>, bounds: Rect) -> Option<Rect> {
@@ -1062,7 +1227,7 @@ impl Editor {
 
         let mut start_pos = None;
         let mut end_pos = None;
-        let mut y = layout.visible_top;
+        let mut y = layout.visible_top_rel;
 
         for (vi, row_layout) in layout.rows.iter().enumerate() {
             if start_pos.is_some() && end_pos.is_some() {
@@ -1070,8 +1235,9 @@ impl Editor {
             }
             let base = layout.visible_byte_offsets[vi];
             if start_pos.is_none()
+                && range.start >= base
                 && let Some(p) = row_layout.position_for_index(
-                    range.start.saturating_sub(base),
+                    range.start - base,
                     line_height,
                     false,
                 )
@@ -1079,8 +1245,9 @@ impl Editor {
                 start_pos = Some(p + point(0.0, y));
             }
             if end_pos.is_none()
+                && range.end >= base
                 && let Some(p) = row_layout.position_for_index(
-                    range.end.saturating_sub(base),
+                    range.end - base,
                     line_height,
                     false,
                 )

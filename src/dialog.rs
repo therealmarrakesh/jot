@@ -1,5 +1,5 @@
 //! Modal Win11 ContentDialogs (Go To, Out of Range, Confirm Discard, Confirm Lossy ANSI, Error)
-//! with animated scale/fade transitions and typed enum dispatch (zero boxed callbacks).
+//! with animated scale/fade transitions and typed enum dispatch.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -8,8 +8,8 @@ use crate::APP_NAME;
 use crate::color::{Rgba, rgb, rgba};
 use crate::document::Format;
 use crate::editor::{Editor, Rope};
-use crate::files::{FilePrompt, LOSSY_ANSI_WARNING, discard_prompt_text};
-use crate::gfx::TextSystem;
+use crate::files::{FilePrompt, LOSSY_ANSI_WARNING, WorkflowGen, discard_prompt_text};
+use crate::gfx::{FontWeight, TextSystem};
 use crate::platform::CursorStyle;
 use crate::tabs::TabId;
 use crate::theme::{Palette, theme_shadow};
@@ -47,7 +47,7 @@ const LOSSY_BUTTONS: &[&str] = &["OK", "Cancel"];
 const BORDER: f32 = 1.;
 const BODY_BASELINE_SNAP: f32 = -1.;
 
-/// Concrete modal dialog payload — zero boxed callbacks.
+/// Concrete modal dialog payload.
 pub(crate) enum DialogKind {
     GoTo,
     LineOutOfRange,
@@ -60,6 +60,7 @@ pub(crate) enum DialogKind {
         name: String,
     },
     ConfirmLossyAnsi {
+        wf_gen: WorkflowGen,
         tab: TabId,
         snapshot: u64,
         text: Rope,
@@ -74,18 +75,27 @@ impl DialogKind {
             FilePrompt::Error { title, message } => Self::Error { title, message },
             FilePrompt::ConfirmDiscard { tab, name } => Self::ConfirmDiscard { tab, name },
             FilePrompt::ConfirmLossyAnsi {
+                wf_gen,
                 tab,
                 snapshot,
                 text,
                 path,
                 format,
             } => Self::ConfirmLossyAnsi {
+                wf_gen,
                 tab,
                 snapshot,
                 text,
                 path,
                 format,
             },
+        }
+    }
+
+    pub(crate) fn referenced_tab(&self) -> Option<TabId> {
+        match self {
+            Self::ConfirmDiscard { tab, .. } | Self::ConfirmLossyAnsi { tab, .. } => Some(*tab),
+            Self::GoTo | Self::LineOutOfRange | Self::Error { .. } => None,
         }
     }
 
@@ -223,16 +233,21 @@ impl Dialogs {
         }
     }
 
+    pub(crate) fn close_for_tab(&mut self, id: TabId) -> bool {
+        let mut closed = false;
+        for d in &mut self.open {
+            if !d.closing && d.kind.referenced_tab() == Some(id) {
+                d.closing = true;
+                closed = true;
+            }
+        }
+        closed
+    }
+
     /// Marks the active dialog as closing and extracts its `DialogKind` so the caller can act on
-    /// the user's button choice without boxed callbacks.
+    /// the user's button choice while keeping visual buttons intact during fade-out.
     pub(crate) fn take_active(&mut self) -> Option<DialogKind> {
         let ix = self.open.iter().rposition(|d| !d.closing)?;
-        let placeholder = DialogKind::Error {
-            title: SharedStr::default(),
-            message: SharedStr::default(),
-        };
-        // Keep the dialog visuals intact during its 83ms fade-out when it's GoTo / LineOutOfRange /
-        // Error / ConfirmDiscard, and only extract owned state for LossyAnsi.
         let taken = match &mut self.open[ix].kind {
             DialogKind::GoTo => DialogKind::GoTo,
             DialogKind::LineOutOfRange => DialogKind::LineOutOfRange,
@@ -245,29 +260,20 @@ impl Dialogs {
                 name: name.clone(),
             },
             DialogKind::ConfirmLossyAnsi {
+                wf_gen,
                 tab,
                 snapshot,
                 text,
                 path,
                 format,
-            } => {
-                let path_clone = path.clone();
-                let res = DialogKind::ConfirmLossyAnsi {
-                    tab: *tab,
-                    snapshot: *snapshot,
-                    text: std::mem::take(text),
-                    path: path_clone.clone(),
-                    format: *format,
-                };
-                // Keep static visual text during fade-out.
-                let message = format!("{}\n{LOSSY_ANSI_WARNING}", path_clone.display());
-                self.open[ix].kind = DialogKind::Error {
-                    title: APP_NAME.into(),
-                    message: message.into(),
-                };
-                let _ = placeholder;
-                res
-            }
+            } => DialogKind::ConfirmLossyAnsi {
+                wf_gen: *wf_gen,
+                tab: *tab,
+                snapshot: *snapshot,
+                text: std::mem::take(text),
+                path: path.clone(),
+                format: *format,
+            },
         };
         Some(taken)
     }
@@ -371,25 +377,26 @@ impl Dialogs {
                 message_body(OUT_OF_RANGE_MESSAGE.into(), s),
             ),
             DialogKind::Error { title, message } => (
-                ts.text_width(message, TEXT_FONT, BODY_SIZE)
-                    .max(ts.text_width(title, TITLE_FONT, TITLE_SIZE)),
+                ts.text_width(message, TEXT_FONT, BODY_SIZE).max(
+                    ts.text_width_weighted(title, TITLE_FONT, FontWeight::SEMIBOLD, TITLE_SIZE),
+                ),
                 title.clone(),
                 message_body(message.clone(), s),
             ),
             DialogKind::ConfirmDiscard { name, .. } => {
                 let (title, message) = discard_prompt_text(name);
-                let w = ts
-                    .text_width(&message, TEXT_FONT, BODY_SIZE)
-                    .max(ts.text_width(&title, TITLE_FONT, TITLE_SIZE));
+                let w = ts.text_width(&message, TEXT_FONT, BODY_SIZE).max(
+                    ts.text_width_weighted(&title, TITLE_FONT, FontWeight::SEMIBOLD, TITLE_SIZE),
+                );
                 (w, title, message_body(message, s))
             }
             DialogKind::ConfirmLossyAnsi { path, .. } => {
                 let title: SharedStr = APP_NAME.into();
                 let message: SharedStr =
                     format!("{}\n{LOSSY_ANSI_WARNING}", path.display()).into();
-                let w = ts
-                    .text_width(&message, TEXT_FONT, BODY_SIZE)
-                    .max(ts.text_width(&title, TITLE_FONT, TITLE_SIZE));
+                let w = ts.text_width(&message, TEXT_FONT, BODY_SIZE).max(
+                    ts.text_width_weighted(&title, TITLE_FONT, FontWeight::SEMIBOLD, TITLE_SIZE),
+                );
                 (w, title, message_body(message, s))
             }
         };
@@ -406,7 +413,10 @@ impl Dialogs {
             .when(!dialog.closing, |this| {
                 this.hit(HitId::DialogBackdrop).cursor(CursorStyle::Arrow)
             })
-            .child(dialog_frame(p, s, width, title, body, buttons))
+            .child(
+                dialog_frame(p, s, width, title, body, buttons)
+                    .when(dialog.closing, Node::strip_hits),
+            )
     }
 
     fn render_go_to_body(&self, focus: Focus, p: Palette, s: f32, ui: &UiState) -> Node {

@@ -1,8 +1,9 @@
-//! Win32 window creation, Mica Alt framing, Snap Layouts hit-testing, lock-free HWND metadata
+//! Win32 window creation, Mica Alt framing, Snap Layouts hit-testing, UI-thread HWND metadata
 //! registry, re-entrant event queue, modal size/move repaint timer, and `wnd_proc`.
 
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -20,6 +21,7 @@ use windows::Win32::{
     System::{
         LibraryLoader::GetModuleHandleW,
         Ole::{IDropTarget, RegisterDragDrop, RevokeDragDrop},
+        Shutdown::{ShutdownBlockReasonCreate, ShutdownBlockReasonDestroy},
     },
     UI::{
         Controls::{MARGINS, WM_MOUSELEAVE},
@@ -44,17 +46,18 @@ use windows::Win32::{
             SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOZORDER, SetCursor, SetLayeredWindowAttributes,
             SetTimer, SetWindowPos, SetWindowTextW, ShowWindow, USER_DEFAULT_SCREEN_DPI,
             USER_TIMER_MINIMUM, WM_ACTIVATE, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_DPICHANGED,
-            WM_ENTERMENULOOP, WM_ENTERSIZEMOVE, WM_ERASEBKGND, WM_EXITMENULOOP, WM_EXITSIZEMOVE,
-            WM_GETMINMAXINFO, WM_IME_COMPOSITION, WM_IME_ENDCOMPOSITION, WM_IME_STARTCOMPOSITION,
-            WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN,
-            WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_MOVE, WM_NCCALCSIZE,
-            WM_NCHITTEST, WM_NCLBUTTONDOWN, WM_NCLBUTTONUP, WM_NCMOUSELEAVE, WM_NCMOUSEMOVE,
-            WM_PAINT, WM_RBUTTONDBLCLK, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR,
-            WM_SETTINGCHANGE, WM_SIZE, WM_SYSCHAR, WM_SYSCOMMAND, WM_SYSKEYDOWN, WM_SYSKEYUP,
-            WM_THEMECHANGED, WM_TIMER, WNDCLASSW, WS_EX_APPWINDOW, WS_EX_LAYERED,
-            WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-            WS_EX_TRANSPARENT, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU, WS_THICKFRAME,
-            WindowFromPoint,
+            WM_ENDSESSION, WM_ENTERMENULOOP, WM_ENTERSIZEMOVE, WM_ERASEBKGND, WM_EXITMENULOOP,
+            WM_EXITSIZEMOVE, WM_GETMINMAXINFO, WM_IME_COMPOSITION, WM_IME_ENDCOMPOSITION,
+            WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN,
+            WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE,
+            WM_MOUSEWHEEL, WM_MOVE, WM_NCCALCSIZE, WM_NCHITTEST, WM_NCLBUTTONDBLCLK,
+            WM_NCLBUTTONDOWN, WM_NCLBUTTONUP, WM_NCMOUSELEAVE, WM_NCMOUSEMOVE, WM_PAINT,
+            WM_QUERYENDSESSION, WM_RBUTTONDBLCLK,
+            WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCHAR,
+            WM_SYSCOMMAND, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_THEMECHANGED, WM_TIMER, WNDCLASSW,
+            WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP,
+            WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_MAXIMIZEBOX, WS_MINIMIZEBOX,
+            WS_POPUP, WS_SYSMENU, WS_THICKFRAME, WindowFromPoint,
         },
     },
 };
@@ -72,7 +75,7 @@ use super::input::{
 use super::os::{WindowHwnd, wheel_scroll_amount};
 use super::{ACTIVE_HANDLER, DisplayId, WindowsDisplay};
 
-const WINDOW_CLASS: PCWSTR = w!("JotD2DWindow");
+const WINDOW_CLASS: PCWSTR = w!("JotWindow");
 const DWMSBT_TABBEDWINDOW: i32 = 4;
 const SIZE_MOVE_TIMER_ID: usize = 1;
 
@@ -204,11 +207,19 @@ pub(crate) enum PlatformEvent {
         window_id: WindowId,
         position: Point,
         delta_lines: Point,
+        page_scroll: bool,
         modifiers: Modifiers,
     },
     KeyDown {
         window_id: WindowId,
         event: KeyEvent,
+    },
+    KeyUp {
+        window_id: WindowId,
+        event: KeyEvent,
+    },
+    CaptureLost {
+        window_id: WindowId,
     },
     ModifiersChanged {
         modifiers: Modifiers,
@@ -249,6 +260,12 @@ pub(crate) trait PlatformHandler {
     fn drive_frames(&mut self);
     /// Returns `true` when the message loop should exit.
     fn should_quit(&self) -> bool;
+    /// Returns `true` if any open window has unsaved changes (for `WM_QUERYENDSESSION`).
+    fn has_dirty_tabs(&self) -> bool {
+        false
+    }
+    /// Called when Windows is shutting down or logging off (`WM_ENDSESSION`).
+    fn on_end_session(&mut self, _ending: bool) {}
 }
 
 /// Per-HWND cached metadata & Win32 input tracking stored lock-free on the UI thread.
@@ -264,7 +281,7 @@ struct HwndEntry {
     scale_factor: f32,
     min_size: Option<Size>,
     cursor: CursorStyle,
-    control_areas: Vec<(Rect, WindowControlArea)>,
+    control_areas: Vec<(Rect, Option<WindowControlArea>)>,
     in_size_move: bool,
     hovered: bool,
     nc_button_down: Option<u32>,
@@ -273,6 +290,7 @@ struct HwndEntry {
     last_modifiers: Modifiers,
     clicks: ClickTracker,
     pressed_button: Option<MouseButton>,
+    pressed_buttons_mask: u8,
     tracking_leave: bool,
     tracking_nc_leave: bool,
 }
@@ -283,20 +301,22 @@ thread_local! {
 }
 
 pub(crate) fn register_window_class() -> Result<()> {
-    let hinstance: HINSTANCE = unsafe { GetModuleHandleW(None)? }.into();
-    let hicon =
-        unsafe { LoadIconW(Some(hinstance), PCWSTR(std::ptr::without_provenance(1))) }
+    // SAFETY: Queries current module handle, loads embedded icon/cursor, and registers window class.
+    unsafe {
+        let hinstance: HINSTANCE = GetModuleHandleW(None)?.into();
+        let hicon = LoadIconW(Some(hinstance), PCWSTR(std::ptr::without_provenance(1)))
             .unwrap_or_default();
-    let wc = WNDCLASSW {
-        style: CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS,
-        lpfnWndProc: Some(window_wnd_proc),
-        hInstance: hinstance,
-        hIcon: hicon,
-        lpszClassName: WINDOW_CLASS,
-        hCursor: unsafe { LoadCursorW(None, IDC_ARROW).unwrap_or_default() },
-        ..Default::default()
-    };
-    unsafe { RegisterClassW(&wc) };
+        let wc = WNDCLASSW {
+            style: CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS,
+            lpfnWndProc: Some(window_wnd_proc),
+            hInstance: hinstance,
+            hIcon: hicon,
+            lpszClassName: WINDOW_CLASS,
+            hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
+            ..Default::default()
+        };
+        RegisterClassW(&wc);
+    }
     Ok(())
 }
 
@@ -314,7 +334,49 @@ pub(crate) fn has_hwnd_entry(hwnd: WindowHwnd) -> bool {
 }
 
 pub(super) fn queue_pending_event(event: PlatformEvent) {
-    PENDING_EVENTS.with(|q| q.borrow_mut().push_back(event));
+    PENDING_EVENTS.with(|q| {
+        let mut queue = q.borrow_mut();
+        // Coalesce idempotent trailing events so re-entrant moves/resizes/theme updates never pile up.
+        let coalesced = match (&event, queue.back_mut()) {
+            (
+                PlatformEvent::Moved {
+                    window_id: a,
+                    origin: new_origin,
+                },
+                Some(PlatformEvent::Moved {
+                    window_id: b,
+                    origin,
+                }),
+            ) if a == b => {
+                *origin = *new_origin;
+                true
+            }
+            (
+                PlatformEvent::Resized {
+                    window_id: a,
+                    physical_width: nw,
+                    physical_height: nh,
+                    scale: ns,
+                },
+                Some(PlatformEvent::Resized {
+                    window_id: b,
+                    physical_width,
+                    physical_height,
+                    scale,
+                }),
+            ) if a == b => {
+                *physical_width = *nw;
+                *physical_height = *nh;
+                *scale = *ns;
+                true
+            }
+            (PlatformEvent::ThemeChanged, Some(PlatformEvent::ThemeChanged)) => true,
+            _ => false,
+        };
+        if !coalesced {
+            queue.push_back(event);
+        }
+    });
 }
 
 pub(super) fn drain_pending_events() {
@@ -322,6 +384,12 @@ pub(super) fn drain_pending_events() {
         return;
     };
     loop {
+        if super::take_wake_pending() {
+            match handler_rc.try_borrow_mut() {
+                Ok(mut handler) => handler.on_wake(),
+                Err(_) => return,
+            }
+        }
         let next = PENDING_EVENTS.with(|q| q.borrow_mut().pop_front());
         let Some(event) = next else {
             break;
@@ -334,12 +402,13 @@ pub(super) fn drain_pending_events() {
     }
 }
 
-/// Dispatches `event` synchronously if `ACTIVE_HANDLER` is free, or queues it for immediate drain
-/// if `wnd_proc` was re-entered during a Win32 call made inside the handler.
+/// Dispatches `event` synchronously if `ACTIVE_HANDLER` is free (draining older queued events
+/// first to preserve FIFO order), or queues it for immediate drain on re-entry.
 pub(super) fn dispatch_or_queue_event(event: PlatformEvent) -> bool {
     let Some(handler_rc) = ACTIVE_HANDLER.with(|slot| slot.borrow().clone()) else {
         return false;
     };
+    drain_pending_events();
     let handled = match handler_rc.try_borrow_mut() {
         Ok(mut handler) => handler.on_event(event),
         Err(_) => {
@@ -359,6 +428,7 @@ fn dispatch_if_free(event: PlatformEvent) -> bool {
     let Some(handler_rc) = ACTIVE_HANDLER.with(|slot| slot.borrow().clone()) else {
         return false;
     };
+    drain_pending_events();
     let handled = match handler_rc.try_borrow_mut() {
         Ok(mut handler) => handler.on_event(event),
         Err(_) => return false,
@@ -380,7 +450,7 @@ pub(crate) struct NativeWindow {
     pub(crate) origin: Point,
     pub(crate) active: bool,
     pub(crate) in_size_move: bool,
-    pub(crate) renderer: D2DRenderer,
+    renderer: Option<D2DRenderer>,
     drop_registered: bool,
     destroyed: bool,
 }
@@ -392,6 +462,7 @@ impl NativeWindow {
         appearance: WindowAppearance,
     ) -> Result<Self> {
         let id = WindowId::next();
+        // SAFETY: Current process module handle is always valid.
         let hinstance: HINSTANCE = unsafe { GetModuleHandleW(None)? }.into();
         let is_overlay = matches!(options.kind, WindowKind::Overlay);
 
@@ -422,6 +493,7 @@ impl NativeWindow {
         } else {
             (CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT)
         };
+        // SAFETY: `WINDOW_CLASS` was registered on startup and `wide_title` is a valid HSTRING.
         let hwnd = unsafe {
             CreateWindowExW(
                 ex_style,
@@ -439,6 +511,7 @@ impl NativeWindow {
             )?
         };
 
+        // SAFETY: `hwnd` was just created above.
         let dpi = unsafe { GetDpiForWindow(hwnd) }.max(USER_DEFAULT_SCREEN_DPI);
         let init_scale = dpi as f32 / USER_DEFAULT_SCREEN_DPI as f32;
         HWND_REGISTRY.with(|map| {
@@ -461,6 +534,7 @@ impl NativeWindow {
                     last_modifiers: current_modifiers(),
                     clicks: ClickTracker::default(),
                     pressed_button: None,
+                    pressed_buttons_mask: 0,
                     tracking_leave: false,
                     tracking_nc_leave: false,
                 },
@@ -480,6 +554,7 @@ impl NativeWindow {
             );
             set_dwm_u32(hwnd, DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE);
             set_dwm_u32(hwnd, DWMWA_TRANSITIONS_FORCEDISABLED, 1);
+            // SAFETY: Overlay window was created with `WS_EX_LAYERED`.
             unsafe {
                 let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), 255, LWA_ALPHA);
             }
@@ -500,6 +575,7 @@ impl NativeWindow {
                 w += bx * 2;
                 h += by;
             }
+            // SAFETY: Positions `hwnd` on the target monitor without activating it.
             unsafe {
                 let _ = SetWindowPos(
                     hwnd,
@@ -513,12 +589,14 @@ impl NativeWindow {
             }
         }
 
+        // SAFETY: Queries post-placement DPI on `hwnd`.
         let final_dpi = unsafe { GetDpiForWindow(hwnd) }.max(USER_DEFAULT_SCREEN_DPI);
         let scale_factor = final_dpi as f32 / USER_DEFAULT_SCREEN_DPI as f32;
         with_entry_mut(hwnd, |e| e.scale_factor = scale_factor);
 
         let drop_registered = if !is_overlay {
-            let target: IDropTarget = JotDropTarget { window_id: id }.into();
+            let target: IDropTarget = JotDropTarget::new(id).into();
+            // SAFETY: OLE was initialized on the UI thread; paired with `RevokeDragDrop` on destroy.
             unsafe { RegisterDragDrop(hwnd, &target) }.is_ok()
         } else {
             false
@@ -533,8 +611,10 @@ impl NativeWindow {
                     map.borrow_mut().remove(&(hwnd.0 as isize));
                 });
                 if drop_registered {
+                    // SAFETY: Revokes the drag-drop registration succeeded above.
                     let _ = unsafe { RevokeDragDrop(hwnd) };
                 }
+                // SAFETY: Cleans up partially constructed window on renderer init failure.
                 let _ = unsafe { DestroyWindow(hwnd) };
                 return Err(err);
             }
@@ -549,7 +629,7 @@ impl NativeWindow {
             origin,
             active: options.show && options.focus,
             in_size_move: false,
-            renderer,
+            renderer: Some(renderer),
             drop_registered,
             destroyed: false,
         };
@@ -560,6 +640,7 @@ impl NativeWindow {
     }
 
     pub(crate) fn show(&self, focus: bool) {
+        // SAFETY: `self.hwnd` is owned by `self` on the UI thread.
         unsafe {
             let _ = ShowWindow(self.hwnd, if focus { SW_SHOW } else { SW_SHOWNOACTIVATE });
         }
@@ -567,6 +648,7 @@ impl NativeWindow {
 
     pub(crate) fn set_title(&self, title: &str) {
         let wide = HSTRING::from(title);
+        // SAFETY: `wide` is a valid NUL-terminated HSTRING and `self.hwnd` is owned by `self`.
         unsafe {
             let _ = SetWindowTextW(self.hwnd, &wide);
         }
@@ -594,16 +676,26 @@ impl NativeWindow {
         with_entry_mut(self.hwnd, |e| e.min_size = min_size);
     }
 
-    pub(crate) fn set_control_areas(&self, areas: Vec<(Rect, WindowControlArea)>) {
+    pub(crate) fn set_control_areas(&self, areas: Vec<(Rect, Option<WindowControlArea>)>) {
         with_entry_mut(self.hwnd, |e| e.control_areas = areas);
     }
 
     pub(crate) fn is_maximized(&self) -> bool {
+        // SAFETY: `IsZoomed` safely validates `self.hwnd`.
         unsafe { IsZoomed(self.hwnd) }.as_bool()
     }
 
     pub(crate) fn hwnd(&self) -> WindowHwnd {
         WindowHwnd::from_raw(self.hwnd)
+    }
+
+    pub(crate) fn clear_shutdown_block(&self) {
+        // SAFETY: `ShutdownBlockReasonDestroy` is a no-op if no block reason is registered.
+        let _ = unsafe { ShutdownBlockReasonDestroy(self.hwnd) };
+    }
+
+    pub(crate) fn renderer_mut(&mut self) -> Option<&mut D2DRenderer> {
+        self.renderer.as_mut()
     }
 
     pub(crate) fn sync_size(&mut self, physical_width: u32, physical_height: u32, scale: f32) {
@@ -613,15 +705,16 @@ impl NativeWindow {
             physical_height as f32 / scale,
         );
         with_entry_mut(self.hwnd, |e| e.scale_factor = scale);
-        let _ = self
-            .renderer
-            .resize(physical_width, physical_height, scale);
+        if let Some(renderer) = &mut self.renderer {
+            let _ = renderer.resize(physical_width, physical_height, scale);
+        }
     }
 
     /// Queries the live Win32 client rect and DPI (essential for overlay windows resized via
     /// `SetWindowPos` before `WM_SIZE` drains). Returns `false` if the window is minimized/empty.
     pub(crate) fn sync_live_metrics(&mut self) -> bool {
         let mut rc = RECT::default();
+        // SAFETY: `rc` is a valid stack `RECT` out-pointer.
         if unsafe { GetClientRect(self.hwnd, &mut rc) }.is_err() {
             return false;
         }
@@ -630,6 +723,7 @@ impl NativeWindow {
         if w <= 0 || h <= 0 {
             return false;
         }
+        // SAFETY: `self.hwnd` is owned by `self`.
         let dpi = unsafe { GetDpiForWindow(self.hwnd) }.max(USER_DEFAULT_SCREEN_DPI);
         let scale = dpi as f32 / USER_DEFAULT_SCREEN_DPI as f32;
         self.sync_size(w as u32, h as u32, scale);
@@ -637,8 +731,10 @@ impl NativeWindow {
     }
 
     pub(crate) fn recreate_renderer(&mut self, devices: Direct2DDevices) -> Result<()> {
+        // Release the old swap chain and DirectComposition target before creating a new one (G-2).
+        self.renderer = None;
         let (w, h) = query_physical_size(self.hwnd);
-        self.renderer = D2DRenderer::new(devices, self.hwnd, w, h, self.scale_factor)?;
+        self.renderer = Some(D2DRenderer::new(devices, self.hwnd, w, h, self.scale_factor)?);
         Ok(())
     }
 
@@ -653,12 +749,15 @@ impl NativeWindow {
                 .is_some_and(|e| e.in_size_move)
         });
         if in_size_move {
+            // SAFETY: Stops active modal size/move repaint timer before destroying `self.hwnd`.
             let _ = unsafe { KillTimer(Some(self.hwnd), SIZE_MOVE_TIMER_ID) };
         }
         if self.drop_registered {
+            // SAFETY: Matches `RegisterDragDrop` succeeded in `NativeWindow::create`.
             let _ = unsafe { RevokeDragDrop(self.hwnd) };
             self.drop_registered = false;
         }
+        // SAFETY: Destroys our owned HWND once (`self.destroyed` prevents double-destroy).
         let _ = unsafe { DestroyWindow(self.hwnd) };
     }
 }
@@ -671,6 +770,7 @@ impl Drop for NativeWindow {
 
 fn query_physical_size(hwnd: HWND) -> (u32, u32) {
     let mut rc = RECT::default();
+    // SAFETY: `rc` is a valid stack `RECT` out-pointer.
     let _ = unsafe { GetClientRect(hwnd, &mut rc) };
     (
         (rc.right - rc.left).max(1) as u32,
@@ -680,9 +780,12 @@ fn query_physical_size(hwnd: HWND) -> (u32, u32) {
 
 fn query_client_metrics(hwnd: HWND, scale: f32) -> (Size, Point) {
     let mut client = RECT::default();
-    let _ = unsafe { GetClientRect(hwnd, &mut client) };
     let mut win_rc = RECT::default();
-    let _ = unsafe { GetWindowRect(hwnd, &mut win_rc) };
+    // SAFETY: Both `client` and `win_rc` are valid stack `RECT` out-pointers.
+    unsafe {
+        let _ = GetClientRect(hwnd, &mut client);
+        let _ = GetWindowRect(hwnd, &mut win_rc);
+    }
     (
         size(
             (client.right - client.left).max(1) as f32 / scale,
@@ -703,11 +806,13 @@ fn screen_to_client_point(hwnd: HWND, lparam: LPARAM, scale: f32) -> Point {
         x: (lparam.0 & 0xFFFF) as i16 as i32,
         y: ((lparam.0 >> 16) & 0xFFFF) as i16 as i32,
     };
+    // SAFETY: `pt` is a valid stack `POINT` out-pointer.
     let _ = unsafe { ScreenToClient(hwnd, &mut pt) };
     point(pt.x as f32 / scale, pt.y as f32 / scale)
 }
 
 fn set_dwm_u32(hwnd: HWND, attr: DWMWINDOWATTRIBUTE, value: u32) {
+    // SAFETY: `&value` matches the 4-byte `u32` DWM attribute buffer.
     let _ = unsafe {
         DwmSetWindowAttribute(
             hwnd,
@@ -720,6 +825,7 @@ fn set_dwm_u32(hwnd: HWND, attr: DWMWINDOWATTRIBUTE, value: u32) {
 
 fn configure_dark_mode(hwnd: HWND, appearance: WindowAppearance) {
     let dark = BOOL(i32::from(matches!(appearance, WindowAppearance::Dark)));
+    // SAFETY: `&dark` matches the `BOOL` buffer expected by `DWMWA_USE_IMMERSIVE_DARK_MODE`.
     let _ = unsafe {
         DwmSetWindowAttribute(
             hwnd,
@@ -731,10 +837,13 @@ fn configure_dark_mode(hwnd: HWND, appearance: WindowAppearance) {
 }
 
 fn frame_thickness_for_dpi(dpi: u32) -> (i32, i32) {
-    let pad = unsafe { GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi) };
-    let bx = unsafe { GetSystemMetricsForDpi(SM_CXFRAME, dpi) } + pad;
-    let by = unsafe { GetSystemMetricsForDpi(SM_CYFRAME, dpi) } + pad;
-    (bx, by)
+    // SAFETY: `GetSystemMetricsForDpi` is a pure OS metric query.
+    unsafe {
+        let pad = GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi);
+        let bx = GetSystemMetricsForDpi(SM_CXFRAME, dpi) + pad;
+        let by = GetSystemMetricsForDpi(SM_CYFRAME, dpi) + pad;
+        (bx, by)
+    }
 }
 
 fn configure_backdrop(hwnd: HWND, backdrop: WindowBackdrop) {
@@ -744,9 +853,11 @@ fn configure_backdrop(hwnd: HWND, backdrop: WindowBackdrop) {
         cyTopHeight: -1,
         cyBottomHeight: -1,
     };
+    // SAFETY: Extends DWM sheet-of-glass frame across `hwnd` for borderless Mica Alt rendering.
     let _ = unsafe { DwmExtendFrameIntoClientArea(hwnd, &margins) };
     if matches!(backdrop, WindowBackdrop::MicaAlt) {
         let b = DWM_SYSTEMBACKDROP_TYPE(DWMSBT_TABBEDWINDOW);
+        // SAFETY: `&b` matches the `DWM_SYSTEMBACKDROP_TYPE` buffer expected by DWM.
         let _ = unsafe {
             DwmSetWindowAttribute(
                 hwnd,
@@ -763,8 +874,9 @@ fn apply_cursor(style: CursorStyle) {
         CursorStyle::Arrow => IDC_ARROW,
         CursorStyle::IBeam => IDC_IBEAM,
     };
-    if let Ok(cursor) = unsafe { LoadCursorW(None, id) } {
-        unsafe {
+    // SAFETY: Loads a built-in system cursor and activates it on the UI thread.
+    unsafe {
+        if let Ok(cursor) = LoadCursorW(None, id) {
             SetCursor(Some(cursor));
         }
     }
@@ -772,7 +884,22 @@ fn apply_cursor(style: CursorStyle) {
 
 fn cursor_is_over_hwnd(hwnd: HWND) -> bool {
     let mut pt = POINT::default();
+    // SAFETY: Queries cursor screen position and topmost window at that point.
     unsafe { GetCursorPos(&mut pt).is_ok() && WindowFromPoint(pt) == hwnd }
+}
+
+fn is_relevant_setting_change(lparam: LPARAM) -> bool {
+    if lparam.0 == 0 {
+        return true;
+    }
+    let ptr = lparam.0 as *const u16;
+    let pcw = PCWSTR(ptr);
+    // SAFETY: Win32 passes either NULL or a NUL-terminated UTF-16 area name in `WM_SETTINGCHANGE`.
+    let wide = unsafe { pcw.as_wide() };
+    let name = String::from_utf16_lossy(wide);
+    name.eq_ignore_ascii_case("ImmersiveColorSet")
+        || name.eq_ignore_ascii_case("WindowMetrics")
+        || name.eq_ignore_ascii_case("HighContrast")
 }
 
 fn update_ime_pos(hwnd: HWND, window_id: WindowId) {
@@ -794,10 +921,23 @@ unsafe extern "system" fn window_wnd_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
+    match catch_unwind(AssertUnwindSafe(|| {
+        window_wnd_proc_inner(hwnd, msg, wparam, lparam)
+    })) {
+        Ok(res) => res,
+        Err(payload) => {
+            super::report_caught_ffi_panic("window_wnd_proc", &*payload);
+            LRESULT(0)
+        }
+    }
+}
+
+fn window_wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match msg {
         WM_ERASEBKGND => LRESULT(1),
 
         WM_PAINT => {
+            // SAFETY: Validates the update region before synchronous D2D rendering.
             let _ = unsafe { ValidateRect(Some(hwnd), None) };
             if let Some(window_id) = with_entry(hwnd, |e| e.window_id)
                 && let Some(handler_rc) = ACTIVE_HANDLER.with(|s| s.borrow().clone())
@@ -815,13 +955,19 @@ unsafe extern "system" fn window_wnd_proc(
                 return LRESULT(0);
             }
             if !hide_titlebar {
+                // SAFETY: Forwards standard non-client calculation to `DefWindowProcW`.
                 return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
             }
+            // SAFETY: For `WM_NCCALCSIZE` with `wparam != 0`, Win32 guarantees `lparam` points to
+            // a valid mutable `NCCALCSIZE_PARAMS` for the duration of this call.
             let params = unsafe { &mut *(lparam.0 as *mut NCCALCSIZE_PARAMS) };
             let saved_top = params.rgrc[0].top;
+            // SAFETY: Runs default frame calculation for left/right/bottom resize borders.
             let result = unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
             params.rgrc[0].top = saved_top;
+            // SAFETY: Queries zoom/DPI state on `hwnd` to inset maximized top edge onto monitor.
             if unsafe { IsZoomed(hwnd) }.as_bool() {
+                // SAFETY: `hwnd` is a valid UI-thread window.
                 let dpi = unsafe { GetDpiForWindow(hwnd) }.max(USER_DEFAULT_SCREEN_DPI);
                 let (_, by) = frame_thickness_for_dpi(dpi);
                 params.rgrc[0].top += by;
@@ -831,18 +977,22 @@ unsafe extern "system" fn window_wnd_proc(
 
         WM_GETMINMAXINFO => {
             if let Some(min_size) = with_entry(hwnd, |e| e.min_size).flatten() {
+                // SAFETY: `hwnd` is a valid UI-thread window.
                 let dpi = unsafe { GetDpiForWindow(hwnd) }.max(USER_DEFAULT_SCREEN_DPI);
                 let scale = dpi as f32 / USER_DEFAULT_SCREEN_DPI as f32;
                 let (bx, by) = frame_thickness_for_dpi(dpi);
+                // SAFETY: For `WM_GETMINMAXINFO`, Win32 guarantees `lparam` points to `MINMAXINFO`.
                 let mmi = unsafe { &mut *(lparam.0 as *mut MINMAXINFO) };
                 mmi.ptMinTrackSize.x = (min_size.width * scale).ceil() as i32 + bx * 2;
                 mmi.ptMinTrackSize.y = (min_size.height * scale).ceil() as i32 + by;
                 return LRESULT(0);
             }
+            // SAFETY: Forwards unhandled `WM_GETMINMAXINFO` to `DefWindowProcW`.
             unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
         }
 
         WM_NCHITTEST => {
+            // SAFETY: Lets `DefWindowProcW` handle standard resize borders first.
             let def_hit = unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
             if def_hit.0 != HTCLIENT as isize {
                 return def_hit;
@@ -852,10 +1002,13 @@ unsafe extern "system" fn window_wnd_proc(
                     return HTCLIENT;
                 }
                 let mut rc = RECT::default();
+                // SAFETY: `rc` is a valid stack `RECT` out-pointer.
                 let _ = unsafe { GetWindowRect(hwnd, &mut rc) };
                 let sx = (lparam.0 & 0xFFFF) as i16 as i32;
                 let sy = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
+                // SAFETY: Queries zoom/DPI state on `hwnd` for top resize edge hit-testing.
                 if e.is_resizable && !unsafe { IsZoomed(hwnd) }.as_bool() {
+                    // SAFETY: `hwnd` is a valid UI-thread window.
                     let dpi = unsafe { GetDpiForWindow(hwnd) }.max(USER_DEFAULT_SCREEN_DPI);
                     let (bx, by) = frame_thickness_for_dpi(dpi);
                     if sy < rc.top + by {
@@ -869,12 +1022,14 @@ unsafe extern "system" fn window_wnd_proc(
                     }
                 }
                 let local = screen_to_client_point(hwnd, lparam, e.scale_factor);
+                // Paint-ordered hit test: `None` entries (menus, flyouts, dialogs) occlude
+                // underlying drag / caption control areas (K-6).
                 let area = e
                     .control_areas
                     .iter()
                     .rev()
                     .find(|(rect, _)| rect.contains(local))
-                    .map(|(_, a)| *a);
+                    .and_then(|(_, a)| *a);
                 match area {
                     Some(WindowControlArea::Close) => HTCLOSE,
                     Some(WindowControlArea::Max) => HTMAXBUTTON,
@@ -919,12 +1074,14 @@ unsafe extern "system" fn window_wnd_proc(
                         hwndTrack: hwnd,
                         dwHoverTime: 0,
                     };
+                    // SAFETY: `tme.cbSize` is initialized and `hwnd` is valid.
                     if unsafe { TrackMouseEvent(&mut tme) }.is_ok() {
                         with_entry_mut(hwnd, |e| e.tracking_nc_leave = true);
                     }
                 }
                 dispatch_if_free(ev);
             }
+            // SAFETY: Forwards `WM_NCMOUSEMOVE` to `DefWindowProcW` (required for Snap Layouts).
             unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
         }
 
@@ -941,14 +1098,18 @@ unsafe extern "system" fn window_wnd_proc(
                     e.window_id
                 });
                 if let Some(window_id) = window_id {
-                    dispatch_if_free(PlatformEvent::MouseLeave { window_id });
+                    dispatch_or_queue_event(PlatformEvent::MouseLeave { window_id });
                 }
             }
             LRESULT(0)
         }
 
-        WM_NCLBUTTONDOWN => {
+        WM_NCLBUTTONDOWN | WM_NCLBUTTONDBLCLK => {
             let area = wparam.0 as u32;
+            if msg == WM_NCLBUTTONDBLCLK && area == HTCAPTION {
+                // SAFETY: Lets `DefWindowProcW` maximize/restore on titlebar double-click (K-9).
+                return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
+            }
             if matches!(area, HTMINBUTTON | HTMAXBUTTON | HTCLOSE | HTCAPTION) {
                 let ev = with_entry_mut(hwnd, |e| {
                     if area != HTCAPTION {
@@ -971,6 +1132,7 @@ unsafe extern "system" fn window_wnd_proc(
                     return LRESULT(0);
                 }
             }
+            // SAFETY: Forwards titlebar/border drag initiation to `DefWindowProcW`.
             unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
         }
 
@@ -995,6 +1157,7 @@ unsafe extern "system" fn window_wnd_proc(
                         let cmd = match area {
                             HTMINBUTTON => SC_MINIMIZE,
                             HTMAXBUTTON => {
+                                // SAFETY: `IsZoomed` safely queries maximize state of `hwnd`.
                                 if unsafe { IsZoomed(hwnd) }.as_bool() {
                                     SC_RESTORE
                                 } else {
@@ -1005,6 +1168,7 @@ unsafe extern "system" fn window_wnd_proc(
                             _ => 0,
                         };
                         if cmd != 0 {
+                            // SAFETY: Posts standard `WM_SYSCOMMAND` to `hwnd`.
                             let _ = unsafe {
                                 PostMessageW(
                                     Some(hwnd),
@@ -1018,6 +1182,7 @@ unsafe extern "system" fn window_wnd_proc(
                 }
                 return LRESULT(0);
             }
+            // SAFETY: Forwards non-caption `WM_NCLBUTTONUP` to `DefWindowProcW`.
             unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
         }
 
@@ -1058,6 +1223,7 @@ unsafe extern "system" fn window_wnd_proc(
                         hwndTrack: hwnd,
                         dwHoverTime: 0,
                     };
+                    // SAFETY: `tme.cbSize` is initialized and `hwnd` is valid.
                     if unsafe { TrackMouseEvent(&mut tme) }.is_ok() {
                         with_entry_mut(hwnd, |e| e.tracking_leave = true);
                     }
@@ -1079,27 +1245,36 @@ unsafe extern "system" fn window_wnd_proc(
                     e.window_id
                 });
                 if let Some(window_id) = window_id {
-                    dispatch_if_free(PlatformEvent::MouseLeave { window_id });
+                    dispatch_or_queue_event(PlatformEvent::MouseLeave { window_id });
                 }
             }
             LRESULT(0)
         }
 
         WM_CAPTURECHANGED => {
-            with_entry_mut(hwnd, |e| e.pressed_button = None);
+            let window_id = with_entry_mut(hwnd, |e| {
+                e.pressed_button = None;
+                e.pressed_buttons_mask = 0;
+                e.window_id
+            });
+            if let Some(window_id) = window_id {
+                dispatch_or_queue_event(PlatformEvent::CaptureLost { window_id });
+            }
             LRESULT(0)
         }
 
         WM_LBUTTONDOWN | WM_LBUTTONDBLCLK | WM_RBUTTONDOWN | WM_RBUTTONDBLCLK | WM_MBUTTONDOWN => {
-            let button = match msg {
-                WM_LBUTTONDOWN | WM_LBUTTONDBLCLK => MouseButton::Left,
-                WM_RBUTTONDOWN | WM_RBUTTONDBLCLK => MouseButton::Right,
-                _ => MouseButton::Middle,
+            let (button, bit) = match msg {
+                WM_LBUTTONDOWN | WM_LBUTTONDBLCLK => (MouseButton::Left, 0x1u8),
+                WM_RBUTTONDOWN | WM_RBUTTONDBLCLK => (MouseButton::Right, 0x2u8),
+                _ => (MouseButton::Middle, 0x4u8),
             };
+            // SAFETY: Captures mouse drag on the UI thread; released once all buttons are up.
             unsafe {
                 SetCapture(hwnd);
             }
             let ev = with_entry_mut(hwnd, |e| {
+                e.pressed_buttons_mask |= bit;
                 e.pressed_button = Some(button);
                 let (x, y, position) = client_point_from_lparam(lparam, e.scale_factor);
                 let click_count = e.clicks.record(button, x, y);
@@ -1118,23 +1293,39 @@ unsafe extern "system" fn window_wnd_proc(
         }
 
         WM_LBUTTONUP | WM_RBUTTONUP | WM_MBUTTONUP => {
-            let button = match msg {
-                WM_LBUTTONUP => MouseButton::Left,
-                WM_RBUTTONUP => MouseButton::Right,
-                _ => MouseButton::Middle,
+            let (button, bit) = match msg {
+                WM_LBUTTONUP => (MouseButton::Left, 0x1u8),
+                WM_RBUTTONUP => (MouseButton::Right, 0x2u8),
+                _ => (MouseButton::Middle, 0x4u8),
             };
-            let _ = unsafe { ReleaseCapture() };
-            let ev = with_entry_mut(hwnd, |e| {
+            let (release_cap, ev) = with_entry_mut(hwnd, |e| {
+                e.pressed_buttons_mask &= !bit;
                 if e.pressed_button == Some(button) {
-                    e.pressed_button = None;
+                    e.pressed_button = if (e.pressed_buttons_mask & 0x1) != 0 {
+                        Some(MouseButton::Left)
+                    } else if (e.pressed_buttons_mask & 0x2) != 0 {
+                        Some(MouseButton::Right)
+                    } else if (e.pressed_buttons_mask & 0x4) != 0 {
+                        Some(MouseButton::Middle)
+                    } else {
+                        None
+                    };
                 }
                 let (_, _, position) = client_point_from_lparam(lparam, e.scale_factor);
-                PlatformEvent::MouseUp {
-                    window_id: e.window_id,
-                    button,
-                    position,
-                }
-            });
+                (
+                    e.pressed_buttons_mask == 0,
+                    PlatformEvent::MouseUp {
+                        window_id: e.window_id,
+                        button,
+                        position,
+                    },
+                )
+            })
+            .map_or((true, None), |(rel, ev)| (rel, Some(ev)));
+            if release_cap {
+                // SAFETY: All tracked buttons are released; releases thread mouse capture.
+                let _ = unsafe { ReleaseCapture() };
+            }
             if let Some(ev) = ev {
                 dispatch_if_free(ev);
             }
@@ -1142,14 +1333,17 @@ unsafe extern "system" fn window_wnd_proc(
         }
 
         WM_MOUSEWHEEL | WM_MOUSEHWHEEL => {
-            let horizontal = msg == WM_MOUSEHWHEEL;
+            let modifiers = current_modifiers();
+            let horizontal = msg == WM_MOUSEHWHEEL || modifiers.shift;
             let raw_delta = ((wparam.0 >> 16) & 0xFFFF) as i16 as f32;
             let notches = raw_delta / 120.0;
-            let amount = wheel_scroll_amount(horizontal).unwrap_or(3) as f32;
-            let modifiers = current_modifiers();
-            let delta_lines = if horizontal || modifiers.shift {
+            let raw_amount = wheel_scroll_amount(horizontal).unwrap_or(3);
+            // Handle Windows WHEEL_PAGESCROLL (`u32::MAX`) without overflow (K-9, E-17).
+            let page_scroll = !horizontal && raw_amount == u32::MAX;
+            let amount = if page_scroll { 1.0 } else { raw_amount.max(1) as f32 };
+            let delta_lines = if horizontal {
                 point(
-                    if horizontal {
+                    if msg == WM_MOUSEHWHEEL {
                         -notches * amount
                     } else {
                         notches * amount
@@ -1165,6 +1359,7 @@ unsafe extern "system" fn window_wnd_proc(
                     window_id: e.window_id,
                     position,
                     delta_lines,
+                    page_scroll,
                     modifiers,
                 }
             });
@@ -1220,27 +1415,52 @@ unsafe extern "system" fn window_wnd_proc(
             if msg == WM_SYSKEYDOWN && !is_syskey_passthrough(vk) {
                 return LRESULT(0);
             }
+            // SAFETY: Forwards unhandled key-down or system chord to `DefWindowProcW`.
             unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
         }
 
-        WM_SYSCHAR => LRESULT(0),
+        WM_SYSCHAR => {
+            // Pass Alt+Space through to DefWindowProcW so the native Windows system menu opens (K-2).
+            if (wparam.0 & 0xFFFF) == b' ' as usize {
+                // SAFETY: Forwards `WM_SYSCHAR(' ')` to `DefWindowProcW` for the system menu.
+                return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
+            }
+            LRESULT(0)
+        }
 
         WM_KEYUP | WM_SYSKEYUP => {
+            let vk = (wparam.0 & 0xFFFF) as u16;
             let modifiers = current_modifiers();
-            let mods_changed = with_entry_mut(hwnd, |e| {
+            let prep = with_entry_mut(hwnd, |e| {
                 e.suppress_next_char = false;
-                (modifiers != e.last_modifiers).then(|| {
+                let mods_changed = (modifiers != e.last_modifiers).then(|| {
                     e.last_modifiers = modifiers;
                     PlatformEvent::ModifiersChanged { modifiers }
-                })
-            })
-            .flatten();
-            if let Some(ev) = mods_changed {
-                dispatch_if_free(ev);
+                });
+                (e.window_id, mods_changed)
+            });
+            if let Some((window_id, mods_changed)) = prep {
+                if let Some(ev) = mods_changed {
+                    dispatch_if_free(ev);
+                }
+                if let Some(key) = translate_vk(vk, modifiers) {
+                    let mut stroke_mods = modifiers;
+                    if key == Key::Alt {
+                        stroke_mods.alt = false;
+                    }
+                    dispatch_if_free(PlatformEvent::KeyUp {
+                        window_id,
+                        event: KeyEvent {
+                            key,
+                            modifiers: stroke_mods,
+                        },
+                    });
+                }
             }
             if msg == WM_SYSKEYUP {
                 return LRESULT(0);
             }
+            // SAFETY: Forwards regular `WM_KEYUP` to `DefWindowProcW`.
             unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
         }
 
@@ -1286,6 +1506,7 @@ unsafe extern "system" fn window_wnd_proc(
         WM_IME_COMPOSITION => {
             let flags = lparam.0 as u32;
             if let Some(window_id) = with_entry(hwnd, |e| e.window_id) {
+                // SAFETY: Acquires IMC on the UI thread owning `hwnd`; released below if valid.
                 let himc = unsafe { ImmGetContext(hwnd) };
                 if !himc.is_invalid() {
                     if (flags & GCS_RESULTSTR.0) != 0
@@ -1295,6 +1516,7 @@ unsafe extern "system" fn window_wnd_proc(
                     }
                     if (flags & GCS_COMPSTR.0) != 0 {
                         let text = read_ime_string(himc, GCS_COMPSTR).unwrap_or_default();
+                        // SAFETY: `himc` is valid; `GCS_CURSORPOS` returns a UTF-16 offset without writing memory.
                         let cursor = unsafe {
                             ImmGetCompositionStringW(himc, GCS_CURSORPOS, None, 0)
                         }
@@ -1305,6 +1527,7 @@ unsafe extern "system" fn window_wnd_proc(
                             cursor,
                         });
                     }
+                    // SAFETY: Matches `ImmGetContext` above.
                     let _ = unsafe { ImmReleaseContext(hwnd, himc) };
                     update_ime_pos(hwnd, window_id);
                 }
@@ -1342,7 +1565,7 @@ unsafe extern "system" fn window_wnd_proc(
         WM_MOVE => {
             if let Some((window_id, scale)) = with_entry(hwnd, |e| (e.window_id, e.scale_factor)) {
                 let (_, origin) = query_client_metrics(hwnd, scale);
-                dispatch_if_free(PlatformEvent::Moved { window_id, origin });
+                dispatch_or_queue_event(PlatformEvent::Moved { window_id, origin });
             }
             LRESULT(0)
         }
@@ -1351,22 +1574,29 @@ unsafe extern "system" fn window_wnd_proc(
             let new_dpi = (wparam.0 & 0xFFFF) as u32;
             let scale =
                 new_dpi.max(USER_DEFAULT_SCREEN_DPI) as f32 / USER_DEFAULT_SCREEN_DPI as f32;
-            let suggested = unsafe { &*(lparam.0 as *const RECT) };
-            unsafe {
-                let _ = SetWindowPos(
-                    hwnd,
-                    None,
-                    suggested.left,
-                    suggested.top,
-                    suggested.right - suggested.left,
-                    suggested.bottom - suggested.top,
-                    SWP_NOZORDER | SWP_NOACTIVATE,
-                );
-            }
-            if let Some(window_id) = with_entry_mut(hwnd, |e| {
+            // Update `scale_factor` BEFORE `SetWindowPos` so synchronous WM_SIZE/WM_MOVE
+            // delivered inside `SetWindowPos` observe the new DPI, and never resize overlays (G-13).
+            let info = with_entry_mut(hwnd, |e| {
                 e.scale_factor = scale;
-                e.window_id
-            }) {
+                (e.window_id, e.is_overlay)
+            });
+            if let Some((window_id, is_overlay)) = info {
+                if !is_overlay {
+                    // SAFETY: For `WM_DPICHANGED`, Win32 guarantees `lparam` points to a valid `RECT`.
+                    let suggested = unsafe { &*(lparam.0 as *const RECT) };
+                    // SAFETY: Applies the OS-suggested physical rect after updating `scale_factor`.
+                    unsafe {
+                        let _ = SetWindowPos(
+                            hwnd,
+                            None,
+                            suggested.left,
+                            suggested.top,
+                            suggested.right - suggested.left,
+                            suggested.bottom - suggested.top,
+                            SWP_NOZORDER | SWP_NOACTIVATE,
+                        );
+                    }
+                }
                 let (w, h) = query_physical_size(hwnd);
                 dispatch_or_queue_event(PlatformEvent::DpiChanged {
                     window_id,
@@ -1387,7 +1617,11 @@ unsafe extern "system" fn window_wnd_proc(
         }
 
         WM_SETTINGCHANGE | WM_THEMECHANGED => {
-            if with_entry(hwnd, |_| ()).is_some() {
+            // Skip overlay windows and filter WM_SETTINGCHANGE to theme/metric/contrast broadcasts
+            // so ambient system broadcasts don't trigger N² theme syncs (P-6).
+            let relevant = with_entry(hwnd, |e| !e.is_overlay).unwrap_or(false)
+                && (msg == WM_THEMECHANGED || is_relevant_setting_change(lparam));
+            if relevant {
                 dispatch_or_queue_event(PlatformEvent::ThemeChanged);
             }
             LRESULT(0)
@@ -1401,13 +1635,14 @@ unsafe extern "system" fn window_wnd_proc(
                 (e.window_id, h)
             }) {
                 if was_hovered {
-                    dispatch_if_free(PlatformEvent::MouseLeave { window_id });
+                    dispatch_or_queue_event(PlatformEvent::MouseLeave { window_id });
                 }
-                dispatch_if_free(PlatformEvent::SizeMoveChanged {
+                dispatch_or_queue_event(PlatformEvent::SizeMoveChanged {
                     window_id,
                     entering: true,
                 });
             }
+            // SAFETY: Starts repaint timer for the modal loop and forwards to `DefWindowProcW`.
             unsafe {
                 let _ = SetTimer(Some(hwnd), SIZE_MOVE_TIMER_ID, USER_TIMER_MINIMUM, None);
                 DefWindowProcW(hwnd, msg, wparam, lparam)
@@ -1428,26 +1663,66 @@ unsafe extern "system" fn window_wnd_proc(
         }
 
         WM_EXITSIZEMOVE | WM_EXITMENULOOP => {
+            // SAFETY: Stops the modal-loop repaint timer started in `WM_ENTERSIZEMOVE`.
             let _ = unsafe { KillTimer(Some(hwnd), SIZE_MOVE_TIMER_ID) };
             if let Some(window_id) = with_entry_mut(hwnd, |e| {
                 e.in_size_move = false;
                 e.window_id
             }) {
-                dispatch_if_free(PlatformEvent::SizeMoveChanged {
+                dispatch_or_queue_event(PlatformEvent::SizeMoveChanged {
                     window_id,
                     entering: false,
                 });
             }
+            // SAFETY: Forwards `WM_EXITSIZEMOVE`/`WM_EXITMENULOOP` to `DefWindowProcW`.
             unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
         }
 
-        WM_CLOSE => {
-            if let Some(window_id) = with_entry(hwnd, |e| e.window_id) {
-                dispatch_if_free(PlatformEvent::CloseRequested { window_id });
+        WM_QUERYENDSESSION => {
+            let dirty = ACTIVE_HANDLER.with(|s| {
+                s.borrow()
+                    .as_ref()
+                    .and_then(|h| h.try_borrow().ok().map(|g| g.has_dirty_tabs()))
+                    .unwrap_or(false)
+            });
+            if dirty {
+                // SAFETY: `hwnd` is a valid top-level window owned by this thread.
+                let _ = unsafe {
+                    ShutdownBlockReasonCreate(hwnd, w!("You have unsaved changes."))
+                };
+                if let Some(window_id) = with_entry(hwnd, |e| e.window_id) {
+                    dispatch_or_queue_event(PlatformEvent::CloseRequested { window_id });
+                }
+                LRESULT(0)
+            } else {
+                // SAFETY: Clears any prior shutdown block reason on `hwnd`.
+                let _ = unsafe { ShutdownBlockReasonDestroy(hwnd) };
+                LRESULT(1)
+            }
+        }
+
+        WM_ENDSESSION => {
+            let ending = wparam.0 != 0;
+            if !ending {
+                // SAFETY: Shutdown was cancelled; clears any registered shutdown block reason.
+                let _ = unsafe { ShutdownBlockReasonDestroy(hwnd) };
+            }
+            if let Some(handler_rc) = ACTIVE_HANDLER.with(|s| s.borrow().clone())
+                && let Ok(mut handler) = handler_rc.try_borrow_mut()
+            {
+                handler.on_end_session(ending);
             }
             LRESULT(0)
         }
 
+        WM_CLOSE => {
+            if let Some(window_id) = with_entry(hwnd, |e| e.window_id) {
+                dispatch_or_queue_event(PlatformEvent::CloseRequested { window_id });
+            }
+            LRESULT(0)
+        }
+
+        // SAFETY: Forwards all other window messages to `DefWindowProcW`.
         _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
     }
 }

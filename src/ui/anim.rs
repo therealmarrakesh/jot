@@ -5,7 +5,6 @@ use std::hash::Hash;
 use std::time::{Duration, Instant};
 
 use crate::color::Rgba;
-use crate::geom::{Point, point};
 
 /// Evaluates a standard CSS `cubic-bezier(x1, y1, x2, y2)` timing curve at normalized time `t`.
 ///
@@ -112,13 +111,6 @@ impl Lerp for f32 {
     #[inline]
     fn lerp(self, target: Self, t: f32) -> Self {
         self + (target - self) * t
-    }
-}
-
-impl Lerp for Point {
-    #[inline]
-    fn lerp(self, target: Self, t: f32) -> Self {
-        point(self.x.lerp(target.x, t), self.y.lerp(target.y, t))
     }
 }
 

@@ -1,4 +1,6 @@
-//! Typed application, menu, dialog, and editor commands dispatched across Jot.
+//! Typed application, menu, dialog, and editor commands plus single-source shortcut metadata.
+
+use crate::platform::{Key, KeyEvent};
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum Command {
@@ -64,6 +66,8 @@ pub(crate) enum Command {
     SelectDown,
     SelectLeft,
     SelectRight,
+    SelectPageUp,
+    SelectPageDown,
     SelectToStartOfLine,
     SelectToEndOfLine,
     SelectToStart,
@@ -76,4 +80,326 @@ pub(crate) enum Command {
     Undo,
     Redo,
     Escape,
+}
+
+/// Single declarative shortcut table binding keystrokes to commands and displayed menu labels (AR-5).
+struct ShortcutEntry {
+    ctrl: bool,
+    alt: bool,
+    shift: Option<bool>, // None matches either shift state (e.g. Ctrl+= / Ctrl++)
+    key: Key,
+    command: Command,
+    label: Option<&'static str>,
+}
+
+const WINDOW_SHORTCUTS: &[ShortcutEntry] = &[
+    ShortcutEntry {
+        ctrl: false,
+        alt: false,
+        shift: Some(false),
+        key: Key::Escape,
+        command: Command::Cancel,
+        label: None,
+    },
+    ShortcutEntry {
+        ctrl: true,
+        alt: false,
+        shift: Some(false),
+        key: Key::Char('n'),
+        command: Command::NewTab,
+        label: Some("Ctrl+N"),
+    },
+    ShortcutEntry {
+        ctrl: true,
+        alt: false,
+        shift: Some(true),
+        key: Key::Char('n'),
+        command: Command::NewWindow,
+        label: Some("Ctrl+Shift+N"),
+    },
+    ShortcutEntry {
+        ctrl: true,
+        alt: false,
+        shift: Some(false),
+        key: Key::Char('o'),
+        command: Command::Open,
+        label: Some("Ctrl+O"),
+    },
+    ShortcutEntry {
+        ctrl: true,
+        alt: false,
+        shift: Some(false),
+        key: Key::Char('s'),
+        command: Command::Save,
+        label: Some("Ctrl+S"),
+    },
+    ShortcutEntry {
+        ctrl: true,
+        alt: false,
+        shift: Some(true),
+        key: Key::Char('s'),
+        command: Command::SaveAs,
+        label: Some("Ctrl+Shift+S"),
+    },
+    ShortcutEntry {
+        ctrl: true,
+        alt: true,
+        shift: Some(false),
+        key: Key::Char('s'),
+        command: Command::SaveAll,
+        label: Some("Ctrl+Alt+S"),
+    },
+    ShortcutEntry {
+        ctrl: true,
+        alt: false,
+        shift: Some(false),
+        key: Key::Char('w'),
+        command: Command::CloseTab,
+        label: Some("Ctrl+W"),
+    },
+    ShortcutEntry {
+        ctrl: true,
+        alt: false,
+        shift: Some(true),
+        key: Key::Char('w'),
+        command: Command::CloseWindow,
+        label: Some("Ctrl+Shift+W"),
+    },
+    ShortcutEntry {
+        ctrl: true,
+        alt: false,
+        shift: Some(false),
+        key: Key::Tab,
+        command: Command::NextTab,
+        label: None,
+    },
+    ShortcutEntry {
+        ctrl: true,
+        alt: false,
+        shift: Some(false),
+        key: Key::PageDown,
+        command: Command::NextTab,
+        label: None,
+    },
+    ShortcutEntry {
+        ctrl: true,
+        alt: false,
+        shift: Some(true),
+        key: Key::Tab,
+        command: Command::PrevTab,
+        label: None,
+    },
+    ShortcutEntry {
+        ctrl: true,
+        alt: false,
+        shift: Some(false),
+        key: Key::PageUp,
+        command: Command::PrevTab,
+        label: None,
+    },
+    ShortcutEntry {
+        ctrl: true,
+        alt: false,
+        shift: Some(false),
+        key: Key::Char('1'),
+        command: Command::SelectTab(0),
+        label: None,
+    },
+    ShortcutEntry {
+        ctrl: true,
+        alt: false,
+        shift: Some(false),
+        key: Key::Char('2'),
+        command: Command::SelectTab(1),
+        label: None,
+    },
+    ShortcutEntry {
+        ctrl: true,
+        alt: false,
+        shift: Some(false),
+        key: Key::Char('3'),
+        command: Command::SelectTab(2),
+        label: None,
+    },
+    ShortcutEntry {
+        ctrl: true,
+        alt: false,
+        shift: Some(false),
+        key: Key::Char('4'),
+        command: Command::SelectTab(3),
+        label: None,
+    },
+    ShortcutEntry {
+        ctrl: true,
+        alt: false,
+        shift: Some(false),
+        key: Key::Char('5'),
+        command: Command::SelectTab(4),
+        label: None,
+    },
+    ShortcutEntry {
+        ctrl: true,
+        alt: false,
+        shift: Some(false),
+        key: Key::Char('6'),
+        command: Command::SelectTab(5),
+        label: None,
+    },
+    ShortcutEntry {
+        ctrl: true,
+        alt: false,
+        shift: Some(false),
+        key: Key::Char('7'),
+        command: Command::SelectTab(6),
+        label: None,
+    },
+    ShortcutEntry {
+        ctrl: true,
+        alt: false,
+        shift: Some(false),
+        key: Key::Char('8'),
+        command: Command::SelectTab(7),
+        label: None,
+    },
+    ShortcutEntry {
+        ctrl: true,
+        alt: false,
+        shift: Some(false),
+        key: Key::Char('9'),
+        command: Command::SelectLastTab,
+        label: None,
+    },
+    ShortcutEntry {
+        ctrl: true,
+        alt: false,
+        shift: Some(false),
+        key: Key::Char('f'),
+        command: Command::Find,
+        label: Some("Ctrl+F"),
+    },
+    ShortcutEntry {
+        ctrl: false,
+        alt: false,
+        shift: Some(false),
+        key: Key::F(3),
+        command: Command::FindNext,
+        label: Some("F3"),
+    },
+    ShortcutEntry {
+        ctrl: false,
+        alt: false,
+        shift: Some(true),
+        key: Key::F(3),
+        command: Command::FindPrevious,
+        label: Some("Shift+F3"),
+    },
+    ShortcutEntry {
+        ctrl: true,
+        alt: false,
+        shift: Some(false),
+        key: Key::Char('h'),
+        command: Command::Replace,
+        label: Some("Ctrl+H"),
+    },
+    ShortcutEntry {
+        ctrl: true,
+        alt: false,
+        shift: Some(false),
+        key: Key::Char('g'),
+        command: Command::GoTo,
+        label: Some("Ctrl+G"),
+    },
+    ShortcutEntry {
+        ctrl: false,
+        alt: false,
+        shift: Some(false),
+        key: Key::F(5),
+        command: Command::TimeDate,
+        label: Some("F5"),
+    },
+    ShortcutEntry {
+        ctrl: false,
+        alt: false,
+        shift: Some(true),
+        key: Key::F(10),
+        command: Command::ShowContextMenu,
+        label: None,
+    },
+    ShortcutEntry {
+        ctrl: false,
+        alt: false,
+        shift: Some(false),
+        key: Key::Menu,
+        command: Command::ShowContextMenu,
+        label: None,
+    },
+    ShortcutEntry {
+        ctrl: true,
+        alt: false,
+        shift: None,
+        key: Key::Char('='),
+        command: Command::ZoomIn,
+        label: Some("Ctrl+Plus"),
+    },
+    ShortcutEntry {
+        ctrl: true,
+        alt: false,
+        shift: None,
+        key: Key::Char('+'),
+        command: Command::ZoomIn,
+        label: Some("Ctrl+Plus"),
+    },
+    ShortcutEntry {
+        ctrl: true,
+        alt: false,
+        shift: Some(false),
+        key: Key::Char('-'),
+        command: Command::ZoomOut,
+        label: Some("Ctrl+Minus"),
+    },
+    ShortcutEntry {
+        ctrl: true,
+        alt: false,
+        shift: Some(false),
+        key: Key::Char('0'),
+        command: Command::ResetZoom,
+        label: Some("Ctrl+0"),
+    },
+];
+
+/// Resolves a window-level keyboard shortcut, ignoring AltGr text chords (K-4, AR-5).
+pub(crate) fn window_shortcut(ev: KeyEvent) -> Option<Command> {
+    let m = ev.modifiers;
+    if m.win || m.alt_gr {
+        return None;
+    }
+    WINDOW_SHORTCUTS
+        .iter()
+        .find(|entry| {
+            entry.ctrl == m.ctrl
+                && entry.alt == m.alt
+                && entry.shift.is_none_or(|s| s == m.shift)
+                && entry.key == ev.key
+        })
+        .map(|entry| entry.command)
+}
+
+/// Returns the displayed menu shortcut label from the single shortcut table (AR-5).
+pub(crate) fn shortcut_label(command: Command) -> Option<&'static str> {
+    if let Some(entry) = WINDOW_SHORTCUTS
+        .iter()
+        .find(|e| e.command == command && e.label.is_some())
+    {
+        return entry.label;
+    }
+    match command {
+        Command::Undo => Some("Ctrl+Z"),
+        Command::Redo => Some("Ctrl+Y"),
+        Command::Cut => Some("Ctrl+X"),
+        Command::Copy => Some("Ctrl+C"),
+        Command::Paste => Some("Ctrl+V"),
+        Command::Delete => Some("Del"),
+        Command::SelectAll => Some("Ctrl+A"),
+        _ => None,
+    }
 }

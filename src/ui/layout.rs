@@ -25,6 +25,19 @@ fn round_stroke_to_device_pixel(logical: f32, scale_factor: f32) -> f32 {
     }
 }
 
+/// Snaps logical border thicknesses to whole device pixels and returns the matching DIP values
+/// so `D2DRenderer::paint_quad` matches the physical border inset used by `LayoutEngine` (G-9).
+#[inline]
+pub(crate) fn snap_border_edges(border: Edges<f32>, scale_factor: f32) -> Edges<f32> {
+    let s = scale_factor.max(0.5);
+    Edges {
+        top: round_stroke_to_device_pixel(border.top, s) / s,
+        right: round_stroke_to_device_pixel(border.right, s) / s,
+        bottom: round_stroke_to_device_pixel(border.bottom, s) / s,
+        left: round_stroke_to_device_pixel(border.left, s) / s,
+    }
+}
+
 #[inline]
 fn ceil_to_device_pixel(logical: f32, scale_factor: f32) -> f32 {
     (logical * scale_factor).ceil()
@@ -413,7 +426,7 @@ fn opt_f32_bits(v: Option<f32>) -> u32 {
 
 #[derive(Default)]
 struct SizeCache {
-    entries: [Option<(SizeCacheKey, Size)>; 4],
+    entries: [Option<(SizeCacheKey, Size)>; 8],
     next: usize,
 }
 
@@ -547,7 +560,7 @@ impl LayoutEngine {
                 self.bounds(parent_id, scale);
                 let parent_origin = self.nodes[parent_id.idx()]
                     .abs_origin
-                    .expect("parent origin cached");
+                    .unwrap_or(Point::ZERO);
                 parent_origin + location
             }
             None => location,
@@ -879,6 +892,8 @@ impl<'a> Solver<'a> {
             let effective_min_main = if let Some(min_m) = c_min_main {
                 min_m.max(c_pb_main)
             } else if cs.overflow_main(row) == Overflow::Hidden
+                || c_max_main == Some(0.0)
+                || c_size_main.is_some_and(|s| s == 0.0 || (cs.flex_shrink == 0.0 && flex_basis >= s))
                 || (cs.flex_shrink == 0.0 && basis_from_content)
             {
                 c_pb_main

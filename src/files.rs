@@ -4,6 +4,9 @@
 use std::collections::VecDeque;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Condvar, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use crate::APP_NAME;
 use crate::app::AppEvent;
@@ -14,7 +17,69 @@ use crate::platform::{
     run_open_dialog, run_save_dialog,
 };
 use crate::tabs::TabId;
-use crate::types::SharedStr;
+use crate::types::{Error, SharedStr};
+
+/// Unique generation ID tagging every file workflow so stale async completions never advance
+/// or abort a newer workflow (F-1).
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct WorkflowGen(pub(crate) u64);
+
+impl WorkflowGen {
+    pub(crate) fn next() -> Self {
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        Self(NEXT.fetch_add(1, Ordering::Relaxed))
+    }
+}
+
+fn write_flight_tracker() -> &'static (Mutex<usize>, Condvar) {
+    static TRACKER: OnceLock<(Mutex<usize>, Condvar)> = OnceLock::new();
+    TRACKER.get_or_init(|| (Mutex::new(0), Condvar::new()))
+}
+
+struct WriteFlightGuard;
+
+impl WriteFlightGuard {
+    fn enter() -> Self {
+        let (lock, _) = write_flight_tracker();
+        let mut count = lock.lock().unwrap_or_else(|e| e.into_inner());
+        *count += 1;
+        Self
+    }
+}
+
+impl Drop for WriteFlightGuard {
+    fn drop(&mut self) {
+        let (lock, cvar) = write_flight_tracker();
+        let mut count = lock.lock().unwrap_or_else(|e| e.into_inner());
+        *count = count.saturating_sub(1);
+        if *count == 0 {
+            cvar.notify_all();
+        }
+    }
+}
+
+pub(crate) fn in_flight_writes() -> usize {
+    let (lock, _) = write_flight_tracker();
+    *lock.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Blocks up to `timeout` waiting for any in-flight `write_rope` operations to finish so
+/// shutdown / session-end does not truncate temp/backup cleanup.
+pub(crate) fn wait_for_in_flight_writes(timeout: Duration) {
+    let (lock, cvar) = write_flight_tracker();
+    let deadline = Instant::now() + timeout;
+    let mut count = lock.lock().unwrap_or_else(|e| e.into_inner());
+    while *count > 0 {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        let (guard, _) = cvar
+            .wait_timeout(count, remaining)
+            .unwrap_or_else(|e| e.into_inner());
+        count = guard;
+    }
+}
 
 pub(crate) const UNTITLED_FILE_NAME: &str = "Untitled.txt";
 const SAVE_AS_TITLE: &str = "Save as";
@@ -40,7 +105,9 @@ pub(crate) enum WorkflowFinish {
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct FileWorkflow {
+    pub(crate) wf_gen: WorkflowGen,
     pending: VecDeque<WorkflowStep>,
+    approved_discards: Vec<(TabId, u64)>,
     pub(crate) on_finish: WorkflowFinish,
 }
 
@@ -48,7 +115,12 @@ impl FileWorkflow {
     pub(crate) fn single(step: WorkflowStep, on_finish: WorkflowFinish) -> Self {
         let mut pending = VecDeque::with_capacity(1);
         pending.push_back(step);
-        Self { pending, on_finish }
+        Self {
+            wf_gen: WorkflowGen::next(),
+            pending,
+            approved_discards: Vec::new(),
+            on_finish,
+        }
     }
 
     pub(crate) fn batch(
@@ -56,7 +128,9 @@ impl FileWorkflow {
         on_finish: WorkflowFinish,
     ) -> Self {
         Self {
+            wf_gen: WorkflowGen::next(),
             pending: steps.into_iter().collect(),
+            approved_discards: Vec::new(),
             on_finish,
         }
     }
@@ -68,9 +142,29 @@ impl FileWorkflow {
     pub(crate) fn prepend(&mut self, step: WorkflowStep) {
         self.pending.push_front(step);
     }
+
+    pub(crate) fn approve_discard(&mut self, tab: TabId, revision: u64) {
+        self.approved_discards.retain(|(id, _)| *id != tab);
+        self.approved_discards.push((tab, revision));
+    }
+
+    pub(crate) fn is_discard_approved(&self, tab: TabId, revision: u64) -> bool {
+        self.approved_discards
+            .iter()
+            .any(|&(id, rev)| id == tab && rev == revision)
+    }
+
+    pub(crate) fn take_approved_discards(&mut self) -> Vec<(TabId, u64)> {
+        std::mem::take(&mut self.approved_discards)
+    }
+
+    pub(crate) fn with_approved_discards(mut self, approved: Vec<(TabId, u64)>) -> Self {
+        self.approved_discards = approved;
+        self
+    }
 }
 
-/// Typed file prompt data passed to the modal dialog layer (zero boxed callbacks).
+/// Typed file prompt data passed to the modal dialog layer.
 pub(crate) enum FilePrompt {
     Error {
         title: SharedStr,
@@ -81,6 +175,7 @@ pub(crate) enum FilePrompt {
         name: String,
     },
     ConfirmLossyAnsi {
+        wf_gen: WorkflowGen,
         tab: TabId,
         snapshot: u64,
         text: Rope,
@@ -89,32 +184,70 @@ pub(crate) enum FilePrompt {
     },
 }
 
-pub(crate) fn spawn_open_dialog(window: WindowId, jobs: &Jobs<AppEvent>) {
-    jobs.spawn_dedicated("jot-open-dialog", move || {
-        let result = run_open_dialog(OpenDialogOptions {
-            directories: false,
-            multiple: true,
-            prompt: None,
-        });
-        AppEvent::OpenDialogDone { window, result }
-    });
+pub(crate) fn spawn_open_dialog(
+    window: WindowId,
+    hwnd: WindowHwnd,
+    current: Option<PathBuf>,
+    jobs: &Jobs<AppEvent>,
+) {
+    let owner_raw = hwnd.raw().0 as isize;
+    let options = OpenDialogOptions {
+        multiple: true,
+        directory: Some(default_directory(current.as_deref())),
+        file_types: [TEXT_FILE_TYPE, ALL_FILE_TYPE]
+            .map(|(name, spec)| (SharedStr::new_static(name), SharedStr::new_static(spec)))
+            .into(),
+    };
+    jobs.spawn_dedicated_guarded(
+        "jot-open-dialog",
+        move || {
+            let result = run_open_dialog(owner_raw, options);
+            AppEvent::OpenDialogDone { window, result }
+        },
+        move |msg| AppEvent::OpenDialogDone {
+            window,
+            result: Err(Error::new(msg)),
+        },
+    );
 }
 
-pub(crate) fn spawn_load_files(window: WindowId, paths: Vec<PathBuf>, jobs: &Jobs<AppEvent>) {
-    jobs.spawn_bg(move || {
-        let results = paths
-            .into_iter()
-            .map(|path| {
-                let loaded = document::load(&path);
-                (path, loaded)
-            })
-            .collect();
-        AppEvent::FilesLoaded { window, results }
-    });
+pub(crate) fn spawn_load_files(
+    window: WindowId,
+    paths: Vec<(PathBuf, String)>,
+    jobs: &Jobs<AppEvent>,
+) {
+    let fallback_paths = paths.clone();
+    jobs.spawn_bg_guarded(
+        move || {
+            let results = paths
+                .into_iter()
+                .map(|(path, quick_key)| {
+                    let loaded = document::load(&path);
+                    (path, quick_key, loaded)
+                })
+                .collect();
+            AppEvent::FilesLoaded { window, results }
+        },
+        move |msg| {
+            let results = fallback_paths
+                .into_iter()
+                .map(|(path, quick_key)| {
+                    (
+                        path,
+                        quick_key,
+                        Err(LoadError::Io(io::Error::other(msg.clone()))),
+                    )
+                })
+                .collect();
+            AppEvent::FilesLoaded { window, results }
+        },
+    );
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_save_dialog(
     window: WindowId,
+    wf_gen: WorkflowGen,
     hwnd: WindowHwnd,
     tab: TabId,
     current: Option<PathBuf>,
@@ -142,19 +275,32 @@ pub(crate) fn spawn_save_dialog(
         }),
     };
     let owner_raw = hwnd.raw().0 as isize;
-    jobs.spawn_dedicated("jot-save-dialog", move || {
-        let result = run_save_dialog(owner_raw, options);
-        AppEvent::SaveDialogDone {
+    jobs.spawn_dedicated_guarded(
+        "jot-save-dialog",
+        move || {
+            let result = run_save_dialog(owner_raw, options);
+            AppEvent::SaveDialogDone {
+                window,
+                wf_gen,
+                tab,
+                format,
+                result,
+            }
+        },
+        move |msg| AppEvent::SaveDialogDone {
             window,
+            wf_gen,
             tab,
             format,
-            result,
-        }
-    });
+            result: Err(Error::new(msg)),
+        },
+    );
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_lossy_check(
     window: WindowId,
+    wf_gen: WorkflowGen,
     tab: TabId,
     snapshot: u64,
     text: Rope,
@@ -163,22 +309,39 @@ pub(crate) fn spawn_lossy_check(
     jobs: &Jobs<AppEvent>,
 ) {
     let path = std::path::absolute(&path).unwrap_or(path);
-    jobs.spawn_bg(move || {
-        let result = document::is_lossy(&text, format);
-        AppEvent::LossyCheckDone {
+    let fallback_path = path.clone();
+    let fallback_text = text.clone();
+    jobs.spawn_bg_guarded(
+        move || {
+            let result = document::is_lossy(&text, format);
+            AppEvent::LossyCheckDone {
+                window,
+                wf_gen,
+                tab,
+                snapshot,
+                text,
+                path,
+                format,
+                result,
+            }
+        },
+        move |msg| AppEvent::LossyCheckDone {
             window,
+            wf_gen,
             tab,
             snapshot,
-            text,
-            path,
+            text: fallback_text,
+            path: fallback_path,
             format,
-            result,
-        }
-    });
+            result: Err(io::Error::other(msg)),
+        },
+    );
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_write_file(
     window: WindowId,
+    wf_gen: WorkflowGen,
     tab: TabId,
     snapshot: u64,
     text: Rope,
@@ -186,39 +349,89 @@ pub(crate) fn spawn_write_file(
     format: Format,
     jobs: &Jobs<AppEvent>,
 ) {
-    jobs.spawn_bg(move || {
-        let result = document::write_rope(&path, &text, format);
-        AppEvent::FileSaved {
+    let guard = WriteFlightGuard::enter();
+    let fallback_path = path.clone();
+    let fallback_key = document::quick_path_key(&path);
+    // Run file writes on a dedicated thread so a save is never queued behind large file loads
+    // on the background pool (D-4), and release `guard` even if a panic is caught (D-7).
+    jobs.spawn_dedicated_guarded(
+        "jot-write-file",
+        move || {
+            let _guard = guard;
+            let result = document::write_rope(&path, &text, format);
+            let path_key = if result.is_ok() {
+                document::canonical_path_key(&path)
+            } else {
+                document::quick_path_key(&path)
+            };
+            AppEvent::FileSaved {
+                window,
+                wf_gen,
+                tab,
+                snapshot,
+                path,
+                path_key,
+                format: Format {
+                    mixed_line_endings: false,
+                    lossy_decode: false,
+                    ..format
+                },
+                result,
+            }
+        },
+        move |msg| AppEvent::FileSaved {
             window,
+            wf_gen,
             tab,
             snapshot,
-            path,
+            path: fallback_path,
+            path_key: fallback_key,
             format,
-            result,
-        }
-    });
+            result: Err(io::Error::other(msg)),
+        },
+    );
 }
 
 pub(crate) fn resolve_save_dialog(
     format: Format,
     result: SaveDialogResult,
-) -> Option<(PathBuf, Format)> {
-    let Ok(Some((path, choice))) = result else {
-        return None;
-    };
-    let next_format = Format {
-        encoding: choice
-            .and_then(|ix| Encoding::SAVE_ORDER.get(ix).copied())
-            .unwrap_or(format.encoding),
-        ..format
-    };
-    Some((path, next_format))
+) -> std::result::Result<Option<(PathBuf, Format)>, String> {
+    match result {
+        Ok(Some((path, choice))) => {
+            let next_format = Format {
+                encoding: choice
+                    .and_then(|ix| Encoding::SAVE_ORDER.get(ix).copied())
+                    .unwrap_or(format.encoding),
+                lossy_decode: false,
+                ..format
+            };
+            Ok(Some((path, next_format)))
+        }
+        Ok(None) => Ok(None),
+        Err(err) => Err(err.to_string()),
+    }
+}
+
+pub(crate) fn friendly_io_error(error: &io::Error) -> String {
+    let raw = error.to_string();
+    if let Some(prefix) = raw.strip_suffix(')')
+        && let Some((clean, suffix)) = prefix.rsplit_once(" (os error ")
+        && suffix.chars().all(|c| c.is_ascii_digit())
+    {
+        return clean.trim_end().to_owned();
+    }
+    raw
 }
 
 pub(crate) fn load_error_prompt(path: &Path, error: LoadError) -> FilePrompt {
     let detail: SharedStr = match error {
         LoadError::Undecodable => "Jot can't decode the text in this file.".into(),
-        LoadError::Io(err) => err.to_string().into(),
+        LoadError::TooLarge(bytes) => format!(
+            "This file is too large to open ({} MB).",
+            bytes / (1024 * 1024)
+        )
+        .into(),
+        LoadError::Io(err) => friendly_io_error(&err).into(),
     };
     FilePrompt::Error {
         title: format!("Can't open {}", display_name(Some(path))).into(),
@@ -229,7 +442,23 @@ pub(crate) fn load_error_prompt(path: &Path, error: LoadError) -> FilePrompt {
 pub(crate) fn save_error_prompt(path: &Path, error: &io::Error) -> FilePrompt {
     FilePrompt::Error {
         title: format!("Can't save {}", display_name(Some(path))).into(),
-        message: error.to_string().into(),
+        message: friendly_io_error(error).into(),
+    }
+}
+
+pub(crate) fn dialog_error_prompt(title: &'static str, message: String) -> FilePrompt {
+    FilePrompt::Error {
+        title: SharedStr::new_static(title),
+        message: message.into(),
+    }
+}
+
+pub(crate) fn already_open_save_prompt(path: &Path) -> FilePrompt {
+    FilePrompt::Error {
+        title: format!("Can't save {}", display_name(Some(path))).into(),
+        message: SharedStr::new_static(
+            "This file is already open in another tab. Close that tab before saving over it.",
+        ),
     }
 }
 

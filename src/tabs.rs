@@ -50,7 +50,7 @@ const SCROLL_AREA: f32 = SCROLL_OUTER_PAD + BUTTON_WIDTH + SCROLL_INNER_PAD;
 const SCROLL_OUTER_PAD: f32 = 8.;
 const SCROLL_INNER_PAD: f32 = 3.;
 pub(crate) const SCROLL_STEP: f32 = 50.;
-pub(crate) const SCROLL_REPEAT_DELAY: Duration = Duration::from_millis(50);
+pub(crate) const SCROLL_REPEAT_DELAY: Duration = Duration::from_millis(250);
 pub(crate) const SCROLL_REPEAT_INTERVAL: Duration = Duration::from_millis(100);
 pub(crate) const WHEEL_SHARE: f32 = 0.15;
 const BUTTON_WIDTH: f32 = 32.;
@@ -76,12 +76,30 @@ const BUTTON_GLYPH_SIZE: f32 = 12.;
 #[derive(Clone, Copy, Default)]
 pub(crate) struct SlotKey(usize);
 
+#[derive(Clone, Debug)]
+pub(crate) struct PendingSave {
+    pub(crate) path: PathBuf,
+    pub(crate) format: Format,
+    pub(crate) wf_gen: crate::files::WorkflowGen,
+}
+
+#[derive(Default)]
+pub(crate) enum TabSaveState {
+    #[default]
+    Idle,
+    InFlight {
+        pending: Option<PendingSave>,
+    },
+}
+
 pub(crate) struct TabData {
     pub(crate) id: TabId,
     pub(crate) editor: Editor,
     pub(crate) zoom: f32,
     pub(crate) path: Option<PathBuf>,
+    pub(crate) path_key: Option<String>,
     pub(crate) format: Format,
+    pub(crate) save_state: TabSaveState,
 }
 
 impl TabData {
@@ -98,13 +116,19 @@ impl TabData {
         word_wrap: bool,
         paddings: Edges<f32>,
     ) -> Self {
-        let (path, text, format) = match content {
-            Some((path, loaded)) => (Some(path), loaded.text, loaded.format),
-            None => (None, Rope::new(), Format::default()),
+        let (path, path_key, text, format) = match content {
+            Some((path, loaded)) => {
+                let key = if loaded.path_key.is_empty() {
+                    document::quick_path_key(&path)
+                } else {
+                    loaded.path_key
+                };
+                (Some(path), Some(key), loaded.text, loaded.format)
+            }
+            None => (None, None, Rope::new(), Format::default()),
         };
         let editor = Editor::multi_line()
             .with_soft_wrap(word_wrap)
-            .with_viewport_wheel_step()
             .with_rope(text)
             .with_paddings(paddings);
         Self {
@@ -112,7 +136,9 @@ impl TabData {
             editor,
             zoom: 1.,
             path,
+            path_key,
             format,
+            save_state: TabSaveState::Idle,
         }
     }
 }
@@ -135,6 +161,7 @@ struct Ghost {
     name: SharedStr,
     key: SlotKey,
     x: f32,
+    was_active: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -149,7 +176,7 @@ pub(crate) struct StripFrame {
     shift: f32,
     viewport: f32,
     tabs: Vec<(f32, f32)>,
-    ghosts: Vec<(SharedStr, f32, f32)>,
+    ghosts: Vec<(SharedStr, f32, f32, bool)>,
 }
 
 pub(crate) struct TabStrip {
@@ -269,11 +296,19 @@ impl TabStrip {
         }
     }
 
-    pub(crate) fn push_ghost(&mut self, name: SharedStr, key: SlotKey, ix: usize, width: f32) {
+    pub(crate) fn push_ghost(
+        &mut self,
+        name: SharedStr,
+        key: SlotKey,
+        ix: usize,
+        width: f32,
+        was_active: bool,
+    ) {
         self.ghosts.push(Ghost {
             name,
             key,
             x: ix as f32 * width,
+            was_active,
         });
     }
 
@@ -457,7 +492,7 @@ impl TabStrip {
             let (width, shrinking) = slide(AnimKey::TabWidth(ghost.key.0), 0., 0., false, ui);
             let moving = sliding || shrinking;
             if moving {
-                ghosts.push((ghost.name.clone(), x, width));
+                ghosts.push((ghost.name.clone(), x, width, ghost.was_active));
             }
             moving
         });
@@ -501,15 +536,20 @@ impl TabStrip {
         let ghosts: Vec<Node> = sampled
             .ghosts
             .iter()
-            .map(|(name, x, width)| {
+            .map(|(name, x, width, was_active)| {
+                let bg = if *was_active {
+                    rgba(p.layer)
+                } else {
+                    transparent_black()
+                };
                 tab_frame(
                     shift + x,
                     *width,
                     cover,
                     tab_face(
                         p,
-                        false,
-                        transparent_black(),
+                        *was_active,
+                        bg,
                         TAB_LABEL_TRAILING_BARE,
                         name.clone(),
                     ),

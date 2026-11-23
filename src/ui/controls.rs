@@ -220,7 +220,7 @@ pub(crate) fn text_field_frame(
     let (trailing, clear_right) = if search_icon {
         (
             2. * FIELD_GLYPH_WIDTH + FIELD_GLYPH_RIGHT,
-            FIELD_GLYPH_RIGHT + FIELD_GLYPH_WIDTH - 1.,
+            FIELD_GLYPH_RIGHT + FIELD_GLYPH_WIDTH,
         )
     } else {
         (FIELD_GLYPH_WIDTH + FIELD_GLYPH_RIGHT, FIELD_GLYPH_RIGHT)
@@ -237,9 +237,12 @@ pub(crate) fn text_field_frame(
     let clear_pressed = ui.is_pressed(clear_hit);
 
     box_()
+        .hit(field_hit)
+        .cursor(CursorStyle::IBeam)
         .relative()
         .h(u(CONTROL_HEIGHT))
         .rounded(u(CONTROL_RADIUS))
+        .overflow_hidden()
         .bg(bg)
         .border_widths(
             Edges {
@@ -266,8 +269,8 @@ pub(crate) fn text_field_frame(
         .child(
             box_()
                 .absolute()
-                .left(-1.)
-                .right(-1.)
+                .left(0.)
+                .right(0.)
                 .bottom(0.)
                 .h(if focused { 2. } else { 1. })
                 .rounded_b(CONTROL_RADIUS * scale)

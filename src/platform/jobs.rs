@@ -1,8 +1,9 @@
 //! Typed UI-thread event delivery for drop-canceling timers, background pool jobs, STA threads,
-//! and cross-thread posts — zero `Any`, zero thread-local callback tables, zero `unsafe`.
+//! and cross-thread posts.
 
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, VecDeque};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::thread;
@@ -70,7 +71,7 @@ impl TimerWheel {
         repeat: Option<Duration>,
         fire: Box<dyn Fn() + Send + 'static>,
     ) {
-        let mut guard = self.state.lock().unwrap();
+        let mut guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let seq = guard.1;
         guard.1 = seq.wrapping_add(1);
         let wake = guard
@@ -90,47 +91,64 @@ impl TimerWheel {
     }
 
     fn run(&self) {
-        let mut guard = self.state.lock().unwrap();
+        let mut due = Vec::new();
         loop {
-            let now = Instant::now();
-            while let Some(Reverse(top)) = guard.0.peek() {
-                if top.cancelled.load(Ordering::Relaxed) {
-                    guard.0.pop();
+            {
+                let mut guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                let now = Instant::now();
+                while let Some(Reverse(top)) = guard.0.peek() {
+                    if top.cancelled.load(Ordering::Acquire) {
+                        guard.0.pop();
+                        continue;
+                    }
+                    if top.deadline <= now {
+                        due.push(guard.0.pop().unwrap().0);
+                    } else {
+                        break;
+                    }
+                }
+                if due.is_empty() {
+                    if let Some(Reverse(top)) = guard.0.peek() {
+                        let wait = top.deadline.saturating_duration_since(Instant::now());
+                        if !wait.is_zero() {
+                            drop(self.condvar.wait_timeout(guard, wait));
+                        }
+                    } else {
+                        drop(self.condvar.wait(guard));
+                    }
                     continue;
                 }
-                if top.deadline <= now {
-                    let Reverse(mut entry) = guard.0.pop().unwrap();
-                    if !entry.cancelled.load(Ordering::Relaxed) {
-                        (entry.fire)();
-                        if let Some(interval) = entry.repeat
-                            && !entry.cancelled.load(Ordering::Relaxed)
-                        {
-                            let seq = guard.1;
-                            guard.1 = seq.wrapping_add(1);
-                            entry.deadline = Instant::now() + interval;
-                            entry.seq = seq;
-                            guard.0.push(Reverse(entry));
-                        }
+            }
+
+            // Fire due callbacks outside the wheel lock and catch any panic so the wheel never
+            // poisons or dies.
+            let mut reschedule = Vec::new();
+            for mut entry in due.drain(..) {
+                if !entry.cancelled.load(Ordering::Acquire) {
+                    let _ = catch_unwind(AssertUnwindSafe(|| (entry.fire)()));
+                    if let Some(interval) = entry.repeat
+                        && !entry.cancelled.load(Ordering::Acquire)
+                    {
+                        entry.deadline = Instant::now() + interval;
+                        reschedule.push(entry);
                     }
-                } else {
-                    break;
                 }
             }
-            if let Some(Reverse(top)) = guard.0.peek() {
-                let wait = top.deadline.saturating_duration_since(Instant::now());
-                if !wait.is_zero() {
-                    let (g, _) = self.condvar.wait_timeout(guard, wait).unwrap();
-                    guard = g;
+            if !reschedule.is_empty() {
+                let mut guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                for mut entry in reschedule {
+                    let seq = guard.1;
+                    guard.1 = seq.wrapping_add(1);
+                    entry.seq = seq;
+                    guard.0.push(Reverse(entry));
                 }
-            } else {
-                guard = self.condvar.wait(guard).unwrap();
             }
         }
     }
 }
 
 // ---------------------------------------------------------------------------
-// Global 2-thread background worker pool (0% CPU when idle)
+// Global 2-thread background worker pool (0% CPU when idle, panic-resilient)
 // ---------------------------------------------------------------------------
 
 type PoolJob = Box<dyn FnOnce() + Send + 'static>;
@@ -154,13 +172,13 @@ impl WorkerPool {
                     .name(format!("jot-bg-{ix}"))
                     .spawn(move || loop {
                         let job = {
-                            let mut q = p.queue.lock().unwrap();
+                            let mut q = p.queue.lock().unwrap_or_else(|e| e.into_inner());
                             while q.is_empty() {
-                                q = p.condvar.wait(q).unwrap();
+                                q = p.condvar.wait(q).unwrap_or_else(|e| e.into_inner());
                             }
                             q.pop_front().unwrap()
                         };
-                        job();
+                        let _ = catch_unwind(AssertUnwindSafe(job));
                     })
                     .expect("failed to spawn background worker");
             }
@@ -169,7 +187,10 @@ impl WorkerPool {
     }
 
     fn submit(&self, job: PoolJob) {
-        self.queue.lock().unwrap().push_back(job);
+        self.queue
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push_back(job);
         self.condvar.notify_one();
     }
 }
@@ -178,9 +199,15 @@ impl WorkerPool {
 // Typed job/timer queue owned by `App`
 // ---------------------------------------------------------------------------
 
+struct QueuedEvent<E> {
+    event: E,
+    cancelled: Option<Arc<AtomicBool>>,
+}
+
 struct JobsInner<E> {
-    ready: Mutex<VecDeque<E>>,
+    ready: Mutex<VecDeque<QueuedEvent<E>>>,
     wake: Mutex<Option<WakeCallback>>,
+    wake_posted: AtomicBool,
 }
 
 impl<E> JobsInner<E> {
@@ -188,18 +215,36 @@ impl<E> JobsInner<E> {
         Self {
             ready: Mutex::new(VecDeque::new()),
             wake: Mutex::new(None),
+            wake_posted: AtomicBool::new(false),
         }
     }
 
-    fn push(&self, event: E) {
-        self.ready.lock().unwrap().push_back(event);
-        if let Some(cb) = self.wake.lock().unwrap().as_ref().cloned() {
+    fn push(&self, event: E, cancelled: Option<Arc<AtomicBool>>) {
+        self.ready
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push_back(QueuedEvent { event, cancelled });
+        if !self.wake_posted.swap(true, Ordering::AcqRel)
+            && let Some(cb) = self.wake.lock().unwrap_or_else(|e| e.into_inner()).as_ref().cloned()
+        {
             cb();
         }
     }
 
     fn pop(&self) -> Option<E> {
-        self.ready.lock().unwrap().pop_front()
+        let mut q = self.ready.lock().unwrap_or_else(|e| e.into_inner());
+        while let Some(item) = q.pop_front() {
+            if item
+                .cancelled
+                .as_ref()
+                .is_some_and(|flag| flag.load(Ordering::Acquire))
+            {
+                continue;
+            }
+            return Some(item.event);
+        }
+        self.wake_posted.store(false, Ordering::Release);
+        None
     }
 }
 
@@ -218,7 +263,7 @@ impl<E> Clone for EventPoster<E> {
 
 impl<E> EventPoster<E> {
     pub(crate) fn post(&self, event: E) {
-        self.inner.push(event);
+        self.inner.push(event, None);
     }
 }
 
@@ -231,7 +276,7 @@ pub(crate) struct TimerHandle {
 impl TimerHandle {
     pub(crate) fn cancel(&mut self) {
         if let Some(flag) = self.cancelled.take() {
-            flag.store(true, Ordering::Relaxed);
+            flag.store(true, Ordering::Release);
         }
     }
 
@@ -260,7 +305,7 @@ impl<E: Send + 'static> Jobs<E> {
     }
 
     pub(crate) fn set_wake_callback(&self, wake: WakeCallback) {
-        *self.inner.wake.lock().unwrap() = Some(wake);
+        *self.inner.wake.lock().unwrap_or_else(|e| e.into_inner()) = Some(wake);
     }
 
     pub(crate) fn poster(&self) -> EventPoster<E> {
@@ -272,14 +317,15 @@ impl<E: Send + 'static> Jobs<E> {
     pub(crate) fn after(&self, delay: Duration, event: E) -> TimerHandle {
         let cancelled = Arc::new(AtomicBool::new(false));
         let target = self.inner.clone();
+        let flag_for_queue = cancelled.clone();
         let slot = Mutex::new(Some(event));
         TimerWheel::global().schedule(
             Instant::now() + delay,
             cancelled.clone(),
             None,
             Box::new(move || {
-                if let Some(ev) = slot.lock().unwrap().take() {
-                    target.push(ev);
+                if let Some(ev) = slot.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                    target.push(ev, Some(flag_for_queue.clone()));
                 }
             }),
         );
@@ -296,36 +342,90 @@ impl<E: Send + 'static> Jobs<E> {
     ) -> TimerHandle {
         let cancelled = Arc::new(AtomicBool::new(false));
         let target = self.inner.clone();
+        let flag_for_queue = cancelled.clone();
         TimerWheel::global().schedule(
             Instant::now() + delay,
             cancelled.clone(),
             Some(interval),
-            Box::new(move || target.push(make())),
+            Box::new(move || target.push(make(), Some(flag_for_queue.clone()))),
         );
         TimerHandle {
             cancelled: Some(cancelled),
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn spawn_bg(&self, work: impl FnOnce() -> E + Send + 'static) {
         let target = self.inner.clone();
         WorkerPool::global().submit(Box::new(move || {
-            target.push(work());
+            target.push(work(), None);
         }));
     }
 
-    pub(crate) fn spawn_dedicated(&self, name: &str, work: impl FnOnce() -> E + Send + 'static) {
+    /// Runs `work` on the background pool, catching panics so `on_panic` still delivers an error
+    /// event and workflows never hang.
+    pub(crate) fn spawn_bg_guarded(
+        &self,
+        work: impl FnOnce() -> E + Send + 'static,
+        on_panic: impl FnOnce(String) -> E + Send + 'static,
+    ) {
         let target = self.inner.clone();
-        thread::Builder::new()
-            .name(name.into())
-            .spawn(move || {
-                target.push(work());
-            })
-            .expect("failed to spawn dedicated worker thread");
+        WorkerPool::global().submit(Box::new(move || {
+            let ev = match catch_unwind(AssertUnwindSafe(work)) {
+                Ok(ev) => ev,
+                Err(payload) => on_panic(panic_message(&*payload)),
+            };
+            target.push(ev, None);
+        }));
+    }
+
+    /// Runs `work` on a dedicated thread (for writes or STA dialogs), catching panics so `on_panic`
+    /// still delivers a completion event.
+    pub(crate) fn spawn_dedicated_guarded(
+        &self,
+        name: &str,
+        work: impl FnOnce() -> E + Send + 'static,
+        on_panic: impl FnOnce(String) -> E + Send + 'static,
+    ) {
+        let target = self.inner.clone();
+        let on_panic = Arc::new(Mutex::new(Some(on_panic)));
+        let thread_target = target.clone();
+        let thread_on_panic = on_panic.clone();
+        let res = thread::Builder::new().name(name.into()).spawn(move || {
+            let ev = match catch_unwind(AssertUnwindSafe(work)) {
+                Ok(ev) => ev,
+                Err(payload) => {
+                    let Some(handler) = thread_on_panic
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .take()
+                    else {
+                        return;
+                    };
+                    handler(panic_message(&*payload))
+                }
+            };
+            thread_target.push(ev, None);
+        });
+        if let Err(err) = res
+            && let Some(handler) = on_panic.lock().unwrap_or_else(|e| e.into_inner()).take()
+        {
+            target.push(handler(format!("Failed to start worker thread: {err}")), None);
+        }
     }
 
     pub(crate) fn pop(&self) -> Option<E> {
         self.inner.pop()
+    }
+}
+
+pub(crate) fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_owned()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "Internal error".to_owned()
     }
 }
 
@@ -339,6 +439,7 @@ mod tests {
         Cancelled,
         Tick,
         Bg(usize),
+        Panicked(String),
     }
 
     #[test]
@@ -370,7 +471,7 @@ mod tests {
                             repeat.cancel();
                         }
                     }
-                    TestEvent::Bg(_) => {}
+                    TestEvent::Bg(_) | TestEvent::Panicked(_) => {}
                 }
             }
             if saw_once && ticks >= 3 {
@@ -384,18 +485,43 @@ mod tests {
     }
 
     #[test]
-    fn spawn_bg_delivers_typed_event() {
+    fn hard_cancel_drops_already_queued_timer_event() {
         let jobs = Jobs::<TestEvent>::new();
+        let mut handle = jobs.after(Duration::from_millis(5), TestEvent::Cancelled);
+        thread::sleep(Duration::from_millis(25));
+        // Event is now sitting in `ready`; cancelling must still suppress it at pop().
+        handle.cancel();
+        assert_eq!(jobs.pop(), None);
+    }
+
+    #[test]
+    fn spawn_bg_delivers_typed_event_and_recovers_from_worker_panic() {
+        let jobs = Jobs::<TestEvent>::new();
+        jobs.spawn_bg_guarded(
+            || panic!("simulated worker failure"),
+            TestEvent::Panicked,
+        );
         jobs.spawn_bg(|| TestEvent::Bg(21 * 2));
 
-        let mut received = None;
+        let mut saw_panic = false;
+        let mut saw_bg = false;
         for _ in 0..50 {
-            if let Some(ev) = jobs.pop() {
-                received = Some(ev);
+            while let Some(ev) = jobs.pop() {
+                match ev {
+                    TestEvent::Panicked(msg) => {
+                        assert!(msg.contains("simulated worker failure"));
+                        saw_panic = true;
+                    }
+                    TestEvent::Bg(42) => saw_bg = true,
+                    _ => {}
+                }
+            }
+            if saw_panic && saw_bg {
                 break;
             }
             thread::sleep(Duration::from_millis(5));
         }
-        assert_eq!(received, Some(TestEvent::Bg(42)));
+        assert!(saw_panic, "guarded worker panic must still deliver error event");
+        assert!(saw_bg, "worker pool must keep serving jobs after a panic");
     }
 }

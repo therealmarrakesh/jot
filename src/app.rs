@@ -1,20 +1,28 @@
 //! Application root owning all open windows, shared theme/view settings, typed event/timer jobs,
 //! cross-window tab dragging, and the `PlatformHandler` implementation.
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::Instant;
 
 use crate::APP_NAME;
 use crate::document::{self, Format};
 use crate::editor::{EditorTimer, Rope};
-use crate::geom::{Rect, Size, size};
+use crate::files::{self, WorkflowGen};
+use crate::geom::{Rect, ScreenPoint, Size, point, size};
 use crate::gfx::{Direct2DDevices, TextSystem};
+use crate::instance::HandoffCommand;
 use crate::keytips::KeyTips;
 use crate::platform::{
     Jobs, MouseButton, NativeWindow, Platform, PlatformEvent, PlatformHandler, SaveDialogResult,
     WindowAppearance, WindowBackdrop, WindowHwnd, WindowId, WindowKind, WindowOptions,
-    WindowsDisplay, client_area_animations_enabled, system_accent_color,
+    WindowsDisplay, client_area_animations_enabled, cursor_screen_pos, high_contrast_colors,
+    system_accent_color,
 };
 use crate::tab_drag::TabDragState;
 use crate::tabs::{TabData, TabId};
@@ -64,25 +72,26 @@ pub(crate) enum AppEvent {
         epoch: u64,
     },
     TooltipHideTimer,
-    TabDragLift,
     TabDragPoll,
-    HandoffPaths(Vec<PathBuf>),
+    Handoff(HandoffCommand),
     OpenDialogDone {
         window: WindowId,
         result: crate::types::Result<Option<Vec<PathBuf>>>,
     },
     FilesLoaded {
         window: WindowId,
-        results: Vec<(PathBuf, Result<document::Loaded, document::LoadError>)>,
+        results: Vec<(PathBuf, String, Result<document::Loaded, document::LoadError>)>,
     },
     SaveDialogDone {
         window: WindowId,
+        wf_gen: WorkflowGen,
         tab: TabId,
         format: Format,
         result: SaveDialogResult,
     },
     LossyCheckDone {
         window: WindowId,
+        wf_gen: WorkflowGen,
         tab: TabId,
         snapshot: u64,
         text: Rope,
@@ -92,9 +101,11 @@ pub(crate) enum AppEvent {
     },
     FileSaved {
         window: WindowId,
+        wf_gen: WorkflowGen,
         tab: TabId,
         snapshot: u64,
         path: PathBuf,
+        path_key: String,
         format: Format,
         result: std::io::Result<()>,
     },
@@ -104,8 +115,21 @@ pub(crate) enum AppEvent {
     TestFlag(std::sync::Arc<std::sync::atomic::AtomicBool>),
 }
 
+pub(crate) struct OpenWindowError {
+    pub(crate) tab: Option<TabData>,
+    pub(crate) message: String,
+}
+
+impl std::fmt::Debug for OpenWindowError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OpenWindowError")
+            .field("has_tab", &self.tab.is_some())
+            .field("message", &self.message)
+            .finish()
+    }
+}
+
 pub(crate) struct App {
-    pub(crate) platform: Rc<Platform>,
     pub(crate) text_system: TextSystem,
     pub(crate) jobs: Jobs<AppEvent>,
     appearance_override: Option<WindowAppearance>,
@@ -118,9 +142,14 @@ pub(crate) struct App {
     pub(crate) tab_drag: Option<TabDragState>,
     pub(crate) keytips: KeyTips,
     pub(crate) tooltips: Tooltips,
+    in_flight_loads: HashSet<String>,
+    cascade_step: u32,
+    pipe_accepting: Option<Arc<AtomicBool>>,
     #[cfg(test)]
     pub(crate) headless: bool,
     quit: bool,
+    // Declared last so every window, overlay, and COM object drops before OLE/COM uninitialize.
+    pub(crate) platform: Rc<Platform>,
 }
 
 impl App {
@@ -129,11 +158,14 @@ impl App {
         jobs.set_wake_callback(platform.wake_callback());
         let appearance = platform.system_appearance();
         let dark = matches!(appearance, WindowAppearance::Dark);
-        let palette = Palette::for_appearance(dark, system_accent_color(dark));
+        let palette = if let Some(hc) = high_contrast_colors() {
+            Palette::from_high_contrast(hc)
+        } else {
+            Palette::for_appearance(dark, system_accent_color(dark))
+        };
         let reduce_motion = client_area_animations_enabled().is_some_and(|enabled| !enabled);
 
         Self {
-            platform,
             text_system: TextSystem::new(),
             jobs,
             appearance_override: None,
@@ -146,10 +178,34 @@ impl App {
             tab_drag: None,
             keytips: KeyTips::default(),
             tooltips: Tooltips::default(),
+            in_flight_loads: HashSet::new(),
+            cascade_step: 0,
+            pipe_accepting: None,
             #[cfg(test)]
             headless: false,
             quit: false,
+            platform,
         }
+    }
+
+    pub(crate) fn find_tab_owner(&self, tab: TabId) -> Option<(usize, usize)> {
+        self.windows
+            .iter()
+            .enumerate()
+            .find_map(|(wix, w)| w.tab_index(tab).map(|tix| (wix, tix)))
+    }
+
+    pub(crate) fn find_open_tab_by_key(&self, key: &str) -> Option<(usize, usize)> {
+        self.windows
+            .iter()
+            .enumerate()
+            .find_map(|(wix, w)| w.find_open_tab_by_key(key).map(|tix| (wix, tix)))
+    }
+
+    fn fallback_window_ix(&self, preferred: WindowId) -> Option<usize> {
+        self.window_ix(preferred)
+            .or_else(|| self.active_window.and_then(|id| self.window_ix(id)))
+            .or_else(|| (!self.windows.is_empty()).then_some(self.windows.len() - 1))
     }
 
     pub(crate) fn window_ix(&self, id: WindowId) -> Option<usize> {
@@ -174,20 +230,58 @@ impl App {
         }
     }
 
-    fn window_options(&self, window_size: Option<Size>) -> WindowOptions {
-        let display = WindowsDisplay::primary();
-        let screen = display
-            .map_or(size(WINDOW_WIDTH, WINDOW_HEIGHT), |d| d.visible_bounds().size);
+    fn window_options(
+        &mut self,
+        window_size: Option<Size>,
+        target_point: Option<ScreenPoint>,
+    ) -> WindowOptions {
+        let display = if let Some(pt) = target_point {
+            WindowsDisplay::from_point(pt).or_else(WindowsDisplay::primary)
+        } else if let Some(origin) = self
+            .active_window
+            .and_then(|id| self.window(id))
+            .map(|w| w.native.hwnd().client_origin())
+        {
+            WindowsDisplay::from_point(origin).or_else(WindowsDisplay::primary)
+        } else {
+            #[cfg(test)]
+            let fallback = if self.headless {
+                WindowsDisplay::primary()
+            } else {
+                WindowsDisplay::from_point(cursor_screen_pos()).or_else(WindowsDisplay::primary)
+            };
+            #[cfg(not(test))]
+            let fallback =
+                WindowsDisplay::from_point(cursor_screen_pos()).or_else(WindowsDisplay::primary);
+            fallback
+        };
+        let visible = display.map(|d| d.visible_bounds());
+        let screen = visible.map_or(size(WINDOW_WIDTH, WINDOW_HEIGHT), |v| v.size);
         let target_size = window_size.unwrap_or_else(|| {
             size(
                 WINDOW_WIDTH.min(screen.width * WINDOW_MAX_SCREEN_SHARE),
                 WINDOW_HEIGHT.min(screen.height * WINDOW_MAX_SCREEN_SHARE),
             )
         });
-        let bounds = display.map_or_else(
+        let mut bounds = display.map_or_else(
             || Rect::new(crate::geom::Point::ZERO, target_size),
             |d| d.centered_rect(target_size),
         );
+        // Cascade fresh secondary windows on the same monitor so they don't stack invisibly (W-4).
+        if target_point.is_none() && !self.windows.is_empty() && window_size.is_none() {
+            let step = (self.cascade_step % 8) as f32 * 28.0;
+            self.cascade_step = self.cascade_step.wrapping_add(1);
+            if let Some(vis) = visible {
+                let max_x = (vis.right() - target_size.width).max(vis.left());
+                let max_y = (vis.bottom() - target_size.height).max(vis.top());
+                bounds.origin = point(
+                    (bounds.origin.x + step).clamp(vis.left(), max_x),
+                    (bounds.origin.y + step).clamp(vis.top(), max_y),
+                );
+            } else {
+                bounds.origin = point(bounds.origin.x + step, bounds.origin.y + step);
+            }
+        }
         #[cfg(test)]
         let (focus, show) = (!self.headless, !self.headless);
         #[cfg(not(test))]
@@ -201,7 +295,7 @@ impl App {
             kind: WindowKind::Normal,
             is_resizable: true,
             is_minimizable: true,
-            display_id: None,
+            display_id: display.map(|d| d.id()),
             backdrop: WindowBackdrop::MicaAlt,
             min_size: None,
         }
@@ -211,16 +305,83 @@ impl App {
         &mut self,
         initial: Option<TabData>,
         window_size: Option<Size>,
-    ) -> Option<(WindowId, WindowHwnd)> {
-        let opts = self.window_options(window_size);
+    ) -> std::result::Result<(WindowId, WindowHwnd), Box<OpenWindowError>> {
+        self.open_window_at(initial, window_size, None)
+    }
+
+    pub(crate) fn open_window_at(
+        &mut self,
+        initial: Option<TabData>,
+        window_size: Option<Size>,
+        target_point: Option<ScreenPoint>,
+    ) -> std::result::Result<(WindowId, WindowHwnd), Box<OpenWindowError>> {
+        let opts = self.window_options(window_size, target_point);
         let native =
-            NativeWindow::create(self.platform.devices.clone(), &opts, self.appearance).ok()?;
+            match NativeWindow::create(self.platform.devices(), &opts, self.appearance) {
+                Ok(n) => n,
+                Err(err) => {
+                    let message = err.to_string();
+                    crate::platform::debug_log(&format!("NativeWindow::create failed: {message}"));
+                    return Err(Box::new(OpenWindowError {
+                        tab: initial,
+                        message,
+                    }));
+                }
+            };
         let id = native.id;
         let hwnd = native.hwnd();
         let win = MainWindow::new(native, initial, self.view.word_wrap, &self.jobs);
         self.windows.push(win);
         self.active_window = Some(id);
-        Some((id, hwnd))
+        Ok((id, hwnd))
+    }
+
+    pub(crate) fn set_pipe_accepting(&mut self, flag: Arc<AtomicBool>) {
+        self.pipe_accepting = Some(flag);
+    }
+
+    pub(crate) fn request_quit(&mut self) {
+        if !self.quit {
+            self.quit = true;
+            if let Some(flag) = &self.pipe_accepting {
+                flag.store(false, Ordering::Release);
+            }
+            self.platform.post_quit();
+        }
+    }
+
+    /// Deduplicates `paths` across all open windows and in-flight loads (F-6, F-8, DOC-2),
+    /// then spawns background loads targeting `window_id`.
+    pub(crate) fn open_paths_in_window(&mut self, window_id: WindowId, paths: Vec<PathBuf>) {
+        if paths.is_empty() {
+            return;
+        }
+        let mut to_load: Vec<(PathBuf, String)> = Vec::new();
+        let mut last_existing: Option<(usize, usize)> = None;
+        for raw in paths {
+            let path = std::path::absolute(&raw).unwrap_or(raw);
+            let key = document::quick_path_key(&path);
+            if let Some(found) = self.find_open_tab_by_key(&key) {
+                last_existing = Some(found);
+                continue;
+            }
+            if self.in_flight_loads.contains(&key)
+                || to_load.iter().any(|(_, queued_key)| queued_key == &key)
+            {
+                continue;
+            }
+            self.in_flight_loads.insert(key.clone());
+            to_load.push((path, key));
+        }
+        if to_load.is_empty() {
+            if let Some((wix, tix)) = last_existing {
+                let hwnd = self.windows[wix].native.hwnd();
+                self.windows[wix].activate_tab(tix, &self.jobs);
+                hwnd.bring_to_front();
+            }
+            return;
+        }
+        files::spawn_load_files(window_id, to_load, &self.jobs);
     }
 
     pub(crate) fn open_handoff_paths(&mut self, paths: Vec<PathBuf>) {
@@ -228,14 +389,12 @@ impl App {
             return;
         }
         if paths.len() == 1 {
-            let target = std::path::absolute(&paths[0]).unwrap_or_else(|_| paths[0].clone());
-            for ix in 0..self.windows.len() {
-                if let Some(tab_ix) = self.windows[ix].find_open_tab(&target) {
-                    let hwnd = self.windows[ix].native.hwnd();
-                    self.windows[ix].activate_tab(tab_ix, &self.jobs);
-                    hwnd.bring_to_front();
-                    return;
-                }
+            let key = document::quick_path_key(&paths[0]);
+            if let Some((wix, tix)) = self.find_open_tab_by_key(&key) {
+                let hwnd = self.windows[wix].native.hwnd();
+                self.windows[wix].activate_tab(tix, &self.jobs);
+                hwnd.bring_to_front();
+                return;
             }
         }
 
@@ -247,13 +406,11 @@ impl App {
         if let Some(id) = target_id {
             if let Some(ix) = self.window_ix(id) {
                 let hwnd = self.windows[ix].native.hwnd();
-                self.windows[ix].open_paths(paths, &self.jobs);
+                self.open_paths_in_window(id, paths);
                 hwnd.bring_to_front();
             }
-        } else if let Some((id, _)) = self.open_window(None, None)
-            && let Some(ix) = self.window_ix(id)
-        {
-            self.windows[ix].open_paths(paths, &self.jobs);
+        } else if let Ok((id, _)) = self.open_window(None, None) {
+            self.open_paths_in_window(id, paths);
         }
     }
 
@@ -264,7 +421,11 @@ impl App {
             .unwrap_or_else(|| self.platform.system_appearance());
         let dark = matches!(next, WindowAppearance::Dark);
         self.appearance = next;
-        self.palette = Palette::for_appearance(dark, system_accent_color(dark));
+        self.palette = if let Some(hc) = high_contrast_colors() {
+            Palette::from_high_contrast(hc)
+        } else {
+            Palette::for_appearance(dark, system_accent_color(dark))
+        };
         for w in &mut self.windows {
             w.native.set_appearance(next);
             w.dirty = true;
@@ -321,35 +482,56 @@ impl App {
     }
 
     pub(crate) fn sweep_closed_windows(&mut self) {
-        if !self.windows.iter().any(|w| w.pending_close) {
-            return;
-        }
-        for w in &self.windows {
-            if w.pending_close {
-                self.keytips.window_closed(w.id());
-                self.tooltips.window_closed(w.id(), &self.jobs);
+        if self.windows.iter().any(|w| w.pending_close) {
+            let closed: Vec<WindowId> = self
+                .windows
+                .iter()
+                .filter(|w| w.pending_close)
+                .map(MainWindow::id)
+                .collect();
+            for wid in closed {
+                self.keytips.window_closed(wid);
+                self.tooltips.window_closed(wid, &self.jobs);
+                self.tab_drag_window_closed(wid);
+            }
+            self.windows.retain(|w| !w.pending_close);
+            if let Some(active) = self.active_window
+                && self.window(active).is_none()
+            {
+                self.active_window = self.windows.last().map(MainWindow::id);
             }
         }
-        self.windows.retain(|w| !w.pending_close);
-        if let Some(active) = self.active_window
-            && self.window(active).is_none()
-        {
-            self.active_window = self.windows.last().map(MainWindow::id);
+        if !self.has_dirty_tabs() {
+            for w in &self.windows {
+                w.native.clear_shutdown_block();
+            }
         }
-        if self.windows.is_empty() && !self.quit {
-            self.quit = true;
-            self.platform.post_quit();
+        if self.windows.is_empty() && !self.quit && crate::files::in_flight_writes() == 0 {
+            self.request_quit();
         }
     }
 
     fn recover_device_loss(&mut self) {
-        if let Ok(new_devices) = Direct2DDevices::new() {
-            for w in &mut self.windows {
-                let _ = w.native.recreate_renderer(new_devices.clone());
-                w.dirty = true;
+        match Direct2DDevices::new() {
+            Ok(new_devices) => {
+                // Replace the shared Platform devices so future windows/overlays never inherit
+                // the removed D3D11/D2D1 device (G-3).
+                self.platform.replace_devices(new_devices.clone());
+                for w in &mut self.windows {
+                    if let Err(err) = w.native.recreate_renderer(new_devices.clone()) {
+                        crate::platform::debug_log(&format!(
+                            "recreate_renderer failed for window {:?}: {err}",
+                            w.id()
+                        ));
+                    }
+                    w.dirty = true;
+                }
+                self.keytips.recreate_renderer(new_devices.clone());
+                self.tooltips.recreate_renderer(new_devices);
             }
-            self.keytips.recreate_renderer(new_devices.clone());
-            self.tooltips.recreate_renderer(new_devices);
+            Err(err) => {
+                crate::platform::debug_log(&format!("Direct2DDevices recovery failed: {err}"));
+            }
         }
     }
 
@@ -360,6 +542,7 @@ impl App {
         let pos = w.last_mouse_pos;
         let origin = w.native.hwnd().client_origin();
         let scale = w.native.scale_factor;
+        let devices = self.platform.devices();
         self.tooltips.evaluate(
             wid,
             hovered,
@@ -368,7 +551,7 @@ impl App {
             origin,
             scale,
             &w.ui.frame,
-            &self.platform.devices,
+            &devices,
             self.appearance,
             &self.text_system,
             &self.jobs,
@@ -388,24 +571,23 @@ impl App {
             &self.jobs,
         ) {
             Ok(res) => (res.needs_vsync, res.device_lost),
-            Err(_) => (false, false),
+            Err(err) => {
+                crate::platform::debug_log(&format!("render_frame error: {err}"));
+                (false, true)
+            }
         };
         let wid = self.windows[ix].id();
         if self.windows[ix].menu_bar.access_active() || self.keytips.is_owner(wid) {
             let tips = self.windows[ix].key_tips(&self.text_system);
             let origin = self.windows[ix].native.hwnd().client_origin();
             let scale = self.windows[ix].native.scale_factor;
-            self.keytips.sync(
-                wid,
-                origin,
-                scale,
-                tips,
-                &self.platform.devices,
-                self.appearance,
-            );
+            let devices = self.platform.devices();
+            self.keytips
+                .sync(wid, origin, scale, tips, &devices, self.appearance);
         }
         if self.windows[ix].pointer_hovered {
-            self.evaluate_tooltip_for(ix, false);
+            let pressed = self.windows[ix].pointer_pressed;
+            self.evaluate_tooltip_for(ix, pressed);
         }
         res
     }
@@ -536,10 +718,11 @@ impl PlatformHandler for App {
                 window_id,
                 position,
                 delta_lines,
+                page_scroll,
                 modifiers,
             } => {
                 if let Some(ix) = self.window_ix(window_id) {
-                    self.windows[ix].on_scroll_wheel(position, delta_lines, modifiers);
+                    self.windows[ix].on_scroll_wheel(position, delta_lines, page_scroll, modifiers);
                 }
             }
             PlatformEvent::KeyDown { window_id, event } => {
@@ -562,6 +745,37 @@ impl PlatformHandler for App {
                     }
                 }
             }
+            PlatformEvent::KeyUp { window_id, event } => {
+                let view = self.view;
+                let dragging = self.is_tab_dragging();
+                let res = self.window_ix(window_id).map(|ix| {
+                    self.windows[ix].on_key_up(
+                        event,
+                        view,
+                        dragging,
+                        &self.text_system,
+                        &self.jobs,
+                    )
+                });
+                if let Some((was_handled, action)) = res {
+                    handled = was_handled;
+                    if let Some(action) = action {
+                        self.handle_window_action(window_id, action);
+                    }
+                }
+            }
+            PlatformEvent::CaptureLost { window_id } => {
+                if let Some(ix) = self.window_ix(window_id) {
+                    self.windows[ix].on_capture_lost();
+                }
+                if self
+                    .tab_drag
+                    .as_ref()
+                    .is_some_and(|d| d.owner() == window_id && d.is_dragging())
+                {
+                    self.tab_drag_released();
+                }
+            }
             PlatformEvent::ModifiersChanged { modifiers } => {
                 self.tooltips.on_modifiers_changed(modifiers, &self.jobs);
             }
@@ -580,8 +794,8 @@ impl PlatformHandler for App {
                 }
             }
             PlatformEvent::FilesDropped { window_id, paths } => {
-                if let Some(ix) = self.window_ix(window_id) {
-                    self.windows[ix].open_paths(paths, &self.jobs);
+                if self.window(window_id).is_some() {
+                    self.open_paths_in_window(window_id, paths);
                 }
             }
             PlatformEvent::SizeMoveChanged {
@@ -591,6 +805,7 @@ impl PlatformHandler for App {
                 if let Some(ix) = self.window_ix(window_id) {
                     self.windows[ix].native.in_size_move = entering;
                 }
+                self.tab_drag_size_move_changed(window_id, entering);
             }
             PlatformEvent::CloseRequested { window_id } => {
                 if let Some(ix) = self.window_ix(window_id) {
@@ -610,7 +825,16 @@ impl PlatformHandler for App {
         while let Some(ev) = self.jobs.pop() {
             match ev {
                 AppEvent::EditorTimer { window, slot, kind } => {
-                    if let Some(ix) = self.window_ix(window) {
+                    // Route tab-scoped editor timers by TabId across windows so timers never stick
+                    // after dragging a tab to another window (F-4, AR-1).
+                    let target_ix = match slot {
+                        EditorSlot::Tab(raw) => self
+                            .find_tab_owner(TabId(raw))
+                            .map(|(wix, _)| wix)
+                            .or_else(|| self.window_ix(window)),
+                        _ => self.window_ix(window),
+                    };
+                    if let Some(ix) = target_ix {
                         self.windows[ix].on_editor_timer(slot, kind, &self.jobs);
                     }
                 }
@@ -640,11 +864,12 @@ impl PlatformHandler for App {
                             &w.ui.frame,
                         )
                     });
+                    let devices = self.platform.devices();
                     self.tooltips.on_show_timer(
                         window,
                         epoch,
                         state,
-                        &self.platform.devices,
+                        &devices,
                         self.appearance,
                         &self.text_system,
                         &self.jobs,
@@ -653,38 +878,126 @@ impl PlatformHandler for App {
                 AppEvent::TooltipHideTimer => {
                     self.tooltips.on_hide_timer();
                 }
-                AppEvent::TabDragLift => self.tab_drag_lift(),
                 AppEvent::TabDragPoll => self.tab_drag_poll(),
-                AppEvent::HandoffPaths(paths) => self.open_handoff_paths(paths),
+                AppEvent::Handoff(cmd) => match cmd {
+                    HandoffCommand::OpenPaths(paths) => self.open_handoff_paths(paths),
+                    HandoffCommand::NewWindow => {
+                        if let Ok((_, hwnd)) = self.open_window(None, None) {
+                            hwnd.bring_to_front();
+                        }
+                    }
+                },
                 AppEvent::OpenDialogDone { window, result } => {
-                    if let Ok(Some(paths)) = result
-                        && let Some(ix) = self.window_ix(window)
-                    {
-                        self.windows[ix].open_paths(paths, &self.jobs);
+                    if let Some(ix) = self.window_ix(window) {
+                        self.windows[ix].open_dialog_active = false;
+                    }
+                    let Some(target_ix) = self.fallback_window_ix(window) else {
+                        continue;
+                    };
+                    let target_id = self.windows[target_ix].id();
+                    match result {
+                        Ok(Some(paths)) => self.open_paths_in_window(target_id, paths),
+                        Ok(None) => {}
+                        Err(err) => {
+                            self.windows[target_ix].show_file_prompt(
+                                files::dialog_error_prompt("Can't open file", err.to_string()),
+                                &self.jobs,
+                            );
+                        }
                     }
                 }
                 AppEvent::FilesLoaded { window, results } => {
                     let wrap = self.view.word_wrap;
-                    let forgotten = self
-                        .window_ix(window)
-                        .map(|ix| self.windows[ix].on_files_loaded(results, wrap, &self.jobs))
-                        .unwrap_or_default();
+                    let mut forgotten = Vec::new();
+                    for (path, quick_key, res) in results {
+                        self.in_flight_loads.remove(&quick_key);
+                        // Check cross-window dedup against both the canonical key and quick key (F-6, F-8).
+                        let dup = res
+                            .as_ref()
+                            .ok()
+                            .and_then(|loaded| self.find_open_tab_by_key(&loaded.path_key))
+                            .or_else(|| self.find_open_tab_by_key(&quick_key));
+                        if let Some((wix, tix)) = dup {
+                            let hwnd = self.windows[wix].native.hwnd();
+                            self.windows[wix].activate_tab(tix, &self.jobs);
+                            hwnd.bring_to_front();
+                            continue;
+                        }
+                        if let Some(ix) = self.fallback_window_ix(window)
+                            && let Some(id) =
+                                self.windows[ix].adopt_loaded_file(path, res, wrap, &self.jobs)
+                        {
+                            forgotten.push(id);
+                        }
+                    }
                     for id in forgotten {
                         self.tab_drag_forget(id);
                     }
                 }
                 AppEvent::SaveDialogDone {
                     window,
+                    wf_gen,
                     tab,
                     format,
                     result,
-                } => {
-                    if let Some(ix) = self.window_ix(window) {
-                        self.windows[ix].on_save_dialog_done(tab, format, result, &self.jobs);
+                } => match files::resolve_save_dialog(format, result) {
+                    Ok(Some((path, next_format))) => {
+                        // Reject saving over a path that is already open in a different tab (F-6).
+                        let target_key = document::quick_path_key(&path);
+                        let conflict = self
+                            .find_open_tab_by_key(&target_key)
+                            .is_some_and(|(wix, tix)| self.windows[wix].tabs[tix].data.id != tab);
+                        if conflict {
+                            let prompt_ix = self
+                                .find_tab_owner(tab)
+                                .map(|(wix, _)| wix)
+                                .or_else(|| self.fallback_window_ix(window));
+                            if let Some(ix) = prompt_ix {
+                                self.windows[ix].show_file_prompt(
+                                    files::already_open_save_prompt(&path),
+                                    &self.jobs,
+                                );
+                            }
+                            if let Some(ix) = self.window_ix(window) {
+                                self.windows[ix].abort_file_workflow_if(wf_gen);
+                            }
+                        } else if let Some((owner_wix, owner_tix)) = self.find_tab_owner(tab) {
+                            self.windows[owner_wix].begin_write_tab_for_workflow(
+                                owner_tix,
+                                window,
+                                wf_gen,
+                                path,
+                                next_format,
+                                &self.jobs,
+                            );
+                        } else if let Some(ix) = self.window_ix(window) {
+                            self.windows[ix].abort_file_workflow_if(wf_gen);
+                        }
                     }
-                }
+                    Ok(None) => {
+                        if let Some(ix) = self.window_ix(window) {
+                            self.windows[ix].abort_file_workflow_if(wf_gen);
+                        }
+                    }
+                    Err(msg) => {
+                        let prompt_ix = self
+                            .find_tab_owner(tab)
+                            .map(|(wix, _)| wix)
+                            .or_else(|| self.fallback_window_ix(window));
+                        if let Some(ix) = prompt_ix {
+                            self.windows[ix].show_file_prompt(
+                                files::dialog_error_prompt("Can't save file", msg),
+                                &self.jobs,
+                            );
+                        }
+                        if let Some(ix) = self.window_ix(window) {
+                            self.windows[ix].abort_file_workflow_if(wf_gen);
+                        }
+                    }
+                },
                 AppEvent::LossyCheckDone {
                     window,
+                    wf_gen,
                     tab,
                     snapshot,
                     text,
@@ -692,28 +1005,99 @@ impl PlatformHandler for App {
                     format,
                     result,
                 } => {
-                    if let Some(ix) = self.window_ix(window) {
-                        self.windows[ix].on_lossy_check_done(
-                            tab, snapshot, text, path, format, result, &self.jobs,
-                        );
+                    let owner_wix = self
+                        .find_tab_owner(tab)
+                        .map(|(wix, _)| wix)
+                        .or_else(|| self.fallback_window_ix(window));
+                    match result {
+                        Err(err) => {
+                            if let Some((wix, _)) = self.find_tab_owner(tab) {
+                                let _ = self.windows[wix].clear_tab_save_in_flight(tab);
+                            }
+                            if let Some(ix) = owner_wix {
+                                self.windows[ix].show_file_prompt(
+                                    files::save_error_prompt(&path, &err),
+                                    &self.jobs,
+                                );
+                            }
+                            if let Some(ix) = self.window_ix(window) {
+                                self.windows[ix].abort_file_workflow_if(wf_gen);
+                            }
+                        }
+                        Ok(true) => {
+                            if let Some(ix) = owner_wix {
+                                self.windows[ix].show_file_prompt(
+                                    files::FilePrompt::ConfirmLossyAnsi {
+                                        wf_gen,
+                                        tab,
+                                        snapshot,
+                                        text,
+                                        path,
+                                        format,
+                                    },
+                                    &self.jobs,
+                                );
+                            } else if let Some(ix) = self.window_ix(window) {
+                                self.windows[ix].abort_file_workflow_if(wf_gen);
+                            }
+                        }
+                        Ok(false) => {
+                            files::spawn_write_file(
+                                window, wf_gen, tab, snapshot, text, path, format, &self.jobs,
+                            );
+                        }
                     }
                 }
                 AppEvent::FileSaved {
                     window,
+                    wf_gen,
                     tab,
                     snapshot,
                     path,
+                    path_key,
                     format,
                     result,
-                } => {
-                    let forgotten = self.window_ix(window).and_then(|ix| {
-                        self.windows[ix]
-                            .on_file_saved(tab, snapshot, path, format, result, &self.jobs)
-                    });
-                    if let Some(id) = forgotten {
-                        self.tab_drag_forget(id);
+                } => match result {
+                    Ok(()) => {
+                        let mut retriggered_gen = None;
+                        if let Some((owner_wix, _)) = self.find_tab_owner(tab) {
+                            retriggered_gen = self.windows[owner_wix].apply_tab_saved(
+                                tab,
+                                snapshot,
+                                path,
+                                path_key,
+                                format,
+                                window,
+                                &self.jobs,
+                            );
+                        }
+                        if retriggered_gen != Some(wf_gen)
+                            && let Some(origin_ix) = self.window_ix(window)
+                            && let Some(id) = self.windows[origin_ix]
+                                .advance_file_workflow_if(wf_gen, &self.jobs)
+                        {
+                            self.tab_drag_forget(id);
+                        }
                     }
-                }
+                    Err(err) => {
+                        if let Some((owner_wix, _)) = self.find_tab_owner(tab) {
+                            let _ = self.windows[owner_wix].clear_tab_save_in_flight(tab);
+                        }
+                        let prompt_ix = self
+                            .find_tab_owner(tab)
+                            .map(|(wix, _)| wix)
+                            .or_else(|| self.fallback_window_ix(window));
+                        if let Some(ix) = prompt_ix {
+                            self.windows[ix].show_file_prompt(
+                                files::save_error_prompt(&path, &err),
+                                &self.jobs,
+                            );
+                        }
+                        if let Some(origin_ix) = self.window_ix(window) {
+                            self.windows[origin_ix].abort_file_workflow_if(wf_gen);
+                        }
+                    }
+                },
                 #[cfg(test)]
                 AppEvent::TestCloseWindow(id) => {
                     if let Some(ix) = self.window_ix(id) {
@@ -731,6 +1115,9 @@ impl PlatformHandler for App {
 
     fn on_paint(&mut self, window_id: WindowId) {
         if let Some(ix) = self.windows.iter().position(|w| w.id() == window_id) {
+            if !self.windows[ix].dirty && self.windows[ix].has_painted {
+                return;
+            }
             let (needs_vsync, lost) = self.paint_window_ix(ix, Instant::now());
             if lost {
                 self.recover_device_loss();
@@ -761,7 +1148,7 @@ impl PlatformHandler for App {
         if painted_any {
             self.text_system.finish_frame();
         }
-        any_lost |= self.keytips.paint(&self.text_system);
+        any_lost |= self.keytips.paint(self.palette, &self.text_system);
         let (tt_vsync, tt_lost) =
             self.tooltips
                 .paint(self.palette, self.reduce_motion, now, &self.text_system);
@@ -777,5 +1164,15 @@ impl PlatformHandler for App {
 
     fn should_quit(&self) -> bool {
         self.quit
+    }
+
+    fn has_dirty_tabs(&self) -> bool {
+        self.windows.iter().any(MainWindow::has_dirty_tabs)
+    }
+
+    fn on_end_session(&mut self, ending: bool) {
+        if ending {
+            crate::files::wait_for_in_flight_writes(std::time::Duration::from_secs(5));
+        }
     }
 }

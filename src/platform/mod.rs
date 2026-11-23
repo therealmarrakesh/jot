@@ -17,31 +17,42 @@ pub(crate) use dialogs::{
 pub(crate) use input::{Key, KeyEvent, Modifiers, MouseButton};
 pub(crate) use jobs::{Jobs, TimerHandle};
 pub(crate) use os::{
-    AnsiCodePage, ReplaceFileError, WindowHwnd, WindowPlacement, caret_blink_interval,
-    client_area_animations_enabled, cursor_screen_pos, documents_dir, format_local_time_date,
-    menu_show_delay_ms, monitor_work_area_and_scale, mouse_hover_time_ms, primary_mouse_button_down,
-    release_mouse_capture, replace_file, system_accent_color, top_visible_window_at,
+    AnsiCodePage, HIDDEN_FILE_ATTRIBUTE, HighContrastColors, ReplaceFileError, WindowHwnd,
+    WindowPlacement, caret_blink_interval, caret_blink_timeout, caret_width_px,
+    client_area_animations_enabled, cursor_screen_pos, documents_dir, file_hard_link_count,
+    format_local_time_date, high_contrast_colors, menu_show_delay_ms, monitor_work_area_and_scale,
+    mouse_hover_time_ms, primary_mouse_button_down, release_mouse_capture, replace_file,
+    system_accent_color, top_visible_window_at,
 };
-pub(crate) use pipe::{allow_any_set_foreground_window, start_inbound_pipe_listener};
+pub(crate) use pipe::{
+    PipeClaim, PipeServer, current_process_identity, send_framed_handoff, try_claim_pipe_server,
+};
 pub(crate) use window::{
     CursorStyle, NativeWindow, PlatformEvent, PlatformHandler, WindowAppearance, WindowBackdrop,
     WindowControlArea, WindowId, WindowKind, WindowOptions,
 };
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+use std::collections::VecDeque;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
-use std::sync::{Arc, Condvar, Mutex};
+#[cfg(not(test))]
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::time::Duration;
 
 use windows::Win32::{
     Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM},
     Graphics::{
         Dwm::DwmFlush,
         Gdi::{
-            GetMonitorInfoW, HMONITOR, MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MonitorFromPoint,
+            GetMonitorInfoW, HMONITOR, MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTOPRIMARY,
+            MONITORINFO, MonitorFromPoint,
         },
     },
     System::{
         Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize},
+        Diagnostics::Debug::OutputDebugStringW,
         LibraryLoader::GetModuleHandleW,
         Ole::{OleInitialize, OleUninitialize},
         Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW},
@@ -53,12 +64,13 @@ use windows::Win32::{
         },
         WindowsAndMessaging::{
             CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW,
-            HWND_MESSAGE, MSG, PostMessageW, PostQuitMessage, RegisterClassW, TranslateMessage,
-            USER_DEFAULT_SCREEN_DPI, WM_APP, WINDOW_EX_STYLE, WINDOW_STYLE, WNDCLASSW,
+            HWND_MESSAGE, MB_ICONERROR, MB_OK, MSG, MessageBoxW, PostMessageW, PostQuitMessage,
+            RegisterClassW, TranslateMessage, USER_DEFAULT_SCREEN_DPI, WM_APP, WINDOW_EX_STYLE,
+            WINDOW_STYLE, WNDCLASSW,
         },
     },
 };
-use windows::core::{PCWSTR, w};
+use windows::core::{HSTRING, PCWSTR, w};
 
 use crate::geom::{Rect, Size, point, size};
 use crate::gfx::Direct2DDevices;
@@ -66,7 +78,77 @@ use crate::types::{Error, Result};
 
 const WM_APP_WAKE: u32 = WM_APP + 1;
 const WM_APP_VSYNC: u32 = WM_APP + 2;
-const WAKE_CLASS_NAME: PCWSTR = w!("JotD2DWakeWindow");
+const WAKE_CLASS_NAME: PCWSTR = w!("JotWakeWindow");
+const DEBUG_RING_CAPACITY: usize = 64;
+
+fn debug_ring() -> &'static Mutex<VecDeque<String>> {
+    static RING: OnceLock<Mutex<VecDeque<String>>> = OnceLock::new();
+    RING.get_or_init(|| Mutex::new(VecDeque::with_capacity(DEBUG_RING_CAPACITY)))
+}
+
+/// Logs a diagnostic line to the in-memory ring buffer and the Windows debug output stream
+/// (`OutputDebugStringW`) without touching disk.
+pub(crate) fn debug_log(message: &str) {
+    {
+        let mut ring = debug_ring().lock().unwrap_or_else(|e| e.into_inner());
+        if ring.len() >= DEBUG_RING_CAPACITY {
+            ring.pop_front();
+        }
+        ring.push_back(message.to_owned());
+    }
+    let wide = HSTRING::from(format!("[Jot] {message}\n"));
+    // SAFETY: `wide` is a valid NUL-terminated UTF-16 string for the duration of the call.
+    unsafe { OutputDebugStringW(&wide) };
+}
+
+/// Displays a native Win32 error dialog (used only for fatal startup or caught FFI-boundary errors).
+pub(crate) fn show_error_dialog(title: &str, message: &str) {
+    let title_w = HSTRING::from(title);
+    let msg_w = HSTRING::from(message);
+    // SAFETY: Both HSTRING pointers are valid NUL-terminated UTF-16 strings.
+    unsafe {
+        let _ = MessageBoxW(None, &msg_w, &title_w, MB_OK | MB_ICONERROR);
+    }
+}
+
+/// Installs a process-wide panic hook that records panics to `OutputDebugStringW` and the
+/// in-memory diagnostic ring buffer.
+pub(crate) fn install_panic_hook() {
+    let prev = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let msg = if let Some(s) = info.payload().downcast_ref::<&str>() {
+            (*s).to_owned()
+        } else if let Some(s) = info.payload().downcast_ref::<String>() {
+            s.clone()
+        } else {
+            "unknown panic".to_owned()
+        };
+        let loc = info
+            .location()
+            .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+            .unwrap_or_else(|| "<unknown>".to_owned());
+        debug_log(&format!("PANIC at {loc}: {msg}"));
+        prev(info);
+    }));
+}
+
+pub(super) fn report_caught_ffi_panic(context: &str, payload: &(dyn std::any::Any + Send)) {
+    let msg = jobs::panic_message(payload);
+    debug_log(&format!("Caught panic at Win32 boundary ({context}): {msg}"));
+    #[cfg(not(test))]
+    {
+        static SHOWN: AtomicBool = AtomicBool::new(false);
+        if !SHOWN.swap(true, Ordering::AcqRel) {
+            show_error_dialog(
+                "Jot",
+                &format!(
+                    "Jot encountered an unexpected error and prevented a crash.\n\n\
+                     Please save any open documents and restart Jot.\n\nDetails: {msg}"
+                ),
+            );
+        }
+    }
+}
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct DisplayId(pub(crate) usize);
@@ -78,8 +160,24 @@ pub(crate) struct WindowsDisplay {
 
 impl WindowsDisplay {
     pub(crate) fn primary() -> Option<Self> {
+        // SAFETY: `MonitorFromPoint` accepts any coordinates with `MONITOR_DEFAULTTOPRIMARY`.
         let monitor = unsafe { MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY) };
         (!monitor.is_invalid()).then_some(Self { monitor })
+    }
+
+    pub(crate) fn from_point(pt: crate::geom::ScreenPoint) -> Option<Self> {
+        // SAFETY: `MonitorFromPoint` accepts any coordinates with `MONITOR_DEFAULTTONEAREST`.
+        let monitor = unsafe {
+            MonitorFromPoint(
+                POINT { x: pt.x, y: pt.y },
+                MONITOR_DEFAULTTONEAREST,
+            )
+        };
+        (!monitor.is_invalid()).then_some(Self { monitor })
+    }
+
+    pub(crate) fn id(&self) -> DisplayId {
+        DisplayId(self.monitor.0 as usize)
     }
 
     pub(crate) fn from_id(id: DisplayId) -> Option<Self> {
@@ -90,6 +188,7 @@ impl WindowsDisplay {
     pub(crate) fn scale_factor(&self) -> f32 {
         let mut dpi_x = USER_DEFAULT_SCREEN_DPI;
         let mut dpi_y = USER_DEFAULT_SCREEN_DPI;
+        // SAFETY: `self.monitor` is a valid HMONITOR and out-pointers point to stack locals.
         let _ =
             unsafe { GetDpiForMonitor(self.monitor, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y) };
         (dpi_x.max(USER_DEFAULT_SCREEN_DPI) as f32) / (USER_DEFAULT_SCREEN_DPI as f32)
@@ -100,6 +199,7 @@ impl WindowsDisplay {
             cbSize: std::mem::size_of::<MONITORINFO>() as u32,
             ..Default::default()
         };
+        // SAFETY: `info.cbSize` is initialized and `self.monitor` is a valid HMONITOR.
         if !unsafe { GetMonitorInfoW(self.monitor, &mut info) }.as_bool() {
             return Rect::new(point(0.0, 0.0), size(1280.0, 800.0));
         }
@@ -129,6 +229,11 @@ impl WindowsDisplay {
 thread_local! {
     pub(super) static ACTIVE_HANDLER: RefCell<Option<Rc<RefCell<dyn PlatformHandler>>>> =
         const { RefCell::new(None) };
+    static WAKE_PENDING: Cell<bool> = const { Cell::new(false) };
+}
+
+pub(super) fn take_wake_pending() -> bool {
+    WAKE_PENDING.with(|flag| flag.replace(false))
 }
 
 struct ActiveHandlerGuard;
@@ -136,6 +241,7 @@ struct ActiveHandlerGuard;
 impl Drop for ActiveHandlerGuard {
     fn drop(&mut self) {
         ACTIVE_HANDLER.with(|slot| *slot.borrow_mut() = None);
+        WAKE_PENDING.with(|flag| flag.set(false));
     }
 }
 
@@ -157,13 +263,21 @@ impl VsyncPacer {
             .name("jot-vsync".into())
             .spawn(move || loop {
                 {
-                    let mut armed = bg.armed.lock().unwrap();
+                    let mut armed = bg.armed.lock().unwrap_or_else(|e| e.into_inner());
                     while !*armed {
-                        armed = bg.condvar.wait(armed).unwrap();
+                        armed = bg
+                            .condvar
+                            .wait(armed)
+                            .unwrap_or_else(|e| e.into_inner());
                     }
                     *armed = false;
                 }
-                let _ = unsafe { DwmFlush() };
+                // SAFETY: `DwmFlush` synchronizes with DWM composition; if unavailable, fall back
+                // to a ~60 Hz sleep so animations cannot busy-spin.
+                if unsafe { DwmFlush() }.is_err() {
+                    std::thread::sleep(Duration::from_millis(16));
+                }
+                // SAFETY: `PostMessageW` is thread-safe; posting to a destroyed HWND fails harmlessly.
                 unsafe {
                     let _ = PostMessageW(
                         Some(HWND(wake_hwnd_raw as *mut _)),
@@ -178,7 +292,7 @@ impl VsyncPacer {
     }
 
     fn arm(&self) {
-        let mut armed = self.armed.lock().unwrap();
+        let mut armed = self.armed.lock().unwrap_or_else(|e| e.into_inner());
         if !*armed {
             *armed = true;
             self.condvar.notify_one();
@@ -187,21 +301,28 @@ impl VsyncPacer {
 }
 
 pub(crate) struct Platform {
-    pub(crate) devices: Direct2DDevices,
+    devices: RefCell<Direct2DDevices>,
+    gpu_generation: Cell<u64>,
     wake_hwnd: HWND,
     vsync: Arc<VsyncPacer>,
+    com_initialized: bool,
     ole_initialized: bool,
 }
 
 impl Platform {
     pub(crate) fn new() -> Result<Self> {
+        // SAFETY: Best-effort DPI awareness for test binaries without an embedded manifest.
         unsafe {
             let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-            let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
         }
+        // SAFETY: STA COM initialization on the UI thread; matched by `CoUninitialize` in `Drop`.
+        let com_initialized =
+            unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }.is_ok();
+        // SAFETY: OLE initialization on the UI thread for drag-drop; matched in `Drop`.
         let ole_initialized = unsafe { OleInitialize(None) }.is_ok();
         window::register_window_class()?;
 
+        // SAFETY: `GetModuleHandleW(None)` returns the current executable's module handle.
         let hinstance = unsafe { GetModuleHandleW(None)? };
         let wc = WNDCLASSW {
             lpfnWndProc: Some(wake_wnd_proc),
@@ -209,8 +330,10 @@ impl Platform {
             lpszClassName: WAKE_CLASS_NAME,
             ..Default::default()
         };
+        // SAFETY: `wc` has a static class name and valid `wake_wnd_proc`.
         unsafe { RegisterClassW(&wc) };
 
+        // SAFETY: Creates a message-only wake window using the class registered above.
         let wake_hwnd = unsafe {
             CreateWindowExW(
                 WINDOW_EX_STYLE(0),
@@ -233,22 +356,42 @@ impl Platform {
         let vsync = VsyncPacer::spawn(wake_hwnd.0 as isize);
 
         Ok(Self {
-            devices,
+            devices: RefCell::new(devices),
+            gpu_generation: Cell::new(0),
             wake_hwnd,
             vsync,
+            com_initialized,
             ole_initialized,
         })
     }
 
+    pub(crate) fn devices(&self) -> Direct2DDevices {
+        self.devices.borrow().clone()
+    }
+
+    pub(crate) fn replace_devices(&self, next: Direct2DDevices) {
+        *self.devices.borrow_mut() = next;
+        self.gpu_generation
+            .set(self.gpu_generation.get().wrapping_add(1));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn gpu_generation(&self) -> u64 {
+        self.gpu_generation.get()
+    }
+
     pub(crate) fn wake_callback(&self) -> Arc<dyn Fn() + Send + Sync> {
         let wake_raw = self.wake_hwnd.0 as isize;
-        Arc::new(move || unsafe {
-            let _ = PostMessageW(
-                Some(HWND(wake_raw as *mut _)),
-                WM_APP_WAKE,
-                WPARAM(0),
-                LPARAM(0),
-            );
+        Arc::new(move || {
+            // SAFETY: `PostMessageW` is thread-safe; posting to a destroyed HWND fails harmlessly.
+            unsafe {
+                let _ = PostMessageW(
+                    Some(HWND(wake_raw as *mut _)),
+                    WM_APP_WAKE,
+                    WPARAM(0),
+                    LPARAM(0),
+                );
+            }
         })
     }
 
@@ -259,6 +402,7 @@ impl Platform {
     pub(crate) fn system_appearance(&self) -> WindowAppearance {
         let mut value = 1u32;
         let mut size = std::mem::size_of::<u32>() as u32;
+        // SAFETY: Reading a `REG_DWORD` into a 4-byte stack local with static subkey/value strings.
         let status = unsafe {
             RegGetValueW(
                 HKEY_CURRENT_USER,
@@ -278,6 +422,7 @@ impl Platform {
     }
 
     pub(crate) fn post_quit(&self) {
+        // SAFETY: Posts `WM_QUIT` to the current UI thread's message queue.
         unsafe { PostQuitMessage(0) };
     }
 
@@ -311,9 +456,11 @@ impl Platform {
             if handler.borrow().should_quit() {
                 break;
             }
+            // SAFETY: Pumps messages on the UI thread into stack-allocated `msg`.
             if unsafe { GetMessageW(&mut msg, None, 0, 0) }.0 <= 0 {
                 break;
             }
+            // SAFETY: `msg` was populated by `GetMessageW`.
             unsafe {
                 let _ = TranslateMessage(&msg);
                 DispatchMessageW(&msg);
@@ -325,12 +472,15 @@ impl Platform {
 
 impl Drop for Platform {
     fn drop(&mut self) {
+        // SAFETY: Tears down owned wake HWND and balances OLE/COM initialization on the UI thread.
         unsafe {
             let _ = DestroyWindow(self.wake_hwnd);
             if self.ole_initialized {
                 OleUninitialize();
             }
-            CoUninitialize();
+            if self.com_initialized {
+                CoUninitialize();
+            }
         }
     }
 }
@@ -341,15 +491,28 @@ unsafe extern "system" fn wake_wnd_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
+    match catch_unwind(AssertUnwindSafe(|| {
+        wake_wnd_proc_inner(hwnd, msg, wparam, lparam)
+    })) {
+        Ok(res) => res,
+        Err(payload) => {
+            report_caught_ffi_panic("wake_wnd_proc", &*payload);
+            LRESULT(0)
+        }
+    }
+}
+
+fn wake_wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match msg {
         WM_APP_WAKE => {
             if let Some(handler_rc) = ACTIVE_HANDLER.with(|slot| slot.borrow().clone()) {
                 match handler_rc.try_borrow_mut() {
-                    Ok(mut handler) => handler.on_wake(),
+                    Ok(mut handler) => {
+                        WAKE_PENDING.with(|flag| flag.set(false));
+                        handler.on_wake();
+                    }
                     Err(_) => {
-                        let _ = unsafe {
-                            PostMessageW(Some(hwnd), WM_APP_WAKE, WPARAM(0), LPARAM(0))
-                        };
+                        WAKE_PENDING.with(|flag| flag.set(true));
                         return LRESULT(0);
                     }
                 }
@@ -369,6 +532,7 @@ unsafe extern "system" fn wake_wnd_proc(
             }
             LRESULT(0)
         }
+        // SAFETY: Forwards unhandled wake-window messages to `DefWindowProcW`.
         _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
     }
 }
@@ -430,11 +594,12 @@ mod tests {
         }
 
         fn drive_frames(&mut self) {
-            if let Some(w) = &mut self.window {
-                w.renderer.begin_frame(rgb(0x272727));
-                w.renderer
-                    .paint_quad(fill(rect(0.0, 0.0, 100.0, 50.0), rgb(0x005fb8)));
-                let lost = w.renderer.end_frame().expect("end_frame failed");
+            if let Some(w) = &mut self.window
+                && let Some(renderer) = w.renderer_mut()
+            {
+                renderer.begin_frame(rgb(0x272727));
+                renderer.paint_quad(fill(rect(0.0, 0.0, 100.0, 50.0), rgb(0x005fb8)));
+                let lost = renderer.end_frame().expect("end_frame failed");
                 assert!(!lost);
                 self.paints += 1;
             }
@@ -458,7 +623,7 @@ mod tests {
             ..Default::default()
         };
         let win =
-            NativeWindow::create(platform.devices.clone(), &opts, WindowAppearance::Dark)
+            NativeWindow::create(platform.devices(), &opts, WindowAppearance::Dark)
                 .expect("NativeWindow::create failed");
         let hwnd = win.hwnd();
         assert!(window::has_hwnd_entry(hwnd));
@@ -476,6 +641,7 @@ mod tests {
 
         Platform::run(handler.clone(), |h| {
             // Re-entrant WM_SIZE while handler is borrowed must queue instead of dropping.
+            // SAFETY: `hwnd` is a valid window owned by the test thread.
             unsafe {
                 let _ = SendMessageW(
                     hwnd.raw(),
@@ -485,6 +651,7 @@ mod tests {
                 );
             }
             // Exercise modal size/move timer entry & exit cleanly.
+            // SAFETY: `hwnd` is a valid window owned by the test thread.
             unsafe {
                 let _ = SendMessageW(hwnd.raw(), WM_ENTERSIZEMOVE, Some(WPARAM(0)), Some(LPARAM(0)));
                 let _ = SendMessageW(hwnd.raw(), WM_TIMER, Some(WPARAM(1)), Some(LPARAM(0)));

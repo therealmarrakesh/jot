@@ -6,7 +6,8 @@ use std::hash::{Hash, Hasher};
 
 use windows::Win32::Graphics::DirectWrite::{
     DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
-    DWRITE_FONT_WEIGHT, DWRITE_HIT_TEST_METRICS, DWRITE_LINE_METRICS, DWRITE_TEXT_ALIGNMENT_CENTER,
+    DWRITE_FONT_WEIGHT, DWRITE_HIT_TEST_METRICS, DWRITE_LINE_METRICS,
+    DWRITE_LINE_SPACING_METHOD_UNIFORM, DWRITE_TEXT_ALIGNMENT_CENTER,
     DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_TEXT_METRICS, DWRITE_TEXT_RANGE, DWRITE_TRIMMING,
     DWRITE_TRIMMING_GRANULARITY_CHARACTER, DWRITE_WORD_WRAPPING_NO_WRAP, DWRITE_WORD_WRAPPING_WRAP,
     DWriteCreateFactory, IDWriteFactory5, IDWriteTextFormat, IDWriteTextLayout,
@@ -21,13 +22,23 @@ use super::d2d::{D2DRenderer, fill};
 use super::wrap::CharWidths;
 
 const MAX_LAYOUT_CACHE: usize = 512;
+const MAX_SHAPED_CACHE_BYTES: usize = 4 * 1024 * 1024;
+const MAX_CACHEABLE_LINE_BYTES: usize = 16 * 1024;
+pub(crate) const TAB_STOP_COLUMNS: f32 = 8.0;
 
-#[derive(Copy, Clone, Debug, PartialEq, PartialOrd)]
+#[derive(Copy, Clone, Debug, PartialOrd)]
 pub(crate) struct FontWeight(pub(crate) f32);
 
 impl Default for FontWeight {
     fn default() -> Self {
         Self::NORMAL
+    }
+}
+
+impl PartialEq for FontWeight {
+    #[inline]
+    fn eq(&self, other: &Self) -> bool {
+        self.0.to_bits() == other.0.to_bits()
     }
 }
 
@@ -64,15 +75,6 @@ pub(crate) fn font(family: impl Into<SharedStr>) -> Font {
         family: family.into(),
         weight: FontWeight::NORMAL,
     }
-}
-
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash)]
-pub(crate) struct FontId(pub(crate) usize);
-
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub(crate) struct FontRun {
-    pub(crate) len: usize,
-    pub(crate) font_id: FontId,
 }
 
 #[derive(Copy, Clone, Debug, Default, PartialEq)]
@@ -114,7 +116,6 @@ pub(crate) struct ShapedLine {
     pub(crate) text: SharedStr,
     layout: Option<IDWriteTextLayout>,
     default_color: Rgba,
-    run_colors: Vec<(u32, u32, Rgba)>,
     underlines: Vec<UnderlineSpan>,
     is_ascii: bool,
 }
@@ -129,7 +130,6 @@ impl Default for ShapedLine {
             text: SharedStr::default(),
             layout: None,
             default_color: Rgba::new(0.0, 0.0, 0.0, 1.0),
-            run_colors: Vec::new(),
             underlines: Vec::new(),
             is_ascii: true,
         }
@@ -139,19 +139,20 @@ impl Default for ShapedLine {
 impl ShapedLine {
     pub(crate) fn x_for_index(&self, index: usize) -> f32 {
         let index = index.min(self.len);
-        if index == 0 {
+        if index == 0 && self.is_ascii {
             return 0.0;
         }
-        if index >= self.len {
+        if index >= self.len && self.is_ascii {
             return self.width;
         }
         let Some(layout) = &self.layout else {
-            return 0.0;
+            return if index == 0 { 0.0 } else { self.width };
         };
         let utf16_pos = utf8_to_utf16_offset(self.text.as_str(), index, self.is_ascii);
         let mut x = 0.0f32;
         let mut y = 0.0f32;
         let mut metrics = DWRITE_HIT_TEST_METRICS::default();
+        // SAFETY: `layout` is a valid `IDWriteTextLayout` and output pointers are stack locals.
         if unsafe { layout.HitTestTextPosition(utf16_pos, false, &mut x, &mut y, &mut metrics) }
             .is_ok()
         {
@@ -161,11 +162,70 @@ impl ShapedLine {
         }
     }
 
+    /// Returns horizontal highlight segments `(x0, x1)` covering `start..end` UTF-8 bytes,
+    /// using `HitTestTextRange` for accurate BiDi / RTL selection boxes (E-17).
+    pub(crate) fn selection_spans(&self, start: usize, end: usize) -> Vec<(f32, f32)> {
+        let start = start.min(self.len);
+        let end = end.min(self.len);
+        if start >= end {
+            return Vec::new();
+        }
+        if self.is_ascii {
+            let x0 = self.x_for_index(start);
+            let x1 = self.x_for_index(end);
+            return if x1 > x0 { vec![(x0, x1)] } else { Vec::new() };
+        }
+        let Some(layout) = &self.layout else {
+            return Vec::new();
+        };
+        let u16_start = utf8_to_utf16_offset(self.text.as_str(), start, false);
+        let u16_end = utf8_to_utf16_offset(self.text.as_str(), end, false);
+        let u16_len = u16_end.saturating_sub(u16_start);
+        if u16_len == 0 {
+            return Vec::new();
+        }
+        let mut actual = 0u32;
+        let mut buf = [DWRITE_HIT_TEST_METRICS::default(); 8];
+        // SAFETY: `layout` is a valid `IDWriteTextLayout` and `buf` is a writable metrics slice.
+        let res = unsafe {
+            layout.HitTestTextRange(u16_start, u16_len, 0.0, 0.0, Some(&mut buf), &mut actual)
+        };
+        if res.is_ok() {
+            return buf[..actual as usize]
+                .iter()
+                .filter(|m| m.width > 0.0)
+                .map(|m| (m.left, m.left + m.width))
+                .collect();
+        }
+        if actual > 0 {
+            let mut heap = vec![DWRITE_HIT_TEST_METRICS::default(); actual as usize];
+            // SAFETY: `heap` has length `actual` reported by DirectWrite above.
+            if unsafe {
+                layout.HitTestTextRange(u16_start, u16_len, 0.0, 0.0, Some(&mut heap), &mut actual)
+            }
+            .is_ok()
+            {
+                return heap[..actual as usize]
+                    .iter()
+                    .filter(|m| m.width > 0.0)
+                    .map(|m| (m.left, m.left + m.width))
+                    .collect();
+            }
+        }
+        let x0 = self.x_for_index(start);
+        let x1 = self.x_for_index(end);
+        let (lo, hi) = if x0 <= x1 { (x0, x1) } else { (x1, x0) };
+        if hi > lo { vec![(lo, hi)] } else { Vec::new() }
+    }
+
     pub(crate) fn closest_index_for_x(&self, x: f32) -> usize {
-        if self.len == 0 || x <= 0.0 {
+        if self.len == 0 {
             return 0;
         }
-        if x >= self.width {
+        if self.is_ascii && x <= 0.0 {
+            return 0;
+        }
+        if self.is_ascii && x >= self.width {
             return self.len;
         }
         let Some(layout) = &self.layout else {
@@ -174,6 +234,7 @@ impl ShapedLine {
         let mut is_trailing = BOOL(0);
         let mut is_inside = BOOL(0);
         let mut metrics = DWRITE_HIT_TEST_METRICS::default();
+        // SAFETY: `layout` is a valid `IDWriteTextLayout` and output refs are stack locals.
         if unsafe { layout.HitTestPoint(x, 0.0, &mut is_trailing, &mut is_inside, &mut metrics) }
             .is_err()
         {
@@ -206,27 +267,22 @@ impl ShapedLine {
         let top_padding = ((line_height - glyph_height) * 0.5).max(0.0);
         let draw_origin = point(origin.x + align_offset_x, origin.y + top_padding);
 
-        renderer.paint_text_layout(draw_origin, layout, self.default_color, &self.run_colors);
+        renderer.paint_text_layout(draw_origin, layout, self.default_color);
 
         for ul in &self.underlines {
             let x0 = self.x_for_index(ul.start_utf8);
             let x1 = self.x_for_index(ul.end_utf8);
-            if x1 > x0 {
+            let (lo, hi) = if x0 <= x1 { (x0, x1) } else { (x1, x0) };
+            if hi > lo {
                 let y = draw_origin.y + self.ascent + 2.0;
                 let rect = Rect::new(
-                    point(draw_origin.x + x0, y),
-                    size(x1 - x0, ul.thickness.max(1.0)),
+                    point(draw_origin.x + lo, y),
+                    size(hi - lo, ul.thickness.max(1.0)),
                 );
                 renderer.paint_quad(fill(rect, ul.color));
             }
         }
     }
-}
-
-/// Lightweight single-line width measurement returned by `layout_line`.
-#[derive(Clone, Copy, Debug, Default)]
-pub(crate) struct LineLayout {
-    pub(crate) width: f32,
 }
 
 /// Immutable multi-line wrapped DirectWrite layout (used by tooltips, dialogs, and UI text).
@@ -237,8 +293,9 @@ pub(crate) struct WrappedLine {
     layout_box_width: Option<f32>,
     pub(crate) ascent: f32,
     pub(crate) descent: f32,
+    uniform_spacing: bool,
+    clamped: bool,
     layout: Option<IDWriteTextLayout>,
-    run_colors: Vec<(u32, u32, Rgba)>,
 }
 
 impl WrappedLine {
@@ -265,14 +322,29 @@ impl WrappedLine {
             }
             _ => 0.0,
         };
-        let glyph_height = self.ascent + self.descent;
-        let top_padding = ((line_height - glyph_height) * 0.5).max(0.0);
+        let top_padding = if self.uniform_spacing {
+            0.0
+        } else {
+            let glyph_height = self.ascent + self.descent;
+            ((line_height - glyph_height) * 0.5).max(0.0)
+        };
+        let clip_height = line_height * self.line_count.max(1) as f32;
+        if self.clamped {
+            let clip_w = align_width
+                .or(self.layout_box_width)
+                .unwrap_or(self.width)
+                .max(self.width)
+                + 2.0;
+            renderer.push_clip(Rect::new(origin, size(clip_w, clip_height)));
+        }
         renderer.paint_text_layout(
             point(origin.x + align_offset_x, origin.y + top_padding),
             layout,
             color,
-            &self.run_colors,
         );
+        if self.clamped {
+            renderer.pop_clip();
+        }
     }
 }
 
@@ -300,7 +372,7 @@ struct WrappedCacheKey {
     family: SharedStr,
     weight: FontWeight,
     wrap_width_tenths: Option<u32>,
-    trim_width_tenths: Option<u32>,
+    line_height_tenths: Option<u32>,
     line_clamp: Option<usize>,
     align: TextAlign,
 }
@@ -308,79 +380,123 @@ struct WrappedCacheKey {
 /// Low-level DirectWrite helper passed into `with_char_widths` callbacks.
 pub(crate) struct DirectWriteCore {
     factory: IDWriteFactory5,
-    fonts: Vec<Font>,
-    font_ids: HashMap<Font, FontId>,
     formats: RefCell<HashMap<FormatKey, IDWriteTextFormat>>,
     space_widths: RefCell<HashMap<FormatKey, f32>>,
+    font_metrics: RefCell<HashMap<FormatKey, (f32, f32)>>,
 }
 
 impl DirectWriteCore {
     fn new() -> Self {
+        // SAFETY: Creating a shared DirectWrite factory requires no external preconditions.
         let factory: IDWriteFactory5 =
             unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED) }
                 .expect("failed to create DirectWrite factory");
         Self {
             factory,
-            fonts: Vec::new(),
-            font_ids: HashMap::new(),
             formats: RefCell::new(HashMap::new()),
             space_widths: RefCell::new(HashMap::new()),
+            font_metrics: RefCell::new(HashMap::new()),
         }
     }
 
-    fn font_id(&mut self, font: &Font) -> FontId {
-        if let Some(&id) = self.font_ids.get(font) {
-            return id;
+    pub(super) fn sanitize_size(font_size: f32) -> f32 {
+        if font_size.is_finite() {
+            font_size.clamp(1.0, 4096.0)
+        } else {
+            14.0
         }
-        let id = FontId(self.fonts.len());
-        self.fonts.push(font.clone());
-        self.font_ids.insert(font.clone(), id);
-        id
-    }
-
-    fn font_by_id(&self, id: FontId) -> Font {
-        self.fonts.get(id.0).cloned().unwrap_or_default()
     }
 
     pub(super) fn text_format(&self, font: &Font, font_size: f32) -> IDWriteTextFormat {
+        let safe_size = Self::sanitize_size(font_size);
         let key = FormatKey {
             family: font.family.clone(),
             weight: font.weight,
-            size_hundredths: (font_size * 100.0).round().max(1.0) as u32,
+            size_hundredths: (safe_size * 100.0).round().max(1.0) as u32,
         };
         if let Some(existing) = self.formats.borrow().get(&key) {
             return existing.clone();
         }
         let family = HSTRING::from(font.family.as_str());
-        let locale = HSTRING::from("en-us");
-        let dw_weight = DWRITE_FONT_WEIGHT(font.weight.0.round() as i32);
+        // Use user default locale ("") instead of hardcoded "en-us" (G-14).
+        let locale = HSTRING::from("");
+        let dw_weight = DWRITE_FONT_WEIGHT(font.weight.0.round().clamp(1.0, 999.0) as i32);
+        // SAFETY: `self.factory` is valid and `family`, `locale`, `safe_size` are valid inputs.
         let format = unsafe {
-            self.factory.CreateTextFormat(
-                &family,
-                None,
-                dw_weight,
-                DWRITE_FONT_STYLE_NORMAL,
-                DWRITE_FONT_STRETCH_NORMAL,
-                font_size.max(1.0),
-                &locale,
-            )
+            self.factory
+                .CreateTextFormat(
+                    &family,
+                    None,
+                    dw_weight,
+                    DWRITE_FONT_STYLE_NORMAL,
+                    DWRITE_FONT_STRETCH_NORMAL,
+                    safe_size,
+                    &locale,
+                )
+                .or_else(|_| {
+                    let fallback = HSTRING::from("Segoe UI");
+                    self.factory.CreateTextFormat(
+                        &fallback,
+                        None,
+                        DWRITE_FONT_WEIGHT(400),
+                        DWRITE_FONT_STYLE_NORMAL,
+                        DWRITE_FONT_STRETCH_NORMAL,
+                        safe_size,
+                        &locale,
+                    )
+                })
         }
-        .expect("CreateTextFormat failed");
+        .expect("CreateTextFormat fallback failed");
+        // SAFETY: `format` is a newly created `IDWriteTextFormat`.
         let _ = unsafe { format.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP) };
+        // Align incremental tab stops to 8 space columns (Notepad parity, G-5).
+        let space_w = self.measure_utf16(&[b' ' as u16], &format);
+        if space_w > 0.0 {
+            // SAFETY: `space_w * TAB_STOP_COLUMNS` is positive and finite.
+            let _ = unsafe { format.SetIncrementalTabStop(space_w * TAB_STOP_COLUMNS) };
+            self.space_widths.borrow_mut().insert(key.clone(), space_w);
+        }
         self.formats.borrow_mut().insert(key, format.clone());
         format
+    }
+
+    /// Returns cached `(ascent, descent)` of the primary font so fallback glyphs (emoji/CJK)
+    /// do not shift the row baseline vertically (G-7).
+    fn primary_metrics(&self, font: &Font, font_size: f32) -> (f32, f32) {
+        let safe_size = Self::sanitize_size(font_size);
+        let key = FormatKey {
+            family: font.family.clone(),
+            weight: font.weight,
+            size_hundredths: (safe_size * 100.0).round().max(1.0) as u32,
+        };
+        if let Some(&m) = self.font_metrics.borrow().get(&key) {
+            return m;
+        }
+        let format = self.text_format(font, safe_size);
+        let sample = [b'H' as u16, b'g' as u16];
+        // SAFETY: `sample` and `format` are valid inputs to `CreateTextLayout`.
+        let metrics = unsafe { self.factory.CreateTextLayout(&sample, &format, f32::MAX, f32::MAX) }
+            .ok()
+            .map_or((safe_size * 0.8, safe_size * 0.2), |l| {
+                let (_, asc, desc) = extract_single_line_metrics(&l, safe_size);
+                (asc, desc)
+            });
+        self.font_metrics.borrow_mut().insert(key, metrics);
+        metrics
     }
 
     pub(super) fn measure_utf16(&self, utf16: &[u16], format: &IDWriteTextFormat) -> f32 {
         if utf16.is_empty() {
             return 0.0;
         }
+        // SAFETY: `utf16` and `format` are valid inputs to `CreateTextLayout`.
         let Ok(layout) =
             (unsafe { self.factory.CreateTextLayout(utf16, format, f32::MAX, f32::MAX) })
         else {
             return 0.0;
         };
         let mut metrics = DWRITE_TEXT_METRICS::default();
+        // SAFETY: `layout` is valid and `metrics` is a stack `DWRITE_TEXT_METRICS`.
         if unsafe { layout.GetMetrics(&mut metrics) }.is_ok() {
             metrics.widthIncludingTrailingWhitespace
         } else {
@@ -388,24 +504,129 @@ impl DirectWriteCore {
         }
     }
 
-    pub(crate) fn layout_line(&self, text: &str, font_size: f32, runs: &[FontRun]) -> LineLayout {
-        let base_font = runs
-            .first()
-            .map(|r| self.font_by_id(r.font_id))
-            .unwrap_or_default();
-        if text.is_empty() {
-            return LineLayout { width: 0.0 };
+    /// Computes soft-wrap break boundaries for a single logical line in O(1) DirectWrite layout
+    /// calls using `DWRITE_WORD_WRAPPING_WRAP` + `GetLineMetrics` (P-1).
+    pub(crate) fn wrap_line_breaks(
+        &self,
+        text: &str,
+        font: &Font,
+        font_size: f32,
+        width: f32,
+        preserve_indent: bool,
+        out: &mut Vec<crate::gfx::Boundary>,
+    ) {
+        if text.is_empty() || !width.is_finite() || width <= 0.0 {
+            return;
         }
-        let format = self.text_format(&base_font, font_size);
-        let utf16: Vec<u16> = text.encode_utf16().collect();
-        let Ok(layout) =
-            (unsafe { self.factory.CreateTextLayout(&utf16, &format, f32::MAX, f32::MAX) })
-        else {
-            return LineLayout { width: 0.0 };
+        let safe_size = Self::sanitize_size(font_size);
+        let format = self.text_format(font, safe_size);
+        let utf16 = encode_single_line_utf16(text);
+        if utf16.is_empty() {
+            return;
+        }
+
+        let indent = if preserve_indent {
+            text.chars()
+                .take_while(|&c| c == ' ')
+                .count()
+                .min(crate::gfx::MAX_WRAP_INDENT as usize)
+        } else {
+            0
         };
-        let (width, _, _) = extract_single_line_metrics(&layout, font_size);
-        LineLayout { width }
+        let indent_width = if indent > 0 {
+            let spaces = vec![b' ' as u16; indent];
+            self.measure_utf16(&spaces, &format)
+        } else {
+            0.0
+        };
+
+        let collect_breaks = |u16_slice: &[u16], max_w: f32| -> Vec<usize> {
+            // SAFETY: `u16_slice` and `format` are valid inputs for DirectWrite wrapping layout.
+            let Ok(layout) = (unsafe {
+                self.factory
+                    .CreateTextLayout(u16_slice, &format, max_w.max(1.0), f32::MAX)
+            }) else {
+                return Vec::new();
+            };
+            // SAFETY: `layout` is a valid `IDWriteTextLayout`.
+            let _ = unsafe { layout.SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP) };
+            let mut m = DWRITE_TEXT_METRICS::default();
+            // SAFETY: `m` is a stack `DWRITE_TEXT_METRICS` out-pointer.
+            if unsafe { layout.GetMetrics(&mut m) }.is_err() || m.lineCount <= 1 {
+                return Vec::new();
+            }
+            let count = m.lineCount as usize;
+            let mut metrics = vec![DWRITE_LINE_METRICS::default(); count];
+            let mut actual = 0u32;
+            // SAFETY: `metrics` has length `count` matching `m.lineCount`.
+            let _ = unsafe { layout.GetLineMetrics(Some(&mut metrics), &mut actual) };
+            let n = (actual as usize).min(metrics.len());
+            if n <= 1 {
+                return Vec::new();
+            }
+            let mut breaks = Vec::with_capacity(n - 1);
+            let mut acc = 0usize;
+            for lm in &metrics[..n - 1] {
+                acc += lm.length as usize;
+                if acc > 0 && acc < u16_slice.len() {
+                    breaks.push(acc);
+                }
+            }
+            breaks
+        };
+
+        let mut u16_breaks = collect_breaks(&utf16, width);
+        if u16_breaks.is_empty() {
+            return;
+        }
+        if indent > 0 && indent_width > 0.0 && indent_width < width {
+            let first = u16_breaks[0];
+            u16_breaks.truncate(1);
+            if first < utf16.len() {
+                let cont_w = (width - indent_width).max(1.0);
+                for rel in collect_breaks(&utf16[first..], cont_w) {
+                    u16_breaks.push(first + rel);
+                }
+            }
+        }
+
+        // Convert sorted UTF-16 break offsets to UTF-8 byte offsets in one linear pass.
+        let mut bi = 0usize;
+        let mut u16_acc = 0usize;
+        let mut last_byte = 0usize;
+        for (byte_ix, ch) in text.char_indices() {
+            while bi < u16_breaks.len() && u16_acc >= u16_breaks[bi] {
+                if byte_ix > last_byte && byte_ix < text.len() {
+                    out.push(crate::gfx::Boundary {
+                        ix: byte_ix,
+                        next_indent: indent as u32,
+                    });
+                    last_byte = byte_ix;
+                }
+                bi += 1;
+            }
+            if bi >= u16_breaks.len() {
+                break;
+            }
+            u16_acc += ch.len_utf16();
+        }
     }
+}
+
+/// Encodes a single logical editor line to UTF-16 while replacing Unicode/control line-breaking
+/// code points (`VT`, `FF`, `NEL`, `U+2028`, `U+2029`) with a 1-code-unit placeholder (`'□'`)
+/// so DirectWrite never splits one logical line into multiple vertical lines (G-8).
+pub(crate) fn encode_single_line_utf16(text: &str) -> Vec<u16> {
+    let mut out = Vec::with_capacity(text.len());
+    for ch in text.chars() {
+        let mapped = match ch {
+            '\u{000B}' | '\u{000C}' | '\u{0085}' | '\u{2028}' | '\u{2029}' => '\u{25A1}',
+            other => other,
+        };
+        let mut buf = [0u16; 2];
+        out.extend_from_slice(mapped.encode_utf16(&mut buf));
+    }
+    out
 }
 
 /// High-level DirectWrite text system shared across Jot windows.
@@ -417,6 +638,7 @@ struct TextSystemState {
     dw: DirectWriteCore,
     char_widths: HashMap<(Font, u32), CharWidths>,
     shaped_cache: HashMap<ShapedCacheKey, ShapedLine>,
+    shaped_cache_bytes: usize,
     prev_wrapped_cache: HashMap<WrappedCacheKey, Vec<WrappedLine>>,
     curr_wrapped_cache: HashMap<WrappedCacheKey, Vec<WrappedLine>>,
 }
@@ -428,6 +650,7 @@ impl TextSystem {
                 dw: DirectWriteCore::new(),
                 char_widths: HashMap::new(),
                 shaped_cache: HashMap::new(),
+                shaped_cache_bytes: 0,
                 prev_wrapped_cache: HashMap::new(),
                 curr_wrapped_cache: HashMap::new(),
             }),
@@ -442,15 +665,16 @@ impl TextSystem {
 
     pub(crate) fn space_width(&self, font: &Font, font_size: f32) -> f32 {
         let state = self.state.borrow();
+        let safe_size = DirectWriteCore::sanitize_size(font_size);
         let key = FormatKey {
             family: font.family.clone(),
             weight: font.weight,
-            size_hundredths: (font_size * 100.0).round().max(1.0) as u32,
+            size_hundredths: (safe_size * 100.0).round().max(1.0) as u32,
         };
         if let Some(&w) = state.dw.space_widths.borrow().get(&key) {
             return w;
         }
-        let format = state.dw.text_format(font, font_size);
+        let format = state.dw.text_format(font, safe_size);
         let w = state.dw.measure_utf16(&[b' ' as u16], &format);
         state.dw.space_widths.borrow_mut().insert(key, w);
         w
@@ -462,12 +686,26 @@ impl TextSystem {
         }
         let state = self.state.borrow();
         let format = state.dw.text_format(font, font_size);
-        let utf16: Vec<u16> = text.encode_utf16().collect();
+        let utf16 = encode_single_line_utf16(text);
         state.dw.measure_utf16(&utf16, &format)
     }
 
     pub(crate) fn text_width(&self, text: &str, family: &'static str, font_size: f32) -> f32 {
         self.measure_line_width(text, &font(family), font_size).ceil()
+    }
+
+    pub(crate) fn text_width_weighted(
+        &self,
+        text: &str,
+        family: &'static str,
+        weight: FontWeight,
+        font_size: f32,
+    ) -> f32 {
+        let f = Font {
+            family: SharedStr::new_static(family),
+            weight,
+        };
+        self.measure_line_width(text, &f, font_size).ceil()
     }
 
     pub(crate) fn shape_line(
@@ -479,26 +717,28 @@ impl TextSystem {
         let base_run = runs.first();
         let base_font = base_run.map(|r| r.font.clone()).unwrap_or_default();
         let default_color = base_run.map_or(Rgba::new(0.0, 0.0, 0.0, 1.0), |r| r.color);
+        let safe_size = DirectWriteCore::sanitize_size(font_size);
 
         if text.is_empty() {
+            let (ascent, descent) = self.state.borrow().dw.primary_metrics(&base_font, safe_size);
             return ShapedLine {
                 len: 0,
                 width: 0.0,
-                ascent: font_size * 0.8,
-                descent: font_size * 0.2,
+                ascent,
+                descent,
                 text,
                 layout: None,
                 default_color,
-                run_colors: Vec::new(),
                 underlines: Vec::new(),
                 is_ascii: true,
             };
         }
 
-        let single_uniform_run = runs.len() <= 1;
+        // Skip caching huge lines to prevent unbounded memory growth (P-2).
+        let single_uniform_run = runs.len() <= 1 && text.len() <= MAX_CACHEABLE_LINE_BYTES;
         let cache_key = single_uniform_run.then(|| ShapedCacheKey {
             text: text.clone(),
-            font_size_hundredths: (font_size * 100.0).round() as u32,
+            font_size_hundredths: (safe_size * 100.0).round() as u32,
             family: base_font.family.clone(),
             weight: base_font.weight,
             color_bits: [
@@ -517,9 +757,11 @@ impl TextSystem {
             return cached.clone();
         }
 
-        let format = state.dw.text_format(&base_font, font_size);
-        let utf16: Vec<u16> = text.as_str().encode_utf16().collect();
+        let format = state.dw.text_format(&base_font, safe_size);
+        let (ascent, descent) = state.dw.primary_metrics(&base_font, safe_size);
+        let utf16 = encode_single_line_utf16(text.as_str());
         let is_ascii = text.as_str().is_ascii();
+        // SAFETY: `utf16` and `format` are valid DirectWrite layout inputs.
         let layout = unsafe {
             state
                 .dw
@@ -528,14 +770,22 @@ impl TextSystem {
         }
         .ok();
 
-        let mut run_colors = Vec::new();
         let mut underlines = Vec::new();
 
         if let Some(layout) = &layout {
+            // SAFETY: Uniform line spacing locks baseline to primary font metrics (G-7).
+            let _ = unsafe {
+                layout.SetLineSpacing(
+                    DWRITE_LINE_SPACING_METHOD_UNIFORM,
+                    ascent + descent,
+                    ascent,
+                )
+            };
             let mut byte_pos = 0usize;
             let mut utf16_pos = 0u32;
             for run in runs {
-                let end_byte = (byte_pos + run.len).min(text.len());
+                let raw_end = (byte_pos + run.len).min(text.len());
+                let end_byte = text.as_str().floor_char_boundary(raw_end);
                 let slice = &text.as_str()[byte_pos..end_byte];
                 let utf16_len = if is_ascii {
                     slice.len() as u32
@@ -549,18 +799,17 @@ impl TextSystem {
                     };
                     if run.font.family != base_font.family {
                         let fam = HSTRING::from(run.font.family.as_str());
+                        // SAFETY: `fam` is a valid NUL-terminated HSTRING and `range` is within layout.
                         let _ = unsafe { layout.SetFontFamilyName(&fam, range) };
                     }
                     if run.font.weight != base_font.weight {
+                        // SAFETY: `layout` is valid and `range` lies within its UTF-16 text span.
                         let _ = unsafe {
                             layout.SetFontWeight(
                                 DWRITE_FONT_WEIGHT(run.font.weight.0.round() as i32),
                                 range,
                             )
                         };
-                    }
-                    if run.color != default_color {
-                        run_colors.push((utf16_pos, utf16_len, run.color));
                     }
                     if let Some(ul) = run.underline {
                         underlines.push(UnderlineSpan {
@@ -576,11 +825,15 @@ impl TextSystem {
             }
         }
 
-        let (width, ascent, descent) = layout
-            .as_ref()
-            .map_or((0.0, font_size * 0.8, font_size * 0.2), |l| {
-                extract_single_line_metrics(l, font_size)
-            });
+        let width = layout.as_ref().map_or(0.0, |l| {
+            let mut metrics = DWRITE_TEXT_METRICS::default();
+            // SAFETY: `l` is a valid `IDWriteTextLayout`.
+            if unsafe { l.GetMetrics(&mut metrics) }.is_ok() {
+                metrics.widthIncludingTrailingWhitespace
+            } else {
+                0.0
+            }
+        });
 
         let shaped = ShapedLine {
             len: text.len(),
@@ -590,15 +843,19 @@ impl TextSystem {
             text,
             layout,
             default_color,
-            run_colors,
             underlines,
             is_ascii,
         };
 
         if let Some(key) = cache_key {
-            if state.shaped_cache.len() >= MAX_LAYOUT_CACHE {
+            let entry_bytes = key.text.len().max(64);
+            if state.shaped_cache.len() >= MAX_LAYOUT_CACHE
+                || state.shaped_cache_bytes.saturating_add(entry_bytes) > MAX_SHAPED_CACHE_BYTES
+            {
                 state.shaped_cache.clear();
+                state.shaped_cache_bytes = 0;
             }
+            state.shaped_cache_bytes += entry_bytes;
             state.shaped_cache.insert(key, shaped.clone());
         }
         shaped
@@ -611,17 +868,18 @@ impl TextSystem {
         font_size: f32,
         font: &Font,
         wrap_width: Option<f32>,
+        line_height: Option<f32>,
         line_clamp: Option<usize>,
-        trim_width: Option<f32>,
         align: TextAlign,
     ) -> Vec<WrappedLine> {
+        let safe_size = DirectWriteCore::sanitize_size(font_size);
         let key = WrappedCacheKey {
             text: text.clone(),
-            font_size_hundredths: (font_size * 100.0).round().max(1.0) as u32,
+            font_size_hundredths: (safe_size * 100.0).round().max(1.0) as u32,
             family: font.family.clone(),
             weight: font.weight,
             wrap_width_tenths: wrap_width.map(|w| (w.max(1.0) * 10.0).round() as u32),
-            trim_width_tenths: trim_width.map(|w| (w.max(1.0) * 10.0).round() as u32),
+            line_height_tenths: line_height.map(|h| (h.max(1.0) * 10.0).round() as u32),
             line_clamp,
             align,
         };
@@ -635,8 +893,11 @@ impl TextSystem {
             return cached;
         }
 
-        let format = state.dw.text_format(font, font_size);
-        let ellipsis_sign = if trim_width.is_some() {
+        let format = state.dw.text_format(font, safe_size);
+        let (ascent, descent) = state.dw.primary_metrics(font, safe_size);
+        let glyph_h = (ascent + descent).max(1.0);
+        let ellipsis_sign = if line_clamp.is_some() {
+            // SAFETY: `format` is a valid `IDWriteTextFormat`.
             unsafe { state.dw.factory.CreateEllipsisTrimmingSign(&format) }.ok()
         } else {
             None
@@ -649,8 +910,9 @@ impl TextSystem {
                 break;
             }
             let utf16: Vec<u16> = segment.encode_utf16().collect();
-            let box_w = wrap_width.or(trim_width).map(|w| w.max(1.0));
+            let box_w = wrap_width.map(|w| w.max(1.0));
             let max_w = box_w.unwrap_or(f32::MAX);
+            // SAFETY: `utf16` and `format` are valid DirectWrite layout inputs.
             let layout = unsafe {
                 state
                     .dw
@@ -658,58 +920,61 @@ impl TextSystem {
                     .CreateTextLayout(&utf16, &format, max_w, f32::MAX)
             }
             .ok();
+            let uniform_spacing = line_height.is_some();
             if let Some(layout) = &layout {
-                let _ = unsafe {
-                    layout.SetWordWrapping(if wrap_width.is_some() {
+                // SAFETY: Configures wrapping, optional uniform line spacing, and alignment on `layout`.
+                unsafe {
+                    let _ = layout.SetWordWrapping(if wrap_width.is_some() {
                         DWRITE_WORD_WRAPPING_WRAP
                     } else {
                         DWRITE_WORD_WRAPPING_NO_WRAP
-                    })
-                };
-                if box_w.is_some() {
-                    let dw_align = match align {
-                        TextAlign::Left => DWRITE_TEXT_ALIGNMENT_LEADING,
-                        TextAlign::Center => DWRITE_TEXT_ALIGNMENT_CENTER,
-                    };
-                    let _ = unsafe { layout.SetTextAlignment(dw_align) };
-                }
-                if let Some(sign) = &ellipsis_sign {
-                    let trimming = DWRITE_TRIMMING {
-                        granularity: DWRITE_TRIMMING_GRANULARITY_CHARACTER,
-                        delimiter: 0,
-                        delimiterCount: 0,
-                    };
-                    let _ = unsafe { layout.SetTrimming(&trimming, sign) };
+                    });
+                    if let Some(lh) = line_height {
+                        let top_pad = ((lh - glyph_h) * 0.5).max(0.0);
+                        let _ = layout.SetLineSpacing(
+                            DWRITE_LINE_SPACING_METHOD_UNIFORM,
+                            lh.max(1.0),
+                            top_pad + ascent,
+                        );
+                    }
+                    if box_w.is_some() {
+                        let dw_align = match align {
+                            TextAlign::Left => DWRITE_TEXT_ALIGNMENT_LEADING,
+                            TextAlign::Center => DWRITE_TEXT_ALIGNMENT_CENTER,
+                        };
+                        let _ = layout.SetTextAlignment(dw_align);
+                    }
                 }
             }
-            let (width, raw_lines, ascent, descent) =
-                layout
-                    .as_ref()
-                    .map_or((0.0, 1, font_size * 0.8, font_size * 0.2), |l| {
-                        let mut m = DWRITE_TEXT_METRICS::default();
-                        let _ = unsafe { l.GetMetrics(&mut m) };
-                        let (_, asc, desc) = extract_single_line_metrics(l, font_size);
-                        (
-                            m.widthIncludingTrailingWhitespace,
-                            m.lineCount.max(1) as usize,
-                            asc,
-                            desc,
-                        )
-                    });
-            let line_count = match remaining_lines {
+            let (width, raw_lines) = layout.as_ref().map_or((0.0, 1), |l| {
+                let mut m = DWRITE_TEXT_METRICS::default();
+                // SAFETY: `l` is a valid `IDWriteTextLayout`.
+                let _ = unsafe { l.GetMetrics(&mut m) };
+                (m.widthIncludingTrailingWhitespace, m.lineCount.max(1) as usize)
+            });
+            let (line_count, clamped) = match remaining_lines {
                 Some(cap) => {
-                    let clamped = raw_lines.min(cap);
-                    remaining_lines = Some(cap.saturating_sub(clamped));
-                    if clamped < raw_lines
-                        && let Some(layout) = &layout
-                    {
-                        let _ = unsafe {
-                            layout.SetMaxHeight((ascent + descent) * clamped as f32)
-                        };
+                    let clamped_lines = raw_lines.min(cap);
+                    remaining_lines = Some(cap.saturating_sub(clamped_lines));
+                    let did_clamp = clamped_lines < raw_lines;
+                    if did_clamp && let Some(layout) = &layout {
+                        let effective_lh = line_height.unwrap_or(glyph_h);
+                        // SAFETY: Configures max height and optional ellipsis trimming sign on `layout`.
+                        unsafe {
+                            let _ = layout.SetMaxHeight(effective_lh * clamped_lines as f32);
+                            if let Some(sign) = &ellipsis_sign {
+                                let trimming = DWRITE_TRIMMING {
+                                    granularity: DWRITE_TRIMMING_GRANULARITY_CHARACTER,
+                                    delimiter: 0,
+                                    delimiterCount: 0,
+                                };
+                                let _ = layout.SetTrimming(&trimming, sign);
+                            }
+                        }
                     }
-                    clamped
+                    (clamped_lines, did_clamp)
                 }
-                None => raw_lines,
+                None => (raw_lines, false),
             };
             out.push(WrappedLine {
                 width,
@@ -717,8 +982,9 @@ impl TextSystem {
                 layout_box_width: box_w,
                 ascent,
                 descent,
+                uniform_spacing,
+                clamped,
                 layout,
-                run_colors: Vec::new(),
             });
         }
 
@@ -732,10 +998,9 @@ impl TextSystem {
         &self,
         font: &Font,
         font_size: f32,
-        f: impl FnOnce(FontId, &mut CharWidths, &DirectWriteCore) -> R,
+        f: impl FnOnce(&mut CharWidths, &DirectWriteCore) -> R,
     ) -> R {
         let mut state = self.state.borrow_mut();
-        let font_id = state.dw.font_id(font);
         let key = (font.clone(), (font_size * 100.0).round() as u32);
         let TextSystemState {
             dw, char_widths, ..
@@ -743,7 +1008,7 @@ impl TextSystem {
         let widths = char_widths
             .entry(key)
             .or_insert_with(|| CharWidths::new(font.clone(), font_size, dw));
-        f(font_id, widths, dw)
+        f(widths, dw)
     }
 
     #[cfg(test)]
@@ -755,9 +1020,11 @@ impl TextSystem {
 
 fn extract_single_line_metrics(layout: &IDWriteTextLayout, font_size: f32) -> (f32, f32, f32) {
     let mut metrics = DWRITE_TEXT_METRICS::default();
+    // SAFETY: `layout` is a valid `IDWriteTextLayout`.
     let _ = unsafe { layout.GetMetrics(&mut metrics) };
     let mut line_metrics = [DWRITE_LINE_METRICS::default(); 2];
     let mut count = 0u32;
+    // SAFETY: `line_metrics` is a valid 2-element stack buffer for `GetLineMetrics`.
     let (ascent, descent) =
         if unsafe { layout.GetLineMetrics(Some(&mut line_metrics), &mut count) }.is_ok()
             && count > 0

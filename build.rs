@@ -168,6 +168,7 @@ const THIRD_PARTY_NOTICES: &str = r#"Jot includes the following MIT-licensed thi
   Copyright (c) 2023 Nathan Vegdahl
 
 - str_indices 0.4.4 (https://github.com/cessen/str_indices)
+  Copyright (c) 2023 Nathan Vegdahl
 
 - unicode-segmentation 1.13.3 (https://github.com/unicode-rs/unicode-segmentation)
   Copyright (c) 2015 The Rust Project Developers

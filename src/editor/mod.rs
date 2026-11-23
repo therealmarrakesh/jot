@@ -28,15 +28,32 @@ use crate::ui::{CustomDraw, EditorSlot, HitId, Node, box_, custom};
 
 use buffer::CaretSelection;
 use history::History;
-use view::{AutoScroll, BlinkState, LongestLineCache, ScrollbarSnapshot, ViewLayout};
+use view::{AutoScroll, BlinkState, LongestLineCache, ViewLayout};
 use wrap::WrapIndex;
 
 mod history;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum MoveDirection {
     Up,
     Down,
+}
+
+/// Active IME preedit composition span owning a single undo history group (E-2).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct Composition {
+    pub(super) start: usize,
+    pub(super) end: usize,
+    pub(super) cursor_utf16: usize,
+}
+
+/// Deferred caret-reveal intent resolved in `paint()` AFTER `wrap.sync_layout` (E-5, E-6, E-15).
+#[derive(Clone, Copy, Debug)]
+pub(super) struct RevealRequest {
+    pub(super) offset: usize,
+    pub(super) end_affinity: bool,
+    pub(super) direction: Option<MoveDirection>,
+    pub(super) with_margin: bool,
 }
 
 /// Typed timer events requested by an `Editor` (routed back via `Editor::on_timer`).
@@ -77,9 +94,10 @@ pub(crate) struct TabSize {
 
 impl Default for TabSize {
     fn default() -> Self {
+        // Windows Notepad default: hard tabs aligned to 8-column stops (E-11, G-5).
         Self {
-            tab_size: 2,
-            hard_tabs: false,
+            tab_size: 8,
+            hard_tabs: true,
         }
     }
 }
@@ -99,7 +117,10 @@ pub(crate) fn key_to_command(ev: KeyEvent) -> Option<Command> {
     let m = ev.modifiers;
     match (m.ctrl, m.alt, m.shift, m.win, ev.key) {
         (false, false, false | true, false, Key::Backspace) => Some(Command::Backspace),
-        (false, false, false | true, false, Key::Delete) => Some(Command::Delete),
+        (false, false, false, false, Key::Delete) => Some(Command::Delete),
+        (false, false, true, false, Key::Delete) => Some(Command::Cut),
+        (true, false, false, false, Key::Insert) => Some(Command::Copy),
+        (false, false, true, false, Key::Insert) => Some(Command::Paste),
         (true, false, false, false, Key::Backspace) => Some(Command::DeletePrevWord),
         (true, false, false, false, Key::Delete) => Some(Command::DeleteNextWord),
         (false | true, false, false, false, Key::Enter)
@@ -111,6 +132,8 @@ pub(crate) fn key_to_command(ev: KeyEvent) -> Option<Command> {
         (false, false, false, false, Key::Right) => Some(Command::MoveRight),
         (false, false, false, false, Key::PageUp) => Some(Command::MovePageUp),
         (false, false, false, false, Key::PageDown) => Some(Command::MovePageDown),
+        (false, false, true, false, Key::PageUp) => Some(Command::SelectPageUp),
+        (false, false, true, false, Key::PageDown) => Some(Command::SelectPageDown),
         (false, false, false, false, Key::Tab) => Some(Command::IndentInline),
         (false, false, true, false, Key::Tab) => Some(Command::OutdentInline),
         (true, false, false, false, Key::Char(']')) => Some(Command::Indent),
@@ -136,7 +159,9 @@ pub(crate) fn key_to_command(ev: KeyEvent) -> Option<Command> {
         (true, false, false, false, Key::Char('x')) => Some(Command::Cut),
         (true, false, false, false, Key::Char('v')) => Some(Command::Paste),
         (true, false, false, false, Key::Char('z')) => Some(Command::Undo),
-        (true, false, false, false, Key::Char('y')) => Some(Command::Redo),
+        (true, false, true, false, Key::Char('z')) | (true, false, false, false, Key::Char('y')) => {
+            Some(Command::Redo)
+        }
         _ => None,
     }
 }
@@ -157,23 +182,23 @@ pub(crate) struct Editor {
     scrollbar: ScrollbarState,
     selection: CaretSelection,
     word_anchor: Option<CaretSelection>,
-    ime_marked: Option<CaretSelection>,
+    composition: Option<Composition>,
     layout: Option<ViewLayout>,
     caret_bounds: Option<Rect>,
     caret_height: f32,
     caret_hidden: bool,
     last_cursor: Option<usize>,
+    last_line_height: f32,
     input_bounds: Rect,
     content_bounds: Option<Rect>,
-    last_selection: Option<CaretSelection>,
     selecting: bool,
     line_end_affinity: bool,
     validate: Option<ValidateFn>,
-    scroll_offset: Point,
-    pending_scroll: Option<Point>,
+    scroll_x: f32,
+    scroll_y: f64,
+    reveal: Option<RevealRequest>,
     content_size: Size,
-    scrollbar_snapshot: Option<ScrollbarSnapshot>,
-    viewport_wheel_step: bool,
+    content_height_f64: f64,
     longest_line_cache: Option<(LongestLineCache, f32)>,
     paddings: Edges<f32>,
     placeholder: SharedStr,
@@ -203,23 +228,23 @@ impl Editor {
             scrollbar: ScrollbarState::new(),
             selection: CaretSelection::default(),
             word_anchor: None,
-            ime_marked: None,
+            composition: None,
             layout: None,
             caret_bounds: None,
             caret_height: 0.0,
             caret_hidden: false,
             last_cursor: None,
+            last_line_height: 20.0,
             input_bounds: Rect::ZERO,
             content_bounds: None,
-            last_selection: None,
             selecting: false,
             line_end_affinity: false,
             validate: None,
-            scroll_offset: Point::ZERO,
-            pending_scroll: None,
+            scroll_x: 0.0,
+            scroll_y: 0.0,
+            reveal: None,
             content_size: Size::ZERO,
-            scrollbar_snapshot: None,
-            viewport_wheel_step: false,
+            content_height_f64: 0.0,
             longest_line_cache: None,
             paddings: Edges::ZERO,
             placeholder: SharedStr::default(),
@@ -249,11 +274,6 @@ impl Editor {
         self
     }
 
-    pub(crate) fn with_viewport_wheel_step(mut self) -> Self {
-        self.viewport_wheel_step = true;
-        self
-    }
-
     pub(crate) fn with_rope(mut self, rope: Rope) -> Self {
         self.text = rope;
         self
@@ -269,6 +289,11 @@ impl Editor {
     #[inline]
     pub(crate) fn text(&self) -> &Rope {
         &self.text
+    }
+
+    #[inline]
+    pub(crate) fn revision(&self) -> u64 {
+        self.revision
     }
 
     pub(crate) fn value(&self) -> SharedStr {
@@ -297,7 +322,47 @@ impl Editor {
     #[cfg(test)]
     #[inline]
     pub(crate) fn scroll_offset(&self) -> Point {
-        self.scroll_offset
+        crate::geom::point(self.scroll_x, self.scroll_y as f32)
+    }
+
+    #[inline]
+    pub(super) fn scroll_offset_point(&self) -> Point {
+        crate::geom::point(self.scroll_x, self.scroll_y as f32)
+    }
+
+    #[inline]
+    pub(super) fn request_reveal(
+        &mut self,
+        offset: usize,
+        end_affinity: bool,
+        direction: Option<MoveDirection>,
+        with_margin: bool,
+    ) {
+        self.reveal = Some(RevealRequest {
+            offset,
+            end_affinity,
+            direction,
+            with_margin,
+        });
+    }
+
+    /// Clears transient pointer-drag / double-click anchor state on any buffer mutation (E-1).
+    #[inline]
+    pub(super) fn reset_pointer_selection_state(&mut self) {
+        self.word_anchor = None;
+        self.selecting = false;
+        self.auto_scroll.stop();
+    }
+
+    #[inline]
+    pub(super) fn debug_assert_invariants(&self) {
+        debug_assert!(self.selection.start <= self.selection.end);
+        debug_assert!(self.selection.end <= self.text.len());
+        debug_assert!(self.text.is_char_boundary(self.selection.start));
+        debug_assert!(self.text.is_char_boundary(self.selection.end));
+        if let Some(comp) = self.composition {
+            debug_assert!(comp.start <= comp.end && comp.end <= self.text.len());
+        }
     }
 
     #[inline]
@@ -316,35 +381,53 @@ impl Editor {
     }
 
     pub(crate) fn set_soft_wrap(&mut self, wrap: bool, ts: &TextSystem) {
+        if self.soft_wrap == wrap {
+            return;
+        }
+        let anchor = self.capture_scroll_anchor(self.last_line_height);
         self.soft_wrap = wrap;
         if wrap {
             let width = self
                 .layout
                 .as_ref()
                 .and_then(|l| l.wrap_width)
-                .unwrap_or(self.input_bounds.size.width);
-            self.wrap.set_wrap_width(Some(width), ts);
-            self.scroll_offset.x = 0.0;
+                .or_else(|| {
+                    (self.input_bounds.size.width > view::RIGHT_MARGIN)
+                        .then_some(self.input_bounds.size.width - view::RIGHT_MARGIN)
+                });
+            self.wrap.set_wrap_width(width, ts);
+            self.scroll_x = 0.0;
         } else {
             self.wrap.set_wrap_width(None, ts);
+        }
+        if let Some(anchor) = anchor {
+            self.restore_scroll_anchor(anchor, self.last_line_height);
         }
     }
 
     pub(crate) fn cursor(&self) -> usize {
-        if let Some(marked) = self.ime_marked {
-            return marked.end;
+        if let Some(comp) = self.composition {
+            let start = comp.start.min(self.text.len());
+            let end = comp.end.min(self.text.len());
+            if start <= end {
+                let base_u16 = self.text.offset_to_offset_utf16(start);
+                let target_u16 = base_u16.saturating_add(comp.cursor_utf16);
+                return self.text.offset_utf16_to_offset(target_u16).clamp(start, end);
+            }
         }
-        self.selection.head()
+        self.selection.head().min(self.text.len())
     }
 
     pub(crate) fn selected_range(&self) -> Range<usize> {
-        self.selection.into()
+        let len = self.text.len();
+        self.selection.start.min(len)..self.selection.end.min(len)
     }
 
     pub(crate) fn selected_text(&self) -> RopeSlice<'_> {
-        let utf16 = self.range_to_utf16(&self.selected_range());
-        let range = self.range_from_utf16(&utf16);
-        self.text.slice(range)
+        let range = self.selected_range();
+        let start = self.text.clip_offset(range.start, buffer::Bias::Left);
+        let end = self.text.clip_offset(range.end, buffer::Bias::Right);
+        self.text.slice(start..end)
     }
 
     #[inline]
@@ -363,7 +446,12 @@ impl Editor {
         self.history.can_undo()
     }
 
+    pub(crate) fn can_redo(&self) -> bool {
+        self.history.can_redo()
+    }
+
     pub(crate) fn begin_save(&mut self) -> u64 {
+        self.commit_composition();
         self.history.begin_save()
     }
 
@@ -390,10 +478,10 @@ impl Editor {
     }
 
     pub(crate) fn on_blur(&mut self) {
+        self.commit_composition();
         self.history.break_coalescing();
         self.blink.stop();
-        self.selecting = false;
-        self.auto_scroll.stop();
+        self.reset_pointer_selection_state();
     }
 
     // ---- Declarative view node (zero closures, zero EditorHost) ----

@@ -132,6 +132,7 @@ struct Shown {
 #[derive(Default)]
 pub(crate) struct Tooltips {
     popup: Option<NativeWindow>,
+    create_failed: bool,
     ui: UiState,
     text: SharedStr,
     card_size: Size,
@@ -284,8 +285,11 @@ impl Tooltips {
     }
 
     pub(crate) fn recreate_renderer(&mut self, devices: Direct2DDevices) {
+        self.create_failed = false;
         if let Some(popup) = &mut self.popup {
-            let _ = popup.recreate_renderer(devices);
+            if let Err(err) = popup.recreate_renderer(devices) {
+                crate::platform::debug_log(&format!("tooltip recreate_renderer failed: {err}"));
+            }
             if self.visible {
                 self.dirty = true;
             }
@@ -369,6 +373,9 @@ impl Tooltips {
         ts: &TextSystem,
     ) {
         if self.popup.is_none() {
+            if self.create_failed {
+                return;
+            }
             let opts = WindowOptions {
                 bounds: Some(Rect::new(point(0., 0.), size(1., 1.))),
                 title: "".into(),
@@ -382,10 +389,14 @@ impl Tooltips {
                 backdrop: WindowBackdrop::Transparent,
                 min_size: None,
             };
-            let Ok(win) = NativeWindow::create(devices.clone(), &opts, appearance) else {
-                return;
-            };
-            self.popup = Some(win);
+            match NativeWindow::create(devices.clone(), &opts, appearance) {
+                Ok(win) => self.popup = Some(win),
+                Err(err) => {
+                    self.create_failed = true;
+                    crate::platform::debug_log(&format!("tooltip overlay create failed: {err}"));
+                    return;
+                }
+            }
         }
 
         let entered = snap.entered;
@@ -468,9 +479,20 @@ impl Tooltips {
             scale,
             ts,
         );
-        popup.renderer.begin_frame(transparent_black());
-        frame.paint(&mut popup.renderer, &mut |_, _, _| {});
-        let lost = popup.renderer.end_frame().unwrap_or(false);
+        let lost = match popup.renderer_mut() {
+            Some(renderer) => {
+                renderer.begin_frame(transparent_black());
+                frame.paint(renderer, &mut |_, _, _| {});
+                match renderer.end_frame() {
+                    Ok(lost) => lost,
+                    Err(err) => {
+                        crate::platform::debug_log(&format!("tooltip end_frame failed: {err}"));
+                        true
+                    }
+                }
+            }
+            None => true,
+        };
         let animating = self.ui.finish_frame(frame);
         if animating {
             self.dirty = true;
@@ -497,7 +519,7 @@ fn measure_tooltip(content: &SharedStr, ts: &TextSystem) -> Size {
         FONT_SIZE,
         &font(SMALL_FONT),
         Some(wrap),
-        None,
+        Some(LINE_HEIGHT),
         None,
         TextAlign::Left,
     );

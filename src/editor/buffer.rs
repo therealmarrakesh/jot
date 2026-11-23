@@ -3,10 +3,10 @@
 use std::ops::{Bound, Range, RangeBounds};
 
 use ropey::{LineType, Rope, RopeSlice};
-use unicode_segmentation::UnicodeSegmentation;
+use unicode_segmentation::{GraphemeCursor, GraphemeIncomplete, UnicodeSegmentation};
 
 const WORD_SCAN_WINDOW_BYTES: usize = 256;
-const DOUBLE_CLICK_SCAN_LIMIT: usize = 128;
+const GRAPHEME_SCAN_WINDOW_BYTES: usize = 128;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum Bias {
@@ -75,16 +75,6 @@ impl From<Selection> for Range<usize> {
     }
 }
 
-impl RangeBounds<usize> for Selection {
-    fn start_bound(&self) -> Bound<&usize> {
-        Bound::Included(&self.start)
-    }
-
-    fn end_bound(&self) -> Bound<&usize> {
-        Bound::Excluded(&self.end)
-    }
-}
-
 /// Oriented caret + selection span with preferred vertical-motion X column anchor.
 #[derive(Debug, Copy, Clone, PartialEq, Default)]
 pub(crate) struct CaretSelection {
@@ -103,11 +93,6 @@ impl CaretSelection {
             reversed: false,
             preferred_x: None,
         }
-    }
-
-    #[inline]
-    pub(crate) fn len(&self) -> usize {
-        self.end.saturating_sub(self.start)
     }
 
     #[inline]
@@ -141,7 +126,15 @@ impl CaretSelection {
         self.preferred_x = preferred_x;
     }
 
-    pub(crate) fn extend_to(&mut self, offset: usize, anchor_word: Option<CaretSelection>) {
+    pub(crate) fn extend_to(
+        &mut self,
+        offset: usize,
+        anchor_word: Option<CaretSelection>,
+        max_len: usize,
+    ) {
+        let offset = offset.min(max_len);
+        self.start = self.start.min(max_len);
+        self.end = self.end.min(max_len);
         if self.reversed {
             self.start = offset;
         } else {
@@ -152,8 +145,8 @@ impl CaretSelection {
             std::mem::swap(&mut self.start, &mut self.end);
         }
         if let Some(word) = anchor_word {
-            self.start = self.start.min(word.start);
-            self.end = self.end.max(word.end);
+            self.start = self.start.min(word.start.min(max_len));
+            self.end = self.end.max(word.end.min(max_len));
         }
     }
 }
@@ -301,142 +294,270 @@ pub(crate) fn line_range_at(text: &Rope, offset: usize) -> Range<usize> {
     text.line_start_offset(row)..text.line_end_offset(row)
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum TokenClass {
-    Identifier,
-    HorizontalSpace,
-    Break,
-    Symbol,
-}
-
-fn classify_char(ch: char) -> TokenClass {
-    if ch == '_'
-        || ch.is_ascii_alphanumeric()
-        || matches!(
-            ch,
-            '\u{00C0}'..='\u{024F}'
-                | '\u{0300}'..='\u{036F}'
-                | '\u{0400}'..='\u{04FF}'
-                | '\u{1E00}'..='\u{1EFF}'
-        )
-    {
-        TokenClass::Identifier
-    } else if matches!(ch, '\n' | '\r') {
-        TokenClass::Break
-    } else if ch.is_whitespace() {
-        TokenClass::HorizontalSpace
-    } else {
-        TokenClass::Symbol
+/// Steps backward by one extended Unicode grapheme cluster (UAX #29, E-4).
+pub(crate) fn prev_grapheme_boundary(text: &Rope, offset: usize) -> usize {
+    let len = text.len();
+    let off = text.clip_offset(offset, Bias::Left);
+    if off == 0 {
+        return 0;
+    }
+    // Fast path for plain printable ASCII pairs (never join with a preceding ASCII byte).
+    let prev_b = text.byte(off - 1);
+    if (0x20..=0x7E).contains(&prev_b) && (off == 1 || text.byte(off - 2) < 0x80) {
+        return off - 1;
+    }
+    let mut span = GRAPHEME_SCAN_WINDOW_BYTES;
+    loop {
+        let win_start = text.floor_char_boundary(off.saturating_sub(span));
+        let win_end = text.ceil_char_boundary(off.saturating_add(32).min(len));
+        let chunk = text.slice(win_start..win_end).to_string();
+        let mut cursor = GraphemeCursor::new(off, len, true);
+        match cursor.prev_boundary(&chunk, win_start) {
+            Ok(Some(pos)) => return pos,
+            Ok(None) => return 0,
+            Err(GraphemeIncomplete::PrevChunk | GraphemeIncomplete::PreContext(_))
+                if win_start > 0 =>
+            {
+                span = span.saturating_mul(2);
+            }
+            Err(_) => return text.floor_char_boundary(off.saturating_sub(1)),
+        }
     }
 }
 
+/// Steps forward by one extended Unicode grapheme cluster (UAX #29, E-4).
+pub(crate) fn next_grapheme_boundary(text: &Rope, offset: usize) -> usize {
+    let len = text.len();
+    let off = text.clip_offset(offset, Bias::Right);
+    if off >= len {
+        return len;
+    }
+    let b = text.byte(off);
+    if (0x20..=0x7E).contains(&b) && (off + 1 == len || text.byte(off + 1) < 0x80) {
+        return off + 1;
+    }
+    let mut span = GRAPHEME_SCAN_WINDOW_BYTES;
+    loop {
+        let win_start = text.floor_char_boundary(off.saturating_sub(span));
+        let win_end = text.ceil_char_boundary(off.saturating_add(span).min(len));
+        let chunk = text.slice(win_start..win_end).to_string();
+        let mut cursor = GraphemeCursor::new(off, len, true);
+        match cursor.next_boundary(&chunk, win_start) {
+            Ok(Some(pos)) => return pos,
+            Ok(None) => return len,
+            Err(GraphemeIncomplete::NextChunk | GraphemeIncomplete::PreContext(_))
+                if win_start > 0 || win_end < len =>
+            {
+                span = span.saturating_mul(2);
+            }
+            Err(_) => return text.ceil_char_boundary((off + 1).min(len)),
+        }
+    }
+}
+
+/// Snaps `offset` to the nearest extended Unicode grapheme cluster boundary (E-4).
+pub(crate) fn snap_grapheme_boundary(text: &Rope, offset: usize, bias: Bias) -> usize {
+    let len = text.len();
+    let off = text.clip_offset(offset, bias);
+    if off == 0 || off >= len {
+        return off;
+    }
+    // Fast path for plain ASCII boundaries (not inside `\r\n`).
+    let prev_b = text.byte(off - 1);
+    let curr_b = text.byte(off);
+    if prev_b < 0x80 && curr_b < 0x80 && !(prev_b == b'\r' && curr_b == b'\n') {
+        return off;
+    }
+    let mut span = GRAPHEME_SCAN_WINDOW_BYTES;
+    loop {
+        let win_start = text.floor_char_boundary(off.saturating_sub(span));
+        let win_end = text.ceil_char_boundary(off.saturating_add(span).min(len));
+        let chunk = text.slice(win_start..win_end).to_string();
+        let mut cursor = GraphemeCursor::new(off, len, true);
+        match cursor.is_boundary(&chunk, win_start) {
+            Ok(true) => return off,
+            Ok(false) => {
+                return match bias {
+                    Bias::Left => prev_grapheme_boundary(text, off),
+                    Bias::Right => next_grapheme_boundary(text, off),
+                };
+            }
+            Err(GraphemeIncomplete::PreContext(_)) if win_start > 0 => {
+                span = span.saturating_mul(2);
+            }
+            Err(_) => return off,
+        }
+    }
+}
+
+#[inline]
+fn is_horizontal_ws(ch: char) -> bool {
+    ch.is_whitespace() && !matches!(ch, '\n' | '\r')
+}
+
+/// Uncapped UAX #29 double-click word selection (selecting the preceding word at line end, E-12).
 pub(crate) fn word_range_at(text: &Rope, offset: usize) -> Option<Range<usize>> {
-    let start_pos = text.clip_offset(offset, Bias::Left);
-    let ch = text.char_at(start_pos)?;
-    let class = classify_char(ch);
-    let joins = |other: char| {
-        let other_class = classify_char(other);
-        matches!(
-            (class, other_class),
-            (TokenClass::Identifier, TokenClass::Identifier)
-                | (TokenClass::HorizontalSpace, TokenClass::HorizontalSpace)
-        )
-    };
+    let line = line_range_at(text, offset);
+    if line.is_empty() {
+        return None;
+    }
+    let mut pos = text.clip_offset(offset, Bias::Left);
+    if pos >= line.end {
+        pos = prev_grapheme_boundary(text, line.end);
+    }
+    if pos < line.start || pos >= line.end {
+        return None;
+    }
 
-    let mut left = start_pos;
-    for prev in text
-        .chars_at(start_pos)
-        .reversed()
-        .take(DOUBLE_CLICK_SCAN_LIMIT)
-    {
-        if !joins(prev) {
-            break;
+    let ch = text.char_at(pos)?;
+    if is_horizontal_ws(ch) {
+        let mut left = pos;
+        for prev in text.chars_at(pos).reversed() {
+            if left <= line.start || !is_horizontal_ws(prev) {
+                break;
+            }
+            left -= prev.len_utf8();
         }
-        left -= prev.len_utf8();
-    }
-
-    let mut right = start_pos + ch.len_utf8();
-    for next in text.chars_at(right).take(DOUBLE_CLICK_SCAN_LIMIT) {
-        if !joins(next) {
-            break;
+        let mut right = pos + ch.len_utf8();
+        for next in text.chars_at(right) {
+            if right >= line.end || !is_horizontal_ws(next) {
+                break;
+            }
+            right += next.len_utf8();
         }
-        right += next.len_utf8();
-    }
-
-    Some(left..right)
-}
-
-pub(crate) fn prev_word_start(text: &Rope, offset: usize) -> usize {
-    let offset = text.floor_char_boundary(offset.min(text.len()));
-    if offset == 0 {
-        return 0;
-    }
-
-    let mut end = offset;
-    for ch in text.chars_at(offset).reversed() {
-        if ch.is_whitespace() {
-            end -= ch.len_utf8();
-        } else {
-            break;
-        }
-    }
-    if end == 0 {
-        return 0;
+        return Some(left..right);
     }
 
     let mut span = WORD_SCAN_WINDOW_BYTES;
     loop {
-        let win_start = text.floor_char_boundary(end.saturating_sub(span));
-        let chunk = text.slice(win_start..end).to_string();
-        if let Some((rel, _)) = UnicodeSegmentation::split_word_bound_indices(chunk.as_str())
-            .rfind(|(_, piece)| !piece.trim_start().is_empty())
-            && (win_start == 0 || (rel > 0 && chunk[..rel].chars().count() >= 4))
-        {
-            return win_start + rel;
+        let win_start = text
+            .floor_char_boundary(pos.saturating_sub(span))
+            .max(line.start);
+        let win_end = text
+            .ceil_char_boundary(pos.saturating_add(span).min(line.end))
+            .min(line.end);
+        let chunk = text.slice(win_start..win_end).to_string();
+        let rel_pos = pos - win_start;
+        for (seg_start, seg) in UnicodeSegmentation::split_word_bound_indices(chunk.as_str()) {
+            let seg_end = seg_start + seg.len();
+            if rel_pos >= seg_start && rel_pos < seg_end {
+                let touches_left = win_start > line.start && chunk[..seg_start].chars().count() < 4;
+                let touches_right = win_end < line.end && chunk[seg_end..].chars().count() < 4;
+                if !touches_left && !touches_right {
+                    return Some((win_start + seg_start)..(win_start + seg_end));
+                }
+                break;
+            }
         }
-        if win_start == 0 {
-            return 0;
+        if win_start == line.start && win_end == line.end {
+            return Some(pos..(pos + ch.len_utf8()));
         }
         span = span.saturating_mul(2);
     }
 }
 
+/// Windows Ctrl+Left / Ctrl+Backspace boundary: treats `\n` as a hard stop (E-10).
+pub(crate) fn prev_word_start(text: &Rope, offset: usize) -> usize {
+    let offset = text.floor_char_boundary(offset.min(text.len()));
+    if offset == 0 {
+        return 0;
+    }
+    if text.byte(offset - 1) == b'\n' {
+        return offset - 1;
+    }
+    let row = text.offset_to_point(offset).row;
+    let line_start = text.line_start_offset(row);
+
+    let mut end = offset;
+    for ch in text.chars_at(offset).reversed() {
+        if end <= line_start || !is_horizontal_ws(ch) {
+            break;
+        }
+        end -= ch.len_utf8();
+    }
+    if end <= line_start {
+        return line_start;
+    }
+
+    let mut span = WORD_SCAN_WINDOW_BYTES;
+    loop {
+        let win_start = text
+            .floor_char_boundary(end.saturating_sub(span))
+            .max(line_start);
+        let chunk = text.slice(win_start..end).to_string();
+        if let Some((rel, _)) = UnicodeSegmentation::split_word_bound_indices(chunk.as_str())
+            .rfind(|(_, piece)| !piece.chars().all(is_horizontal_ws))
+            && (win_start == line_start || (rel > 0 && chunk[..rel].chars().count() >= 4))
+        {
+            return win_start + rel;
+        }
+        if win_start == line_start {
+            return line_start;
+        }
+        span = span.saturating_mul(2);
+    }
+}
+
+/// Windows Ctrl+Right / Ctrl+Delete boundary: advances to start of next word on the current line
+/// (stopping at line end, and stepping across `\n` only when already at line end, E-10).
 pub(crate) fn next_word_end(text: &Rope, offset: usize) -> usize {
     let len = text.len();
     let offset = text.floor_char_boundary(offset.min(len));
     if offset >= len {
         return len;
     }
+    if text.byte(offset) == b'\n' {
+        return offset + 1;
+    }
+    let row = text.offset_to_point(offset).row;
+    let line_end = text.line_end_offset(row);
+    if offset >= line_end {
+        return (line_end + 1).min(len);
+    }
 
     let mut start = offset;
-    for ch in text.chars_at(offset) {
-        if ch.is_whitespace() {
+    // If already on horizontal whitespace, advance straight to the next word on this line.
+    if text.char_at(start).is_some_and(is_horizontal_ws) {
+        for ch in text.chars_at(start) {
+            if start >= line_end || !is_horizontal_ws(ch) {
+                break;
+            }
             start += ch.len_utf8();
-        } else {
-            break;
         }
-    }
-    if start >= len {
-        return len;
+        return start.min(line_end);
     }
 
+    // Advance past the current UAX #29 word segment within `start..line_end`.
     let mut span = WORD_SCAN_WINDOW_BYTES;
-    loop {
-        let win_end = text.ceil_char_boundary(start.saturating_add(span).min(len));
+    let word_end = loop {
+        let win_end = text
+            .ceil_char_boundary(start.saturating_add(span).min(line_end))
+            .min(line_end);
         let chunk = text.slice(start..win_end).to_string();
         if let Some((rel, piece)) = UnicodeSegmentation::split_word_bound_indices(chunk.as_str())
-            .find(|(_, piece)| !piece.trim_start().is_empty())
+            .find(|(_, piece)| !piece.chars().all(is_horizontal_ws))
         {
             let end = rel + piece.len();
-            if win_end == len || chunk[end..].chars().count() >= 4 {
-                return start + end;
+            if win_end == line_end || chunk[end..].chars().count() >= 4 {
+                break start + end;
             }
         }
-        if win_end == len {
-            return len;
+        if win_end == line_end {
+            break line_end;
         }
         span = span.saturating_mul(2);
+    };
+
+    // Windows Notepad convention: consume trailing horizontal whitespace on this line so the
+    // caret lands at the start of the next word (or at `line_end`, never crossing `\n`).
+    let mut pos = word_end.min(line_end);
+    for ch in text.chars_at(pos) {
+        if pos >= line_end || !is_horizontal_ws(ch) {
+            break;
+        }
+        pos += ch.len_utf8();
     }
+    pos.min(line_end)
 }
 
 #[cfg(test)]
@@ -537,21 +658,47 @@ mod tests {
         let long_word = "a".repeat(WORD_SCAN_WINDOW_BYTES + 64);
         let long_spaces = " ".repeat(WORD_SCAN_WINDOW_BYTES + 64);
         let sample = format!(
-            "  hello, don't 1,234.56 foo_bar\r\n日本語🎉 test{long_spaces}{long_word}  tail"
+            "  hello, don't 1,234.56 foo_bar\n日本語🎉 test{long_spaces}{long_word}  tail"
         );
         let rope = Rope::from(sample.as_str());
 
-        for (offset, _) in sample.char_indices().chain([(sample.len(), '\0')]) {
-            let ref_prev = UnicodeSegmentation::split_word_bound_indices(&sample[..offset])
-                .rfind(|(_, s)| !s.trim_start().is_empty())
-                .map(|(i, _)| i)
-                .unwrap_or(0);
-            let ref_next = UnicodeSegmentation::split_word_bound_indices(&sample[offset..])
-                .find(|(_, s)| !s.trim_start().is_empty())
-                .map(|(i, s)| offset + i + s.len())
-                .unwrap_or(sample.len());
-            assert_eq!(prev_word_start(&rope, offset), ref_prev, "prev at {offset}");
-            assert_eq!(next_word_end(&rope, offset), ref_next, "next at {offset}");
+        // Newlines act as hard boundaries in both directions (E-10).
+        let nl = sample.find('\n').unwrap();
+        assert_eq!(prev_word_start(&rope, nl + 1), nl);
+        assert_eq!(next_word_end(&rope, nl), nl + 1);
+        assert_eq!(next_word_end(&rope, nl - 3), nl);
+
+        // Long identifiers > WORD_SCAN_WINDOW_BYTES work without truncation (E-12).
+        let long_start = sample.find(&long_word).unwrap();
+        assert_eq!(
+            word_range_at(&rope, long_start + 10),
+            Some(long_start..long_start + long_word.len())
+        );
+        assert_eq!(
+            prev_word_start(&rope, long_start + long_word.len()),
+            long_start
+        );
+        assert_eq!(
+            next_word_end(&rope, long_start),
+            long_start + long_word.len() + 2
+        );
+
+        // Extended grapheme cluster stepping (E-4).
+        let emoji = Rope::from("a👍🏽b👨‍👩‍👧🇺🇸e\u{0301}z");
+        let mut forward = vec![0];
+        let mut cur = 0;
+        while cur < emoji.len() {
+            cur = next_grapheme_boundary(&emoji, cur);
+            forward.push(cur);
         }
+        assert_eq!(forward.len(), 8, "7 grapheme clusters + start");
+        let mut backward = vec![emoji.len()];
+        cur = emoji.len();
+        while cur > 0 {
+            cur = prev_grapheme_boundary(&emoji, cur);
+            backward.push(cur);
+        }
+        backward.reverse();
+        assert_eq!(forward, backward);
     }
 }

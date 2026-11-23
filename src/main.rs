@@ -31,37 +31,62 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use app::{App, AppEvent};
+use instance::Arbitration;
 use platform::Platform;
 
 pub(crate) const APP_NAME: &str = "Jot";
 const NOTICES_FLAG: &str = "--notices";
 
 fn main() {
+    platform::install_panic_hook();
+
     let (flags, mut paths): (Vec<_>, Vec<_>) = std::env::args_os()
         .skip(1)
         .map(PathBuf::from)
         .partition(|arg| arg.as_os_str() == NOTICES_FLAG);
     if !flags.is_empty() {
-        paths.extend(document::write_notices().ok());
-    }
-    if !paths.is_empty() && instance::try_handoff(&paths) {
-        return;
+        match document::write_notices() {
+            Ok(path) => paths.push(path),
+            Err(err) => platform::debug_log(&format!("Failed to write notices file: {err}")),
+        }
     }
 
-    let platform = Rc::new(Platform::new().expect("Failed to initialize Windows platform"));
+    // Arbitrate single-instance ownership *before* D3D/D2D initialization (I-1, I-4).
+    let server = match instance::arbitrate(&paths) {
+        Arbitration::HandedOff => return,
+        Arbitration::Primary(server) => server,
+    };
+
+    let platform = match Platform::new() {
+        Ok(p) => Rc::new(p),
+        Err(err) => {
+            platform::show_error_dialog(APP_NAME, &format!("Jot couldn't start.\n\n{err}"));
+            return;
+        }
+    };
     let app = Rc::new(RefCell::new(App::new(platform)));
 
-    let poster = app.borrow().jobs.poster();
-    instance::start_listener(move |incoming| {
-        poster.post(AppEvent::HandoffPaths(incoming));
-    });
+    if let Some(ref server) = server {
+        let poster = app.borrow().jobs.poster();
+        app.borrow_mut().set_pipe_accepting(server.accepting_flag());
+        server.attach_handler(move |cmd| {
+            poster.post(AppEvent::Handoff(cmd));
+        });
+    }
 
-    Platform::run(app, move |app| {
-        if let Some((id, _)) = app.open_window(None, None)
-            && !paths.is_empty()
-            && let Some(ix) = app.window_ix(id)
-        {
-            app.windows[ix].open_paths(paths, &app.jobs);
+    Platform::run(app, move |app| match app.open_window(None, None) {
+        Ok((id, _)) => {
+            if !paths.is_empty() {
+                app.open_paths_in_window(id, paths);
+            }
+        }
+        Err(err) => {
+            platform::show_error_dialog(
+                APP_NAME,
+                &format!("Jot couldn't open a window.\n\n{}", err.message),
+            );
+            app.request_quit();
         }
     });
+    drop(server);
 }

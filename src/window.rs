@@ -1,20 +1,21 @@
 //! Main editor window: custom Mica Alt titlebar + caption buttons, tab strip, menu bar row,
 //! multi-tab editor host, status bar, dynamic min-size tracking, and direct top-down input routing.
 
-use std::path::{Path, PathBuf};
+use std::collections::VecDeque;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crate::APP_NAME;
 use crate::app::{AppEvent, ViewSettings};
 use crate::color::{rgb, rgba, transparent_black};
-use crate::command::Command;
+use crate::command::{Command, window_shortcut};
 use crate::dialog::{DialogKind, Dialogs};
 use crate::document::{self, Format};
 use crate::editor::{
     Editor, EditorPaintStyle, EditorTimer, EditorTimers, Position, RopeExt as _, key_to_command,
 };
 use crate::files::{
-    self, FilePrompt, FileWorkflow, UNTITLED_FILE_NAME, WorkflowFinish, WorkflowStep,
+    self, FilePrompt, FileWorkflow, WorkflowFinish, WorkflowGen, WorkflowStep,
 };
 use crate::find::FindBar;
 use crate::geom::{Axis, Edges, Point, Rect, Size, point, size};
@@ -26,8 +27,8 @@ use crate::platform::{
     WindowControlArea, WindowId, format_local_time_date,
 };
 use crate::tabs::{
-    self, CAPTION_BUTTON_WIDTH, SCROLL_REPEAT_DELAY, SCROLL_REPEAT_INTERVAL, SCROLL_STEP,
-    STRIP_TOP, TAB_HEIGHT, Tab, TabData, TabId, TabStrip, WHEEL_SHARE,
+    self, CAPTION_BUTTON_WIDTH, PendingSave, SCROLL_REPEAT_DELAY, SCROLL_REPEAT_INTERVAL,
+    SCROLL_STEP, STRIP_TOP, TAB_HEIGHT, Tab, TabData, TabId, TabSaveState, TabStrip, WHEEL_SHARE,
 };
 use crate::theme::Palette;
 use crate::types::Result;
@@ -43,11 +44,6 @@ use crate::ui::{
 pub(crate) const WINDOW_WIDTH: f32 = 2213.;
 pub(crate) const WINDOW_HEIGHT: f32 = 1107.;
 pub(crate) const WINDOW_MAX_SCREEN_SHARE: f32 = 0.9;
-
-const CLOSE_HOVER: u32 = 0xc42b1cff;
-const CLOSE_PRESSED: u32 = 0xc42b1ce6;
-const CLOSE_GLYPH_HOVER: u32 = 0xffffffff;
-const CLOSE_GLYPH_PRESSED: u32 = 0xffffffb3;
 
 const SEPARATOR_HEIGHT: f32 = 1.;
 pub(crate) const MENU_BAR_HEIGHT: f32 = 32.;
@@ -78,7 +74,7 @@ const ZOOM_STEP: f32 = 0.1;
 const ZOOM_MIN: f32 = 0.1;
 const ZOOM_MAX: f32 = 5.;
 
-/// Explicit per-window focus target (replaces `FocusHandle` / `FocusNode` graph).
+/// Explicit per-window focus target.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Focus {
     Editor(EditorSlot),
@@ -122,8 +118,9 @@ struct StatusMetrics {
 
 #[derive(Clone, Copy, PartialEq)]
 struct MinSizeKey {
-    status: Option<StatusMetrics>,
+    status_bar: bool,
     zoom_pct: u32,
+    format: Format,
     menu_width: f32,
     scale: f32,
 }
@@ -180,11 +177,15 @@ pub(crate) struct MainWindow {
     pub(crate) menu_bar: MenuBar,
     pub(crate) find: FindBar,
     pub(crate) dialogs: Dialogs,
+    pending_prompts: VecDeque<DialogKind>,
+    pub(crate) open_dialog_active: bool,
     pub(crate) focus: Focus,
     pub(crate) file_workflow: Option<FileWorkflow>,
     pub(crate) dirty: bool,
+    pub(crate) has_painted: bool,
     pub(crate) pending_close: bool,
     pub(crate) pointer_hovered: bool,
+    pub(crate) pointer_pressed: bool,
     pub(crate) last_mouse_pos: Point,
     middle_pressed_tab: Option<TabId>,
     min_size_cache: Option<MinSizeCache>,
@@ -212,11 +213,15 @@ impl MainWindow {
             menu_bar: MenuBar::default(),
             find: FindBar::new(),
             dialogs: Dialogs::new(),
+            pending_prompts: VecDeque::new(),
+            open_dialog_active: false,
             focus: Focus::Editor(EditorSlot::Tab(active_id.0)),
             file_workflow: None,
             dirty: true,
+            has_painted: false,
             pending_close: false,
             pointer_hovered: false,
+            pointer_pressed: false,
             last_mouse_pos: Point::ZERO,
             middle_pressed_tab: None,
             min_size_cache: None,
@@ -302,10 +307,11 @@ impl MainWindow {
             }
             return;
         }
-        if let Focus::Editor(old_slot) = self.focus
-            && let Some(ed) = self.editor_by_slot_mut(old_slot)
-        {
-            ed.on_blur();
+        if let Focus::Editor(old_slot) = self.focus {
+            self.native.hwnd().complete_ime_composition();
+            if let Some(ed) = self.editor_by_slot_mut(old_slot) {
+                ed.on_blur();
+            }
         }
         self.focus = next;
         if let Focus::Editor(new_slot) = next {
@@ -372,16 +378,26 @@ impl MainWindow {
 
     // ---- Tab operations ----
 
-    pub(crate) fn activate_tab(&mut self, ix: usize, jobs: &Jobs<AppEvent>) {
+    pub(crate) fn select_tab_only(&mut self, ix: usize) {
+        if self.active != ix {
+            self.native.hwnd().complete_ime_composition();
+            self.active_editor_mut().on_blur();
+        }
         self.active = ix;
         self.strip.reveal_tab(&self.tabs, ix);
         self.find.clear_notice();
         if self.find.is_open() && !self.has_text() {
             self.find.close();
         }
-        self.focus_active_editor(jobs);
         self.refresh_title();
         self.dirty = true;
+    }
+
+    pub(crate) fn activate_tab(&mut self, ix: usize, jobs: &Jobs<AppEvent>) {
+        self.select_tab_only(ix);
+        if !self.dialogs.is_open() && !self.menu_bar.is_open() {
+            self.focus_active_editor(jobs);
+        }
     }
 
     pub(crate) fn add_tab(&mut self, word_wrap: bool, jobs: &Jobs<AppEvent>) {
@@ -409,11 +425,16 @@ impl MainWindow {
             self.pending_close = true;
             return None;
         }
+        let was_active = ix == self.active;
         let width = self.strip.width;
         let name: crate::types::SharedStr = self.tab_name(ix).into();
         let tab = self.tabs.remove(ix);
         let removed_id = tab.data.id;
         self.strip.depart(removed_id);
+        if self.dialogs.close_for_tab(removed_id) {
+            self.pending_prompts
+                .retain(|d| d.referenced_tab() != Some(removed_id));
+        }
         if ix < self.tabs.len()
             && self
                 .ui
@@ -423,17 +444,26 @@ impl MainWindow {
         {
             self.strip.freeze(width);
         }
-        self.strip.push_ghost(name, tab.slot, ix, width);
+        self.strip.push_ghost(name, tab.slot, ix, width, was_active);
         self.settle_after_removal(ix, jobs);
         Some(removed_id)
     }
 
     fn settle_after_removal(&mut self, ix: usize, jobs: &Jobs<AppEvent>) {
+        let closed_active = ix == self.active;
         if ix < self.active || self.active == self.tabs.len() {
             self.active -= 1;
         }
         self.strip.layout(self.tabs.len());
-        self.activate_tab(self.active, jobs);
+        let focus_in_find = matches!(
+            self.focus,
+            Focus::Editor(EditorSlot::FindQuery | EditorSlot::FindReplace)
+        );
+        if closed_active || !focus_in_find {
+            self.activate_tab(self.active, jobs);
+        } else {
+            self.select_tab_only(self.active);
+        }
     }
 
     pub(crate) fn drag_tab(&mut self, id: TabId, x: f32, grab: f32, start: f32) {
@@ -551,18 +581,19 @@ impl MainWindow {
 
     // ---- File workflows ----
 
-    pub(crate) fn find_open_tab(&self, path: &Path) -> Option<usize> {
-        self.tabs.iter().position(|tab| {
-            tab.data
-                .path
-                .as_deref()
-                .is_some_and(|existing| document::same_path(existing, path))
-        })
+    pub(crate) fn find_open_tab_by_key(&self, key: &str) -> Option<usize> {
+        self.tabs
+            .iter()
+            .position(|tab| tab.data.path_key.as_deref() == Some(key))
     }
 
     fn is_blank(&self, ix: usize) -> bool {
         let tab = &self.tabs[ix];
         tab.data.path.is_none() && tab.data.editor.text().len() == 0
+    }
+
+    pub(crate) fn has_dirty_tabs(&self) -> bool {
+        self.tabs.iter().any(|tab| tab.data.is_dirty())
     }
 
     fn dirty_tabs(&self) -> Vec<TabId> {
@@ -573,66 +604,41 @@ impl MainWindow {
             .collect()
     }
 
-    pub(crate) fn open_paths(&mut self, paths: Vec<PathBuf>, jobs: &Jobs<AppEvent>) {
-        let mut to_load: Vec<PathBuf> = Vec::new();
-        let mut last_existing = None;
-        for raw in paths {
-            let path = std::path::absolute(&raw).unwrap_or(raw);
-            if let Some(ix) = self.find_open_tab(&path) {
-                last_existing = Some(ix);
-                continue;
-            }
-            if !to_load
-                .iter()
-                .any(|queued| document::same_path(queued, &path))
-            {
-                to_load.push(path);
-            }
-        }
-        if to_load.is_empty() {
-            if let Some(ix) = last_existing {
-                self.activate_tab(ix, jobs);
-            }
-            return;
-        }
-        files::spawn_load_files(self.id(), to_load, jobs);
-    }
-
-    pub(crate) fn on_files_loaded(
+    pub(crate) fn adopt_loaded_file(
         &mut self,
-        results: Vec<(PathBuf, std::result::Result<document::Loaded, document::LoadError>)>,
+        path: PathBuf,
+        result: std::result::Result<document::Loaded, document::LoadError>,
         word_wrap: bool,
         jobs: &Jobs<AppEvent>,
-    ) -> Vec<TabId> {
-        let mut forgotten = Vec::new();
-        for (path, result) in results {
-            if let Some(ix) = self.find_open_tab(&path) {
-                self.activate_tab(ix, jobs);
-                continue;
+    ) -> Option<TabId> {
+        match result {
+            Ok(loaded) => {
+                let tab = Tab::adopt(TabData::create(
+                    Some((path, loaded)),
+                    word_wrap,
+                    EDITOR_PADDINGS,
+                ));
+                if self.is_blank(self.active) {
+                    Some(self.replace_tab(self.active, tab, jobs))
+                } else {
+                    self.push_tab(tab, jobs);
+                    None
+                }
             }
-            match result {
-                Ok(loaded) => {
-                    let tab = Tab::adopt(TabData::create(
-                        Some((path, loaded)),
-                        word_wrap,
-                        EDITOR_PADDINGS,
-                    ));
-                    if self.is_blank(self.active) {
-                        forgotten.push(self.replace_tab(self.active, tab, jobs));
-                    } else {
-                        self.push_tab(tab, jobs);
-                    }
-                }
-                Err(err) => {
-                    self.show_file_prompt(files::load_error_prompt(&path, err), jobs);
-                }
+            Err(err) => {
+                self.show_file_prompt(files::load_error_prompt(&path, err), jobs);
+                None
             }
         }
-        forgotten
     }
 
     pub(crate) fn save(&mut self, jobs: &Jobs<AppEvent>) {
-        let id = self.active_tab_id();
+        let data = &self.tabs[self.active].data;
+        // Skip redundant disk rewrites when the tab is clean and has no lossy-decode flag (DOC-3).
+        if data.path.is_some() && !data.is_dirty() && !data.format.lossy_decode {
+            return;
+        }
+        let id = data.id;
         self.start_file_workflow(
             FileWorkflow::single(
                 WorkflowStep::SaveTab {
@@ -688,11 +694,19 @@ impl MainWindow {
         None
     }
 
-    pub(crate) fn request_close_window(&mut self, jobs: &Jobs<AppEvent>) -> bool {
+    pub(crate) fn request_close_window(&mut self, jobs: &Jobs<AppEvent>) {
         let dirty = self.dirty_tabs();
         if dirty.is_empty() {
             self.pending_close = true;
-            return true;
+            return;
+        }
+        if self.dialogs.is_open()
+            && self
+                .file_workflow
+                .as_ref()
+                .is_some_and(|wf| wf.on_finish == WorkflowFinish::CloseWindow)
+        {
+            return;
         }
         self.start_file_workflow(
             FileWorkflow::batch(
@@ -703,7 +717,6 @@ impl MainWindow {
             ),
             jobs,
         );
-        false
     }
 
     fn start_file_workflow(&mut self, workflow: FileWorkflow, jobs: &Jobs<AppEvent>) {
@@ -715,28 +728,81 @@ impl MainWindow {
         self.file_workflow = None;
     }
 
+    pub(crate) fn abort_file_workflow_if(&mut self, wf_gen: WorkflowGen) {
+        if self.file_workflow.as_ref().is_some_and(|wf| wf.wf_gen == wf_gen) {
+            self.file_workflow = None;
+        }
+    }
+
+    pub(crate) fn advance_file_workflow_if(
+        &mut self,
+        wf_gen: WorkflowGen,
+        jobs: &Jobs<AppEvent>,
+    ) -> Option<TabId> {
+        if self.file_workflow.as_ref().is_some_and(|wf| wf.wf_gen == wf_gen) {
+            self.advance_file_workflow(jobs)
+        } else {
+            None
+        }
+    }
+
     pub(crate) fn advance_file_workflow(&mut self, jobs: &Jobs<AppEvent>) -> Option<TabId> {
         loop {
+            let wf_gen = self.file_workflow.as_ref().map(|wf| wf.wf_gen);
             let next = self
                 .file_workflow
                 .as_mut()
                 .and_then(FileWorkflow::next_step);
             let Some(step) = next else {
-                if let Some(workflow) = self.file_workflow.take() {
+                if let Some(mut workflow) = self.file_workflow.take() {
                     match workflow.on_finish {
                         WorkflowFinish::None => {}
                         WorkflowFinish::RemoveTab(id) => {
                             if let Some(ix) = self.tab_index(id) {
+                                // Re-check dirtiness so edits made during async save are never lost,
+                                // while still honoring an explicit "Don't save" for the same revision (F-2).
+                                let rev = self.tabs[ix].data.editor.revision();
+                                if self.tabs[ix].data.is_dirty()
+                                    && !workflow.is_discard_approved(id, rev)
+                                {
+                                    return self.close_tab(ix, jobs);
+                                }
                                 return self.remove_tab(ix, jobs);
                             }
                         }
                         WorkflowFinish::CloseWindow => {
-                            self.pending_close = true;
+                            // Re-validate all tabs so edits / Ctrl+N during async save are never lost (F-2).
+                            let remaining_dirty: Vec<TabId> = self
+                                .tabs
+                                .iter()
+                                .filter(|t| {
+                                    t.data.is_dirty()
+                                        && !workflow
+                                            .is_discard_approved(t.data.id, t.data.editor.revision())
+                                })
+                                .map(|t| t.data.id)
+                                .collect();
+                            if remaining_dirty.is_empty() {
+                                self.pending_close = true;
+                            } else {
+                                let approved = workflow.take_approved_discards();
+                                self.start_file_workflow(
+                                    FileWorkflow::batch(
+                                        remaining_dirty.into_iter().map(|id| {
+                                            WorkflowStep::ConfirmDiscard { id, activate: true }
+                                        }),
+                                        WorkflowFinish::CloseWindow,
+                                    )
+                                    .with_approved_discards(approved),
+                                    jobs,
+                                );
+                            }
                         }
                     }
                 }
                 return None;
             };
+            let wf_gen = wf_gen.unwrap_or_else(WorkflowGen::next);
 
             match step {
                 WorkflowStep::SaveTab { id, activate } => {
@@ -750,27 +816,28 @@ impl MainWindow {
                     match self.tabs[ix].data.path.clone() {
                         Some(path) => {
                             let format = self.tabs[ix].data.format;
-                            self.begin_write_tab(ix, path, format, jobs);
+                            let wid = self.id();
+                            self.begin_write_tab_for_workflow(ix, wid, wf_gen, path, format, jobs);
                         }
-                        None => self.begin_save_tab_as(id, jobs),
+                        None => self.begin_save_tab_as(id, wf_gen, jobs),
                     }
                     return None;
                 }
                 WorkflowStep::SaveTabAs(id) => {
-                    self.begin_save_tab_as(id, jobs);
+                    self.begin_save_tab_as(id, wf_gen, jobs);
                     return None;
                 }
                 WorkflowStep::ConfirmDiscard { id, activate } => {
                     let Some(ix) = self.tab_index(id) else {
                         continue;
                     };
+                    if !self.tabs[ix].data.is_dirty() {
+                        continue;
+                    }
                     if activate {
                         self.activate_tab(ix, jobs);
                     }
-                    let name = self.tabs[ix].data.path.as_deref().map_or_else(
-                        || UNTITLED_FILE_NAME.into(),
-                        |path| document::display_name(Some(path)),
-                    );
+                    let name = self.tab_name(ix);
                     self.show_file_prompt(FilePrompt::ConfirmDiscard { tab: id, name }, jobs);
                     return None;
                 }
@@ -778,122 +845,119 @@ impl MainWindow {
         }
     }
 
-    fn begin_save_tab_as(&mut self, id: TabId, jobs: &Jobs<AppEvent>) {
+    pub(crate) fn begin_save_tab_as(
+        &mut self,
+        id: TabId,
+        wf_gen: WorkflowGen,
+        jobs: &Jobs<AppEvent>,
+    ) {
         let Some(ix) = self.tab_index(id) else {
-            self.abort_file_workflow();
+            self.abort_file_workflow_if(wf_gen);
             return;
         };
         let current = self.tabs[ix].data.path.clone();
         let format = self.tabs[ix].data.format;
-        files::spawn_save_dialog(self.id(), self.native.hwnd(), id, current, format, jobs);
+        files::spawn_save_dialog(self.id(), wf_gen, self.native.hwnd(), id, current, format, jobs);
     }
 
-    fn begin_write_tab(&mut self, ix: usize, path: PathBuf, format: Format, jobs: &Jobs<AppEvent>) {
-        let id = self.tabs[ix].data.id;
-        let snapshot = self.tabs[ix].data.editor.begin_save();
-        let text = self.tabs[ix].data.editor.text().clone();
-        files::spawn_lossy_check(self.id(), id, snapshot, text, path, format, jobs);
-    }
-
-    pub(crate) fn on_save_dialog_done(
+    pub(crate) fn begin_write_tab_for_workflow(
         &mut self,
-        tab: TabId,
+        ix: usize,
+        origin_window: WindowId,
+        wf_gen: WorkflowGen,
+        path: PathBuf,
         format: Format,
-        result: crate::platform::SaveDialogResult,
         jobs: &Jobs<AppEvent>,
     ) {
-        let Some((path, next_format)) = files::resolve_save_dialog(format, result) else {
-            self.abort_file_workflow();
+        let data = &mut self.tabs[ix].data;
+        // Coalesce concurrent saves of the same tab into one trailing write (F-3).
+        if let TabSaveState::InFlight { pending } = &mut data.save_state {
+            *pending = Some(PendingSave {
+                path,
+                format,
+                wf_gen,
+            });
             return;
-        };
-        match self.tab_index(tab) {
-            Some(ix) => self.begin_write_tab(ix, path, next_format, jobs),
-            None => self.abort_file_workflow(),
+        }
+        data.save_state = TabSaveState::InFlight { pending: None };
+        let id = data.id;
+        let snapshot = data.editor.begin_save();
+        let text = data.editor.text().clone();
+        files::spawn_lossy_check(origin_window, wf_gen, id, snapshot, text, path, format, jobs);
+    }
+
+    pub(crate) fn clear_tab_save_in_flight(&mut self, tab: TabId) -> Option<PendingSave> {
+        let ix = self.tab_index(tab)?;
+        match std::mem::replace(&mut self.tabs[ix].data.save_state, TabSaveState::Idle) {
+            TabSaveState::InFlight { pending } => pending,
+            TabSaveState::Idle => None,
         }
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn on_lossy_check_done(
-        &mut self,
-        tab: TabId,
-        snapshot: u64,
-        text: crate::editor::Rope,
-        path: PathBuf,
-        format: Format,
-        result: std::io::Result<bool>,
-        jobs: &Jobs<AppEvent>,
-    ) {
-        match result {
-            Err(err) => {
-                self.show_file_prompt(files::save_error_prompt(&path, &err), jobs);
-                self.abort_file_workflow();
-            }
-            Ok(true) => {
-                self.show_file_prompt(
-                    FilePrompt::ConfirmLossyAnsi {
-                        tab,
-                        snapshot,
-                        text,
-                        path,
-                        format,
-                    },
-                    jobs,
-                );
-            }
-            Ok(false) => {
-                files::spawn_write_file(self.id(), tab, snapshot, text, path, format, jobs);
-            }
-        }
-    }
-
-    pub(crate) fn on_file_saved(
+    pub(crate) fn apply_tab_saved(
         &mut self,
         tab: TabId,
         snapshot: u64,
         path: PathBuf,
+        path_key: String,
         format: Format,
-        result: std::io::Result<()>,
+        origin_window: WindowId,
         jobs: &Jobs<AppEvent>,
-    ) -> Option<TabId> {
-        match result {
-            Ok(()) => {
-                let Some(ix) = self.tab_index(tab) else {
-                    self.abort_file_workflow();
-                    return None;
-                };
-                let t = &mut self.tabs[ix];
-                t.data.editor.mark_saved_version(snapshot);
-                t.data.path = Some(path);
-                t.data.format = format;
-                self.refresh_title();
-                self.dirty = true;
-                self.advance_file_workflow(jobs)
-            }
-            Err(err) => {
-                self.show_file_prompt(files::save_error_prompt(&path, &err), jobs);
-                self.abort_file_workflow();
-                None
-            }
+    ) -> Option<WorkflowGen> {
+        let pending = self.clear_tab_save_in_flight(tab);
+        let ix = self.tab_index(tab)?;
+        let t = &mut self.tabs[ix];
+        t.data.editor.mark_saved_version(snapshot);
+        t.data.path = Some(path);
+        t.data.path_key = Some(path_key);
+        t.data.format = format;
+        self.refresh_title();
+        self.dirty = true;
+        if let Some(next) = pending {
+            let next_gen = next.wf_gen;
+            self.begin_write_tab_for_workflow(
+                ix,
+                origin_window,
+                next_gen,
+                next.path,
+                next.format,
+                jobs,
+            );
+            return Some(next_gen);
         }
+        None
     }
 
     // ---- Dialogs & Find helpers ----
 
     fn show_dialog(&mut self, kind: DialogKind, jobs: &Jobs<AppEvent>) {
+        if self.dialogs.is_open() {
+            self.pending_prompts.push_back(kind);
+            return;
+        }
+        self.show_dialog_now(kind, jobs);
+    }
+
+    fn show_dialog_now(&mut self, kind: DialogKind, jobs: &Jobs<AppEvent>) {
         self.cancel_menu(jobs);
         let next_focus = self.dialogs.show(kind);
         self.set_focus(next_focus, jobs);
         self.dirty = true;
     }
 
-    fn show_file_prompt(&mut self, prompt: FilePrompt, jobs: &Jobs<AppEvent>) {
+    pub(crate) fn show_file_prompt(&mut self, prompt: FilePrompt, jobs: &Jobs<AppEvent>) {
         self.show_dialog(DialogKind::from_file_prompt(prompt), jobs);
     }
 
     fn close_dialogs(&mut self, jobs: &Jobs<AppEvent>) {
         self.dialogs.hide();
-        self.focus_active_editor(jobs);
-        self.dirty = true;
+        if let Some(next) = self.pending_prompts.pop_front() {
+            self.show_dialog_now(next, jobs);
+        } else {
+            self.focus_active_editor(jobs);
+            self.dirty = true;
+        }
     }
 
     pub(crate) fn open_go_to(&mut self, ts: &TextSystem, jobs: &Jobs<AppEvent>) {
@@ -906,7 +970,7 @@ impl MainWindow {
     }
 
     fn show_go_to(&mut self, line: Option<usize>, ts: &TextSystem, jobs: &Jobs<AppEvent>) {
-        self.show_dialog(DialogKind::GoTo, jobs);
+        self.show_dialog_now(DialogKind::GoTo, jobs);
         if let Some(line) = line {
             self.dialogs.line.set_value(&line.to_string(), ts);
         }
@@ -926,7 +990,7 @@ impl MainWindow {
                 self.dirty = true;
             }
             _ => {
-                self.show_dialog(DialogKind::LineOutOfRange, jobs);
+                self.show_dialog_now(DialogKind::LineOutOfRange, jobs);
             }
         }
     }
@@ -956,8 +1020,8 @@ impl MainWindow {
                 None
             }
             DialogKind::ConfirmDiscard { tab, .. } => {
-                self.close_dialogs(jobs);
-                match ix {
+                self.dialogs.hide();
+                let res = match ix {
                     0 => {
                         if let Some(wf) = self.file_workflow.as_mut() {
                             wf.prepend(WorkflowStep::SaveTab {
@@ -967,14 +1031,32 @@ impl MainWindow {
                         }
                         self.advance_file_workflow(jobs)
                     }
-                    1 => self.advance_file_workflow(jobs),
+                    1 => {
+                        if let Some(ix) = self.tab_index(tab) {
+                            let rev = self.tabs[ix].data.editor.revision();
+                            if let Some(wf) = self.file_workflow.as_mut() {
+                                wf.approve_discard(tab, rev);
+                            }
+                        }
+                        self.advance_file_workflow(jobs)
+                    }
                     _ => {
                         self.abort_file_workflow();
                         None
                     }
+                };
+                if !self.dialogs.is_open() {
+                    if let Some(next) = self.pending_prompts.pop_front() {
+                        self.show_dialog_now(next, jobs);
+                    } else {
+                        self.focus_active_editor(jobs);
+                        self.dirty = true;
+                    }
                 }
+                res
             }
             DialogKind::ConfirmLossyAnsi {
+                wf_gen,
                 tab,
                 snapshot,
                 text,
@@ -984,15 +1066,21 @@ impl MainWindow {
                 self.close_dialogs(jobs);
                 match ix {
                     0 => {
-                        files::spawn_write_file(self.id(), tab, snapshot, text, path, format, jobs);
-                        None
-                    }
-                    1 => {
-                        self.begin_save_tab_as(tab, jobs);
+                        files::spawn_write_file(
+                            self.id(),
+                            wf_gen,
+                            tab,
+                            snapshot,
+                            text,
+                            path,
+                            format,
+                            jobs,
+                        );
                         None
                     }
                     _ => {
-                        self.abort_file_workflow();
+                        let _ = self.clear_tab_save_in_flight(tab);
+                        self.begin_save_tab_as(tab, wf_gen, jobs);
                         None
                     }
                 }
@@ -1121,8 +1209,15 @@ impl MainWindow {
     pub(crate) fn on_activated(&mut self, active: bool, jobs: &Jobs<AppEvent>) {
         self.native.active = active;
         if !active {
+            self.native.hwnd().complete_ime_composition();
+            if let Some(slot) = self.focused_editor_slot()
+                && let Some(ed) = self.editor_by_slot_mut(slot)
+            {
+                ed.on_blur();
+            }
             self.cancel_menu(jobs);
             self.stop_all_editor_blinks();
+            self.native.hwnd().sync_system_caret(None);
         } else if let Some(slot) = self.focused_editor_slot() {
             self.start_editor_blink(slot, jobs);
         }
@@ -1145,6 +1240,9 @@ impl MainWindow {
         }
 
         let top = self.ui.top_hit();
+        if !matches!(top, Some(HitId::TabScrollLeft | HitId::TabScrollRight)) {
+            self.strip.stop_repeat();
+        }
         let wid = self.id();
         if !self.dialogs.is_open() {
             let menu_out = self.menu_bar.on_hover_change(
@@ -1212,7 +1310,19 @@ impl MainWindow {
             self.dirty = true;
         }
         self.strip.stop_repeat();
+        if self.strip.is_frozen() && self.strip.thaw(self.tabs.len()) {
+            self.dirty = true;
+        }
         if self.active_editor_mut().on_mouse_leave() {
+            self.dirty = true;
+        }
+    }
+
+    pub(crate) fn on_capture_lost(&mut self) {
+        self.pointer_pressed = false;
+        self.middle_pressed_tab = None;
+        self.strip.stop_repeat();
+        if self.ui.clear_hover() {
             self.dirty = true;
         }
     }
@@ -1229,10 +1339,10 @@ impl MainWindow {
         jobs: &Jobs<AppEvent>,
     ) -> Option<WindowAction> {
         self.pointer_hovered = true;
+        self.pointer_pressed = true;
         self.last_mouse_pos = pos;
-        if self.menu_bar.pointer_down() {
-            self.dirty = true;
-        }
+        let menu_out = self.menu_bar.pointer_down();
+        let _ = self.apply_menu_outcome(menu_out, view, false, ts, jobs);
         let top = self.ui.on_mouse_down(pos, button);
         let chain = self.ui.frame.hit_chain(pos);
         self.dirty = true;
@@ -1350,6 +1460,7 @@ impl MainWindow {
             HitId::Editor(slot) => Some(*slot),
             _ => None,
         }) {
+            self.native.hwnd().complete_ime_composition();
             self.set_focus(Focus::Editor(slot), jobs);
             let wid = self.id();
             if let Some(ed) = self.editor_by_slot_mut(slot) {
@@ -1371,8 +1482,24 @@ impl MainWindow {
         ts: &TextSystem,
         jobs: &Jobs<AppEvent>,
     ) -> Option<WindowAction> {
+        self.pointer_pressed = false;
         self.last_mouse_pos = pos;
         let clicked = self.ui.on_mouse_up(pos, button);
+        // Support Win32 press-on-trigger, drag-to-item, release-to-activate (K-8).
+        let menu_release = if button == MouseButton::Left
+            && clicked.is_none()
+            && self.menu_bar.is_open()
+        {
+            match self.ui.frame.hit_chain(pos).first().copied() {
+                hit @ Some(
+                    HitId::MenuItem(_) | HitId::SubmenuItem(_) | HitId::MenuCommand(_),
+                ) => hit,
+                _ => None,
+            }
+        } else {
+            None
+        };
+        let activated = clicked.or(menu_release);
         self.strip.stop_repeat();
         self.dirty = true;
 
@@ -1426,7 +1553,7 @@ impl MainWindow {
             return action;
         }
 
-        match clicked {
+        match activated {
             Some(HitId::DialogButton(ix)) => {
                 return self
                     .press_dialog_button(ix, ts, jobs)
@@ -1498,6 +1625,7 @@ impl MainWindow {
         &mut self,
         pos: Point,
         delta_lines: Point,
+        page_scroll: bool,
         modifiers: Modifiers,
     ) {
         if self.dialogs.is_open() {
@@ -1531,7 +1659,7 @@ impl MainWindow {
         let lh = self.line_height();
         if self
             .active_editor_mut()
-            .on_scroll_wheel(delta_lines, modifiers, lh)
+            .on_scroll_wheel(delta_lines, page_scroll, modifiers, lh)
         {
             self.dirty = true;
         }
@@ -1548,6 +1676,10 @@ impl MainWindow {
         self.ui.last_input_was_keyboard = true;
 
         if self.dialogs.is_open() {
+            let m = ev.modifiers;
+            if m.alt && !m.ctrl && !m.win && matches!(ev.key, Key::F(4) | Key::Space) {
+                return (false, None);
+            }
             if let Some(slot) = self.focused_editor_slot() {
                 let wid = self.id();
                 if let Some(ed) = self.editor_by_slot_mut(slot) {
@@ -1556,7 +1688,6 @@ impl MainWindow {
                     self.dirty = true;
                 }
             }
-            let m = ev.modifiers;
             match (m.ctrl, m.alt, m.shift, m.win, ev.key) {
                 (false, false, false, false, Key::Enter) => {
                     let btn = match self.focus {
@@ -1627,7 +1758,20 @@ impl MainWindow {
             }
         }
 
-        // Single-line Find / Replace Enter shortcuts.
+        // Single-line Find / Replace Tab and Enter shortcuts.
+        if ev.key == Key::Tab && !ev.modifiers.ctrl && !ev.modifiers.alt && !ev.modifiers.win && self.find.replace {
+            match self.focus {
+                Focus::Editor(EditorSlot::FindQuery) => {
+                    self.set_focus(Focus::Editor(EditorSlot::FindReplace), jobs);
+                    return (true, None);
+                }
+                Focus::Editor(EditorSlot::FindReplace) => {
+                    self.set_focus(Focus::Editor(EditorSlot::FindQuery), jobs);
+                    return (true, None);
+                }
+                _ => {}
+            }
+        }
         if ev.key == Key::Enter && !ev.modifiers.ctrl && !ev.modifiers.alt && !ev.modifiers.win {
             match (self.focus, ev.modifiers.shift) {
                 (Focus::Editor(EditorSlot::FindQuery), false) => {
@@ -1672,10 +1816,33 @@ impl MainWindow {
         (false, None)
     }
 
+    pub(crate) fn on_key_up(
+        &mut self,
+        ev: KeyEvent,
+        view: ViewSettings,
+        tab_dragging: bool,
+        ts: &TextSystem,
+        jobs: &Jobs<AppEvent>,
+    ) -> (bool, Option<WindowAction>) {
+        if self.dialogs.is_open() {
+            return (false, None);
+        }
+        let menu_out = self.menu_bar.on_key_up(ev);
+        if menu_out.handled {
+            return self.apply_menu_outcome(menu_out, view, tab_dragging, ts, jobs);
+        } else if menu_out.dirty {
+            self.dirty = true;
+        }
+        (false, None)
+    }
+
     pub(crate) fn on_text_input(&mut self, text: &str, ts: &TextSystem, jobs: &Jobs<AppEvent>) {
         let Some(slot) = self.focused_editor_slot() else {
             return;
         };
+        if self.dialogs.is_open() && slot != EditorSlot::GoToLine {
+            return;
+        }
         let wid = self.id();
         if let Some(ed) = self.editor_by_slot_mut(slot) {
             let mut timers = WindowEditorTimers::new(jobs, wid, slot);
@@ -1688,6 +1855,9 @@ impl MainWindow {
         let Some(slot) = self.focused_editor_slot() else {
             return;
         };
+        if self.dialogs.is_open() && slot != EditorSlot::GoToLine {
+            return;
+        }
         if let Some(ed) = self.editor_by_slot_mut(slot) {
             ed.handle_ime_composition(text, cursor, ts);
             self.dirty = true;
@@ -1764,7 +1934,17 @@ impl MainWindow {
             Command::PrevTab => self.prev_tab(jobs),
             Command::SelectTab(ix) => self.select_tab(ix, jobs),
             Command::SelectLastTab => self.select_last_tab(jobs),
-            Command::Open => files::spawn_open_dialog(self.id(), jobs),
+            Command::Open => {
+                if !self.open_dialog_active {
+                    self.open_dialog_active = true;
+                    files::spawn_open_dialog(
+                        self.id(),
+                        self.native.hwnd(),
+                        self.tabs[self.active].data.path.clone(),
+                        jobs,
+                    );
+                }
+            }
             Command::Save => self.save(jobs),
             Command::SaveAs => self.save_as(jobs),
             Command::SaveAll => self.save_all(jobs),
@@ -1822,12 +2002,19 @@ impl MainWindow {
     fn status_metrics(&self) -> StatusMetrics {
         let editor = self.active_editor();
         let text = editor.text();
-        let cursor = editor.cursor();
+        let len = text.len();
+        let cursor = text.floor_char_boundary(editor.cursor().min(len));
         let pt = text.offset_to_point(cursor);
-        let column = text.byte_to_char_idx(cursor) - text.byte_to_char_idx(cursor - pt.column);
+        let line_start = cursor.saturating_sub(pt.column);
+        let column = text
+            .byte_to_char_idx(cursor)
+            .saturating_sub(text.byte_to_char_idx(line_start));
         let selection = editor.selected_range();
-        let selected =
-            text.byte_to_char_idx(selection.end) - text.byte_to_char_idx(selection.start);
+        let sel_start = text.floor_char_boundary(selection.start.min(len));
+        let sel_end = text.floor_char_boundary(selection.end.min(len));
+        let selected = text
+            .byte_to_char_idx(sel_end)
+            .saturating_sub(text.byte_to_char_idx(sel_start));
         StatusMetrics {
             line: pt.row + 1,
             column: column + 1,
@@ -1840,19 +2027,21 @@ impl MainWindow {
 
     fn update_min_size(
         &mut self,
-        metrics: Option<StatusMetrics>,
+        status_bar: bool,
         frame: &Frame,
         p: Palette,
         ts: &TextSystem,
     ) {
-        let zoom_pct = metrics.map_or((self.zoom() * 100.).round() as u32, |m| m.zoom_pct);
+        let zoom_pct = (self.zoom() * 100.).round() as u32;
+        let format = self.tabs[self.active].data.format;
         let scale = self.native.scale_factor;
         let menu_width = frame
             .rect_of(HitId::MenuBar)
             .map_or(0.0, |r| r.size.width);
         let key = MinSizeKey {
-            status: metrics,
+            status_bar,
             zoom_pct,
+            format,
             menu_width,
             scale,
         };
@@ -1862,7 +2051,19 @@ impl MainWindow {
         {
             return;
         }
-        let status_sz = metrics.map(|m| Frame::measure_min_size(self.status_bar(m, p), scale, ts));
+        // Measure against fixed representative counters so min_size stays stable across typing and
+        // cursor moves without recomputing layout on every keystroke (P-6).
+        let status_sz = status_bar.then(|| {
+            let reference = StatusMetrics {
+                line: 9999,
+                column: 999,
+                selected: 0,
+                total: 999_999,
+                zoom_pct,
+                format,
+            };
+            Frame::measure_min_size(self.status_bar(reference, p), scale, ts)
+        });
         let menu_row = MENU_BAR_LEFT + menu_width + THEME_BUTTON_WIDTH + THEME_BUTTON_RIGHT;
         let width = status_sz
             .map_or(0., |s| s.width)
@@ -1936,7 +2137,7 @@ impl MainWindow {
             ts,
         );
         self.native.set_control_areas(frame.control_areas());
-        self.update_min_size(status_metrics, &frame, p, ts);
+        self.update_min_size(view.status_bar, &frame, p, ts);
 
         let editor_style = EditorPaintStyle {
             font: font("Consolas"),
@@ -1971,20 +2172,47 @@ impl MainWindow {
         self.active_editor_mut().set_caret_height(caret_height);
         self.active_editor_mut().set_caret_hidden(caret_hidden);
 
-        self.native.renderer.begin_frame(transparent_black());
-        frame.paint(&mut self.native.renderer, &mut |token, rect, renderer| {
-            match token {
-                CustomDraw::Editor(slot) => match slot {
-                    EditorSlot::Tab(raw) => {
-                        if let Some(ix) = self.tabs.iter().position(|t| t.data.id == TabId(raw)) {
+        let device_lost = if let Some(renderer) = self.native.renderer_mut() {
+            let clear = if p.high_contrast {
+                rgb(p.editor)
+            } else {
+                transparent_black()
+            };
+            renderer.begin_frame(clear);
+            frame.paint(renderer, &mut |token, rect, renderer| {
+                match token {
+                    CustomDraw::Editor(slot) => match slot {
+                        EditorSlot::Tab(raw) => {
+                            if let Some(ix) = self.tabs.iter().position(|t| t.data.id == TabId(raw)) {
+                                let mut timers = WindowEditorTimers::new(jobs, wid, slot);
+                                let outcome = self.tabs[ix].data.editor.paint(
+                                    rect,
+                                    &editor_style,
+                                    p,
+                                    window_active,
+                                    editor_focused,
+                                    show_selection,
+                                    scale,
+                                    reduce_motion,
+                                    now,
+                                    ts,
+                                    renderer,
+                                    &mut timers,
+                                );
+                                editor_needs_redraw |= outcome.needs_redraw;
+                                editor_needs_vsync |= outcome.needs_vsync;
+                            }
+                        }
+                        EditorSlot::FindQuery => {
+                            let focused = self.focus == Focus::Editor(slot);
                             let mut timers = WindowEditorTimers::new(jobs, wid, slot);
-                            let outcome = self.tabs[ix].data.editor.paint(
+                            let outcome = self.find.query.paint(
                                 rect,
-                                &editor_style,
+                                &find_field_style,
                                 p,
                                 window_active,
-                                editor_focused,
-                                show_selection,
+                                focused,
+                                focused,
                                 scale,
                                 reduce_motion,
                                 now,
@@ -1995,89 +2223,110 @@ impl MainWindow {
                             editor_needs_redraw |= outcome.needs_redraw;
                             editor_needs_vsync |= outcome.needs_vsync;
                         }
+                        EditorSlot::FindReplace => {
+                            let focused = self.focus == Focus::Editor(slot);
+                            let mut timers = WindowEditorTimers::new(jobs, wid, slot);
+                            let outcome = self.find.replacement.paint(
+                                rect,
+                                &find_field_style,
+                                p,
+                                window_active,
+                                focused,
+                                focused,
+                                scale,
+                                reduce_motion,
+                                now,
+                                ts,
+                                renderer,
+                                &mut timers,
+                            );
+                            editor_needs_redraw |= outcome.needs_redraw;
+                            editor_needs_vsync |= outcome.needs_vsync;
+                        }
+                        EditorSlot::GoToLine => {
+                            let focused = self.focus == Focus::Editor(slot);
+                            let mut timers = WindowEditorTimers::new(jobs, wid, slot);
+                            let outcome = self.dialogs.line.paint(
+                                rect,
+                                &dialog_field_style,
+                                p,
+                                window_active,
+                                focused,
+                                focused,
+                                scale,
+                                reduce_motion,
+                                now,
+                                ts,
+                                renderer,
+                                &mut timers,
+                            );
+                            editor_needs_redraw |= outcome.needs_redraw;
+                            editor_needs_vsync |= outcome.needs_vsync;
+                        }
+                    },
+                    CustomDraw::Scrollbar(Axis::Vertical) => {
+                        self.tabs[self.active].data.editor.paint_scrollbar(renderer);
                     }
-                    EditorSlot::FindQuery => {
-                        let focused = self.focus == Focus::Editor(slot);
-                        let mut timers = WindowEditorTimers::new(jobs, wid, slot);
-                        let outcome = self.find.query.paint(
-                            rect,
-                            &find_field_style,
-                            p,
-                            window_active,
-                            focused,
-                            focused,
-                            scale,
-                            reduce_motion,
-                            now,
-                            ts,
-                            renderer,
-                            &mut timers,
-                        );
-                        editor_needs_redraw |= outcome.needs_redraw;
-                        editor_needs_vsync |= outcome.needs_vsync;
+                    CustomDraw::Scrollbar(Axis::Horizontal) => {}
+                    CustomDraw::StatusSpacer => {
+                        let width = rect.size.width;
+                        if width < STATUS_DIVIDER_WIDTH + 0.5 {
+                            let x = rect.origin.x + ((width - STATUS_DIVIDER_WIDTH) / 2.).round();
+                            let line = Rect::new(
+                                point(x, rect.origin.y),
+                                size(STATUS_DIVIDER_WIDTH, rect.size.height),
+                            );
+                            renderer.paint_quad(fill(line, rgba(p.stroke)));
+                        }
                     }
-                    EditorSlot::FindReplace => {
-                        let focused = self.focus == Focus::Editor(slot);
-                        let mut timers = WindowEditorTimers::new(jobs, wid, slot);
-                        let outcome = self.find.replacement.paint(
-                            rect,
-                            &find_field_style,
-                            p,
-                            window_active,
-                            focused,
-                            focused,
-                            scale,
-                            reduce_motion,
-                            now,
-                            ts,
-                            renderer,
-                            &mut timers,
-                        );
-                        editor_needs_redraw |= outcome.needs_redraw;
-                        editor_needs_vsync |= outcome.needs_vsync;
-                    }
-                    EditorSlot::GoToLine => {
-                        let focused = self.focus == Focus::Editor(slot);
-                        let mut timers = WindowEditorTimers::new(jobs, wid, slot);
-                        let outcome = self.dialogs.line.paint(
-                            rect,
-                            &dialog_field_style,
-                            p,
-                            window_active,
-                            focused,
-                            focused,
-                            scale,
-                            reduce_motion,
-                            now,
-                            ts,
-                            renderer,
-                            &mut timers,
-                        );
-                        editor_needs_redraw |= outcome.needs_redraw;
-                        editor_needs_vsync |= outcome.needs_vsync;
-                    }
-                },
-                CustomDraw::Scrollbar(Axis::Vertical) => {
-                    self.tabs[self.active].data.editor.paint_scrollbar(renderer);
                 }
-                CustomDraw::Scrollbar(Axis::Horizontal) => {}
-                CustomDraw::StatusSpacer => {
-                    let width = rect.size.width;
-                    if width < STATUS_DIVIDER_WIDTH + 0.5 {
-                        let x = rect.origin.x + ((width - STATUS_DIVIDER_WIDTH) / 2.).round();
-                        let line = Rect::new(
-                            point(x, rect.origin.y),
-                            size(STATUS_DIVIDER_WIDTH, rect.size.height),
-                        );
-                        renderer.paint_quad(fill(line, rgba(p.stroke)));
-                    }
+            });
+            match renderer.end_frame() {
+                Ok(lost) => lost,
+                Err(err) => {
+                    crate::platform::debug_log(&format!("D2D end_frame failed: {err}"));
+                    true
                 }
             }
-        });
-        let device_lost = self.native.renderer.end_frame()?;
+        } else {
+            true
+        };
 
+        // Keep the hidden Win32 system caret synced for Windows Magnifier / assistive tools (A11Y-1).
+        let sys_caret_px = if window_active && !caret_hidden {
+            self.focused_editor_slot()
+                .and_then(|slot| self.editor_by_slot(slot))
+                .and_then(|ed| ed.caret_bounds())
+                .map(|r| {
+                    (
+                        (r.origin.x * scale).round() as i32,
+                        (r.origin.y * scale).round() as i32,
+                        (r.size.width * scale).round().max(1.0) as i32,
+                        (r.size.height * scale).round().max(1.0) as i32,
+                    )
+                })
+        } else {
+            None
+        };
+        self.native.hwnd().sync_system_caret(sys_caret_px);
+
+        self.has_painted = true;
         let ui_animating = self.ui.finish_frame(frame);
-        let needs_vsync = ui_animating || editor_needs_vsync || editor_needs_redraw;
+        let mut hover_shifted = false;
+        if self.pointer_hovered {
+            hover_shifted = self.ui.update_hover(self.last_mouse_pos);
+            let cursor = if !self.menu_bar.is_open()
+                && !self.dialogs.is_open()
+                && self.active_editor().hits_scrollbar_track(self.last_mouse_pos)
+            {
+                CursorStyle::Arrow
+            } else {
+                self.ui.frame.cursor_at(self.last_mouse_pos)
+            };
+            self.native.set_cursor(cursor);
+        }
+        let needs_vsync =
+            ui_animating || editor_needs_vsync || editor_needs_redraw || hover_shifted;
         if needs_vsync {
             self.dirty = true;
         }
@@ -2209,7 +2458,7 @@ impl MainWindow {
                 )
                 .text_child(format!("{}%", metrics.zoom_pct))
                 .child(status_divider(p))
-                .text_child(metrics.format.line_ending.label())
+                .text_child(metrics.format.line_ending_label())
                 .child(status_divider(p))
                 .text_child(metrics.format.encoding.label()),
         )
@@ -2298,10 +2547,10 @@ impl Caption {
         let hit = self.hit();
         let (hover_bg, pressed_bg, hover_fg, pressed_fg) = match self {
             Self::Close => (
-                CLOSE_HOVER,
-                CLOSE_PRESSED,
-                CLOSE_GLYPH_HOVER,
-                CLOSE_GLYPH_PRESSED,
+                p.close_hover,
+                p.close_pressed,
+                p.close_glyph_hover,
+                p.close_glyph_pressed,
             ),
             _ => (
                 p.layer_hover,
@@ -2371,45 +2620,4 @@ fn caption_buttons(active: bool, maximized: bool, p: Palette, ui: &mut UiState) 
                 .child(Caption::Close.render(active, p, ui)),
         )
         .child(box_().flex_1().window_area(WindowControlArea::Drag))
-}
-
-fn window_shortcut(ev: KeyEvent) -> Option<Command> {
-    let m = ev.modifiers;
-    match (m.ctrl, m.alt, m.shift, m.win, ev.key) {
-        (false, false, false, false, Key::Escape) => Some(Command::Cancel),
-        (true, false, false, false, Key::Char('n')) => Some(Command::NewTab),
-        (true, false, true, false, Key::Char('n')) => Some(Command::NewWindow),
-        (true, false, false, false, Key::Char('o')) => Some(Command::Open),
-        (true, false, false, false, Key::Char('s')) => Some(Command::Save),
-        (true, false, true, false, Key::Char('s')) => Some(Command::SaveAs),
-        (true, true, false, false, Key::Char('s')) => Some(Command::SaveAll),
-        (true, false, false, false, Key::Char('w')) => Some(Command::CloseTab),
-        (true, false, true, false, Key::Char('w')) => Some(Command::CloseWindow),
-        (true, false, false, false, Key::Tab | Key::PageDown) => Some(Command::NextTab),
-        (true, false, true, false, Key::Tab) | (true, false, false, false, Key::PageUp) => {
-            Some(Command::PrevTab)
-        }
-        (true, false, false, false, Key::Char('1')) => Some(Command::SelectTab(0)),
-        (true, false, false, false, Key::Char('2')) => Some(Command::SelectTab(1)),
-        (true, false, false, false, Key::Char('3')) => Some(Command::SelectTab(2)),
-        (true, false, false, false, Key::Char('4')) => Some(Command::SelectTab(3)),
-        (true, false, false, false, Key::Char('5')) => Some(Command::SelectTab(4)),
-        (true, false, false, false, Key::Char('6')) => Some(Command::SelectTab(5)),
-        (true, false, false, false, Key::Char('7')) => Some(Command::SelectTab(6)),
-        (true, false, false, false, Key::Char('8')) => Some(Command::SelectTab(7)),
-        (true, false, false, false, Key::Char('9')) => Some(Command::SelectLastTab),
-        (true, false, false, false, Key::Char('f')) => Some(Command::Find),
-        (false, false, false, false, Key::F(3)) => Some(Command::FindNext),
-        (false, false, true, false, Key::F(3)) => Some(Command::FindPrevious),
-        (true, false, false, false, Key::Char('h')) => Some(Command::Replace),
-        (true, false, false, false, Key::Char('g')) => Some(Command::GoTo),
-        (false, false, false, false, Key::F(5)) => Some(Command::TimeDate),
-        (false, false, true, false, Key::F(10)) | (false, false, false, false, Key::Menu) => {
-            Some(Command::ShowContextMenu)
-        }
-        (true, false, false | true, false, Key::Char('=' | '+')) => Some(Command::ZoomIn),
-        (true, false, false, false, Key::Char('-')) => Some(Command::ZoomOut),
-        (true, false, false, false, Key::Char('0')) => Some(Command::ResetZoom),
-        _ => None,
-    }
 }

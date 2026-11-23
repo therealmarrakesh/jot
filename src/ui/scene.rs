@@ -15,7 +15,7 @@ use crate::types::SharedStr;
 use super::anim::{AnimSample, AnimTracks, Easing};
 use super::layout::{
     AlignItems, AvailSize, AvailableSpace, Dim, FlexDirection, FlexStyle, JustifyContent,
-    LayoutEngine, LayoutId, Overflow, Position,
+    LayoutEngine, LayoutId, Overflow, Position, snap_border_edges,
 };
 
 pub(crate) const BRUSH_FADE_DURATION: Duration = Duration::from_millis(83);
@@ -29,7 +29,7 @@ pub(crate) enum EditorSlot {
     GoToLine,
 }
 
-/// Custom-painted leaf token resolved directly in the paint pass (zero `Box<dyn Element>`).
+/// Custom-painted leaf token resolved directly in the paint pass.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum CustomDraw {
     Editor(EditorSlot),
@@ -37,7 +37,7 @@ pub(crate) enum CustomDraw {
     StatusSpacer,
 }
 
-/// Typed identifier for interactive hit regions and measured layout anchors (zero closures).
+/// Typed identifier for interactive hit regions and measured layout anchors.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum HitId {
     CaptionMin,
@@ -74,7 +74,7 @@ pub(crate) enum HitId {
     DialogButton(usize),
 }
 
-/// Typed key for per-window animation tracks (zero heap string allocations per sample).
+/// Typed key for per-window animation tracks.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum AnimKey {
     Hit(HitId),
@@ -85,6 +85,7 @@ pub(crate) enum AnimKey {
     MenuUnroll(usize),
     MenuAppear(usize),
     MenuFade(usize),
+    MenuHover(usize, usize),
     DialogShow(usize),
     DialogFadeIn(usize),
     DialogHide(usize),
@@ -538,6 +539,22 @@ impl Node {
     pub(crate) fn when_some<T>(self, opt: Option<T>, f: impl FnOnce(Self, T) -> Self) -> Self {
         if let Some(v) = opt { f(self, v) } else { self }
     }
+
+    /// Strips interactive hit IDs, cursors, window control areas, and tooltips from this subtree.
+    /// Used on fading-out popups and dialogs so they stop intercepting pointer input immediately.
+    pub(crate) fn strip_hits(mut self) -> Self {
+        self.hit = None;
+        self.cursor = None;
+        self.window_area = None;
+        self.tooltip = None;
+        if let NodePayload::Box(children) = &mut self.payload {
+            for child in children {
+                let taken = std::mem::replace(child, box_());
+                *child = taken.strip_hits();
+            }
+        }
+        self
+    }
 }
 
 pub(crate) fn row() -> Node {
@@ -613,7 +630,7 @@ pub(crate) struct Frame {
     child_order: Vec<usize>,
     root: Option<usize>,
     hits: Vec<HitEntry>,
-    control_areas: Vec<(Rect, WindowControlArea)>,
+    control_areas: Vec<(Rect, Option<WindowControlArea>)>,
 }
 
 impl Frame {
@@ -662,8 +679,8 @@ impl Frame {
                 style.size,
                 &style.font,
                 wrap_width,
+                Some(style.line_height),
                 style.line_clamp,
-                None,
                 style.align,
             );
             let mut sz = Size::ZERO;
@@ -709,6 +726,7 @@ impl Frame {
         let resolved_text = inherited_text.merge(&node.text);
         let clip = node.flex.overflow_x == Overflow::Hidden
             || node.flex.overflow_y == Overflow::Hidden;
+        let border = snap_border_edges(node.flex.border, scale);
         let flat_idx = self.nodes.len();
 
         match node.payload {
@@ -718,7 +736,7 @@ impl Frame {
                     layout_id: LayoutId(0),
                     rect: Rect::ZERO,
                     bg: node.bg,
-                    border: node.flex.border,
+                    border,
                     border_color: node.border_color,
                     corners: node.corners,
                     shadows: node.shadows,
@@ -772,7 +790,7 @@ impl Frame {
                     layout_id: lid,
                     rect: Rect::ZERO,
                     bg: node.bg,
-                    border: node.flex.border,
+                    border,
                     border_color: node.border_color,
                     corners: node.corners,
                     shadows: node.shadows,
@@ -800,7 +818,7 @@ impl Frame {
                     layout_id: lid,
                     rect: Rect::ZERO,
                     bg: node.bg,
-                    border: node.flex.border,
+                    border,
                     border_color: node.border_color,
                     corners: node.corners,
                     shadows: node.shadows,
@@ -822,10 +840,13 @@ impl Frame {
         let clipped = rect.intersect(clip);
         let child_clip = if self.nodes[idx].clip { clipped } else { clip };
 
-        if let Some(area) = self.nodes[idx].window_area
-            && !clipped.is_empty()
-        {
-            self.control_areas.push((clipped, area));
+        if !clipped.is_empty() {
+            if let Some(area) = self.nodes[idx].window_area {
+                self.control_areas.push((clipped, Some(area)));
+            } else if self.nodes[idx].hit.is_some() {
+                // Interactive client surfaces painted above titlebar/caption areas occlude them (K-6).
+                self.control_areas.push((clipped, None));
+            }
         }
 
         if self.nodes[idx].hit.is_some() && !clipped.is_empty() {
@@ -847,7 +868,7 @@ impl Frame {
         }
     }
 
-    pub(crate) fn control_areas(&self) -> Vec<(Rect, WindowControlArea)> {
+    pub(crate) fn control_areas(&self) -> Vec<(Rect, Option<WindowControlArea>)> {
         self.control_areas.clone()
     }
 
@@ -857,7 +878,7 @@ impl Frame {
             .iter()
             .rev()
             .find(|(rect, _)| rect.contains(pos))
-            .map(|(_, area)| *area)
+            .and_then(|(_, area)| *area)
     }
 
     fn top_hit(&self, pos: Point) -> Option<&HitEntry> {
@@ -945,7 +966,7 @@ impl Frame {
         }
         let pushed_layer = node.opacity < 1.0 - 1e-4;
         if pushed_layer {
-            renderer.push_opacity_layer(node.rect, node.opacity);
+            renderer.push_opacity_layer(node.opacity);
         }
 
         if !node.shadows.is_empty() {
@@ -1105,6 +1126,16 @@ impl UiState {
     }
 
     pub(crate) fn brush(&mut self, hit: HitId, brushes: Brushes, enabled: bool) -> Rgba {
+        self.brush_keyed(AnimKey::Hit(hit), hit, brushes, enabled)
+    }
+
+    pub(crate) fn brush_keyed(
+        &mut self,
+        key: AnimKey,
+        hit: HitId,
+        brushes: Brushes,
+        enabled: bool,
+    ) -> Rgba {
         let target = if !enabled {
             brushes.rest
         } else if self.is_pressed(hit) {
@@ -1115,7 +1146,7 @@ impl UiState {
             brushes.rest
         };
         self.anims.animate_color(
-            AnimKey::Hit(hit),
+            key,
             target,
             BRUSH_FADE_DURATION,
             Easing::Linear,

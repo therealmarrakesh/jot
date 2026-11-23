@@ -1,4 +1,4 @@
-//! End-to-end GUI regression tests and ignored large-file smoke benchmark ported from `src/`.
+//! End-to-end Win32/Direct2D GUI regression tests and ignored large-file smoke benchmark.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -23,7 +23,7 @@ use crate::platform::{
 use crate::tabs::TabId;
 use crate::ui::controls::{SMALL_FONT, TEXT_FONT};
 use crate::ui::{AvailSize, EditorSlot, Frame, HitId, box_, col, row, text};
-use crate::window::{EDITOR_PADDINGS, MainWindow};
+use crate::window::{EDITOR_PADDINGS, Focus, MainWindow};
 
 const EDITOR_PADDING_LEFT: f32 = EDITOR_PADDINGS.left;
 const EDITOR_PADDING_TOP: f32 = EDITOR_PADDINGS.top;
@@ -62,6 +62,7 @@ fn parse_key(spec: &str) -> KeyEvent {
             "left" => Key::Left,
             "right" => Key::Right,
             "f3" => Key::F(3),
+            "f4" => Key::F(4),
             "f5" => Key::F(5),
             "f10" => Key::F(10),
             s if s.len() == 1 => Key::Char(s.chars().next().unwrap()),
@@ -205,6 +206,10 @@ impl TestHarness {
             window_id: self.window_id,
             event,
         });
+        self.app.borrow_mut().on_event(PlatformEvent::KeyUp {
+            window_id: self.window_id,
+            event,
+        });
         self.draw();
     }
 
@@ -221,6 +226,7 @@ impl TestHarness {
             window_id: self.window_id,
             position: pos,
             delta_lines: point(0.0, lines_y),
+            page_scroll: false,
             modifiers,
         });
         self.draw();
@@ -472,10 +478,7 @@ fn find_replace_bar_clear_button_and_key_contexts() {
 
     // Clicking inside main editor while Find bar is open transfers focus back to main editor.
     let ed_bounds = h.hit_rect(HitId::EditorArea).unwrap();
-    let ed_click = point(
-        ed_bounds.left() + EDITOR_PADDING_LEFT + 5.0,
-        ed_bounds.bottom() - 40.0,
-    );
+    let ed_click = point(ed_bounds.right() - 40.0, ed_bounds.bottom() - 40.0);
     h.click_point(ed_click, MouseButton::Left);
     h.type_text("!");
     h.read(|w, _| {
@@ -518,9 +521,14 @@ fn go_to_dialog_navigation_and_out_of_range_flow() {
     h.press_key("enter");
     h.read(|w, _| assert!(w.dialogs.is_open()));
     h.click_hit(HitId::DialogButton(0)); // OK -> returns to Go To
-    h.read(|w, _| assert!(w.dialogs.is_open()));
+    h.read(|w, _| {
+        assert!(w.dialogs.is_open());
+        assert_eq!(w.focus, Focus::Editor(EditorSlot::GoToLine));
+    });
     h.press_key("tab");
+    h.read(|w, _| assert_eq!(w.focus, Focus::DialogButton(0)));
     h.press_key("shift-tab");
+    h.read(|w, _| assert_eq!(w.focus, Focus::Editor(EditorSlot::GoToLine)));
     h.press_key("escape");
     h.read(|w, _| assert!(!w.dialogs.is_open()));
 }
@@ -663,7 +671,7 @@ fn dirty_window_close_file_drop_and_multi_window() {
         window_id: h.window_id,
         paths: vec![tmp.clone()],
     });
-    for _ in 0..40 {
+    for _ in 0..200 {
         h.draw();
         if h.read(|w, _| w.active_editor().value().as_str() == "dropped content 123") {
             break;
@@ -712,7 +720,7 @@ fn dirty_window_close_file_drop_and_multi_window() {
 #[test]
 fn overlay_window_resizes_from_1x1_and_renders() {
     let h = TestHarness::new();
-    let devices = h.app.borrow().platform.devices.clone();
+    let devices = h.app.borrow().platform.devices();
     let opts = WindowOptions {
         bounds: Some(Rect::new(point(0., 0.), size(1., 1.))),
         title: "".into(),
@@ -739,8 +747,9 @@ fn overlay_window_resizes_from_1x1_and_renders() {
         overlay.logical_size.width > 10.0 && overlay.logical_size.height > 10.0,
         "overlay must sync resized client rect before drawing"
     );
-    overlay.renderer.begin_frame(crate::color::transparent_black());
-    let lost = overlay.renderer.end_frame().expect("overlay end_frame");
+    let renderer = overlay.renderer_mut().expect("overlay renderer");
+    renderer.begin_frame(crate::color::transparent_black());
+    let lost = renderer.end_frame().expect("overlay end_frame");
     assert!(!lost);
     overlay.destroy();
 }
@@ -768,6 +777,7 @@ fn status_bar_min_width_and_no_vertical_char_wrapping() {
     );
 
     let mut mmi = MINMAXINFO::default();
+    // SAFETY: `hwnd` is a valid test window and `mmi` is a stack-allocated `MINMAXINFO`.
     unsafe {
         let _ = SendMessageW(
             hwnd.raw(),
@@ -874,6 +884,7 @@ fn hwnd_registry_cleanup_reentrant_queue_and_modal_size_move_timer() {
     // 1. Re-entrant WM_ACTIVATE while App is mutably borrowed must queue, not drop.
     {
         let _borrow = h.app.borrow_mut();
+        // SAFETY: `hwnd` is a valid test window owned by this thread.
         unsafe {
             let _ = SendMessageW(
                 hwnd.raw(),
@@ -900,6 +911,7 @@ fn hwnd_registry_cleanup_reentrant_queue_and_modal_size_move_timer() {
         .poster()
         .post(AppEvent::TestFlag(ran.clone()));
 
+    // SAFETY: `hwnd` is a valid test window owned by this thread.
     unsafe {
         let _ = SendMessageW(
             hwnd.raw(),
@@ -909,6 +921,7 @@ fn hwnd_registry_cleanup_reentrant_queue_and_modal_size_move_timer() {
         );
     }
     h.read(|w, _| assert!(w.native.in_size_move));
+    // SAFETY: `hwnd` is a valid test window owned by this thread.
     unsafe {
         let _ = SendMessageW(hwnd.raw(), WM_TIMER, Some(WPARAM(1)), Some(LPARAM(0)));
     }
@@ -916,6 +929,7 @@ fn hwnd_registry_cleanup_reentrant_queue_and_modal_size_move_timer() {
         ran.load(Ordering::SeqCst),
         "WM_TIMER during modal size/move must drain ready foreground jobs"
     );
+    // SAFETY: `hwnd` is a valid test window owned by this thread.
     unsafe {
         let _ = SendMessageW(
             hwnd.raw(),
@@ -1016,6 +1030,7 @@ fn tab_drag_pop_out_and_reattach_does_not_panic() {
     let cx = (tab_rect.center().x * scale).round() as i32;
     let cy = (tab_rect.center().y * scale).round() as i32;
     let down_lp = LPARAM((((cy as u16 as u32) << 16) | (cx as u16 as u32)) as isize);
+    // SAFETY: `hwnd1` is a valid test window owned by this thread.
     unsafe {
         let _ = SendMessageW(hwnd1.raw(), WM_LBUTTONDOWN, Some(WPARAM(1)), Some(down_lp));
     }
@@ -1024,6 +1039,7 @@ fn tab_drag_pop_out_and_reattach_does_not_panic() {
     // force detach directly so the test is deterministic regardless of desktop cursor position.
     let move_y = ((tab_rect.center().y + 200.0) * scale).round() as i32;
     let move_lp = LPARAM((((move_y as u16 as u32) << 16) | (cx as u16 as u32)) as isize);
+    // SAFETY: `hwnd1` is a valid test window owned by this thread.
     unsafe {
         let _ = SendMessageW(hwnd1.raw(), WM_MOUSEMOVE, Some(WPARAM(1)), Some(move_lp));
     }
@@ -1050,6 +1066,7 @@ fn tab_drag_pop_out_and_reattach_does_not_panic() {
 
     // Exercise WM_MOUSELEAVE / WM_NCMOUSELEAVE on source window (which calls WindowFromPoint ->
     // synchronous WM_NCHITTEST on same-thread windows) and WM_NCHITTEST on popped-out window.
+    // SAFETY: `hwnd1` and `hwnd2` are valid test windows owned by this thread.
     unsafe {
         let _ = SendMessageW(hwnd1.raw(), WM_MOUSELEAVE, Some(WPARAM(0)), Some(LPARAM(0)));
         let _ = SendMessageW(hwnd1.raw(), WM_NCMOUSELEAVE, Some(WPARAM(0)), Some(LPARAM(0)));
@@ -1068,6 +1085,432 @@ fn tab_drag_pop_out_and_reattach_does_not_panic() {
 
     h.close_all();
     Platform::set_active_handler_for_test(None);
+}
+
+#[test]
+fn device_loss_recreates_devices_and_renders_new_windows_cleanly() {
+    let mut h = TestHarness::new();
+    let gen0 = h.read(|_, app| app.platform.gpu_generation());
+    {
+        let mut app = h.app.borrow_mut();
+        app.windows[0]
+            .native
+            .renderer_mut()
+            .expect("renderer")
+            .mark_device_lost_for_test();
+        app.windows[0].dirty = true;
+    }
+    h.draw();
+    let gen1 = h.read(|_, app| app.platform.gpu_generation());
+    assert_eq!(
+        gen1,
+        gen0 + 1,
+        "device loss must replace shared Platform devices (G-1..G-3)"
+    );
+    // Opening a brand-new window after recovery must use the fresh Direct2DDevices cleanly.
+    h.press_key("ctrl-shift-n");
+    {
+        let mut app = h.app.borrow_mut();
+        assert_eq!(app.windows.len(), 2);
+        assert!(app.windows[1].native.renderer_mut().is_some());
+    }
+}
+
+#[test]
+fn stale_file_events_do_not_advance_unrelated_discard_workflow() {
+    let mut h = TestHarness::new();
+    h.type_text("tab A content");
+    h.press_key("ctrl-n");
+    h.type_text("tab B unsaved");
+    let (tab_a, tab_b, wid) = h.read(|w, _| (w.tabs[0].data.id, w.tabs[1].data.id, w.id()));
+
+    // Start close workflow on dirty tab B (opens ConfirmDiscard dialog).
+    h.press_key("ctrl-w");
+    h.read(|w, _| {
+        assert!(w.dialogs.is_open(), "ConfirmDiscard must be open for tab B");
+        assert_eq!(w.tabs.len(), 2);
+    });
+
+    // Inject a stale FileSaved event from an older workflow generation for tab A (F-1).
+    let stale_gen = crate::files::WorkflowGen::next();
+    h.app
+        .borrow()
+        .jobs
+        .poster()
+        .post(AppEvent::FileSaved {
+            window: wid,
+            wf_gen: stale_gen,
+            tab: tab_a,
+            snapshot: 0,
+            path: std::path::PathBuf::from(r"C:\Temp\stale.txt"),
+            path_key: "stale".into(),
+            format: document::Format::default(),
+            result: Ok(()),
+        });
+    h.draw();
+
+    h.read(|w, _| {
+        assert!(w.dialogs.is_open(), "stale FileSaved must not dismiss ConfirmDiscard");
+        assert_eq!(w.tabs.len(), 2, "stale FileSaved must not silently close tab B");
+        assert!(w.tab_index(tab_b).is_some());
+    });
+}
+
+#[test]
+fn close_save_keeps_window_open_when_edited_mid_write_and_migrated_save_cleans_tab() {
+    let dir = std::env::temp_dir().join(format!("jot-f2f4-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("doc.txt");
+    std::fs::write(&path, "initial").unwrap();
+
+    // F-2: Close -> Save with an edit made before FileSaved resolves must keep window open.
+    let mut h = TestHarness::new();
+    let loaded = document::load(&path).unwrap();
+    {
+        let mut app_guard = h.app.borrow_mut();
+        let app = &mut *app_guard;
+        let tab = crate::tabs::Tab::adopt(crate::tabs::TabData::create(
+            Some((path.clone(), loaded)),
+            true,
+            EDITOR_PADDINGS,
+        ));
+        app.windows[0].replace_tab(0, tab, &app.jobs);
+    }
+    h.draw();
+    h.type_text(" v2");
+    h.app
+        .borrow_mut()
+        .on_event(PlatformEvent::CloseRequested {
+            window_id: h.window_id,
+        });
+    h.draw();
+    h.read(|w, _| assert!(w.dialogs.is_open()));
+    // Click Save (button 0), then immediately type before async write finishes.
+    h.click_hit(HitId::DialogButton(0));
+    h.type_text(" extra");
+    for _ in 0..100 {
+        h.draw();
+        if !h.window_open() || h.read(|w, _| w.dialogs.is_open()) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        h.window_open(),
+        "typing during close->Save write must keep window open and re-prompt (F-2)"
+    );
+    h.read(|w, _| {
+        assert!(w.tabs[w.active].data.is_dirty());
+        assert!(w.dialogs.is_open());
+    });
+    h.click_hit(HitId::DialogButton(1)); // Don't save
+    assert!(!h.window_open());
+
+    // F-4: Tab moved to another window mid-save still gets marked clean when FileSaved arrives.
+    let mut h2 = TestHarness::new();
+    h2.type_text("migrated");
+    let (wid1, tab_id, snap) = {
+        let mut app = h2.app.borrow_mut();
+        let w = &mut app.windows[0];
+        (w.id(), w.tabs[0].data.id, w.tabs[0].data.editor.begin_save())
+    };
+    h2.press_key("ctrl-n"); // keep win1 alive with 2 tabs
+    {
+        let mut app_guard = h2.app.borrow_mut();
+        let app = &mut *app_guard;
+        let data = app.windows[0].take_tab(tab_id, &app.jobs).unwrap();
+        let _ = app.open_window(Some(data), Some(size(600.0, 400.0))).unwrap();
+        app.jobs.poster().post(AppEvent::FileSaved {
+            window: wid1,
+            wf_gen: crate::files::WorkflowGen::next(),
+            tab: tab_id,
+            snapshot: snap,
+            path: path.clone(),
+            path_key: document::quick_path_key(&path),
+            format: document::Format::default(),
+            result: Ok(()),
+        });
+    }
+    h2.draw();
+    {
+        let app = h2.app.borrow();
+        let (wix, tix) = app.find_tab_owner(tab_id).expect("tab must exist in win2");
+        assert_eq!(wix, 1);
+        assert!(
+            !app.windows[wix].tabs[tix].data.is_dirty(),
+            "FileSaved must route by TabId to migrated tab (F-4)"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn byte_exact_document_round_trips_and_locked_target_fallback() {
+    let dir = std::env::temp_dir().join(format!("jot-roundtrip-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+
+    let cases: &[(&str, Vec<u8>)] = &[
+        ("empty.txt", b"".to_vec()),
+        ("bom_only.txt", b"\xEF\xBB\xBF".to_vec()),
+        ("utf8_crlf.txt", b"one\r\ntwo\r\n".to_vec()),
+        ("utf8_lf_notrail.txt", b"one\ntwo".to_vec()),
+        ("utf8_cr.txt", b"one\rtwo\r".to_vec()),
+        ("utf8_bom.txt", b"\xEF\xBB\xBFhello \xF0\x9F\x8E\x89\r\n".to_vec()),
+        ("utf16le.txt", {
+            let mut v = vec![0xFF, 0xFE];
+            for u in "hi 日本語\r\n".encode_utf16() {
+                v.extend_from_slice(&u.to_le_bytes());
+            }
+            v
+        }),
+        ("utf16be.txt", {
+            let mut v = vec![0xFE, 0xFF];
+            for u in "hi 日本語\n".encode_utf16() {
+                v.extend_from_slice(&u.to_be_bytes());
+            }
+            v
+        }),
+    ];
+
+    for (name, bytes) in cases {
+        let p = dir.join(name);
+        std::fs::write(&p, bytes).unwrap();
+        let loaded = document::load(&p).unwrap();
+        assert!(!loaded.format.mixed_line_endings, "{name} should not be mixed");
+        document::write_rope(&p, &loaded.text, loaded.format).unwrap();
+        assert_eq!(std::fs::read(&p).unwrap(), *bytes, "round-trip mismatch for {name}");
+    }
+
+    // Mixed line endings flag (DOC-5).
+    let mixed_path = dir.join("mixed.txt");
+    std::fs::write(&mixed_path, b"a\r\nb\nc\r\n").unwrap();
+    let mixed = document::load(&mixed_path).unwrap();
+    assert!(mixed.format.mixed_line_endings);
+
+    // Locked target without FILE_SHARE_DELETE falls back to in-place overwrite cleanly (DOC-4).
+    use std::os::windows::fs::OpenOptionsExt;
+    let locked_path = dir.join("locked.txt");
+    std::fs::write(&locked_path, b"before").unwrap();
+    let _holder = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0x0000_0001 | 0x0000_0002) // FILE_SHARE_READ | FILE_SHARE_WRITE (no DELETE)
+        .open(&locked_path)
+        .unwrap();
+    let rope = crate::editor::Rope::from("after locked write");
+    document::write_rope(&locked_path, &rope, document::Format::default()).unwrap();
+    drop(_holder);
+    assert_eq!(std::fs::read(&locked_path).unwrap(), b"after locked write");
+    // No temp/backup leftovers in directory.
+    let leftovers: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().contains(".jot-"))
+        .collect();
+    assert!(leftovers.is_empty(), "leftover temp files: {leftovers:?}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn editor_invariants_grapheme_ime_word_anchor_up_collapse_and_insert_keys() {
+    let mut h = TestHarness::new();
+    let ed_bounds = h.hit_rect(HitId::EditorArea).unwrap();
+
+    // E-1: stale word_anchor after backspace + mouse drag must not panic.
+    h.type_text("hello world");
+    let p0 = point(
+        ed_bounds.left() + EDITOR_PADDING_LEFT + 10.0,
+        ed_bounds.top() + EDITOR_PADDING_TOP + 10.0,
+    );
+    h.click_point_count(p0, MouseButton::Left, 2);
+    h.press_key("ctrl-a");
+    h.press_key("backspace");
+    h.app.borrow_mut().on_event(PlatformEvent::MouseMove {
+        window_id: h.window_id,
+        position: point(p0.x + 40.0, p0.y),
+        pressed_button: Some(MouseButton::Left),
+    });
+    h.draw();
+    h.read(|w, _| assert_eq!(w.active_editor().text().len(), 0));
+
+    // E-4: grapheme stepping skips entire ZWJ emoji cluster on Right and deletes it on Backspace.
+    h.type_text("a👨‍👩‍👧b");
+    h.press_key("home");
+    h.press_key("right"); // past 'a'
+    h.press_key("right"); // past whole ZWJ cluster
+    h.read(|w, _| {
+        let ed = w.active_editor();
+        assert_eq!(ed.cursor(), "a👨‍👩‍👧".len(), "Right must step a full grapheme cluster (E-4)");
+    });
+    h.press_key("backspace");
+    h.read(|w, _| assert_eq!(w.active_editor().value().as_str(), "ab"));
+
+    // E-8: Up arrow with multi-line selection collapses to selection start.
+    h.press_key("ctrl-a");
+    h.press_key("backspace");
+    h.type_text("line1");
+    h.press_key("enter");
+    h.type_text("line2");
+    h.press_key("ctrl-a");
+    h.press_key("up");
+    h.read(|w, _| {
+        let ed = w.active_editor();
+        assert!(ed.selected_range().is_empty());
+        assert_eq!(ed.cursor(), 0, "Up on selection must collapse to selection start (E-8)");
+    });
+
+    // E-2 / E-3: IME composition Escape cancels preedit; blur finalizes without panic.
+    h.app
+        .borrow_mut()
+        .on_event(PlatformEvent::ImeComposition {
+            window_id: h.window_id,
+            text: "にほん".into(),
+            cursor: 3,
+        });
+    h.draw();
+    h.read(|w, _| assert!(w.active_editor().value().starts_with("にほん")));
+    h.press_key("escape");
+    h.read(|w, _| {
+        assert!(
+            !w.active_editor().value().starts_with("にほん"),
+            "Escape must remove active IME preedit (E-2)"
+        );
+    });
+
+    // E-10: Ctrl+Backspace stops at newline boundary.
+    h.press_key("ctrl-end");
+    h.press_key("enter");
+    h.press_key("ctrl-backspace");
+    h.read(|w, _| {
+        assert_eq!(
+            w.active_editor().value().as_str(),
+            "line1\nline2",
+            "Ctrl+Backspace at start of empty line must delete only the newline (E-10)"
+        );
+    });
+}
+
+#[test]
+fn keyboard_system_chords_altgr_menu_gate_popup_occlusion_and_fractional_borders() {
+    let mut h = TestHarness::new();
+    h.press_key("ctrl-n"); // 2 tabs
+
+    // K-1 / K-2: Alt+F4 and Alt+Space must NEVER be consumed (normal, access mode, menu open, dialog open).
+    let alt_f4 = KeyEvent {
+        key: Key::F(4),
+        modifiers: Modifiers {
+            alt: true,
+            ..Default::default()
+        },
+    };
+    let alt_space = KeyEvent {
+        key: Key::Space,
+        modifiers: Modifiers {
+            alt: true,
+            ..Default::default()
+        },
+    };
+    assert!(!h.app.borrow_mut().on_event(PlatformEvent::KeyDown {
+        window_id: h.window_id,
+        event: alt_f4,
+    }));
+    assert!(!h.app.borrow_mut().on_event(PlatformEvent::KeyDown {
+        window_id: h.window_id,
+        event: alt_space,
+    }));
+
+    // Enter KeyTips access mode via Alt tap, then verify Alt+F4 still passes through!
+    h.press_key("alt");
+    h.read(|w, _| assert!(w.menu_bar.access_active()));
+    assert!(!h.app.borrow_mut().on_event(PlatformEvent::KeyDown {
+        window_id: h.window_id,
+        event: alt_f4,
+    }));
+
+    // K-3: While File menu is open, Ctrl+W must be consumed by menu and NOT close a tab.
+    h.click_hit(HitId::MenuTrigger(MenuKind::File.index()));
+    h.read(|w, _| assert!(w.menu_bar.is_open()));
+    h.press_key("ctrl-w");
+    h.read(|w, _| {
+        assert_eq!(w.tabs.len(), 2, "Ctrl+W must not fire behind an open menu (K-3)");
+    });
+    assert!(!h.app.borrow_mut().on_event(PlatformEvent::KeyDown {
+        window_id: h.window_id,
+        event: alt_f4,
+    }));
+
+    // K-4: AltGr+S must NOT trigger SaveAll.
+    let altgr_s = KeyEvent {
+        key: Key::Char('s'),
+        modifiers: Modifiers {
+            ctrl: true,
+            alt: true,
+            alt_gr: true,
+            ..Default::default()
+        },
+    };
+    assert!(
+        crate::command::window_shortcut(altgr_s).is_none(),
+        "AltGr+S must not match Ctrl+Alt+S SaveAll (K-4)"
+    );
+
+    // K-1/K-2 + K-6: Open modal dialog -> Alt+F4 passes through AND caption buttons are occluded!
+    h.press_key("ctrl-g");
+    h.read(|w, _| assert!(w.dialogs.is_open()));
+    assert!(!h.app.borrow_mut().on_event(PlatformEvent::KeyDown {
+        window_id: h.window_id,
+        event: alt_f4,
+    }));
+    let close_pt = h.hit_rect(HitId::CaptionClose).unwrap().center();
+    h.read(|w, _| {
+        assert_eq!(
+            w.ui.frame.hit_test_control_area(close_pt),
+            None,
+            "modal dialog backdrop must occlude caption buttons (K-6)"
+        );
+    });
+    h.press_key("escape");
+
+    // G-9: Fractional DPI snapped border widths are exact integer device pixels at 1.25/1.5/1.75.
+    for scale in [1.25f32, 1.5, 1.75] {
+        let snapped = crate::ui::layout::snap_border_edges(crate::geom::Edges::all(1.0), scale);
+        let px = snapped.top * scale;
+        assert!(
+            (px - px.round()).abs() < 1e-4 && px >= 1.0,
+            "1 DIP border at {scale}x must snap to integer device pixels, got {px}"
+        );
+    }
+}
+
+#[test]
+fn wrap_handles_tabs_emoji_combining_marks_and_u2028_single_line() {
+    use crate::editor::wrap::WrapIndex;
+    use crate::gfx::TextSystem;
+
+    let ts = TextSystem::new();
+    let sample = "\tindented e\u{0301} 👨‍👩‍👧\u{2028}after_lsep more words to wrap cleanly across rows";
+    let rope = crate::editor::Rope::from(sample);
+    let mut wrap = WrapIndex::new(font("Consolas"), 14.0, Some(180.0));
+    wrap.sync_layout(&rope, font("Consolas"), 14.0, Some(180.0), &ts);
+    assert!(wrap.visual_row_count() >= 2);
+
+    // Zero/negative wrap width must not panic.
+    let mut wrap_zero = WrapIndex::new(font("Consolas"), 14.0, Some(0.0));
+    wrap_zero.sync_layout(&rope, font("Consolas"), 14.0, Some(0.0), &ts);
+    assert!(wrap_zero.visual_row_count() >= 1);
+
+    // U+2028 encoded as single-line placeholder never splits into multiple DirectWrite lines (G-8).
+    let shaped = ts.shape_line(
+        sample.into(),
+        14.0,
+        &[crate::gfx::TextRun {
+            len: sample.len(),
+            font: font("Consolas"),
+            color: rgba(0xFFFFFFFF),
+            underline: None,
+        }],
+    );
+    assert!(shaped.width > 0.0);
 }
 
 mod large_file_smoke {
@@ -1140,7 +1583,7 @@ mod large_file_smoke {
         }
         println!("1000 scroll queries:  {:8.2} ms", t0.elapsed().as_secs_f64() * 1000.0);
 
-        let mut buf = Vec::new();
+        let mut buf = String::new();
         let m_cs = find::Matcher::new("FINAL_SENTINEL_NEEDLE_42", true).unwrap();
         let hit = m_cs.next(&loaded.text, 0, usize::MAX, &mut buf);
         assert!(hit.is_some());
@@ -1151,7 +1594,10 @@ mod large_file_smoke {
         let m_all = find::Matcher::new("omicron", false).unwrap();
         let _ = m_all.all(&loaded.text, &mut buf);
 
+        let before_bytes = std::fs::read(&file).unwrap();
         document::write_rope(&file, &loaded.text, loaded.format).unwrap();
+        let after_bytes = std::fs::read(&file).unwrap();
+        assert_eq!(before_bytes, after_bytes, "large-file round-trip must be byte-exact");
         std::fs::remove_dir_all(&dir).ok();
     }
 

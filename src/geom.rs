@@ -209,6 +209,12 @@ impl Rect {
 
     #[inline]
     pub(crate) fn union(self, other: Self) -> Self {
+        if self.is_empty() {
+            return other;
+        }
+        if other.is_empty() {
+            return self;
+        }
         let left = self.left().min(other.left());
         let top = self.top().min(other.top());
         let right = self.right().max(other.right());
@@ -338,14 +344,26 @@ impl Corners {
         }
     }
 
+    /// Proportionally scales overlapping corner radii per CSS Backgrounds §5.5.
     #[inline]
     pub(crate) fn clamp_to(self, size: Size) -> Self {
-        let max = (size.width * 0.5).min(size.height * 0.5).max(0.0);
+        let tl = self.top_left.max(0.0);
+        let tr = self.top_right.max(0.0);
+        let br = self.bottom_right.max(0.0);
+        let bl = self.bottom_left.max(0.0);
+        let w = size.width.max(0.0);
+        let h = size.height.max(0.0);
+        let mut factor = 1.0f32;
+        for (sum, span) in [(tl + tr, w), (bl + br, w), (tl + bl, h), (tr + br, h)] {
+            if sum > 0.0 {
+                factor = factor.min(span / sum);
+            }
+        }
         Self {
-            top_left: self.top_left.clamp(0.0, max),
-            top_right: self.top_right.clamp(0.0, max),
-            bottom_right: self.bottom_right.clamp(0.0, max),
-            bottom_left: self.bottom_left.clamp(0.0, max),
+            top_left: tl * factor,
+            top_right: tr * factor,
+            bottom_right: br * factor,
+            bottom_left: bl * factor,
         }
     }
 }

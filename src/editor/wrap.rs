@@ -4,22 +4,30 @@ use std::borrow::Cow;
 use std::ops::{Range, RangeInclusive};
 
 use ropey::Rope;
+#[cfg(test)]
 use unicode_segmentation::UnicodeSegmentation as _;
 
 use crate::geom::{Point, Size, point, size};
-use crate::gfx::{
-    Boundary, D2DRenderer, Font, FontRun, MAX_WRAP_INDENT, ShapedLine, TextAlign, TextSystem,
-    line_break_opportunities,
-};
+use crate::gfx::{Boundary, D2DRenderer, Font, ShapedLine, TextAlign, TextSystem};
+#[cfg(test)]
+use crate::gfx::{MAX_WRAP_INDENT, line_break_opportunities};
 
 use super::buffer::{RopeExt, TextPoint};
 
 const CHUNK_SIZE: usize = 256;
 
-/// One visual sub-row within a logical buffer line: shaped for visible/cursor rows, placeholder
-/// otherwise.
+/// One visual sub-row within a logical buffer line: shaped for visible/cursor rows, windowed for
+/// huge unwrapped lines (P-2), or placeholder otherwise.
 pub(crate) enum VisualRow {
     Shaped(ShapedLine),
+    Windowed {
+        start_byte: usize,
+        end_byte: usize,
+        total_bytes: usize,
+        start_x: f32,
+        total_width: f32,
+        line: ShapedLine,
+    },
     Placeholder(usize),
 }
 
@@ -34,6 +42,7 @@ impl VisualRow {
     pub(crate) fn byte_len(&self) -> usize {
         match self {
             Self::Shaped(line) => line.len,
+            Self::Windowed { total_bytes, .. } => *total_bytes,
             Self::Placeholder(len) => *len,
         }
     }
@@ -42,50 +51,122 @@ impl VisualRow {
     pub(crate) fn width(&self) -> f32 {
         match self {
             Self::Shaped(line) => line.width,
+            Self::Windowed { total_width, .. } => *total_width,
             Self::Placeholder(_) => 0.0,
         }
     }
 
     #[inline]
     pub(crate) fn is_shaped(&self) -> bool {
-        matches!(self, Self::Shaped(_))
+        !matches!(self, Self::Placeholder(_))
     }
 
     pub(crate) fn x_for_index(&self, ix: usize) -> f32 {
         match self {
             Self::Shaped(line) => line.x_for_index(ix),
+            Self::Windowed {
+                start_byte,
+                end_byte,
+                start_x,
+                total_width,
+                line,
+                ..
+            } => {
+                if ix <= *start_byte {
+                    *start_x
+                } else if ix >= *end_byte {
+                    (*start_x + line.width).min(*total_width)
+                } else {
+                    *start_x + line.x_for_index(ix - *start_byte)
+                }
+            }
             Self::Placeholder(_) => 0.0,
+        }
+    }
+
+    pub(crate) fn selection_spans(&self, start: usize, end: usize) -> Vec<(f32, f32)> {
+        if start >= end {
+            return Vec::new();
+        }
+        match self {
+            Self::Shaped(line) => line.selection_spans(start, end),
+            Self::Windowed {
+                start_byte,
+                end_byte,
+                start_x,
+                line,
+                ..
+            } => {
+                let s = start.max(*start_byte);
+                let e = end.min(*end_byte);
+                if s >= e {
+                    return Vec::new();
+                }
+                line.selection_spans(s - *start_byte, e - *start_byte)
+                    .into_iter()
+                    .map(|(l, r)| (l + *start_x, r + *start_x))
+                    .collect()
+            }
+            Self::Placeholder(_) => Vec::new(),
         }
     }
 
     pub(crate) fn closest_index_for_x(&self, x: f32) -> usize {
         match self {
             Self::Shaped(line) => line.closest_index_for_x(x),
+            Self::Windowed {
+                start_byte,
+                start_x,
+                line,
+                ..
+            } => *start_byte + line.closest_index_for_x((x - *start_x).max(0.0)),
             Self::Placeholder(_) => 0,
         }
     }
 
     pub(crate) fn paint(&self, origin: Point, line_height: f32, renderer: &mut D2DRenderer) {
-        if let Self::Shaped(line) = self {
-            line.paint(origin, line_height, TextAlign::Left, None, renderer);
+        match self {
+            Self::Shaped(line) => {
+                line.paint(origin, line_height, TextAlign::Left, None, renderer);
+            }
+            Self::Windowed { start_x, line, .. } => {
+                line.paint(
+                    origin + point(*start_x, 0.0),
+                    line_height,
+                    TextAlign::Left,
+                    None,
+                    renderer,
+                );
+            }
+            Self::Placeholder(_) => {}
         }
     }
 }
 
-/// Shaped visual sub-rows for a visible logical buffer line.
+/// Shaped visual sub-rows for a visible logical buffer line (or a visible sub-row slice on
+/// huge wrapped lines, P-3).
 pub(crate) struct RowLayout {
-    byte_len: usize,
+    pub(crate) first_sub_row: usize,
+    pub(crate) leading_bytes: usize,
+    pub(crate) total_sub_rows: usize,
     pub(crate) rows: Vec<VisualRow>,
     pub(crate) hanging_indent: f32,
     max_width: f32,
 }
 
 impl RowLayout {
-    pub(crate) fn from_rows(rows: Vec<VisualRow>, hanging_indent: f32) -> Self {
-        let byte_len = rows.iter().map(VisualRow::byte_len).sum();
+    pub(crate) fn from_slice(
+        rows: Vec<VisualRow>,
+        first_sub_row: usize,
+        leading_bytes: usize,
+        total_sub_rows: usize,
+        hanging_indent: f32,
+    ) -> Self {
         let max_width = rows.iter().map(VisualRow::width).fold(0.0f32, f32::max);
         Self {
-            byte_len,
+            first_sub_row,
+            leading_bytes,
+            total_sub_rows: total_sub_rows.max(rows.len()),
             rows,
             hanging_indent,
             max_width,
@@ -93,17 +174,14 @@ impl RowLayout {
     }
 
     pub(crate) fn from_shaped(lines: Vec<ShapedLine>) -> Self {
-        Self::from_rows(lines.into_iter().map(VisualRow::from).collect(), 0.0)
+        let total = lines.len();
+        let rows: Vec<VisualRow> = lines.into_iter().map(VisualRow::from).collect();
+        Self::from_slice(rows, 0, 0, total, 0.0)
     }
 
     #[inline]
-    pub(crate) fn byte_len(&self) -> usize {
-        self.byte_len
-    }
-
-    #[inline]
-    pub(crate) fn indent_for(&self, sub_row: usize) -> f32 {
-        if sub_row == 0 {
+    pub(crate) fn indent_for(&self, abs_sub_row: usize) -> f32 {
+        if abs_sub_row == 0 {
             0.0
         } else {
             self.hanging_indent
@@ -116,10 +194,11 @@ impl RowLayout {
         line_height: f32,
         end_affinity: bool,
     ) -> Option<Point> {
-        let mut cursor = 0;
-        let mut y = 0.0;
+        let mut cursor = self.leading_bytes;
+        let mut y = self.first_sub_row as f32 * line_height;
         for (ix, row) in self.rows.iter().enumerate() {
-            let is_last = ix + 1 == self.rows.len();
+            let abs_sub = self.first_sub_row + ix;
+            let is_last = abs_sub + 1 == self.total_sub_rows;
             let len = row.byte_len();
             let hit = if len == 0 {
                 local_offset == cursor
@@ -129,7 +208,8 @@ impl RowLayout {
                 local_offset >= cursor && local_offset < cursor + len
             };
             if hit {
-                let x = row.x_for_index(local_offset.saturating_sub(cursor)) + self.indent_for(ix);
+                let x =
+                    row.x_for_index(local_offset.saturating_sub(cursor)) + self.indent_for(abs_sub);
                 return Some(point(x, y));
             }
             cursor += if is_last { len + 1 } else { len };
@@ -139,10 +219,11 @@ impl RowLayout {
     }
 
     pub(crate) fn closest_index_for_x(&self, x: f32) -> usize {
-        let mut cursor = 0;
+        let mut cursor = self.leading_bytes;
         for (ix, row) in self.rows.iter().enumerate() {
-            let indent = self.indent_for(ix);
-            if x <= indent + row.width() {
+            let abs_sub = self.first_sub_row + ix;
+            let indent = self.indent_for(abs_sub);
+            if x <= indent + row.width() || ix + 1 == self.rows.len() {
                 return cursor + row.closest_index_for_x(x - indent);
             }
             cursor += row.byte_len();
@@ -150,19 +231,34 @@ impl RowLayout {
         cursor
     }
 
+    pub(crate) fn closest_index_for_x_in_last_row(&self, x: f32) -> usize {
+        let Some((ix, row)) = self.rows.iter().enumerate().next_back() else {
+            return self.leading_bytes;
+        };
+        let abs_sub = self.first_sub_row + ix;
+        let base = self.leading_bytes
+            + self.rows[..ix]
+                .iter()
+                .map(VisualRow::byte_len)
+                .sum::<usize>();
+        let indent = self.indent_for(abs_sub);
+        base + row.closest_index_for_x(x - indent)
+    }
+
     pub(crate) fn closest_index_for_position(
         &self,
         pos: Point,
         line_height: f32,
     ) -> Option<(usize, bool)> {
-        let mut offset = 0;
-        let mut top = 0.0;
+        let mut offset = self.leading_bytes;
+        let mut top = self.first_sub_row as f32 * line_height;
         for (ix, row) in self.rows.iter().enumerate() {
+            let abs_sub = self.first_sub_row + ix;
             let bottom = top + line_height;
             if pos.y >= top && pos.y < bottom {
-                let x = pos.x - self.indent_for(ix);
+                let x = pos.x - self.indent_for(abs_sub);
                 let col = row.closest_index_for_x(x);
-                let end_affinity = ix + 1 < self.rows.len() && col == row.byte_len();
+                let end_affinity = abs_sub + 1 < self.total_sub_rows && col == row.byte_len();
                 return Some((offset + col, end_affinity));
             }
             offset += row.byte_len();
@@ -176,15 +272,16 @@ impl RowLayout {
             .rows
             .iter()
             .enumerate()
-            .map(|(ix, row)| row.width() + self.indent_for(ix))
+            .map(|(ix, row)| row.width() + self.indent_for(self.first_sub_row + ix))
             .fold(self.max_width, f32::max);
-        size(width, self.rows.len() as f32 * line_height)
+        size(width, self.total_sub_rows as f32 * line_height)
     }
 
     pub(crate) fn paint(&self, origin: Point, line_height: f32, renderer: &mut D2DRenderer) {
         for (ix, row) in self.rows.iter().enumerate() {
+            let abs_sub = self.first_sub_row + ix;
             row.paint(
-                origin + point(self.indent_for(ix), ix as f32 * line_height),
+                origin + point(self.indent_for(abs_sub), abs_sub as f32 * line_height),
                 line_height,
                 renderer,
             );
@@ -207,12 +304,45 @@ impl DisplayPos {
     }
 }
 
+/// Inline single-range storage avoiding per-line heap allocations for non-wrapping lines (P-4).
+#[derive(Debug, Clone)]
+pub(crate) enum LineRanges {
+    Single(usize),
+    Wrapped(Box<[Range<usize>]>),
+}
+
+impl LineRanges {
+    #[inline]
+    pub(crate) fn len(&self) -> usize {
+        match self {
+            Self::Single(_) => 1,
+            Self::Wrapped(s) => s.len(),
+        }
+    }
+
+    #[inline]
+    pub(crate) fn get(&self, index: usize) -> Option<Range<usize>> {
+        match self {
+            Self::Single(byte_len) => (index == 0).then_some(0..*byte_len),
+            Self::Wrapped(s) => s.get(index).cloned(),
+        }
+    }
+
+    #[inline]
+    pub(crate) fn last(&self) -> Range<usize> {
+        match self {
+            Self::Single(byte_len) => 0..*byte_len,
+            Self::Wrapped(s) => s.last().cloned().unwrap_or(0..0),
+        }
+    }
+}
+
 /// Soft-wrap ranges for a single logical buffer line.
 #[derive(Debug, Clone)]
 pub(crate) struct WrappedLine {
     pub(crate) byte_len: usize,
     pub(crate) indent_spaces: u32,
-    pub(crate) ranges: Vec<Range<usize>>,
+    pub(crate) ranges: LineRanges,
 }
 
 impl WrappedLine {
@@ -382,6 +512,18 @@ impl LineChunks {
             rebuilt.push(LineChunk::new(iter.by_ref().take(CHUNK_SIZE).collect()));
         }
         self.chunks.splice(start_chunk..replace_end, rebuilt);
+        // Rebalance under-full neighboring chunks so repeated small edits never fragment (P-4).
+        let mut idx = start_chunk.saturating_sub(1);
+        while idx + 1 < self.chunks.len() && idx <= start_chunk + 2 {
+            let combined = self.chunks[idx].items.len() + self.chunks[idx + 1].items.len();
+            if combined <= CHUNK_SIZE {
+                let next_chunk = self.chunks.remove(idx + 1);
+                self.chunks[idx].items.extend(next_chunk.items);
+                self.chunks[idx].summary = ChunkSummary::of_slice(&self.chunks[idx].items);
+            } else {
+                idx += 1;
+            }
+        }
         self.recompute_total();
     }
 
@@ -419,14 +561,21 @@ fn is_printable_ascii(bytes: &[u8]) -> bool {
     bytes.iter().all(|&b| (0x20..=0x7e).contains(&b))
 }
 
-fn can_wrap_with_char_widths(text: &str) -> bool {
-    if is_printable_ascii(text.as_bytes()) {
-        return true;
-    }
-    text.chars()
-        .all(|c| CHAR_WIDTH_RANGES.iter().any(|r| r.contains(&(c as u32))))
+#[inline]
+fn is_printable_ascii_or_tab(bytes: &[u8]) -> bool {
+    bytes.iter().all(|&b| b == b'\t' || (0x20..=0x7e).contains(&b))
 }
 
+pub(crate) fn can_wrap_with_char_widths(text: &str) -> bool {
+    if is_printable_ascii_or_tab(text.as_bytes()) {
+        return true;
+    }
+    text.chars().all(|c| {
+        c == '\t' || CHAR_WIDTH_RANGES.iter().any(|r| r.contains(&(c as u32)))
+    })
+}
+
+#[cfg(test)]
 fn measured_wrap_breaks(
     text: &str,
     width: f32,
@@ -553,6 +702,32 @@ impl WrapIndex {
             .map_or_else(|| self.line_count().saturating_sub(1), |(line, _, _)| line)
     }
 
+    pub(crate) fn visual_row_to_line_and_sub_row(&self, visual_row: usize) -> (usize, usize) {
+        self.chunks.get_by_visual_row(visual_row).map_or_else(
+            || (self.line_count().saturating_sub(1), 0),
+            |(line, first_row, _)| (line, visual_row.saturating_sub(first_row)),
+        )
+    }
+
+    pub(crate) fn visual_row_range(&self, line_ix: usize, sub_row: usize) -> Option<(Range<usize>, bool)> {
+        let line = self.line(line_ix)?;
+        let range = line.ranges.get(sub_row)?;
+        let soft_end = sub_row + 1 < line.row_count();
+        Some((range, soft_end))
+    }
+
+    pub(crate) fn font(&self) -> &Font {
+        &self.font
+    }
+
+    pub(crate) fn font_size(&self) -> f32 {
+        self.font_size
+    }
+
+    pub(crate) fn wrap_width(&self) -> Option<f32> {
+        self.wrap_width
+    }
+
     pub(crate) fn set_wrap_width(&mut self, wrap_width: Option<f32>, ts: &TextSystem) {
         if self.wrap_width == wrap_width {
             return;
@@ -609,7 +784,7 @@ impl WrapIndex {
 
         let font = self.font.clone();
         let font_size = self.font_size;
-        ts.with_char_widths(&font, font_size, |font_id, char_widths, dw| {
+        ts.with_char_widths(&font, font_size, |char_widths, dw| {
             let max_ascii = char_widths.max_printable_ascii();
             let ascii_fit_len = if max_ascii > 0.0 {
                 (wrap_width / max_ascii).floor().max(0.0) as usize
@@ -625,26 +800,8 @@ impl WrapIndex {
                     if can_wrap_with_char_widths(line_str) {
                         char_widths.wrap_line_into(line_str, width, dw, out);
                     } else {
-                        measured_wrap_breaks(
-                            line_str,
-                            width,
-                            true,
-                            |sub| {
-                                if sub.is_empty() {
-                                    return 0.0;
-                                }
-                                dw.layout_line(
-                                    sub,
-                                    font_size,
-                                    &[FontRun {
-                                        len: sub.len(),
-                                        font_id,
-                                    }],
-                                )
-                                .width
-                            },
-                            out,
-                        );
+                        // Single-pass DirectWrite layout wrapping for complex scripts/emoji (P-1).
+                        dw.wrap_line_breaks(line_str, &font, font_size, width, true, out);
                     }
                 },
             );
@@ -693,31 +850,39 @@ impl WrapIndex {
                 None => updated_text.slice(0..0),
             };
             let byte_len = slice.len();
-            let mut ranges = Vec::new();
-            let mut cursor = 0;
             let mut indent_spaces = 0;
-
-            if let Some(width) = wrap_width
+            let ranges = if let Some(width) = wrap_width
                 && byte_len > 0
             {
                 let fast_ascii = ascii_fit_len > 0
                     && byte_len <= ascii_fit_len
                     && slice.chunks().all(|c| is_printable_ascii(c.as_bytes()));
-                if !fast_ascii {
+                if fast_ascii {
+                    LineRanges::Single(byte_len)
+                } else {
                     let line_str: Cow<str> = slice.into();
                     breaks.clear();
                     wrap_line(&line_str, width, &mut breaks);
-                    for &b in &breaks {
-                        ranges.push(cursor..b.ix);
-                        cursor = b.ix;
-                        indent_spaces = b.next_indent;
+                    if breaks.is_empty() {
+                        LineRanges::Single(byte_len)
+                    } else {
+                        let mut v = Vec::with_capacity(breaks.len() + 1);
+                        let mut cursor = 0;
+                        for &b in &breaks {
+                            v.push(cursor..b.ix);
+                            cursor = b.ix;
+                            indent_spaces = b.next_indent;
+                        }
+                        if cursor < byte_len {
+                            v.push(cursor..byte_len);
+                        }
+                        LineRanges::Wrapped(v.into_boxed_slice())
                     }
                 }
-            }
+            } else {
+                LineRanges::Single(byte_len)
+            };
 
-            if cursor < byte_len || cursor == 0 {
-                ranges.push(cursor..byte_len);
-            }
             replacement.push(WrappedLine {
                 byte_len,
                 indent_spaces,
@@ -729,7 +894,7 @@ impl WrapIndex {
         self.text = updated_text.clone();
     }
 
-    fn rebuild_all(&mut self, text: &Rope, ts: &TextSystem) {
+    pub(crate) fn rebuild_all(&mut self, text: &Rope, ts: &TextSystem) {
         self.apply_edit(text, &(0..self.text.len()), text.len(), ts);
     }
 
@@ -740,18 +905,25 @@ impl WrapIndex {
             return DisplayPos::new(self.visual_row_count(), 0, 0);
         };
         let local = offset.saturating_sub(start);
-        for (sub_row, range) in line.ranges.iter().enumerate() {
-            if range.contains(&local) || (end_affinity && local == range.end) {
-                return DisplayPos::new(
-                    first_row + sub_row,
-                    sub_row,
-                    local.saturating_sub(range.start),
-                );
+        match &line.ranges {
+            LineRanges::Single(byte_len) => {
+                DisplayPos::new(first_row, 0, local.min(*byte_len))
+            }
+            LineRanges::Wrapped(ranges) => {
+                for (sub_row, range) in ranges.iter().enumerate() {
+                    if range.contains(&local) || (end_affinity && local == range.end) {
+                        return DisplayPos::new(
+                            first_row + sub_row,
+                            sub_row,
+                            local.saturating_sub(range.start),
+                        );
+                    }
+                }
+                let last = line.ranges.last();
+                let sub_row = line.row_count().saturating_sub(1);
+                DisplayPos::new(first_row + sub_row, sub_row, last.len())
             }
         }
-        let last = line.ranges.last().unwrap_or(&(0..0));
-        let sub_row = line.row_count().saturating_sub(1);
-        DisplayPos::new(first_row + sub_row, sub_row, last.len())
     }
 
     pub(crate) fn display_to_offset(&self, pos: DisplayPos) -> usize {
@@ -768,10 +940,6 @@ impl WrapIndex {
 
     pub(crate) fn display_to_point(&self, pos: DisplayPos) -> TextPoint {
         self.text.offset_to_point(self.display_to_offset(pos))
-    }
-
-    pub(crate) fn point_to_display(&self, pt: TextPoint) -> DisplayPos {
-        self.offset_to_display(self.text.point_to_offset(pt), false)
     }
 }
 
@@ -843,10 +1011,8 @@ mod tests {
         index.splice_lines(&text, &all, 0, 0, &mut fake);
         assert_eq!(index.line_count(), 1);
         assert_eq!(index.visual_row_count(), 1);
-        assert_eq!(
-            index.line(0).unwrap().ranges.as_slice(),
-            std::slice::from_ref(&(0..0))
-        );
+        assert_eq!(index.line(0).unwrap().ranges.get(0), Some(0..0));
+        assert_eq!(index.line(0).unwrap().ranges.len(), 1);
 
         let mut fast = WrapIndex::new(test_font(), 14., Some(100.));
         let sample = Rope::from("short ascii\nlonger ascii line\n日本語\n");
@@ -865,12 +1031,12 @@ mod tests {
             WrappedLine {
                 byte_len: 10,
                 indent_spaces: 0,
-                ranges: std::iter::once(0..10).collect(),
+                ranges: LineRanges::Single(10),
             },
             WrappedLine {
                 byte_len: 14,
                 indent_spaces: 0,
-                ranges: vec![0..9, 9..14],
+                ranges: LineRanges::Wrapped(vec![0..9, 9..14].into_boxed_slice()),
             },
         ]);
         assert_eq!(index.offset_to_display(20, true), DisplayPos::new(1, 0, 9));
@@ -881,7 +1047,13 @@ mod tests {
         s1.len = 10;
         let mut s2 = ShapedLine::default();
         s2.len = 5;
-        let layout = RowLayout::from_rows(vec![VisualRow::from(s1), VisualRow::from(s2)], 20.);
+        let layout = RowLayout::from_slice(
+            vec![VisualRow::from(s1), VisualRow::from(s2)],
+            0,
+            0,
+            2,
+            20.,
+        );
         let (ix, affinity) = layout
             .closest_index_for_position(point(999., 5.), 20.)
             .unwrap();
