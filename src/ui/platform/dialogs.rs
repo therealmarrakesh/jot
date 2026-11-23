@@ -4,7 +4,6 @@
 use std::ffi::OsString;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
-use std::thread;
 
 use windows::Win32::{
     Foundation::{ERROR_CANCELLED, HWND},
@@ -21,10 +20,7 @@ use windows::Win32::{
 };
 use windows::core::{HSTRING, Interface, PCWSTR};
 
-use crate::win32::WindowHwnd;
-
 use super::{PathPromptOptions, SavePathOptions};
-use crate::ui::runtime::{ForegroundExecutor, futures::channel::oneshot};
 use crate::ui::types::UiResult;
 
 const ENCODING_COMBO_ID: u32 = 1001;
@@ -59,21 +55,7 @@ fn is_cancelled(err: &windows::core::Error) -> bool {
     err.code() == ERROR_CANCELLED.to_hresult()
 }
 
-pub(crate) fn prompt_for_paths(
-    options: PathPromptOptions,
-) -> oneshot::Receiver<UiResult<Option<Vec<PathBuf>>>> {
-    let (tx, rx) = oneshot::channel();
-    thread::Builder::new()
-        .name("jot-open-dialog".into())
-        .spawn(move || {
-            let result = run_open_dialog(options);
-            let _ = tx.send(result);
-        })
-        .expect("failed to spawn open dialog thread");
-    rx
-}
-
-fn run_open_dialog(options: PathPromptOptions) -> UiResult<Option<Vec<PathBuf>>> {
+pub(crate) fn run_open_dialog(options: PathPromptOptions) -> UiResult<Option<Vec<PathBuf>>> {
     unsafe {
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
     }
@@ -113,27 +95,11 @@ fn run_open_dialog(options: PathPromptOptions) -> UiResult<Option<Vec<PathBuf>>>
 
 pub(crate) type SavePathResult = UiResult<Option<(PathBuf, Option<usize>)>>;
 
-pub(crate) fn prompt_for_save_path(
-    owner: WindowHwnd,
-    _foreground: &ForegroundExecutor,
+pub(crate) fn run_save_dialog(
+    owner_raw: isize,
     options: SavePathOptions,
-) -> oneshot::Receiver<SavePathResult> {
-    let (tx, rx) = oneshot::channel();
-    let owner_raw = owner.raw().0 as isize;
-    thread::Builder::new()
-        .name("jot-save-dialog".into())
-        .spawn(move || {
-            let result = run_save_dialog(HWND(owner_raw as *mut _), options);
-            let _ = tx.send(result);
-        })
-        .expect("failed to spawn save dialog thread");
-    rx
-}
-
-fn run_save_dialog(
-    owner: HWND,
-    options: SavePathOptions,
-) -> UiResult<Option<(PathBuf, Option<usize>)>> {
+) -> SavePathResult {
+    let owner = HWND(owner_raw as *mut _);
     unsafe {
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
     }

@@ -2,7 +2,7 @@ use std::cell::Cell;
 use std::rc::Rc;
 use std::time::Duration;
 
-use crate::ui::{AsyncApp, Bounds, Context, Pixels, Point, Task, WeakEntity, px};
+use crate::ui::{Bounds, Context, Pixels, Point, TimerHandle, px};
 
 /// Manages timer-based auto-scrolling during drag interactions.
 ///
@@ -10,7 +10,7 @@ use crate::ui::{AsyncApp, Bounds, Context, Pixels, Point, Task, WeakEntity, px};
 /// toward the top.
 pub(crate) struct AutoScroll {
     delta: Rc<Cell<Option<Pixels>>>,
-    task: Option<Task<()>>,
+    timer: Option<TimerHandle>,
     /// Last drag position, available to the interaction that owns selection.
     pub(crate) last_drag_position: Option<Point<Pixels>>,
 }
@@ -19,7 +19,7 @@ impl Default for AutoScroll {
     fn default() -> Self {
         Self {
             delta: Rc::new(Cell::new(None)),
-            task: None,
+            timer: None,
             last_drag_position: None,
         }
     }
@@ -52,46 +52,28 @@ impl AutoScroll {
         T: 'static,
         F: Fn(Pixels, &mut T, &mut Context<T>) + 'static,
     {
-        let was_idle = self.task.is_none();
+        let was_idle = self.timer.is_none();
         self.delta.set(delta);
 
         if delta.is_none() {
-            self.task = None;
+            self.timer = None;
             return;
         }
 
         if was_idle {
             let shared = Rc::clone(&self.delta);
-            self.task = Some(cx.spawn(Self::task_loop(shared, tick)));
-        }
-    }
-
-    fn task_loop<T, F>(
-        shared: Rc<Cell<Option<Pixels>>>,
-        tick: F,
-    ) -> impl AsyncFnOnce(WeakEntity<T>, &mut AsyncApp) + 'static
-    where
-        T: 'static,
-        F: Fn(Pixels, &mut T, &mut Context<T>) + 'static,
-    {
-        async move |this: WeakEntity<T>, cx: &mut AsyncApp| {
-            loop {
-                cx.background_executor()
-                    .timer(Duration::from_millis(16))
-                    .await;
+            let this = cx.weak_entity();
+            let interval = Duration::from_millis(16);
+            self.timer = Some(cx.every(interval, interval, move |cx| {
                 let Some(delta) = shared.get() else {
-                    break;
+                    return false;
                 };
-                let alive = this
-                    .update(cx, |state, cx| {
-                        tick(delta, state, cx);
-                        true
-                    })
-                    .unwrap_or(false);
-                if !alive {
-                    break;
-                }
-            }
+                this.update(cx, |state, cx| {
+                    tick(delta, state, cx);
+                    true
+                })
+                .unwrap_or(false)
+            }));
         }
     }
 
@@ -101,7 +83,7 @@ impl AutoScroll {
 
     pub(crate) fn stop(&mut self) {
         self.delta.set(None);
-        self.task = None;
+        self.timer = None;
         self.last_drag_position = None;
     }
 }

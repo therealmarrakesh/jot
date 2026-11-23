@@ -232,7 +232,7 @@ pub(crate) struct MenuBar {
     focus: FocusHandle,
     open: Option<OpenMenu>,
     serial: usize,
-    submenu_timer: Task<()>,
+    submenu_timer: TimerHandle,
     hit_areas: MenuHitAreas,
     trigger_areas: MenuHitAreas,
     bar_focus: Option<MenuKind>,
@@ -254,7 +254,7 @@ impl MenuBar {
             focus: cx.focus_handle(),
             open: None,
             serial: 0,
-            submenu_timer: Task::ready(()),
+            submenu_timer: TimerHandle::default(),
             hit_areas: MenuHitAreas::new(),
             trigger_areas: MenuHitAreas::new(),
             bar_focus: None,
@@ -511,7 +511,7 @@ impl Jot {
             return self.menu_close(window, cx);
         };
         open.motion.closing = true;
-        self.menu_bar.submenu_timer = Task::ready(());
+        self.menu_bar.submenu_timer.cancel();
         self.menu_bar.bar_focus = Some(kind);
         self.menu_bar.focus.focus(window, cx);
         self.sync_selection_focus(cx);
@@ -602,7 +602,7 @@ impl Jot {
         self.menu_bar.bar_focus = None;
         let motion = Motion::new(self.menu_bar.next_serial(), !open.commands.is_empty());
         self.menu_bar.open = Some(OpenMenu { motion, ..open });
-        self.menu_bar.submenu_timer = Task::ready(());
+        self.menu_bar.submenu_timer.cancel();
         self.menu_bar.focus.focus(window, cx);
         self.sync_selection_focus(cx);
         cx.notify();
@@ -614,7 +614,7 @@ impl Jot {
             open.motion.closing = true;
             open.return_focus.take()
         });
-        self.menu_bar.submenu_timer = Task::ready(());
+        self.menu_bar.submenu_timer.cancel();
         let target = return_focus.unwrap_or_else(|| self.active_editor().focus_handle(cx));
         target.focus(window, cx);
         self.sync_selection_focus(cx);
@@ -678,7 +678,7 @@ impl Jot {
     ) {
         let action_context = self.active_editor().focus_handle(cx);
         let serial = self.menu_bar.next_serial();
-        self.menu_bar.submenu_timer = Task::ready(());
+        self.menu_bar.submenu_timer.cancel();
         let Some(open) = self.menu_bar.live_open_mut() else {
             return;
         };
@@ -701,7 +701,7 @@ impl Jot {
     }
 
     fn menu_close_submenu(&mut self, cx: &mut Context<Self>) {
-        self.menu_bar.submenu_timer = Task::ready(());
+        self.menu_bar.submenu_timer.cancel();
         if let Some(submenu) = self.menu_bar.open.as_mut().and_then(OpenMenu::live_submenu_mut) {
             submenu.motion.closing = true;
             cx.notify();
@@ -716,20 +716,19 @@ impl Jot {
     ) {
         let target = match change {
             SubmenuChange::Keep => {
-                self.menu_bar.submenu_timer = Task::ready(());
+                self.menu_bar.submenu_timer.cancel();
                 return;
             }
             SubmenuChange::Open(ix) => Some(ix),
             SubmenuChange::Close => None,
         };
         let delay = menu_show_delay();
-        self.menu_bar.submenu_timer = cx.spawn_in(window, async move |this, cx| {
-            cx.background_executor().timer(delay).await;
-            this.update_in(cx, |this, window, cx| match target {
+        let this = cx.weak_entity();
+        self.menu_bar.submenu_timer = cx.after_in(window.window_id(), delay, move |window, cx| {
+            let _ = this.update(cx, |this, cx| match target {
                 Some(ix) => this.menu_open_submenu(ix, false, window, cx),
                 None => this.menu_close_submenu(cx),
-            })
-            .ok();
+            });
         });
     }
 

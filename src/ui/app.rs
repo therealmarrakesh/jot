@@ -1,5 +1,4 @@
-//! Clean-room `App`, `Context<T>`, `AsyncApp`, `AsyncWindowContext`, observers,
-//! subscriptions, and window handles.
+//! Clean-room `App`, `Context<T>`, observers, subscriptions, jobs/timers, and window handles.
 
 use std::any::TypeId;
 use std::borrow::{Borrow, BorrowMut};
@@ -8,17 +7,22 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
 use std::path::PathBuf;
-use std::rc::{Rc, Weak};
+use std::rc::Rc;
+use std::time::Duration;
+
+use crate::win32::WindowHwnd;
 
 use super::element::Render;
 use super::entity::{AnyView, Entity, EntityId, EntityStore, WeakEntity};
 use super::focus::FocusHandle;
 use super::graphics::dwrite::TextSystem;
+use super::jobs::{Jobs, TimerHandle, UiPoster};
 use super::keymap::{Command, KeyBinding, Keymap};
+use super::platform::dialogs::SavePathResult;
 use super::platform::{
-    DisplayId, PathPromptOptions, WindowAppearance, WindowOptions, WindowsDisplay, WindowsPlatform,
+    DisplayId, PathPromptOptions, SavePathOptions, WindowAppearance, WindowOptions,
+    WindowsDisplay, WindowsPlatform,
 };
-use super::runtime::{BackgroundExecutor, ForegroundExecutor, Task, futures::channel::oneshot};
 use super::types::{UiError, UiResult};
 use super::window::{KeyDownEvent, Window, WindowId};
 
@@ -150,13 +154,11 @@ pub(crate) struct AppCell {
     pub(crate) inner: RefCell<App>,
 }
 
-/// Central application state owning all entities, shared app state, windows, keymap, and executors.
+/// Central application state owning all entities, shared app state, windows, keymap, and jobs.
 pub(crate) struct App {
-    pub(crate) self_weak: Weak<AppCell>,
     pub(crate) platform: Rc<WindowsPlatform>,
     pub(crate) text_system: Rc<TextSystem>,
-    pub(crate) foreground: ForegroundExecutor,
-    pub(crate) background: BackgroundExecutor,
+    pub(crate) jobs: Jobs,
     pub(crate) entities: EntityStore,
     pub(crate) shared: crate::AppShared,
     pub(crate) keymap: Rc<RefCell<Keymap>>,
@@ -181,16 +183,12 @@ pub(crate) struct App {
 
 impl App {
     pub(crate) fn new_rc(platform: Rc<WindowsPlatform>) -> Rc<AppCell> {
-        let foreground = ForegroundExecutor::new();
-        let background = BackgroundExecutor::new();
         let text_system = Rc::new(TextSystem::new());
-        Rc::new_cyclic(|weak| AppCell {
+        Rc::new(AppCell {
             inner: RefCell::new(App {
-                self_weak: weak.clone(),
                 platform,
                 text_system,
-                foreground,
-                background,
+                jobs: Jobs::new(),
                 entities: EntityStore::default(),
                 shared: crate::AppShared::default(),
                 keymap: Rc::new(RefCell::new(Keymap::default())),
@@ -215,15 +213,60 @@ impl App {
         })
     }
 
-    pub(crate) fn async_app(&self) -> AsyncApp {
-        AsyncApp {
-            app: self.self_weak.clone(),
-            background: self.background.clone(),
-        }
+    pub(crate) fn ui_poster(&self) -> UiPoster {
+        self.jobs.poster()
     }
 
-    pub(crate) fn foreground_executor(&self) -> &ForegroundExecutor {
-        &self.foreground
+    pub(crate) fn drain_jobs(&mut self) {
+        Jobs::drain_into(self);
+    }
+
+    pub(crate) fn after(
+        &self,
+        delay: Duration,
+        on_fire: impl FnOnce(&mut App) + 'static,
+    ) -> TimerHandle {
+        self.jobs.after(delay, on_fire)
+    }
+
+    pub(crate) fn after_in(
+        &self,
+        window_id: WindowId,
+        delay: Duration,
+        on_fire: impl FnOnce(&mut Window, &mut App) + 'static,
+    ) -> TimerHandle {
+        self.jobs.after(delay, move |cx| {
+            let _ = cx.update_window_impl(window_id, |_, window, cx| on_fire(window, cx));
+        })
+    }
+
+    pub(crate) fn every(
+        &self,
+        delay: Duration,
+        interval: Duration,
+        on_tick: impl FnMut(&mut App) -> bool + 'static,
+    ) -> TimerHandle {
+        self.jobs.every(delay, interval, on_tick)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn spawn_bg<R: Send + 'static>(
+        &self,
+        work: impl FnOnce() -> R + Send + 'static,
+        on_done: impl FnOnce(R, &mut App) + 'static,
+    ) {
+        self.jobs.spawn_bg(work, on_done);
+    }
+
+    pub(crate) fn spawn_bg_in<R: Send + 'static>(
+        &self,
+        window_id: WindowId,
+        work: impl FnOnce() -> R + Send + 'static,
+        on_done: impl FnOnce(R, &mut Window, &mut App) + 'static,
+    ) {
+        self.jobs.spawn_bg(work, move |result, cx| {
+            let _ = cx.update_window_impl(window_id, |_, window, cx| on_done(result, window, cx));
+        });
     }
 
     pub(crate) fn text_system(&self) -> &Rc<TextSystem> {
@@ -488,8 +531,27 @@ impl App {
     pub(crate) fn prompt_for_paths(
         &self,
         options: PathPromptOptions,
-    ) -> oneshot::Receiver<UiResult<Option<Vec<PathBuf>>>> {
-        super::platform::dialogs::prompt_for_paths(options)
+        on_done: impl FnOnce(UiResult<Option<Vec<PathBuf>>>, &mut App) + 'static,
+    ) {
+        self.jobs.spawn_dedicated(
+            "jot-open-dialog",
+            move || super::platform::dialogs::run_open_dialog(options),
+            on_done,
+        );
+    }
+
+    pub(crate) fn prompt_for_save_path(
+        &self,
+        owner: WindowHwnd,
+        options: SavePathOptions,
+        on_done: impl FnOnce(SavePathResult, &mut App) + 'static,
+    ) {
+        let owner_raw = owner.raw().0 as isize;
+        self.jobs.spawn_dedicated(
+            "jot-save-dialog",
+            move || super::platform::dialogs::run_save_dialog(owner_raw, options),
+            on_done,
+        );
     }
 
     // ---- Windows ----
@@ -628,15 +690,6 @@ impl App {
         self.window_closed_listeners = listeners;
     }
 
-    pub(crate) fn spawn<AsyncFn, R>(&self, f: AsyncFn) -> Task<R>
-    where
-        AsyncFn: AsyncFnOnce(&mut AsyncApp) -> R + 'static,
-        R: 'static,
-    {
-        let mut async_app = self.async_app();
-        self.foreground.spawn(async move { f(&mut async_app).await })
-    }
-
     pub(crate) fn quit(&mut self) {
         self.quit_requested = true;
         self.platform.post_quit();
@@ -727,34 +780,6 @@ impl<T: 'static> Context<'_, T> {
             weak.update(app, |this, cx| f(this, command, window, cx))
                 .unwrap_or(false)
         }
-    }
-
-    pub(crate) fn spawn<AsyncFn, R>(&self, f: AsyncFn) -> Task<R>
-    where
-        AsyncFn: AsyncFnOnce(WeakEntity<T>, &mut AsyncApp) -> R + 'static,
-        R: 'static,
-    {
-        let weak = self.weak_entity();
-        let mut async_app = self.app.async_app();
-        self.app
-            .foreground
-            .spawn(async move { f(weak, &mut async_app).await })
-    }
-
-    pub(crate) fn spawn_in<AsyncFn, R>(&self, window: &Window, f: AsyncFn) -> Task<R>
-    where
-        AsyncFn: AsyncFnOnce(WeakEntity<T>, &mut AsyncWindowContext) -> R + 'static,
-        R: 'static,
-    {
-        let weak = self.weak_entity();
-        let mut async_win = AsyncWindowContext {
-            app: self.app.self_weak.clone(),
-            window_id: window.window_id(),
-            background: self.app.background.clone(),
-        };
-        self.app
-            .foreground
-            .spawn(async move { f(weak, &mut async_win).await })
     }
 
     pub(crate) fn observe<Observed: 'static>(
@@ -854,50 +879,6 @@ impl<T: 'static> Context<'_, T> {
             obs.update(app, |this, cx| f(this, window, cx));
             true
         })
-    }
-}
-
-/// Async handle to `App` usable inside foreground `cx.spawn` futures.
-#[derive(Clone)]
-pub(crate) struct AsyncApp {
-    pub(crate) app: Weak<AppCell>,
-    pub(crate) background: BackgroundExecutor,
-}
-
-impl AsyncApp {
-    pub(crate) fn background_executor(&self) -> &BackgroundExecutor {
-        &self.background
-    }
-
-    pub(crate) fn update<R>(&self, f: impl FnOnce(&mut App) -> R) -> R {
-        let cell = self.app.upgrade().expect("Application dropped");
-        let mut app = cell.inner.borrow_mut();
-        let result = f(&mut app);
-        app.flush_effects();
-        result
-    }
-}
-
-/// Async handle bound to a specific window, usable inside `cx.spawn_in` futures.
-#[derive(Clone)]
-pub(crate) struct AsyncWindowContext {
-    pub(crate) app: Weak<AppCell>,
-    pub(crate) window_id: WindowId,
-    pub(crate) background: BackgroundExecutor,
-}
-
-impl AsyncWindowContext {
-    pub(crate) fn background_executor(&self) -> &BackgroundExecutor {
-        &self.background
-    }
-
-    pub(crate) fn update<R>(&self, f: impl FnOnce(&mut Window, &mut App) -> R) -> UiResult<R> {
-        let cell = self
-            .app
-            .upgrade()
-            .ok_or_else(|| UiError::new("Application dropped"))?;
-        let mut app = cell.inner.borrow_mut();
-        app.update_window_impl(self.window_id, |_, window, app| f(window, app))
     }
 }
 

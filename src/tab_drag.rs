@@ -297,15 +297,7 @@ fn start_move_loop(drag: &mut TabDrag, point: ScreenPoint, cx: &mut App) {
     drag.phase = Phase::Entering {
         since: Instant::now(),
     };
-    cx.spawn(async move |cx| {
-        loop {
-            cx.background_executor().timer(MOVE_POLL).await;
-            if !cx.update(poll) {
-                break;
-            }
-        }
-    })
-    .detach();
+    cx.every(MOVE_POLL, MOVE_POLL, poll).detach();
 }
 
 fn poll(cx: &mut App) -> bool {

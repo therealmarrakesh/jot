@@ -1,4 +1,4 @@
-use crate::ui::{Context, Task};
+use crate::ui::{Context, TimerHandle};
 use std::time::Duration;
 
 fn blink_interval() -> Option<Duration> {
@@ -10,7 +10,7 @@ pub(crate) struct BlinkCursor {
     visible: bool,
     paused: bool,
     epoch: usize,
-    _task: Task<()>,
+    _timer: TimerHandle,
 }
 
 impl BlinkCursor {
@@ -19,7 +19,7 @@ impl BlinkCursor {
             visible: false,
             paused: false,
             epoch: 0,
-            _task: Task::ready(()),
+            _timer: TimerHandle::default(),
         }
     }
 
@@ -32,7 +32,7 @@ impl BlinkCursor {
         self.epoch = 0;
         self.paused = false;
         self.visible = false;
-        self._task = Task::ready(());
+        self._timer.cancel();
         cx.notify();
     }
 
@@ -51,7 +51,7 @@ impl BlinkCursor {
         }
         let Some(interval) = blink_interval() else {
             self.visible = true;
-            self._task = Task::ready(());
+            self._timer.cancel();
             cx.notify();
             return;
         };
@@ -60,11 +60,9 @@ impl BlinkCursor {
         cx.notify();
 
         let epoch = self.next_epoch();
-        self._task = cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(interval).await;
-            if let Some(this) = this.upgrade() {
-                this.update(cx, |this, cx| this.blink(epoch, cx));
-            }
+        let this = cx.weak_entity();
+        self._timer = cx.after(interval, move |cx| {
+            let _ = this.update(cx, |this, cx| this.blink(epoch, cx));
         });
     }
 
@@ -83,20 +81,18 @@ impl BlinkCursor {
 
         let epoch = self.next_epoch();
         let Some(delay) = blink_interval() else {
-            self._task = Task::ready(());
+            self._timer.cancel();
             return;
         };
-        self._task = cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(delay).await;
-            if let Some(this) = this.upgrade() {
-                this.update(cx, |this, cx| {
-                    if epoch != this.epoch {
-                        return;
-                    }
-                    this.paused = false;
-                    this.blink(epoch, cx);
-                });
-            }
+        let this = cx.weak_entity();
+        self._timer = cx.after(delay, move |cx| {
+            let _ = this.update(cx, |this, cx| {
+                if epoch != this.epoch {
+                    return;
+                }
+                this.paused = false;
+                this.blink(epoch, cx);
+            });
         });
     }
 }

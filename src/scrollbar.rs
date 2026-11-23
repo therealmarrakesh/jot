@@ -199,7 +199,7 @@ impl ScrollbarState {
         self.0.set(inner);
     }
 
-    fn notify_drag(&self, now: Instant, view_id: EntityId, window: &mut Window, cx: &mut App) {
+    fn notify_drag(&self, now: Instant, view_id: EntityId, cx: &mut App) {
         let mut inner = self.get();
         let elapsed = now.saturating_duration_since(inner.last_drag_notify);
         if elapsed >= DRAG_MIN_INTERVAL {
@@ -218,19 +218,17 @@ impl ScrollbarState {
         self.set(inner);
         let state = self.clone();
         let delay = DRAG_MIN_INTERVAL - elapsed;
-        window
-            .spawn(cx, async move |cx| {
-                cx.background_executor().timer(delay).await;
-                let mut current = state.get();
-                if !current.drag_notify_scheduled || current.drag_notify_generation != generation {
-                    return;
-                }
-                current.drag_notify_scheduled = false;
-                current.last_drag_notify = Instant::now();
-                state.set(current);
-                cx.update(|_, cx| cx.notify(view_id)).ok();
-            })
-            .detach();
+        cx.after(delay, move |cx| {
+            let mut current = state.get();
+            if !current.drag_notify_scheduled || current.drag_notify_generation != generation {
+                return;
+            }
+            current.drag_notify_scheduled = false;
+            current.last_drag_notify = Instant::now();
+            state.set(current);
+            cx.notify(view_id);
+        })
+        .detach();
     }
 }
 
@@ -336,15 +334,13 @@ impl CustomWidget for Scrollbar {
                 let state = state.clone();
                 let view_id = window.current_view();
                 let delay = IDLE_HOLD - elapsed;
-                window
-                    .spawn(cx, async move |cx| {
-                        cx.background_executor().timer(delay).await;
-                        let mut s = state.get();
-                        s.idle_timer_scheduled = false;
-                        state.set(s);
-                        cx.update(|_, cx| cx.notify(view_id)).ok();
-                    })
-                    .detach();
+                cx.after(delay, move |cx| {
+                    let mut s = state.get();
+                    s.idle_timer_scheduled = false;
+                    state.set(s);
+                    cx.notify(view_id);
+                })
+                .detach();
             }
         }
 
@@ -555,7 +551,7 @@ impl CustomWidget for Scrollbar {
                 window.on_mouse_event({
                     let state = prepaint.state.clone();
                     let handle = self.scroll_handle.clone();
-                    move |event: &MouseMoveEvent, _, window, cx| {
+                    move |event: &MouseMoveEvent, _, _, cx| {
                         let mut inner = state.get();
                         let mut notify = false;
 
@@ -597,7 +593,7 @@ impl CustomWidget for Scrollbar {
                                 notify = true;
                             }
                             if notify {
-                                state.notify_drag(Instant::now(), view_id, window, cx);
+                                state.notify_drag(Instant::now(), view_id, cx);
                             }
                             return;
                         }

@@ -414,6 +414,7 @@ struct Jot {
     menu_bar: MenuBar,
     dialogs: dialog::Dialogs,
     find: find::FindBar,
+    file_workflow: Option<files::FileWorkflow>,
     min_size: Rc<Cell<Option<MinSizeCache>>>,
     _subscriptions: Vec<Subscription>,
 }
@@ -468,6 +469,7 @@ impl Jot {
             menu_bar,
             dialogs,
             find,
+            file_workflow: None,
             min_size: Rc::new(Cell::new(None)),
             _subscriptions,
         };
@@ -1021,16 +1023,10 @@ fn main() {
         cx.sync_system_reduce_motion();
         editor::init(cx);
 
-        let (handoff_tx, mut handoff_rx) = crate::ui::futures::channel::mpsc::unbounded::<Vec<PathBuf>>();
+        let poster = cx.ui_poster();
         instance::start_listener(move |incoming| {
-            let _ = handoff_tx.unbounded_send(incoming);
+            poster.post(move |cx| open_handoff_paths(incoming, cx));
         });
-        cx.spawn(async move |cx| {
-            while let Some(incoming) = handoff_rx.next().await {
-                cx.update(|cx| open_handoff_paths(incoming, cx));
-            }
-        })
-        .detach();
 
         cx.on_window_closed(|cx, window| {
             tooltip::window_closed(window, cx);
@@ -1293,19 +1289,12 @@ mod ui_regression_tests {
 
         fn draw(&mut self) {
             for _ in 0..2 {
-                {
-                    let mut app = self.app_cell.inner.borrow_mut();
-                    let _ = app.update_window_impl(self.handle.id, |root, window, cx| {
-                        window.draw_frame(&root, cx);
-                    });
-                    app.flush_effects();
-                }
-                let fg = self.app_cell.inner.borrow().foreground.clone();
-                fg.drain_ready();
-                {
-                    let mut app = self.app_cell.inner.borrow_mut();
-                    app.flush_effects();
-                }
+                let mut app = self.app_cell.inner.borrow_mut();
+                let _ = app.update_window_impl(self.handle.id, |root, window, cx| {
+                    window.draw_frame(&root, cx);
+                });
+                app.drain_jobs();
+                app.flush_effects();
             }
         }
 
@@ -2231,16 +2220,14 @@ mod ui_regression_tests {
             );
         }
 
-        // 2. Modal size/move loop timer pumps foreground tasks while dragging edges.
+        // 2. Modal size/move loop timer pumps UI jobs while dragging edges.
         let ran = Arc::new(AtomicBool::new(false));
         {
             let ran_flag = ran.clone();
             let app = h.app_cell.inner.borrow();
-            app.foreground
-                .spawn(async move {
-                    ran_flag.store(true, Ordering::SeqCst);
-                })
-                .detach();
+            app.ui_poster().post(move |_| {
+                ran_flag.store(true, Ordering::SeqCst);
+            });
         }
         unsafe {
             let _ = SendMessageW(
@@ -2304,13 +2291,8 @@ mod ui_regression_tests {
                 .open_window(opts, |window, cx| cx.new(|cx| Jot::new(None, window, cx)))
                 .expect("open_window in Application::run failed");
             cx.on_window_closed(|cx, _| cx.quit()).detach();
-            cx.spawn(async move |cx| {
-                cx.background_executor()
-                    .timer(Duration::from_millis(25))
-                    .await;
-                cx.update(|cx| {
-                    cx.remove_window_by_id(handle.id);
-                });
+            cx.after(Duration::from_millis(25), move |cx| {
+                cx.remove_window_by_id(handle.id);
             })
             .detach();
         });

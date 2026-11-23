@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use crate::layout::LayoutEngine;
 use crate::win32::WindowHwnd;
 
-use super::app::{AnyWindowHandle, App, AsyncWindowContext, Context, Subscription};
+use super::app::{AnyWindowHandle, App, Context, Subscription};
 use super::color::transparent_black;
 use super::element::{ElementId, GlobalElementId, HitboxBehavior};
 use super::entity::{AnyView, Entity, EntityId};
@@ -26,7 +26,6 @@ use super::graphics::dwrite::TextSystem;
 use super::keymap::KeyContext;
 use super::platform::window::NativeWindow;
 use super::platform::{CursorStyle, WindowAppearance, WindowBounds, WindowOptions};
-use super::runtime::Task;
 use super::style::TextStyle;
 use super::types::UiResult;
 
@@ -322,19 +321,6 @@ impl Window {
         } else {
             true
         }
-    }
-
-    pub(crate) fn spawn<AsyncFn, R>(&self, cx: &App, f: AsyncFn) -> Task<R>
-    where
-        AsyncFn: AsyncFnOnce(&mut AsyncWindowContext) -> R + 'static,
-        R: 'static,
-    {
-        let mut async_win = AsyncWindowContext {
-            app: cx.self_weak.clone(),
-            window_id: self.id,
-            background: cx.background.clone(),
-        };
-        cx.foreground.spawn(async move { f(&mut async_win).await })
     }
 
     pub(crate) fn listener_for<T: 'static, E: ?Sized>(

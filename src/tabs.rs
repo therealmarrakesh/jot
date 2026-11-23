@@ -96,7 +96,7 @@ pub(crate) struct TabStrip {
     lifted: Option<EntityId>,
     hovered: Option<EntityId>,
     area: Rc<Cell<Bounds<Pixels>>>,
-    repeat: Task<()>,
+    repeat: TimerHandle,
 }
 
 impl TabStrip {
@@ -117,7 +117,7 @@ impl TabStrip {
             lifted: None,
             hovered: None,
             area: Rc::new(Cell::new(Bounds::default())),
-            repeat: Task::ready(()),
+            repeat: TimerHandle::default(),
         }
     }
 
@@ -243,12 +243,10 @@ fn repeat(
     delay: Duration,
     interval: Duration,
     mut tick: impl FnMut(&mut Jot, &mut Context<Jot>) -> bool + 'static,
-) -> Task<()> {
-    cx.spawn(async move |this, cx| {
-        cx.background_executor().timer(delay).await;
-        while this.update(cx, |jot, cx| tick(jot, cx)).unwrap_or(false) {
-            cx.background_executor().timer(interval).await;
-        }
+) -> TimerHandle {
+    let this = cx.weak_entity();
+    cx.every(delay, interval, move |cx| {
+        this.update(cx, |jot, cx| tick(jot, cx)).unwrap_or(false)
     })
 }
 
@@ -817,7 +815,7 @@ impl Jot {
     }
 
     fn stop_repeat(&mut self, _: &MouseUpEvent, _: &mut Window, _: &mut Context<Self>) {
-        self.strip.repeat = Task::ready(());
+        self.strip.repeat.cancel();
     }
 
     fn new_tab_button(&self, cx: &mut Context<Self>) -> Div {

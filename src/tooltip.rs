@@ -195,8 +195,8 @@ pub(crate) struct Tooltips {
     shown: Option<Shown>,
     closed_at: Option<Instant>,
     control_only: bool,
-    opening: Option<(u64, Task<()>)>,
-    hiding: Option<Task<()>>,
+    opening: Option<(u64, TimerHandle)>,
+    hiding: Option<TimerHandle>,
 }
 
 pub(crate) fn register(
@@ -373,20 +373,17 @@ fn render(cx: &mut App) {
                 .closed_at
                 .is_some_and(|closed| closed.elapsed() < RESHOW_WINDOW);
             let delay = show_delay(reshow);
-            let task = cx.spawn(async move |cx| {
-                cx.background_executor().timer(delay).await;
-                cx.update(|cx| {
-                    let window = key.window;
-                    if window
-                        .update(cx, |_, window, cx| evaluate(window, cx))
-                        .is_err()
-                    {
-                        report(Report::Gone(key), cx);
-                    }
-                    report(Report::Timer(epoch), cx);
-                });
+            let timer = cx.after(delay, move |cx| {
+                let window = key.window;
+                if window
+                    .update(cx, |_, window, cx| evaluate(window, cx))
+                    .is_err()
+                {
+                    report(Report::Gone(key), cx);
+                }
+                report(Report::Timer(epoch), cx);
             });
-            cx.shared.tooltips.opening = Some((epoch, task));
+            cx.shared.tooltips.opening = Some((epoch, timer));
         }
         None => cx.shared.tooltips.opening = None,
     }
@@ -442,17 +439,14 @@ fn hide(cx: &mut App) {
         view.visible = false;
         cx.notify();
     });
-    let task = cx.spawn(async move |cx| {
-        cx.background_executor().timer(FADE).await;
-        cx.update(|cx| {
-            let tips = &mut cx.shared.tooltips;
-            if tips.shown.is_none() {
-                overlay::hide(hwnd);
-            }
-            tips.hiding = None;
-        });
+    let timer = cx.after(FADE, move |cx| {
+        let tips = &mut cx.shared.tooltips;
+        if tips.shown.is_none() {
+            overlay::hide(hwnd);
+        }
+        tips.hiding = None;
     });
-    cx.shared.tooltips.hiding = Some(task);
+    cx.shared.tooltips.hiding = Some(timer);
 }
 
 fn popup(cx: &mut App) -> Option<overlay::Overlay<TooltipView>> {

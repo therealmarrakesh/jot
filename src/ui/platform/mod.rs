@@ -359,7 +359,7 @@ impl WindowsPlatform {
         app_cell
             .inner
             .borrow()
-            .foreground
+            .jobs
             .set_wake_callback(Arc::new(move || unsafe {
                 let _ = PostMessageW(
                     Some(HWND(wake_raw as *mut _)),
@@ -458,19 +458,18 @@ unsafe extern "system" fn wake_wnd_proc(
     match msg {
         WM_APP_WAKE => {
             if let Some(app_cell) = ACTIVE_APP.with(|slot| slot.borrow().clone()) {
-                let fg = match app_cell.inner.try_borrow() {
-                    Ok(app) => app.foreground.clone(),
+                match app_cell.inner.try_borrow_mut() {
+                    Ok(mut app) => {
+                        app.drain_jobs();
+                        app.flush_effects();
+                        app.entities.prune_dropped();
+                    }
                     Err(_) => {
                         let _ = unsafe {
                             PostMessageW(Some(hwnd), WM_APP_WAKE, WPARAM(0), LPARAM(0))
                         };
                         return LRESULT(0);
                     }
-                };
-                fg.drain_ready();
-                if let Ok(mut app) = app_cell.inner.try_borrow_mut() {
-                    app.flush_effects();
-                    app.entities.prune_dropped();
                 }
                 drive_frames(&app_cell);
             }

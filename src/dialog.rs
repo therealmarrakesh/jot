@@ -1,8 +1,7 @@
 use super::*;
-use field::{BODY_LINE, BODY_SIZE, text_field};
-use crate::ui::futures::channel::oneshot;
 use crate::editor::{EditorState, Position};
 use crate::ui::{AnimStatus, animate_from};
+use field::{BODY_LINE, BODY_SIZE, text_field};
 
 const CONTEXT: &str = "JotDialog";
 const TITLE_FONT: &str = "Segoe UI Variable Display";
@@ -36,11 +35,13 @@ pub(crate) fn key_bindings() -> Vec<KeyBinding> {
     ]
 }
 
+type PromptCallback = Box<dyn FnOnce(&mut Jot, usize, &mut Window, &mut Context<Jot>)>;
+
 struct Prompt {
     title: SharedString,
     message: SharedString,
     buttons: &'static [&'static str],
-    answer: Option<oneshot::Sender<usize>>,
+    on_answer: Option<PromptCallback>,
 }
 
 enum DialogKind {
@@ -176,7 +177,7 @@ impl Dialogs {
         for dialog in &mut self.open {
             dialog.closing = true;
             if let DialogKind::Prompt(prompt) = &mut dialog.kind {
-                prompt.answer = None;
+                prompt.on_answer = None;
             }
         }
     }
@@ -279,30 +280,33 @@ impl Jot {
         buttons: &'static [&'static str],
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> oneshot::Receiver<usize> {
-        let (answer, receiver) = oneshot::channel();
+        on_answer: impl FnOnce(&mut Jot, usize, &mut Window, &mut Context<Jot>) + 'static,
+    ) {
         self.dialogs.show(
             DialogKind::Prompt(Prompt {
                 title: title.into(),
                 message: message.into(),
                 buttons,
-                answer: Some(answer),
+                on_answer: Some(Box::new(on_answer)),
             }),
             cx,
         );
         self.dialogs.focus_default(window, cx);
         cx.notify();
-        receiver
     }
 
     fn answer_prompt(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(dialog) = self.dialogs.active_mut()
-            && let DialogKind::Prompt(prompt) = &mut dialog.kind
-            && let Some(answer) = prompt.answer.take()
-        {
-            answer.send(index).ok();
-        }
+        let on_answer = self
+            .dialogs
+            .active_mut()
+            .and_then(|dialog| match &mut dialog.kind {
+                DialogKind::Prompt(prompt) => prompt.on_answer.take(),
+                _ => None,
+            });
         self.close_dialogs(window, cx);
+        if let Some(cb) = on_answer {
+            cb(self, index, window, cx);
+        }
     }
 
     fn close_dialogs(&mut self, window: &mut Window, cx: &mut Context<Self>) {

@@ -1243,12 +1243,8 @@ unsafe extern "system" fn window_wnd_proc(
 
         WM_TIMER if wparam.0 == SIZE_MOVE_TIMER_ID => {
             if let Some(app_cell) = ACTIVE_APP.with(|s| s.borrow().clone()) {
-                if let Ok(app) = app_cell.inner.try_borrow() {
-                    let fg = app.foreground.clone();
-                    drop(app);
-                    fg.drain_ready();
-                }
                 if let Ok(mut app) = app_cell.inner.try_borrow_mut() {
+                    app.drain_jobs();
                     app.flush_effects();
                 }
                 drive_frames(&app_cell);

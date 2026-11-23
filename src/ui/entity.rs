@@ -12,7 +12,7 @@ use std::marker::PhantomData;
 use std::rc::{Rc, Weak};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use super::app::{App, AsyncApp, AsyncWindowContext, Context};
+use super::app::{App, Context};
 use super::element::{Render, UiNode};
 use super::focus::{FocusHandle, Focusable};
 use super::types::{UiError, UiResult};
@@ -200,12 +200,6 @@ impl<U> EntityUpdateContext for Context<'_, U> {
     }
 }
 
-impl EntityUpdateContext for AsyncApp {
-    fn with_app_mut<R>(&mut self, f: impl FnOnce(&mut App) -> R) -> R {
-        self.update(f)
-    }
-}
-
 impl<T: 'static> WeakEntity<T> {
     pub(crate) fn upgrade(&self) -> Option<Entity<T>> {
         self.token
@@ -222,17 +216,6 @@ impl<T: 'static> WeakEntity<T> {
             .upgrade()
             .ok_or_else(|| UiError::new("entity was dropped"))?;
         Ok(cx.with_app_mut(|app| entity.update(app, f)))
-    }
-
-    pub(crate) fn update_in<R>(
-        &self,
-        cx: &mut AsyncWindowContext,
-        f: impl FnOnce(&mut T, &mut Window, &mut Context<T>) -> R,
-    ) -> UiResult<R> {
-        let entity = self
-            .upgrade()
-            .ok_or_else(|| UiError::new("entity was dropped"))?;
-        cx.update(|window, app| entity.update(app, |this, cx| f(this, window, cx)))
     }
 }
 

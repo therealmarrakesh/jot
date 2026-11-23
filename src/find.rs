@@ -345,7 +345,7 @@ pub(crate) struct FindBar {
     query: Entity<EditorState>,
     replacement: Entity<EditorState>,
     notice: Option<SharedString>,
-    notice_timer: Task<()>,
+    notice_timer: TimerHandle,
     matcher: Option<Matcher>,
     buffer: Vec<u8>,
     options_bounds: Rc<Cell<Bounds<Pixels>>>,
@@ -374,7 +374,7 @@ impl FindBar {
             query,
             replacement,
             notice: None,
-            notice_timer: Task::ready(()),
+            notice_timer: TimerHandle::default(),
             matcher: None,
             buffer: Vec::new(),
             options_bounds: Rc::new(Cell::new(Bounds::default())),
@@ -406,7 +406,7 @@ impl FindBar {
 
     pub(crate) fn clear_notice(&mut self) {
         self.notice = None;
-        self.notice_timer = Task::ready(());
+        self.notice_timer.cancel();
     }
 
     fn card_size(&self, window: &Window) -> (f32, f32) {
@@ -597,7 +597,7 @@ impl Jot {
         }
         self.find.closing = true;
         self.find.notice = None;
-        self.find.notice_timer = Task::ready(());
+        self.find.notice_timer.cancel();
         self.sync_selection_focus(cx);
         self.active_editor().focus_handle(cx).focus(window, cx);
     }
@@ -645,13 +645,12 @@ impl Jot {
             return;
         }
         self.find.notice = Some(notice.into());
-        self.find.notice_timer = cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(NOTICE_DURATION).await;
-            this.update(cx, |this, cx| {
+        let this = cx.weak_entity();
+        self.find.notice_timer = cx.after(NOTICE_DURATION, move |cx| {
+            let _ = this.update(cx, |this, cx| {
                 this.find.notice = None;
                 cx.notify();
-            })
-            .ok();
+            });
         });
         cx.notify();
     }
