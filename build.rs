@@ -114,12 +114,12 @@ mod shader_compilation {
         let shader_dir = manifest_dir.join("src/win32");
         let shader_path = shader_dir.join("shaders.hlsl");
         let color_shader_path = shader_dir.join("color_text_raster.hlsl");
-        let alpha_correction_path = shader_dir.join("alpha_correction.hlsl");
+        let glyph_alpha_path = shader_dir.join("glyph_alpha.hlsl");
         let out_dir = std::env::var("OUT_DIR").unwrap();
 
         println!("cargo:rerun-if-changed={}", shader_path.display());
         println!("cargo:rerun-if-changed={}", color_shader_path.display());
-        println!("cargo:rerun-if-changed={}", alpha_correction_path.display());
+        println!("cargo:rerun-if-changed={}", glyph_alpha_path.display());
 
         let fxc_path = find_fxc_compiler();
         let modules = [

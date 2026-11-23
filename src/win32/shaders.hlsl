@@ -1,10 +1,9 @@
-#include "alpha_correction.hlsl"
+#include "glyph_alpha.hlsl"
 
 cbuffer GlobalParams: register(b0) {
-    float4 gamma_ratios;
     float2 global_viewport_size;
+    float gamma;
     float grayscale_enhanced_contrast;
-    float _global_pad;
 };
 
 cbuffer BatchParams: register(b1) {
@@ -403,7 +402,7 @@ MonochromeSpriteVertexOutput monochrome_sprite_vertex(uint vertex_id: SV_VertexI
 
 float4 monochrome_sprite_fragment(MonochromeSpriteFragmentInput input): SV_Target {
     float sample = t_sprite.Sample(s_sprite, input.tile_position).r;
-    float alpha_corrected = apply_contrast_and_gamma_correction(sample, input.color.rgb, grayscale_enhanced_contrast, gamma_ratios);
+    float alpha_corrected = correct_glyph_alpha(sample, input.color.rgb, gamma, grayscale_enhanced_contrast);
     return float4(input.color.rgb, input.color.a * alpha_corrected);
 }
 

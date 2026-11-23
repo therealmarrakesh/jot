@@ -832,9 +832,6 @@ impl DirectWriteState {
         unsafe { device_context.VSSetShader(&gpu_state.vertex_shader, None) };
         unsafe { device_context.PSSetShader(&gpu_state.pixel_shader, None) };
         unsafe {
-            device_context.VSSetConstantBuffers(0, Some(std::slice::from_ref(&params_buffer)))
-        };
-        unsafe {
             device_context.PSSetConstantBuffers(0, Some(std::slice::from_ref(&params_buffer)))
         };
         unsafe {
@@ -849,18 +846,16 @@ impl DirectWriteState {
         unsafe { device_context.OMSetBlendState(&gpu_state.blend_state, None, 0xffffffff) };
 
         let crate::win32::FontInfo {
-            gamma_ratios,
+            gamma,
             grayscale_enhanced_contrast,
-            ..
         } = DirectXRenderer::get_font_info();
 
         for layer in glyph_layers {
             let params = GlyphLayerTextureParams {
                 run_color: layer.run_color,
-                bounds: layer.bounds,
-                gamma_ratios: *gamma_ratios,
+                gamma: *gamma,
                 grayscale_enhanced_contrast: *grayscale_enhanced_contrast,
-                _pad: [0f32; 3],
+                _pad: [0f32; 2],
             };
             unsafe {
                 let mut dest = std::mem::zeroed();
@@ -1027,12 +1022,13 @@ impl GlyphLayerTexture {
 
 #[repr(C)]
 struct GlyphLayerTextureParams {
-    bounds: Bounds<i32>,
     run_color: Rgba,
-    gamma_ratios: [f32; 4],
+    gamma: f32,
     grayscale_enhanced_contrast: f32,
-    _pad: [f32; 3],
+    _pad: [f32; 2],
 }
+
+const _: () = assert!(std::mem::size_of::<GlyphLayerTextureParams>() == 32);
 
 struct TextRendererWrapper(IDWriteTextRenderer);
 
