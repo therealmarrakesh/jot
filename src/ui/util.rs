@@ -1,7 +1,8 @@
-use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+//! Fluent builder helpers and device-pixel rounding utilities.
 
-/// A helper trait for building complex objects with imperative conditionals in a fluent style.
+/// Fluent conditional helpers implemented for all element builders.
 pub(crate) trait FluentBuilder {
+    #[inline]
     fn map<U>(self, f: impl FnOnce(Self) -> U) -> U
     where
         Self: Sized,
@@ -9,42 +10,30 @@ pub(crate) trait FluentBuilder {
         f(self)
     }
 
+    #[inline]
     fn when(self, condition: bool, then: impl FnOnce(Self) -> Self) -> Self
     where
         Self: Sized,
     {
-        self.map(|this| if condition { then(this) } else { this })
+        if condition { then(self) } else { self }
     }
 
+    #[inline]
     fn when_some<T>(self, option: Option<T>, then: impl FnOnce(Self, T) -> Self) -> Self
     where
         Self: Sized,
     {
-        self.map(|this| {
-            if let Some(value) = option {
-                then(this, value)
-            } else {
-                this
-            }
-        })
-    }
-}
-
-/// Increment the given atomic counter if it is not zero.
-pub(crate) fn atomic_incr_if_not_zero(counter: &AtomicUsize) -> usize {
-    let mut loaded = counter.load(SeqCst);
-    loop {
-        if loaded == 0 {
-            return 0;
-        }
-        match counter.compare_exchange_weak(loaded, loaded + 1, SeqCst, SeqCst) {
-            Ok(x) => return x + 1,
-            Err(actual) => loaded = actual,
+        if let Some(value) = option {
+            then(self, value)
+        } else {
+            self
         }
     }
 }
 
-/// Rounds to the nearest integer with 0.5 ties toward zero.
+impl<T: super::element::IntoElement> FluentBuilder for T {}
+
+/// Rounds to the nearest integer with exact `.5` ties rounded toward zero.
 #[inline]
 pub(crate) fn round_half_toward_zero(value: f32) -> f32 {
     (value.abs() - 0.5).ceil().copysign(value)
@@ -62,11 +51,6 @@ pub(crate) fn round_stroke_to_device_pixel(logical: f32, scale_factor: f32) -> f
     } else {
         round_to_device_pixel(logical.max(0.0), scale_factor).max(1.0)
     }
-}
-
-#[inline]
-pub(crate) fn floor_to_device_pixel(logical: f32, scale_factor: f32) -> f32 {
-    (logical * scale_factor).floor()
 }
 
 #[inline]

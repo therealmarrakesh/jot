@@ -1,125 +1,61 @@
-//! Trimmed Windows-only GPUI core for Jot.
-#![allow(missing_docs)]
+//! Clean-room Win32 + Direct2D 1.1 + DirectWrite UI core.
 
-mod action;
-pub(crate) mod anyhow;
-mod app;
-
-mod arena;
-mod bounds_tree;
-pub(crate) mod collections;
-mod color;
+pub(crate) mod app;
+pub(crate) mod color;
 mod common_actions;
-mod element;
-mod elements;
-mod executor;
-pub(crate) mod futures;
-pub(crate) mod gpui_util;
-mod shared_string;
-pub(crate) mod slotmap;
-pub(crate) mod smallvec;
-mod geometry;
-mod global;
-mod input;
-mod interactive;
-mod key_dispatch;
-mod keymap;
+pub(crate) mod div;
+pub(crate) mod element;
+pub(crate) mod entity;
+pub(crate) mod focus;
+pub(crate) mod geometry;
+pub(crate) mod graphics;
+pub(crate) mod keymap;
 pub(crate) mod motion;
-mod platform;
+pub(crate) mod platform;
 pub(crate) mod reduce_motion;
-mod refineable;
-mod scene;
-mod style;
-mod styled;
-mod subscription;
-pub(crate) mod sync;
-mod text_system;
+pub(crate) mod runtime;
+pub(crate) mod style;
+pub(crate) mod styled;
+pub(crate) mod types;
 pub(crate) mod util;
-mod view;
-mod window;
+pub(crate) mod window;
 
-mod seal {
-    pub(crate) trait Sealed {}
-}
-
-pub(crate) use action::*;
-pub(crate) use crate::ui::anyhow::Result;
 pub(crate) use app::*;
-pub(crate) use arena::*;
 pub(crate) use color::*;
 pub(crate) use common_actions::*;
+pub(crate) use div::*;
 pub(crate) use element::*;
-pub(crate) use elements::*;
-pub(crate) use executor::*;
+pub(crate) use entity::*;
+pub(crate) use focus::*;
 pub(crate) use geometry::*;
-pub(crate) use global::*;
-pub(crate) use gpui_util::{debug_panic, maybe};
-pub(crate) use motion::{Easing, Interpolate, MotionStatus, transition, transition_from};
-pub(crate) use shared_string::*;
-pub(crate) use input::*;
-pub(crate) use interactive::*;
-use key_dispatch::*;
-pub(crate) use keymap::*;
-pub(crate) use platform::*;
-pub(crate) use crate::win32::{
-    SaveChoice, SavePathOptions, ScreenPoint, ScreenRect, WindowHwnd, WindowsDisplay,
-    WindowsPlatform, prompt_for_save_path, set_window_min_size,
+pub(crate) use graphics::d2d_renderer::{BoxShadow, fill};
+#[cfg(test)]
+pub(crate) use graphics::dwrite::TextSystem;
+pub(crate) use graphics::dwrite::{
+    Boundary, Font, FontRun, FontWeight, MAX_WRAP_INDENT, ShapedLine, TextAlign, TextRun,
+    UnderlineStyle, font,
 };
-pub(crate) use slotmap::new_key_type;
-pub(crate) use refineable::*;
-pub(crate) use scene::*;
+pub(crate) use keymap::*;
+pub(crate) use motion::{Easing, Interpolate, MotionStatus, transition, transition_from};
+pub(crate) use platform::dialogs::prompt_for_save_path;
+pub(crate) use platform::{
+    CursorStyle, ExternalPaths, PathPromptOptions, SaveChoice, SavePathOptions, TitlebarOptions,
+    WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowKind,
+    WindowOptions, WindowsPlatform, set_window_min_size,
+};
+pub(crate) use runtime::futures;
+pub(crate) use runtime::Task;
 pub(crate) use style::*;
 pub(crate) use styled::*;
-pub(crate) use subscription::*;
-use crate::layout::{self, LayoutEngine};
-pub(crate) use layout::{AvailableSpace, LayoutId};
-pub(crate) use text_system::*;
+pub(crate) use types::anyhow;
+pub(crate) use types::{SharedString, smallvec};
 pub(crate) use util::FluentBuilder;
-pub(crate) use view::*;
 pub(crate) use window::*;
 
-pub(crate) trait AppContext {
-    #[expect(
-        clippy::wrong_self_convention,
-        reason = "`App::new` is an ubiquitous function for creating entities"
-    )]
-    #[allow(clippy::new_ret_no_self)]
-    fn new<T: 'static>(&mut self, build_entity: impl FnOnce(&mut Context<T>) -> T) -> Entity<T>;
-    fn update_entity<T, R>(
-        &mut self,
-        handle: &Entity<T>,
-        update: impl FnOnce(&mut T, &mut Context<T>) -> R,
-    ) -> R
-    where
-        T: 'static;
-    fn update_window<T, F>(&mut self, window: AnyWindowHandle, f: F) -> Result<T>
-    where
-        F: FnOnce(AnyView, &mut Window, &mut App) -> T;
-    fn with_window<R>(
-        &mut self,
-        entity_id: EntityId,
-        f: impl FnOnce(&mut Window, &mut App) -> R,
-    ) -> Option<R>;
-}
+pub(crate) use crate::layout::{AvailableSpace, LayoutId};
+pub(crate) use crate::win32::{ScreenPoint, ScreenRect, WindowHwnd};
 
-pub(crate) trait BorrowAppContext {
-    fn update_global<G, R>(&mut self, f: impl FnOnce(&mut G, &mut Self) -> R) -> R
-    where
-        G: Global;
-}
-
-impl<C> BorrowAppContext for C
-where
-    C: std::borrow::BorrowMut<App>,
-{
-    #[track_caller]
-    fn update_global<G, R>(&mut self, f: impl FnOnce(&mut G, &mut Self) -> R) -> R
-    where
-        G: Global,
-    {
-        let mut global = self.borrow_mut().lease_global::<G>();
-        let result = f(&mut global, self);
-        self.borrow_mut().end_global_lease(global);
-        result
-    }
+/// Clean-room symbols re-exported through `crate::win32` when `--features d2d` is active.
+pub(crate) mod win32_bridge {
+    pub(crate) use super::graphics::dwrite::line_break_opportunities;
 }

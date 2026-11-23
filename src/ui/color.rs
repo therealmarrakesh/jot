@@ -1,55 +1,7 @@
-use std::{
-    fmt::{self, Display, Formatter},
-    hash::{Hash, Hasher},
-};
+//! Linear/sRGB RGBA color representation for Jot's clean-room UI core.
 
-/// Convert an RGB hex color code (`0xRRGGBB`) to an opaque [`Rgba`].
-#[inline]
-pub(crate) fn rgb(hex: u32) -> Rgba {
-    let [_, r, g, b] = hex.to_be_bytes().map(|b| (b as f32) / 255.0);
-    Rgba { r, g, b, a: 1.0 }
-}
-
-/// Convert an RGBA hex color code (`0xRRGGBBAA`) to [`Rgba`].
-#[inline]
-pub(crate) fn rgba(hex: u32) -> Rgba {
-    let [r, g, b, a] = hex.to_be_bytes().map(|b| (b as f32) / 255.0);
-    Rgba { r, g, b, a }
-}
-
-/// Pure black (`#000000ff`).
-pub(crate) const fn black() -> Rgba {
-    Rgba {
-        r: 0.0,
-        g: 0.0,
-        b: 0.0,
-        a: 1.0,
-    }
-}
-
-/// Transparent black (`#00000000`).
-pub(crate) const fn transparent_black() -> Rgba {
-    Rgba {
-        r: 0.0,
-        g: 0.0,
-        b: 0.0,
-        a: 0.0,
-    }
-}
-
-/// Pure white (`#ffffffff`).
-pub(crate) const fn white() -> Rgba {
-    Rgba {
-        r: 1.0,
-        g: 1.0,
-        b: 1.0,
-        a: 1.0,
-    }
-}
-
-/// An RGBA color (`r`, `g`, `b`, `a` in `0.0..=1.0`), matching HLSL `float4`.
-#[derive(Clone, Copy, Default)]
-#[repr(C)]
+/// Four-channel `[0.0, 1.0]` RGBA color.
+#[derive(Copy, Clone, Debug, Default, PartialEq)]
 pub(crate) struct Rgba {
     pub(crate) r: f32,
     pub(crate) g: f32,
@@ -59,71 +11,62 @@ pub(crate) struct Rgba {
 
 impl Rgba {
     #[inline]
-    pub(crate) fn is_transparent(&self) -> bool {
-        self.a == 0.0
+    pub(crate) const fn new(r: f32, g: f32, b: f32, a: f32) -> Self {
+        Self { r, g, b, a }
     }
 
     #[inline]
-    pub(crate) fn opacity(&self, factor: f32) -> Self {
+    pub(crate) const fn alpha(self, a: f32) -> Self {
+        Self { a, ..self }
+    }
+
+    #[inline]
+    pub(crate) fn opacity(self, factor: f32) -> Self {
         Self {
-            r: self.r,
-            g: self.g,
-            b: self.b,
-            a: self.a * factor.clamp(0.0, 1.0),
+            a: self.a * factor,
+            ..self
         }
     }
 
     #[inline]
-    pub(crate) fn alpha(&self, a: f32) -> Self {
-        Self {
-            r: self.r,
-            g: self.g,
-            b: self.b,
-            a: a.clamp(0.0, 1.0),
-        }
+    pub(crate) fn is_transparent(self) -> bool {
+        self.a <= 0.0
     }
 }
 
-impl PartialEq for Rgba {
-    fn eq(&self, other: &Self) -> bool {
-        self.r
-            .total_cmp(&other.r)
-            .then(self.g.total_cmp(&other.g))
-            .then(self.b.total_cmp(&other.b))
-            .then(self.a.total_cmp(&other.a))
-            .is_eq()
+/// Construct an opaque `Rgba` from `0xRRGGBB`.
+#[inline]
+pub(crate) fn rgb(hex: u32) -> Rgba {
+    Rgba {
+        r: ((hex >> 16) & 0xFF) as f32 / 255.0,
+        g: ((hex >> 8) & 0xFF) as f32 / 255.0,
+        b: (hex & 0xFF) as f32 / 255.0,
+        a: 1.0,
     }
 }
 
-impl Eq for Rgba {}
-
-impl Hash for Rgba {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        state.write_u32(self.r.to_bits());
-        state.write_u32(self.g.to_bits());
-        state.write_u32(self.b.to_bits());
-        state.write_u32(self.a.to_bits());
+/// Construct an `Rgba` from `0xRRGGBBAA`.
+#[inline]
+pub(crate) fn rgba(hex: u32) -> Rgba {
+    Rgba {
+        r: ((hex >> 24) & 0xFF) as f32 / 255.0,
+        g: ((hex >> 16) & 0xFF) as f32 / 255.0,
+        b: ((hex >> 8) & 0xFF) as f32 / 255.0,
+        a: (hex & 0xFF) as f32 / 255.0,
     }
 }
 
-impl fmt::Debug for Rgba {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "rgba({:#010x})", u32::from(*self))
-    }
+#[inline]
+pub(crate) const fn black() -> Rgba {
+    Rgba::new(0.0, 0.0, 0.0, 1.0)
 }
 
-impl Display for Rgba {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "rgba({:#010x})", u32::from(*self))
-    }
+#[inline]
+pub(crate) const fn white() -> Rgba {
+    Rgba::new(1.0, 1.0, 1.0, 1.0)
 }
 
-impl From<Rgba> for u32 {
-    fn from(rgba: Rgba) -> Self {
-        let r = (rgba.r * 255.0) as u32;
-        let g = (rgba.g * 255.0) as u32;
-        let b = (rgba.b * 255.0) as u32;
-        let a = (rgba.a * 255.0) as u32;
-        (r << 24) | (g << 16) | (b << 8) | a
-    }
+#[inline]
+pub(crate) const fn transparent_black() -> Rgba {
+    Rgba::new(0.0, 0.0, 0.0, 0.0)
 }

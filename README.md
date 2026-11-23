@@ -1,6 +1,6 @@
 # Jot
 
-A notepad app without the clutter. Written in Rust with GPUI.
+A notepad app without the clutter. Written in Rust with Win32, Direct2D, and DirectWrite.
 
 Jot looks at home on Windows 11 and works the way you'd expect: open it, type, save.
 

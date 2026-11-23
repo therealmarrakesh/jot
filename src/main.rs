@@ -18,10 +18,6 @@ mod tab_drag;
 mod tabs;
 mod theme;
 mod tooltip;
-#[cfg(not(feature = "d2d"))]
-mod ui;
-#[cfg(feature = "d2d")]
-#[path = "core/mod.rs"]
 mod ui;
 mod win32;
 
@@ -1249,8 +1245,8 @@ mod large_file_smoke {
     }
 }
 
-#[cfg(all(test, feature = "d2d"))]
-mod d2d_regression_tests {
+#[cfg(test)]
+mod ui_regression_tests {
     use super::*;
 
     struct TestHarness {
