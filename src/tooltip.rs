@@ -1,13 +1,8 @@
 use super::*;
 use crate::ui::transition;
+use crate::win32::{cursor_screen_pos, monitor_work_area_and_scale, mouse_hover_time_ms};
 use std::collections::HashMap;
 use std::time::Instant;
-use windows::Win32::Foundation::{POINT, RECT};
-use windows::Win32::Graphics::Gdi::{
-    GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint,
-};
-use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
-use windows::Win32::UI::WindowsAndMessaging::SPI_GETMOUSEHOVERTIME;
 
 const PADDING_X: f32 = 9.;
 const PADDING_TOP: f32 = 6.;
@@ -100,8 +95,8 @@ struct Key {
 struct Snap {
     key: Key,
     text: SharedString,
-    owner: RECT,
-    entered: POINT,
+    owner: ScreenRect,
+    entered: ScreenPoint,
 }
 
 #[derive(Default)]
@@ -187,7 +182,7 @@ struct Entry {
 
 struct Shown {
     key: Key,
-    owner: RECT,
+    owner: ScreenRect,
 }
 
 #[derive(Default)]
@@ -324,7 +319,7 @@ fn evaluate(window: &mut Window, cx: &mut App) {
     let handle = window.window_handle();
     let position = window.mouse_position();
     let scale = window.scale_factor();
-    let origin = client_origin(window_hwnd(window));
+    let origin = window.hwnd().client_origin();
     let tips = cx.default_global::<Tooltips>();
     let entries = tips.owners.get(&handle).map_or(&[][..], Vec::as_slice);
     let gone = tips
@@ -338,10 +333,8 @@ fn evaluate(window: &mut Window, cx: &mut App) {
                 .is_none_or(|entry| {
                     tips.shown.as_ref().is_some_and(|shown| {
                         shown.key == **key
-                            && !overlay::same_rect(
-                                shown.owner,
-                                overlay::screen_rect(entry.hitbox.bounds, scale, origin),
-                            )
+                            && shown.owner
+                                != overlay::screen_rect(entry.hitbox.bounds, scale, origin)
                     })
                 })
         })
@@ -363,7 +356,7 @@ fn evaluate(window: &mut Window, cx: &mut App) {
                 },
                 text: entry.text.clone(),
                 owner: overlay::screen_rect(entry.hitbox.bounds, scale, origin),
-                entered: cursor(),
+                entered: cursor_screen_pos(),
             })
         }))
     };
@@ -463,8 +456,7 @@ fn modifiers_changed(modifiers: &Modifiers, cx: &mut App) {
 }
 
 fn show_delay(reshow: bool) -> Duration {
-    let hover =
-        crate::ui::system_parameters_u32(SPI_GETMOUSEHOVERTIME.0).unwrap_or(DEFAULT_HOVER_TIME) as f32;
+    let hover = mouse_hover_time_ms().unwrap_or(DEFAULT_HOVER_TIME) as f32;
     let factor = if reshow {
         RESHOW_DELAY_FACTOR
     } else {
@@ -553,19 +545,10 @@ fn show(snap: Snap, cx: &mut App) {
         return;
     };
     let entered = snap.entered;
-    let monitor = unsafe { MonitorFromPoint(entered, MONITOR_DEFAULTTONEAREST) };
-    let mut info = MONITORINFO {
-        cbSize: size_of::<MONITORINFO>() as u32,
-        ..Default::default()
-    };
-    let _ = unsafe { GetMonitorInfoW(monitor, &mut info) };
-    let (mut dpi_x, mut dpi_y) = (USER_DEFAULT_SCREEN_DPI, USER_DEFAULT_SCREEN_DPI);
-    let _ = unsafe { GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y) };
-    let scale = dpi_x as f32 / USER_DEFAULT_SCREEN_DPI as f32;
-    let work = info.rcWork;
+    let (work, scale) = monitor_work_area_and_scale(entered);
     overlay::place(
         popup.hwnd,
-        RECT {
+        ScreenRect {
             left: entered.x,
             top: entered.y,
             right: entered.x + 1,
@@ -600,7 +583,7 @@ fn show(snap: Snap, cx: &mut App) {
     );
     overlay::place(
         popup.hwnd,
-        RECT {
+        ScreenRect {
             left: left - side,
             top: top - above,
             right: left + w + side,
@@ -632,13 +615,13 @@ mod tests {
                 id: ElementId::Name(id.into()),
             },
             text: text.into(),
-            owner: RECT {
+            owner: ScreenRect {
                 left: 0,
                 top: 0,
                 right: 20,
                 bottom: 20,
             },
-            entered: POINT { x: 10, y: 10 },
+            entered: ScreenPoint { x: 10, y: 10 },
         }
     }
 

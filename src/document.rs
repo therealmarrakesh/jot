@@ -1,20 +1,9 @@
 use crate::editor::{Rope, RopeBuilder};
+use crate::win32::{AnsiCodePage, ReplaceFileError, documents_dir, replace_file};
 use std::ffi::OsString;
 use std::fs;
 use std::io::{self, BufWriter, Read, Seek, SeekFrom, Write};
-use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
-use windows::Win32::Foundation::ERROR_UNABLE_TO_MOVE_REPLACEMENT_2;
-use windows::Win32::Globalization::{
-    CP_UTF8, GetACP, MULTI_BYTE_TO_WIDE_CHAR_FLAGS, MultiByteToWideChar, WC_NO_BEST_FIT_CHARS,
-    WideCharToMultiByte,
-};
-use windows::Win32::Storage::FileSystem::{
-    REPLACEFILE_IGNORE_ACL_ERRORS, REPLACEFILE_IGNORE_MERGE_ERRORS, ReplaceFileW,
-};
-use windows::Win32::System::Com::CoTaskMemFree;
-use windows::Win32::UI::Shell::{FOLDERID_Documents, KF_FLAG_DEFAULT, SHGetKnownFolderPath};
-use windows::core::{BOOL, PCWSTR};
 
 const UTF8_BOM: &[u8] = b"\xef\xbb\xbf";
 const UTF16_LE_BOM: &[u8] = b"\xff\xfe";
@@ -227,7 +216,9 @@ fn load_reader<R: Read + Seek>(reader: &mut R, chunk_size: usize) -> Result<Load
                 reader.seek(SeekFrom::Start(0)).map_err(LoadError::Io)?;
                 let mut bytes = Vec::new();
                 reader.read_to_end(&mut bytes).map_err(LoadError::Io)?;
-                let decoded = ansi_decode(&bytes).ok_or(LoadError::Undecodable)?;
+                let decoded = AnsiCodePage::current()
+                    .decode(&bytes)
+                    .ok_or(LoadError::Undecodable)?;
                 let mut normalizer = LineNormalizer::new();
                 normalizer.push(&decoded);
                 let (text, line_ending) = normalizer.finish();
@@ -389,8 +380,8 @@ pub(crate) fn is_lossy(rope: &Rope, format: Format) -> io::Result<bool> {
     if format.encoding != Encoding::Ansi {
         return Ok(false);
     }
-    let page = unsafe { GetACP() };
-    if page == CP_UTF8 {
+    let page = AnsiCodePage::current();
+    if page.is_utf8() {
         return Ok(false);
     }
     let mut wide = Vec::with_capacity(ANSI_WIDE_CHUNK);
@@ -398,14 +389,14 @@ pub(crate) fn is_lossy(rope: &Rope, format: Format) -> io::Result<bool> {
         for unit in chunk.encode_utf16() {
             wide.push(unit);
             if wide.len() >= ANSI_WIDE_CHUNK {
-                if ansi_wide_lossy(page, &wide)? {
+                if page.wide_is_lossy(&wide)? {
                     return Ok(true);
                 }
                 wide.clear();
             }
         }
     }
-    if !wide.is_empty() && ansi_wide_lossy(page, &wide)? {
+    if !wide.is_empty() && page.wide_is_lossy(&wide)? {
         return Ok(true);
     }
     Ok(false)
@@ -479,8 +470,8 @@ fn stream_encode_ansi<W: Write>(
     line_ending: LineEnding,
     out: &mut W,
 ) -> io::Result<()> {
-    let page = unsafe { GetACP() };
-    if page == CP_UTF8 {
+    let page = AnsiCodePage::current();
+    if page.is_utf8() {
         for chunk in rope.chunks() {
             write_with_line_ending(chunk, line_ending, |part| out.write_all(part.as_bytes()))?;
         }
@@ -494,7 +485,7 @@ fn stream_encode_ansi<W: Write>(
                 let mut units = [0u16; 2];
                 let encoded = ch.encode_utf16(&mut units);
                 if wide.len() + encoded.len() > ANSI_WIDE_CHUNK {
-                    encode_ansi_wide(page, &wide, &mut bytes)?;
+                    page.encode_wide(&wide, &mut bytes)?;
                     out.write_all(&bytes)?;
                     wide.clear();
                 }
@@ -504,7 +495,7 @@ fn stream_encode_ansi<W: Write>(
         })?;
     }
     if !wide.is_empty() {
-        encode_ansi_wide(page, &wide, &mut bytes)?;
+        page.encode_wide(&wide, &mut bytes)?;
         out.write_all(&bytes)?;
     }
     Ok(())
@@ -556,42 +547,30 @@ fn resolve(path: &Path) -> io::Result<PathBuf> {
 
 fn replace(path: &Path, target: &Path, temp: &Path) -> io::Result<()> {
     let backup = free_sibling(target, BACKUP_SUFFIX)?;
-    let (replaced, replacement, backed_up) = (wide(target), wide(temp), wide(&backup));
-    let done = unsafe {
-        ReplaceFileW(
-            PCWSTR(replaced.as_ptr()),
-            PCWSTR(replacement.as_ptr()),
-            PCWSTR(backed_up.as_ptr()),
-            REPLACEFILE_IGNORE_MERGE_ERRORS | REPLACEFILE_IGNORE_ACL_ERRORS,
-            None,
-            None,
-        )
+    match replace_file(target, temp, &backup) {
+        Ok(()) => {
+            fs::remove_file(&backup).ok();
+            Ok(())
+        }
+        Err(ReplaceFileError::UnableToMoveReplacement(error))
+            if fs::rename(&backup, target).is_err() =>
+        {
+            let shown =
+                |sibling: &Path| path.with_file_name(sibling.file_name().unwrap_or_default());
+            Err(io::Error::new(
+                error.kind(),
+                format!(
+                    "{error}\nThe original file was kept as {}\nThe new text was saved as {}",
+                    shown(&backup).display(),
+                    shown(temp).display()
+                ),
+            ))
+        }
+        Err(ReplaceFileError::UnableToMoveReplacement(error) | ReplaceFileError::Other(error)) => {
+            fs::remove_file(temp).ok();
+            Err(error)
+        }
     }
-    .is_ok();
-    if done {
-        fs::remove_file(&backup).ok();
-        return Ok(());
-    }
-    let error = io::Error::last_os_error();
-    if error.raw_os_error() == Some(ERROR_UNABLE_TO_MOVE_REPLACEMENT_2.0 as i32)
-        && fs::rename(&backup, target).is_err()
-    {
-        let shown = |sibling: &Path| path.with_file_name(sibling.file_name().unwrap_or_default());
-        return Err(io::Error::new(
-            error.kind(),
-            format!(
-                "{error}\nThe original file was kept as {}\nThe new text was saved as {}",
-                shown(&backup).display(),
-                shown(temp).display()
-            ),
-        ));
-    }
-    fs::remove_file(temp).ok();
-    Err(error)
-}
-
-fn wide(path: &Path) -> Vec<u16> {
-    path.as_os_str().encode_wide().chain(Some(0)).collect()
 }
 
 fn free_sibling(path: &Path, suffix: &str) -> io::Result<PathBuf> {
@@ -625,66 +604,6 @@ pub(crate) fn write_notices() -> io::Result<PathBuf> {
     Ok(path)
 }
 
-fn ansi_decode(bytes: &[u8]) -> Option<String> {
-    if bytes.is_empty() {
-        return Some(String::new());
-    }
-    let _ = i32::try_from(bytes.len()).ok()?;
-    let page = unsafe { GetACP() };
-    let length = unsafe { MultiByteToWideChar(page, MULTI_BYTE_TO_WIDE_CHAR_FLAGS(0), bytes, None) };
-    let mut wide = vec![0u16; usize::try_from(length).ok().filter(|&n| n > 0)?];
-    let written = unsafe {
-        MultiByteToWideChar(
-            page,
-            MULTI_BYTE_TO_WIDE_CHAR_FLAGS(0),
-            bytes,
-            Some(&mut wide),
-        )
-    };
-    wide.truncate(usize::try_from(written).ok()?);
-    Some(String::from_utf16_lossy(&wide))
-}
-
-fn ansi_wide_lossy(page: u32, wide: &[u16]) -> io::Result<bool> {
-    if wide.is_empty() {
-        return Ok(false);
-    }
-    let mut used_default = BOOL(0);
-    let written = unsafe {
-        WideCharToMultiByte(
-            page,
-            WC_NO_BEST_FIT_CHARS,
-            wide,
-            None,
-            None,
-            Some(&mut used_default),
-        )
-    };
-    if written == 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(used_default.as_bool())
-}
-
-fn encode_ansi_wide(page: u32, wide: &[u16], out: &mut Vec<u8>) -> io::Result<()> {
-    out.clear();
-    if wide.is_empty() {
-        return Ok(());
-    }
-    let length = unsafe { WideCharToMultiByte(page, WC_NO_BEST_FIT_CHARS, wide, None, None, None) };
-    if length == 0 {
-        return Err(io::Error::last_os_error());
-    }
-    out.resize(usize::try_from(length).unwrap_or(0), 0);
-    let written =
-        unsafe { WideCharToMultiByte(page, WC_NO_BEST_FIT_CHARS, wide, Some(out), None, None) };
-    if written == 0 {
-        return Err(io::Error::last_os_error());
-    }
-    out.truncate(usize::try_from(written).unwrap_or(0));
-    Ok(())
-}
-
 pub(crate) fn same_path(a: &Path, b: &Path) -> bool {
     if let (Ok(ca), Ok(cb)) = (fs::canonicalize(a), fs::canonicalize(b)) {
         return path_key(&ca) == path_key(&cb);
@@ -712,15 +631,8 @@ pub(crate) fn display_name(path: Option<&Path>) -> String {
 pub(crate) fn default_directory(path: Option<&Path>) -> PathBuf {
     path.and_then(Path::parent)
         .map(Path::to_path_buf)
-        .or_else(documents)
+        .or_else(documents_dir)
         .unwrap_or_else(|| PathBuf::from("."))
-}
-
-fn documents() -> Option<PathBuf> {
-    let path = unsafe { SHGetKnownFolderPath(&FOLDERID_Documents, KF_FLAG_DEFAULT, None) }.ok()?;
-    let documents = (!path.0.is_null()).then(|| PathBuf::from(OsString::from_wide(unsafe { path.as_wide() })));
-    unsafe { CoTaskMemFree(Some(path.0.cast())) };
-    documents
 }
 
 fn sibling(path: &Path, attempt: usize, suffix: &str) -> PathBuf {

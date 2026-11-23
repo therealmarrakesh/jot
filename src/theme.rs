@@ -1,5 +1,4 @@
 use super::*;
-use windows::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_BINARY, RegGetValueW};
 
 #[derive(Clone, Copy)]
 pub(crate) struct Surface {
@@ -228,27 +227,8 @@ pub(crate) fn theme_shadow(dark: bool, z: f32, scale: f32) -> Vec<BoxShadow> {
 pub(crate) fn apply(appearance: WindowAppearance, cx: &mut App) {
     let dark = matches!(appearance, WindowAppearance::Dark);
     let mut palette = if dark { DARK } else { LIGHT };
-    if let Some(accent) = system_accent(palette.dark) {
+    if let Some(accent) = crate::win32::system_accent_color(palette.dark) {
         palette.accent = accent;
     }
     cx.set_global(palette);
-}
-
-fn system_accent(dark: bool) -> Option<u32> {
-    let mut shades = [0u8; 32];
-    let mut len = shades.len() as u32;
-    let status = unsafe {
-        RegGetValueW(
-            HKEY_CURRENT_USER,
-            windows::core::w!(r"Software\Microsoft\Windows\CurrentVersion\Explorer\Accent"),
-            windows::core::w!("AccentPalette"),
-            RRF_RT_REG_BINARY,
-            None,
-            Some(shades.as_mut_ptr().cast()),
-            Some(&mut len),
-        )
-    };
-    let at = if dark { 4 } else { 16 };
-    (status.0 == 0 && len as usize >= at + 3)
-        .then(|| u32::from_be_bytes([0, shades[at], shades[at + 1], shades[at + 2]]))
 }

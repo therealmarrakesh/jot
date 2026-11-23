@@ -435,8 +435,8 @@ impl Window {
         self.handle
     }
 
-    pub(crate) fn raw_hwnd(&self) -> Option<isize> {
-        self.platform_window.raw_hwnd()
+    pub(crate) fn hwnd(&self) -> crate::ui::WindowHwnd {
+        self.platform_window.hwnd()
     }
 
     pub(crate) fn refresh(&mut self) {

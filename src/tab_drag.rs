@@ -1,23 +1,10 @@
 use super::*;
+use crate::win32::{
+    WindowPlacement, cursor_screen_pos, primary_mouse_button_down, release_mouse_capture,
+    top_visible_window_at,
+};
 use std::time::Instant;
 use tabs::{CAPTION_WIDTH, STRIP_LEFT, STRIP_TOP, TAB_HEIGHT, window_listeners};
-use windows::Win32::Foundation::{HWND, LPARAM, POINT, RECT, WPARAM};
-use windows::Win32::Graphics::Dwm::{
-    DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute,
-};
-use windows::Win32::Graphics::Gdi::PtInRect;
-use windows::Win32::UI::HiDpi::GetDpiForWindow;
-use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetAsyncKeyState, ReleaseCapture, SetCapture, VK_LBUTTON, VK_RBUTTON,
-};
-use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GUI_INMOVESIZE, GUITHREADINFO, GWL_EXSTYLE, GetClientRect, GetGUIThreadInfo,
-    GetSystemMetrics, GetWindowLongW, GetWindowPlacement, GetWindowRect, GetWindowThreadProcessId,
-    HTCAPTION, IsIconic, IsWindowVisible, IsZoomed, PostMessageW, SC_MOVE, SM_SWAPBUTTON,
-    SW_RESTORE, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SetForegroundWindow, SetWindowPlacement,
-    SetWindowPos, ShowWindow, WINDOWPLACEMENT, WM_CANCELMODE, WM_SYSCOMMAND, WS_EX_TRANSPARENT,
-};
-use windows::core::BOOL;
 
 const DRAG_THRESHOLD: f32 = 10.;
 const DETACH_MAGNETISM: f32 = 15.;
@@ -27,7 +14,7 @@ const MOVE_LOOP_START_TIMEOUT: Duration = Duration::from_millis(500);
 #[derive(Clone, Copy)]
 pub(crate) struct Owner {
     window: WindowHandle<Jot>,
-    hwnd: isize,
+    hwnd: WindowHwnd,
 }
 
 #[derive(Clone, Copy)]
@@ -45,10 +32,10 @@ struct TabDrag {
     tab: EntityId,
     grab: Point<f32>,
     start: f32,
-    press: POINT,
+    press: ScreenPoint,
     phase: Phase,
     source_index: usize,
-    source_placement: Option<WINDOWPLACEMENT>,
+    source_placement: Option<WindowPlacement>,
 }
 
 impl Global for TabDrag {}
@@ -56,7 +43,7 @@ impl Global for TabDrag {}
 pub(crate) fn owner(window: &Window) -> Option<Owner> {
     Some(Owner {
         window: window.window_handle().downcast::<Jot>()?,
-        hwnd: window_hwnd(window),
+        hwnd: window.hwnd(),
     })
 }
 
@@ -85,7 +72,7 @@ pub(crate) fn press(
     alone: bool,
     cx: &mut App,
 ) {
-    if alone && !unsafe { IsZoomed(HWND(owner.hwnd as _)) }.as_bool() {
+    if alone && !owner.hwnd.is_maximized() {
         cx.defer(lift);
     }
     cx.set_global(TabDrag {
@@ -151,11 +138,11 @@ fn moved(cx: &mut App) {
     let Some(mut drag) = cx.try_global::<TabDrag>().cloned() else {
         return;
     };
-    let point = cursor();
+    let point = cursor_screen_pos();
     match drag.phase {
         Phase::Pressed => {
             let distance = ((point.x - drag.press.x) as f32).hypot((point.y - drag.press.y) as f32);
-            if distance / scale(drag.owner.hwnd) <= DRAG_THRESHOLD {
+            if distance / drag.owner.hwnd.dpi_scale() <= DRAG_THRESHOLD {
                 return;
             }
             drag.phase = Phase::Dragging;
@@ -170,7 +157,7 @@ fn moved(cx: &mut App) {
         with_jot(drag.owner, cx, |jot, _, cx| {
             jot.drag_tab(tab, x, grab, start, cx)
         });
-    } else if !alone && let Some(target) = strip_window(point, 0, cx) {
+    } else if !alone && let Some(target) = strip_window(point, None, cx) {
         attach(&mut drag, target, point, cx);
     } else {
         detach(&mut drag, alone, point, cx);
@@ -183,7 +170,7 @@ fn lift(cx: &mut App) {
         return;
     };
     let point = drag.press;
-    drag.source_placement = placement(drag.owner.hwnd);
+    drag.source_placement = drag.owner.hwnd.saved_placement();
     start_move_loop(&mut drag, point, cx);
     cx.set_global(drag);
 }
@@ -201,7 +188,7 @@ fn released(cx: &mut App) {
     if let Phase::Dragging = drag.phase {
         with_jot(drag.owner, cx, |jot, _, cx| jot.release_tab(cx));
         if drag.owner.hwnd != drag.source.hwnd {
-            foreground(drag.owner.hwnd);
+            drag.owner.hwnd.set_foreground();
         }
     }
 }
@@ -210,7 +197,7 @@ pub(crate) fn cancel(cx: &mut App) {
     let Some(drag) = end(cx) else {
         return;
     };
-    let _ = unsafe { ReleaseCapture() };
+    release_mouse_capture();
     if let Phase::Pressed = drag.phase {
         return;
     }
@@ -221,8 +208,8 @@ pub(crate) fn cancel(cx: &mut App) {
             with_jot(drag.source, cx, |jot, window, cx| {
                 jot.return_tab(tab, index, window, cx)
             });
-        } else {
-            restore_placement(drag.source.hwnd, drag.source_placement);
+        } else if let Some(placement) = drag.source_placement {
+            drag.source.hwnd.restore_placement(placement);
         }
         return;
     }
@@ -236,14 +223,16 @@ pub(crate) fn cancel(cx: &mut App) {
         with_jot(drag.source, cx, |jot, window, cx| {
             jot.restore_tab(data, index, window, cx)
         });
-        foreground(drag.source.hwnd);
+        drag.source.hwnd.set_foreground();
     } else {
         let (_, jot) = open_jot_window(Some(data), None, cx);
-        restore_placement(jot.read(cx).hwnd, drag.source_placement);
+        if let Some(placement) = drag.source_placement {
+            jot.read(cx).hwnd.restore_placement(placement);
+        }
     }
 }
 
-fn attach(drag: &mut TabDrag, target: Owner, point: POINT, cx: &mut App) {
+fn attach(drag: &mut TabDrag, target: Owner, point: ScreenPoint, cx: &mut App) {
     let tab = drag.tab;
     let Some(data) = with_jot(drag.owner, cx, |jot, window, cx| {
         jot.take_tab(tab, window, cx)
@@ -256,12 +245,12 @@ fn attach(drag: &mut TabDrag, target: Owner, point: POINT, cx: &mut App) {
     with_jot(target, cx, |jot, window, cx| {
         jot.insert_dragged_tab(data, x, grab, window, cx)
     });
-    unsafe { SetCapture(HWND(target.hwnd as _)) };
+    target.hwnd.set_capture();
     drag.owner = target;
     drag.phase = Phase::Dragging;
 }
 
-fn detach(drag: &mut TabDrag, alone: bool, point: POINT, cx: &mut App) {
+fn detach(drag: &mut TabDrag, alone: bool, point: ScreenPoint, cx: &mut App) {
     let tab = drag.tab;
     if !alone {
         let Some((data, size)) = with_jot(drag.owner, cx, |jot, window, cx| {
@@ -279,17 +268,17 @@ fn detach(drag: &mut TabDrag, alone: bool, point: POINT, cx: &mut App) {
     } else {
         let hwnd = drag.owner.hwnd;
         if hwnd == drag.source.hwnd && drag.source_placement.is_none() {
-            drag.source_placement = placement(hwnd);
+            drag.source_placement = hwnd.saved_placement();
         }
-        if unsafe { IsZoomed(HWND(hwnd as _)) }.as_bool() {
-            let _ = unsafe { ShowWindow(HWND(hwnd as _), SW_RESTORE) };
+        if hwnd.is_maximized() {
+            hwnd.restore();
         }
         with_jot(drag.owner, cx, |jot, _, cx| jot.release_tab(cx));
     }
     run_move_loop(drag, point, cx);
 }
 
-fn run_move_loop(drag: &mut TabDrag, point: POINT, cx: &mut App) {
+fn run_move_loop(drag: &mut TabDrag, point: ScreenPoint, cx: &mut App) {
     place(
         drag.owner.hwnd,
         point,
@@ -298,18 +287,8 @@ fn run_move_loop(drag: &mut TabDrag, point: POINT, cx: &mut App) {
     start_move_loop(drag, point, cx);
 }
 
-fn start_move_loop(drag: &mut TabDrag, point: POINT, cx: &mut App) {
-    let hwnd = drag.owner.hwnd;
-    let position = LPARAM((((point.y as u16 as u32) << 16) | point.x as u16 as u32) as isize);
-    unsafe {
-        let _ = ReleaseCapture();
-        let _ = PostMessageW(
-            Some(HWND(hwnd as _)),
-            WM_SYSCOMMAND,
-            WPARAM(SC_MOVE as usize | HTCAPTION as usize),
-            position,
-        );
-    }
+fn start_move_loop(drag: &mut TabDrag, point: ScreenPoint, cx: &mut App) {
+    drag.owner.hwnd.begin_system_move(point);
     drag.phase = Phase::Entering {
         since: Instant::now(),
     };
@@ -334,11 +313,11 @@ fn poll(cx: &mut App) -> bool {
         Phase::Pressed | Phase::Dragging => return false,
     };
     let hwnd = drag.owner.hwnd;
-    let point = cursor();
-    if in_move_loop(hwnd) {
-        let attaching = attaching || strip_window(point, hwnd, cx).is_some();
+    let point = cursor_screen_pos();
+    if hwnd.in_move_loop() {
+        let attaching = attaching || strip_window(point, Some(hwnd), cx).is_some();
         if attaching && !matches!(drag.phase, Phase::Moving { attaching: true }) {
-            let _ = unsafe { PostMessageW(Some(HWND(hwnd as _)), WM_CANCELMODE, WPARAM(0), LPARAM(0)) };
+            hwnd.cancel_mode();
         }
         drag.phase = Phase::Moving { attaching };
         cx.set_global(drag);
@@ -349,8 +328,8 @@ fn poll(cx: &mut App) -> bool {
     {
         return true;
     }
-    let pressed = button_down();
-    if let Some(target) = strip_window(point, hwnd, cx) {
+    let pressed = primary_mouse_button_down();
+    if let Some(target) = strip_window(point, Some(hwnd), cx) {
         attach(&mut drag, target, point, cx);
         cx.set_global(drag);
         if !pressed {
@@ -364,172 +343,51 @@ fn poll(cx: &mut App) -> bool {
         cancel(cx);
     } else {
         end(cx);
-        foreground(hwnd);
+        hwnd.set_foreground();
     }
     false
 }
 
-fn strip_window(point: POINT, exclude: isize, cx: &App) -> Option<Owner> {
-    let hwnd = window_at(point, exclude);
-    if hwnd == 0 || !in_strip(hwnd, point) {
+fn strip_window(point: ScreenPoint, exclude: Option<WindowHwnd>, cx: &App) -> Option<Owner> {
+    let hwnd = top_visible_window_at(point, exclude)?;
+    if !in_strip(hwnd, point) {
         return None;
     }
     jot_windows(cx).find(|owner| owner.hwnd == hwnd)
 }
 
-fn button_down() -> bool {
-    let button = if unsafe { GetSystemMetrics(SM_SWAPBUTTON) } != 0 {
-        VK_RBUTTON
-    } else {
-        VK_LBUTTON
-    };
-    (unsafe { GetAsyncKeyState(button.0 as i32) }) < 0
-}
-
-fn scale(hwnd: isize) -> f32 {
-    match unsafe { GetDpiForWindow(HWND(hwnd as _)) } {
-        0 => 1.,
-        dpi => dpi as f32 / USER_DEFAULT_SCREEN_DPI as f32,
-    }
-}
-
-fn local(hwnd: isize, point: POINT) -> Point<f32> {
-    let origin = client_origin(hwnd);
-    let scale = scale(hwnd);
+fn local(hwnd: WindowHwnd, point: ScreenPoint) -> Point<f32> {
+    let origin = hwnd.client_origin();
+    let scale = hwnd.dpi_scale();
     self::point(
         (point.x - origin.x) as f32 / scale,
         (point.y - origin.y) as f32 / scale,
     )
 }
 
-fn screen(hwnd: isize, position: Point<Pixels>) -> POINT {
-    let origin = client_origin(hwnd);
-    let scale = scale(hwnd);
-    POINT {
+fn screen(hwnd: WindowHwnd, position: Point<Pixels>) -> ScreenPoint {
+    let origin = hwnd.client_origin();
+    let scale = hwnd.dpi_scale();
+    ScreenPoint {
         x: origin.x + (position.x.as_f32() * scale).round() as i32,
         y: origin.y + (position.y.as_f32() * scale).round() as i32,
     }
 }
 
-fn in_strip(hwnd: isize, point: POINT) -> bool {
-    let mut client = RECT::default();
-    let _ = unsafe { GetClientRect(HWND(hwnd as _), &mut client) };
-    let width = client.right as f32 / scale(hwnd);
+fn in_strip(hwnd: WindowHwnd, point: ScreenPoint) -> bool {
+    let client = hwnd.client_rect();
+    let width = client.right as f32 / hwnd.dpi_scale();
     let position = local(hwnd, point);
     (STRIP_LEFT..width - CAPTION_WIDTH).contains(&position.x)
         && (STRIP_TOP - DETACH_MAGNETISM..STRIP_TOP + TAB_HEIGHT + DETACH_MAGNETISM)
             .contains(&position.y)
 }
 
-fn place(hwnd: isize, point: POINT, offset: Point<f32>) {
-    let scale = scale(hwnd);
-    let origin = client_origin(hwnd);
-    let mut frame = RECT::default();
-    let _ = unsafe { GetWindowRect(HWND(hwnd as _), &mut frame) };
+fn place(hwnd: WindowHwnd, point: ScreenPoint, offset: Point<f32>) {
+    let scale = hwnd.dpi_scale();
+    let origin = hwnd.client_origin();
+    let frame = hwnd.window_rect();
     let x = point.x - (offset.x * scale).round() as i32 - (origin.x - frame.left);
     let y = point.y - (offset.y * scale).round() as i32 - (origin.y - frame.top);
-    let _ = unsafe {
-        SetWindowPos(
-            HWND(hwnd as _),
-            None,
-            x,
-            y,
-            0,
-            0,
-            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
-        )
-    };
-}
-
-fn placement(hwnd: isize) -> Option<WINDOWPLACEMENT> {
-    let mut placement = WINDOWPLACEMENT {
-        length: size_of::<WINDOWPLACEMENT>() as u32,
-        ..Default::default()
-    };
-    unsafe { GetWindowPlacement(HWND(hwnd as _), &mut placement) }
-        .is_ok()
-        .then_some(placement)
-}
-
-fn restore_placement(hwnd: isize, placement: Option<WINDOWPLACEMENT>) {
-    if let Some(placement) = placement {
-        let _ = unsafe { SetWindowPlacement(HWND(hwnd as _), &placement) };
-    }
-}
-
-fn foreground(hwnd: isize) {
-    let _ = unsafe { SetForegroundWindow(HWND(hwnd as _)) };
-}
-
-fn in_move_loop(hwnd: isize) -> bool {
-    let mut info = GUITHREADINFO {
-        cbSize: size_of::<GUITHREADINFO>() as u32,
-        ..Default::default()
-    };
-    unsafe {
-        let thread = GetWindowThreadProcessId(HWND(hwnd as _), None);
-        GetGUIThreadInfo(thread, &mut info).is_ok() && (info.flags & GUI_INMOVESIZE).0 != 0
-    }
-}
-
-struct Search {
-    point: POINT,
-    exclude: isize,
-    found: isize,
-}
-
-fn shown(hwnd: HWND) -> bool {
-    let mut cloaked = 0u32;
-    unsafe {
-        IsWindowVisible(hwnd).as_bool()
-            && !IsIconic(hwnd).as_bool()
-            && GetWindowLongW(hwnd, GWL_EXSTYLE) as u32 & WS_EX_TRANSPARENT.0 == 0
-            && (DwmGetWindowAttribute(
-                hwnd,
-                DWMWA_CLOAKED,
-                (&raw mut cloaked).cast(),
-                size_of::<u32>() as u32,
-            )
-            .is_err()
-                || cloaked == 0)
-    }
-}
-
-fn frame(hwnd: HWND) -> RECT {
-    let mut frame = RECT::default();
-    let status = unsafe {
-        DwmGetWindowAttribute(
-            hwnd,
-            DWMWA_EXTENDED_FRAME_BOUNDS,
-            (&raw mut frame).cast(),
-            size_of::<RECT>() as u32,
-        )
-    };
-    if status.is_err() {
-        let _ = unsafe { GetWindowRect(hwnd, &mut frame) };
-    }
-    frame
-}
-
-unsafe extern "system" fn visit(hwnd: HWND, data: LPARAM) -> BOOL {
-    let search = unsafe { &mut *(data.0 as *mut Search) };
-    if hwnd.0 as isize == search.exclude || !shown(hwnd) {
-        return BOOL(1);
-    }
-    let frame = frame(hwnd);
-    if unsafe { PtInRect(&frame, search.point) }.as_bool() {
-        search.found = hwnd.0 as isize;
-        return BOOL(0);
-    }
-    BOOL(1)
-}
-
-fn window_at(point: POINT, exclude: isize) -> isize {
-    let mut search = Search {
-        point,
-        exclude,
-        found: 0,
-    };
-    let _ = unsafe { EnumWindows(Some(visit), LPARAM((&raw mut search) as isize)) };
-    search.found
+    hwnd.move_noactivate(x, y);
 }

@@ -4,7 +4,10 @@ use crate::ui::anyhow::Result;
 use windows::Win32::{
     Foundation::{HANDLE, HGLOBAL},
     System::{
-        DataExchange::{CloseClipboard, EmptyClipboard, GetClipboardData, OpenClipboard, SetClipboardData},
+        DataExchange::{
+            CloseClipboard, EmptyClipboard, GetClipboardData, IsClipboardFormatAvailable,
+            OpenClipboard, SetClipboardData,
+        },
         Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock},
         Ole::CF_UNICODETEXT,
     },
@@ -13,6 +16,10 @@ use windows::Win32::{
 use windows::core::Owned;
 
 const DRAGDROP_GET_FILES_COUNT: u32 = 0xFFFFFFFF;
+
+pub(crate) fn clipboard_has_text() -> bool {
+    unsafe { IsClipboardFormatAvailable(CF_UNICODETEXT.0 as u32) }.is_ok()
+}
 
 pub(crate) fn write_clipboard_text(text: &str) {
     let Some(_clip) = ClipboardGuard::open() else {

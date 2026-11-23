@@ -1,7 +1,6 @@
 //! Honors Windows' client-area animation preference.
 
 use crate::ui::{App, Global};
-use windows::Win32::UI::WindowsAndMessaging::SPI_GETCLIENTAREAANIMATION;
 
 #[derive(Default)]
 struct SystemReduceMotion {
@@ -11,10 +10,10 @@ struct SystemReduceMotion {
 impl Global for SystemReduceMotion {}
 
 pub(crate) fn init(cx: &mut App) {
-    let Some(animations_enabled) = crate::ui::system_parameters_u32(SPI_GETCLIENTAREAANIMATION.0) else {
+    let Some(animations_enabled) = crate::win32::client_area_animations_enabled() else {
         return;
     };
-    let reduce = animations_enabled == 0;
+    let reduce = !animations_enabled;
     let applied = cx
         .try_global::<SystemReduceMotion>()
         .and_then(|state| state.applied);

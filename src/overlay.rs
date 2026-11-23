@@ -1,13 +1,9 @@
 use super::*;
-use windows::Win32::Foundation::{HWND, POINT, RECT};
-use windows::Win32::UI::WindowsAndMessaging::{
-    HWND_TOPMOST, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SetWindowPos, ShowWindow,
-};
 
 pub(crate) struct Overlay<V> {
     pub view: Entity<V>,
     pub handle: AnyWindowHandle,
-    pub hwnd: isize,
+    pub hwnd: WindowHwnd,
 }
 
 impl<V> Clone for Overlay<V> {
@@ -41,7 +37,7 @@ pub(crate) fn open<V: Render>(
     let handle = cx
         .open_window(options, |window, cx| {
             let view = cx.new(build);
-            created = Some((view.clone(), window_hwnd(window)));
+            created = Some((view.clone(), window.hwnd()));
             view
         })
         .ok()?;
@@ -53,9 +49,9 @@ pub(crate) fn open<V: Render>(
     })
 }
 
-pub(crate) fn screen_rect(bounds: Bounds<Pixels>, scale: f32, origin: POINT) -> RECT {
+pub(crate) fn screen_rect(bounds: Bounds<Pixels>, scale: f32, origin: ScreenPoint) -> ScreenRect {
     let physical = |v: Pixels| (v.as_f32() * scale).round() as i32;
-    RECT {
+    ScreenRect {
         left: origin.x + physical(bounds.origin.x),
         top: origin.y + physical(bounds.origin.y),
         right: origin.x + physical(bounds.origin.x + bounds.size.width),
@@ -63,28 +59,14 @@ pub(crate) fn screen_rect(bounds: Bounds<Pixels>, scale: f32, origin: POINT) -> 
     }
 }
 
-pub(crate) fn same_rect(a: RECT, b: RECT) -> bool {
-    (a.left, a.top, a.right, a.bottom) == (b.left, b.top, b.right, b.bottom)
+pub(crate) fn place(hwnd: WindowHwnd, rect: ScreenRect) {
+    hwnd.place_topmost_noactivate(rect);
 }
 
-pub(crate) fn place(hwnd: isize, rect: RECT) {
-    let _ = unsafe {
-        SetWindowPos(
-            HWND(hwnd as _),
-            Some(HWND_TOPMOST),
-            rect.left,
-            rect.top,
-            rect.right - rect.left,
-            rect.bottom - rect.top,
-            SWP_NOACTIVATE,
-        )
-    };
+pub(crate) fn show(hwnd: WindowHwnd) {
+    hwnd.show_noactivate();
 }
 
-pub(crate) fn show(hwnd: isize) {
-    let _ = unsafe { ShowWindow(HWND(hwnd as _), SW_SHOWNOACTIVATE) };
-}
-
-pub(crate) fn hide(hwnd: isize) {
-    let _ = unsafe { ShowWindow(HWND(hwnd as _), SW_HIDE) };
+pub(crate) fn hide(hwnd: WindowHwnd) {
+    hwnd.hide();
 }

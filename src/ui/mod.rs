@@ -63,8 +63,8 @@ use key_dispatch::*;
 pub(crate) use keymap::*;
 pub(crate) use platform::*;
 pub(crate) use crate::win32::{
-    SaveChoice, SavePathOptions, WindowsDisplay, WindowsPlatform, prompt_for_save_path,
-    set_window_min_size, system_parameters_u32,
+    SaveChoice, SavePathOptions, ScreenPoint, ScreenRect, WindowHwnd, WindowsDisplay,
+    WindowsPlatform, prompt_for_save_path, set_window_min_size,
 };
 pub(crate) use slotmap::new_key_type;
 pub(crate) use refineable::*;

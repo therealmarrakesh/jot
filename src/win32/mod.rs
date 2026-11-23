@@ -9,6 +9,8 @@ mod dispatcher;
 mod display;
 mod events;
 mod keyboard;
+mod os;
+mod pipe;
 mod platform;
 mod system_settings;
 mod util;
@@ -24,6 +26,8 @@ pub(crate) use directx_renderer::*;
 pub(crate) use dispatcher::*;
 pub(crate) use events::*;
 pub(crate) use keyboard::*;
+pub(crate) use os::*;
+pub(crate) use pipe::*;
 pub(crate) use platform::*;
 pub(crate) use system_settings::*;
 pub(crate) use util::*;
@@ -33,7 +37,6 @@ pub(crate) use wrapper::*;
 
 pub(crate) use display::WindowsDisplay;
 pub(crate) use platform::{SaveChoice, SavePathOptions, WindowsPlatform, prompt_for_save_path};
-pub(crate) use util::system_parameters_u32;
 pub(crate) use window::set_window_min_size;
 
 pub(crate) use windows::Win32::Foundation::HWND;

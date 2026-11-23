@@ -11,7 +11,6 @@ use std::cell::Cell;
 use std::ops::Range;
 use std::rc::Rc;
 use unicode_segmentation::UnicodeSegmentation;
-use windows::Win32::UI::WindowsAndMessaging::{SPI_GETWHEELSCROLLCHARS, SPI_GETWHEELSCROLLLINES};
 
 use super::rope_ext::Bias;
 use super::{
@@ -38,12 +37,7 @@ const MIN_WHEEL_STEP: f32 = 48.;
 const WORD_SCAN_WINDOW_BYTES: usize = 256;
 
 fn wheel_scroll_amount(horizontal: bool) -> u32 {
-    let action = if horizontal {
-        SPI_GETWHEELSCROLLCHARS
-    } else {
-        SPI_GETWHEELSCROLLLINES
-    };
-    crate::ui::system_parameters_u32(action.0).unwrap_or(DEFAULT_WHEEL_SCROLL)
+    crate::win32::wheel_scroll_amount(horizontal).unwrap_or(DEFAULT_WHEEL_SCROLL)
 }
 
 actions!(

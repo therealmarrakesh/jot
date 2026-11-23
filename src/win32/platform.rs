@@ -709,11 +709,11 @@ impl Default for SavePathOptions {
 pub(crate) type SavePathResult = Result<Option<(PathBuf, Option<usize>)>>;
 
 pub(crate) fn prompt_for_save_path(
-    owner: isize,
+    owner: WindowHwnd,
     executor: &ForegroundExecutor,
     options: SavePathOptions,
 ) -> Receiver<SavePathResult> {
-    let owner = window_from_hwnd(HWND(owner as _)).map(|window| window.dialog_owner.clone());
+    let owner = window_from_hwnd(owner.raw()).map(|window| window.dialog_owner.clone());
     crate::win32::dialog::show_dialog(owner, executor, move |window| {
         file_save_dialog(&options, Some(window))
     })

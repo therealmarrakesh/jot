@@ -1,5 +1,4 @@
 use super::*;
-use windows::Win32::Foundation::{POINT, RECT};
 
 const FILL: u32 = 0x767676;
 const PADDING: f32 = 4.;
@@ -50,13 +49,13 @@ impl Render for KeyTipView {
 struct KeyTips {
     overlay: Option<overlay::Overlay<KeyTipView>>,
     owner: Option<AnyWindowHandle>,
-    rect: RECT,
+    rect: ScreenRect,
 }
 
 impl KeyTips {
     fn hide(&mut self) {
         self.owner = None;
-        self.rect = RECT::default();
+        self.rect = ScreenRect::default();
         if let Some(overlay) = &self.overlay {
             overlay::hide(overlay.hwnd);
         }
@@ -97,7 +96,7 @@ pub(crate) fn layout(
 
 pub(crate) fn show(
     owner: AnyWindowHandle,
-    origin: POINT,
+    origin: ScreenPoint,
     scale: f32,
     mut tips: Vec<KeyTip>,
     cx: &mut App,
@@ -113,7 +112,7 @@ pub(crate) fn show(
         tip.bounds.origin -= union.origin;
     }
     let rect = overlay::screen_rect(union, scale, origin);
-    let unchanged = state.owner == Some(owner) && overlay::same_rect(state.rect, rect);
+    let unchanged = state.owner == Some(owner) && state.rect == rect;
     let current = state.overlay.clone();
     if unchanged
         && current

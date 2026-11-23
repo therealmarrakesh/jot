@@ -30,15 +30,6 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Duration;
 use theme::{Palette, Surface, palette, theme_shadow};
-use windows::Win32::Foundation::{HWND, POINT};
-use windows::Win32::Globalization::{
-    DATE_SHORTDATE, GetDateFormatEx, GetTimeFormatEx, TIME_NOSECONDS,
-};
-use windows::Win32::Graphics::Gdi::ClientToScreen;
-use windows::Win32::System::SystemInformation::GetLocalTime;
-use windows::Win32::UI::WindowsAndMessaging::{
-    GetCursorPos, IsIconic, SW_RESTORE, SetForegroundWindow, ShowWindow, USER_DEFAULT_SCREEN_DPI,
-};
 
 const APP_NAME: &str = "Jot";
 const NOTICES_FLAG: &str = "--notices";
@@ -365,44 +356,6 @@ fn round_half_up(value: f32) -> f32 {
     (value + 0.5).floor()
 }
 
-fn window_hwnd(window: &Window) -> isize {
-    window.raw_hwnd().unwrap_or(0)
-}
-
-fn cursor() -> POINT {
-    let mut point = POINT::default();
-    let _ = unsafe { GetCursorPos(&mut point) };
-    point
-}
-
-fn client_origin(hwnd: isize) -> POINT {
-    let mut origin = POINT::default();
-    let _ = unsafe { ClientToScreen(HWND(hwnd as _), &mut origin) };
-    origin
-}
-
-fn time_date() -> String {
-    let now = unsafe { GetLocalTime() };
-    let mut time = [0u16; 128];
-    let mut date = [0u16; 128];
-    let (time_len, date_len) = unsafe {
-        (
-            GetTimeFormatEx(None, TIME_NOSECONDS, Some(&now), None, Some(&mut time)),
-            GetDateFormatEx(
-                None,
-                DATE_SHORTDATE,
-                Some(&now),
-                None,
-                Some(&mut date),
-                None,
-            ),
-        )
-    };
-    let text =
-        |buffer: &[u16], len: i32| String::from_utf16_lossy(&buffer[..(len.max(1) - 1) as usize]);
-    format!("{} {}", text(&time, time_len), text(&date, date_len))
-}
-
 pub(crate) fn text_width(window: &Window, text: &str, family: &'static str, size: f32) -> f32 {
     let run = TextRun {
         len: text.len(),
@@ -469,7 +422,7 @@ struct Jot {
     tabs: Vec<Tab>,
     active: usize,
     strip: tabs::TabStrip,
-    hwnd: isize,
+    hwnd: WindowHwnd,
     menu_bar: MenuBar,
     dialogs: dialog::Dialogs,
     find: find::FindBar,
@@ -532,7 +485,7 @@ impl Jot {
             tabs: vec![tab],
             active: 0,
             strip: tabs::TabStrip::new(),
-            hwnd: window_hwnd(window),
+            hwnd: window.hwnd(),
             menu_bar,
             dialogs,
             find,
@@ -687,7 +640,7 @@ impl Jot {
     }
 
     fn insert_time_date(&mut self, _: &TimeDate, window: &mut Window, cx: &mut Context<Self>) {
-        let stamp = time_date();
+        let stamp = crate::win32::format_local_time_date();
         self.active_editor()
             .update(cx, |editor, cx| editor.replace(stamp, window, cx));
     }
@@ -1024,19 +977,6 @@ impl Render for Jot {
     }
 }
 
-fn bring_to_front(hwnd: isize) {
-    if hwnd == 0 {
-        return;
-    }
-    let handle = HWND(hwnd as _);
-    unsafe {
-        if IsIconic(handle).as_bool() {
-            let _ = ShowWindow(handle, SW_RESTORE);
-        }
-        let _ = SetForegroundWindow(handle);
-    }
-}
-
 fn open_handoff_paths(paths: Vec<PathBuf>, cx: &mut App) {
     if paths.is_empty() {
         return;
@@ -1056,7 +996,7 @@ fn open_handoff_paths(paths: Vec<PathBuf>, cx: &mut App) {
                 let _ = window.update(cx, |jot, window, cx| {
                     jot.activate_tab(ix, window, cx);
                 });
-                bring_to_front(hwnd);
+                hwnd.bring_to_front();
                 return;
             }
         }
@@ -1073,12 +1013,12 @@ fn open_handoff_paths(paths: Vec<PathBuf>, cx: &mut App) {
         });
 
     if let Some(window) = target_window {
-        let mut hwnd = 0;
+        let mut hwnd = WindowHwnd::default();
         let _ = window.update(cx, |jot, window, cx| {
             hwnd = jot.hwnd;
             jot.open_paths(paths, window, cx);
         });
-        bring_to_front(hwnd);
+        hwnd.bring_to_front();
     } else {
         let (window, _) = open_jot_window(None, None, cx);
         let _ = window.update(cx, |jot, window, cx| {

@@ -2,9 +2,7 @@ use super::*;
 use crate::ui::{
     Cancel, Confirm, MotionStatus, SelectDown, SelectLeft, SelectRight, SelectUp, transition_from,
 };
-use windows::Win32::System::DataExchange::IsClipboardFormatAvailable;
-use windows::Win32::System::Ole::CF_UNICODETEXT;
-use windows::Win32::UI::WindowsAndMessaging::SPI_GETMENUSHOWDELAY;
+use crate::win32::clipboard_has_text;
 
 const CONTEXT: &str = "JotMenu";
 const OPEN_DURATION: Duration = Duration::from_millis(250);
@@ -120,10 +118,6 @@ fn context_menu(editor: &EditorState) -> (Vec<CommandButton>, Vec<Entry>) {
         icon: Some("\u{E7A7}"),
     }];
     (commands, entries)
-}
-
-fn clipboard_has_text() -> bool {
-    unsafe { IsClipboardFormatAvailable(CF_UNICODETEXT.0 as u32) }.is_ok()
 }
 
 fn display_label(label: &str) -> SharedString {
@@ -404,8 +398,7 @@ fn cycle(
 
 fn menu_show_delay() -> Duration {
     Duration::from_millis(
-        crate::ui::system_parameters_u32(SPI_GETMENUSHOWDELAY.0)
-            .map_or(DEFAULT_MENU_SHOW_DELAY_MS, u64::from),
+        crate::win32::menu_show_delay_ms().map_or(DEFAULT_MENU_SHOW_DELAY_MS, u64::from),
     )
 }
 
@@ -1402,7 +1395,7 @@ impl Jot {
             }
             return;
         }
-        let origin = client_origin(window_hwnd(window));
+        let origin = window.hwnd().client_origin();
         let scale = window.scale_factor();
         cx.defer(move |cx| keytips::show(owner, origin, scale, tips, cx));
     }

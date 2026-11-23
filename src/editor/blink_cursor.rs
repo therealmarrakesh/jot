@@ -2,8 +2,7 @@ use crate::ui::{Context, Task};
 use std::time::Duration;
 
 fn blink_interval() -> Option<Duration> {
-    let millis = unsafe { windows::Win32::UI::WindowsAndMessaging::GetCaretBlinkTime() };
-    (millis != 0 && millis != u32::MAX).then(|| Duration::from_millis(millis.into()))
+    crate::win32::caret_blink_interval()
 }
 
 /// Manages cursor blinking according to Windows' caret blink interval.

@@ -496,8 +496,8 @@ impl WindowsWindow {
         self.state.bounds()
     }
 
-    pub(crate) fn raw_hwnd(&self) -> Option<isize> {
-        Some(self.0.hwnd.0 as isize)
+    pub(crate) fn hwnd(&self) -> WindowHwnd {
+        WindowHwnd::from_raw(self.0.hwnd)
     }
 
     pub(crate) fn is_maximized(&self) -> bool {
@@ -985,8 +985,8 @@ unsafe extern "system" fn window_procedure(
     result
 }
 
-pub(crate) fn set_window_min_size(window: isize, size: Option<Size<Pixels>>) {
-    if let Some(window) = window_from_hwnd(HWND(window as _)) {
+pub(crate) fn set_window_min_size(window: WindowHwnd, size: Option<Size<Pixels>>) {
+    if let Some(window) = window_from_hwnd(window.raw()) {
         window.state.min_size.set(size);
     }
 }
