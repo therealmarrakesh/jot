@@ -1,6 +1,6 @@
 use crate::ui::smallvec::SmallVec;
 use crate::ui::{
-    App, Bounds, FontId, GlyphId, Half, Hsla, Pixels, Point, Result, Size, TextAlign,
+    App, Bounds, FontId, GlyphId, Half, Pixels, Point, Result, Rgba, Size, TextAlign,
     UnderlineStyle, Window, black, point, px, size, underline_y_offset,
 };
 use std::sync::Arc;
@@ -181,7 +181,7 @@ impl WrappedLineLayout {
 #[derive(Debug, Clone)]
 pub(crate) struct DecorationRun {
     pub(crate) len: u32,
-    pub(crate) color: Hsla,
+    pub(crate) color: Rgba,
     pub(crate) underline: Option<UnderlineStyle>,
 }
 

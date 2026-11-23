@@ -12,8 +12,8 @@ use windows::Win32::Graphics::{
 };
 
 use crate::ui::{
-    AtlasKey, AtlasTextureId, AtlasTextureKind, AtlasTextureList, AtlasTile, Bounds, DevicePixels,
-    Point, Size, TileId,
+    AtlasTextureId, AtlasTextureKind, AtlasTextureList, AtlasTile, Bounds, DevicePixels, Point,
+    RenderGlyphParams, Size, TileId,
 };
 
 struct Shelf {
@@ -100,7 +100,7 @@ impl ShelfAtlasAllocator {
 pub(crate) struct DirectXAtlas(Mutex<DirectXAtlasInner>);
 
 struct DirectXAtlasInner {
-    tiles_by_key: FxHashMap<AtlasKey, AtlasTile>,
+    tiles_by_key: FxHashMap<RenderGlyphParams, AtlasTile>,
     device: ID3D11Device,
     device_context: ID3D11DeviceContext,
     monochrome_textures: AtlasTextureList<DirectXAtlasTexture>,
@@ -128,7 +128,7 @@ impl DirectXAtlas {
 
     pub(crate) fn get_or_insert_with<'a>(
         &self,
-        key: AtlasKey,
+        key: RenderGlyphParams,
         mut build: impl FnMut() -> crate::ui::anyhow::Result<Option<(Size<DevicePixels>, Cow<'a, [u8]>)>>,
     ) -> crate::ui::anyhow::Result<Option<AtlasTile>> {
         let mut inner = self.0.lock();
@@ -309,14 +309,6 @@ impl DirectXAtlasTexture {
         let row_bytes = bounds.size.width.to_bytes(self.bytes_per_pixel as u8) as usize;
         let expected = row_bytes * bounds.size.height.0.max(0) as usize;
         if bytes.len() < expected {
-            crate::ui::log::error!(
-                "DirectXAtlasTexture::upload: source slice is {} bytes but the {}x{} region \
-                 requires {} bytes; skipping upload to avoid a driver over-read",
-                bytes.len(),
-                bounds.size.width.0,
-                bounds.size.height.0,
-                expected,
-            );
             return;
         }
         unsafe {

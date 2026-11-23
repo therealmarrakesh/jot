@@ -106,10 +106,6 @@ impl Arena {
         }
     }
 
-    pub(crate) fn capacity(&self) -> usize {
-        self.chunks.len() * self.chunk_size.get()
-    }
-
     /// Marks the start of a scope (e.g. a window draw) whose allocations must stay
     /// live until the scope ends, even if `clear` is called by a nested scope in
     /// the meantime.
@@ -139,11 +135,6 @@ impl Arena {
     pub(crate) fn clear(&mut self) {
         if self.scope_depth == 0 {
             self.force_clear();
-        } else {
-            crate::ui::log::debug!(
-                "deferring arena clear; {} enclosing scope(s) still active",
-                self.scope_depth
-            );
         }
     }
 
@@ -197,10 +188,6 @@ impl Arena {
         if self.current_chunk_index >= self.chunks.len() {
             self.chunks.push(Chunk::new(self.chunk_size));
             assert_eq!(self.current_chunk_index, self.chunks.len() - 1);
-            crate::ui::log::trace!(
-                "increased element arena capacity to {}kb",
-                self.capacity() / 1024,
-            );
         }
         let current_chunk = &mut self.chunks[self.current_chunk_index];
         if let Some(pointer) = current_chunk.allocate(layout) {

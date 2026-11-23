@@ -389,12 +389,12 @@ impl WindowsPlatform {
         }
     }
 
-    pub(crate) fn write_to_clipboard(&self, item: ClipboardItem) {
-        write_to_clipboard(item);
+    pub(crate) fn write_clipboard_text(&self, text: &str) {
+        write_clipboard_text(text);
     }
 
-    pub(crate) fn read_from_clipboard(&self) -> Option<ClipboardItem> {
-        read_from_clipboard()
+    pub(crate) fn read_clipboard_text(&self) -> Option<String> {
+        read_clipboard_text()
     }
 }
 
@@ -467,7 +467,6 @@ impl WindowsPlatformInner {
 
     fn handle_gpui_events(&self, message: u32, wparam: WPARAM, lparam: LPARAM) -> Option<isize> {
         if wparam.0 != self.validation_number {
-            crate::ui::log::error!("Wrong validation number while processing message: {message}");
             return None;
         }
         match message {
@@ -487,7 +486,6 @@ impl WindowsPlatformInner {
             |callbacks| &callbacks.quit,
             |callback| shutdown_completed = callback(),
         );
-        crate::ui::log::logger().flush();
         if shutdown_completed {
             std::process::exit(0);
         }
@@ -501,7 +499,6 @@ impl WindowsPlatformInner {
 
     fn close_one_window(&self, target_window: HWND) -> bool {
         let Some(all_windows) = self.raw_window_handles.upgrade() else {
-            crate::ui::log::error!("Failed to upgrade raw window handles");
             return false;
         };
         let mut lock = all_windows.write();
@@ -522,7 +519,6 @@ impl WindowsPlatformInner {
         'tasks: loop {
             'timeout_loop: loop {
                 if start.elapsed().as_millis() >= MAIN_TASK_TIMEOUT {
-                    crate::ui::log::debug!("foreground task timeout reached");
                     // we spent our budget on gpui tasks, we likely have a lot of work queued so drain system events first to stay responsive
                     // then quit out of foreground work to allow us to process other gpui events first before returning back to foreground task work
                     // if we don't we might not for example process window quit events
@@ -847,14 +843,7 @@ fn load_icon() -> Result<HICON> {
 }
 
 fn check_device_lost(device: &ID3D11Device) -> bool {
-    let device_state = unsafe { device.GetDeviceRemovedReason() };
-    match device_state {
-        Ok(_) => false,
-        Err(err) => {
-            crate::ui::log::error!("DirectX device lost detected: {:?}", err);
-            true
-        }
-    }
+    unsafe { device.GetDeviceRemovedReason() }.is_err()
 }
 
 fn handle_gpu_device_lost(
@@ -871,7 +860,6 @@ fn handle_gpu_device_lost(
     *directx_devices = try_to_recover_from_device_lost(|| {
         DirectXDevices::new().context("Failed to recreate new DirectX devices after device lost")
     })?;
-    crate::ui::log::info!("DirectX devices successfully recreated.");
 
     let lparam = LPARAM(directx_devices as *const _ as _);
     unsafe {

@@ -1,7 +1,7 @@
 use crate::ui::{
-    AbsoluteLength, App, Background, Bounds, ContentMask, Corners, CursorStyle, DefiniteLength,
-    Edges, Font, FontStyle, FontWeight, Hsla, Length, Pixels, Point, Rgba, SharedString, Size,
-    Styled, Window, black, phi, point, quad, rems,
+    App, Bounds, ContentMask, Corners, CursorStyle, DefiniteLength, Edges, Font,
+    FontStyle, FontWeight, IsZero as _, Length, Pixels, Point, Rgba, SharedString, Size, Styled,
+    Window, black, phi, point, px, quad,
 };
 use crate::ui::refineable::{IsEmpty, Refineable};
 
@@ -38,7 +38,7 @@ pub(crate) struct Style {
     /// How large should the padding be on each side?
     pub(crate) padding: Edges<DefiniteLength>,
     /// How large should the border be on each side?
-    pub(crate) border_widths: Edges<AbsoluteLength>,
+    pub(crate) border_widths: Edges<Pixels>,
 
     // Alignment properties
     /// How this node's children aligned in the cross/block axis?
@@ -61,13 +61,13 @@ pub(crate) struct Style {
     pub(crate) flex_shrink: f32,
 
     /// The fill color of this element
-    pub(crate) background: Option<Fill>,
+    pub(crate) background: Option<Rgba>,
 
     /// The border color of this element
-    pub(crate) border_color: Option<Hsla>,
+    pub(crate) border_color: Option<Rgba>,
 
     /// The radius of the corners of this element
-    pub(crate) corner_radii: Corners<AbsoluteLength>,
+    pub(crate) corner_radii: Corners<Pixels>,
 
     /// Box shadow of the element
     pub(crate) box_shadow: Vec<BoxShadow>,
@@ -94,7 +94,7 @@ pub(crate) struct StyleRefinement {
     pub(crate) max_size: crate::ui::SizeRefinement<Length>,
     pub(crate) margin: crate::ui::EdgesRefinement<Length>,
     pub(crate) padding: crate::ui::EdgesRefinement<DefiniteLength>,
-    pub(crate) border_widths: crate::ui::EdgesRefinement<AbsoluteLength>,
+    pub(crate) border_widths: crate::ui::EdgesRefinement<Pixels>,
     pub(crate) align_items: Option<AlignItems>,
     pub(crate) align_self: Option<AlignSelf>,
     pub(crate) justify_content: Option<JustifyContent>,
@@ -103,9 +103,9 @@ pub(crate) struct StyleRefinement {
     pub(crate) flex_basis: Option<Length>,
     pub(crate) flex_grow: Option<f32>,
     pub(crate) flex_shrink: Option<f32>,
-    pub(crate) background: Option<Fill>,
-    pub(crate) border_color: Option<Hsla>,
-    pub(crate) corner_radii: crate::ui::CornersRefinement<AbsoluteLength>,
+    pub(crate) background: Option<Rgba>,
+    pub(crate) border_color: Option<Rgba>,
+    pub(crate) corner_radii: crate::ui::CornersRefinement<Pixels>,
     pub(crate) box_shadow: Option<Vec<BoxShadow>>,
     pub(crate) text: TextStyleRefinement,
     pub(crate) mouse_cursor: Option<CursorStyle>,
@@ -212,7 +212,7 @@ impl Refineable for Style {
         if let Some(v) = &r.flex_basis { self.flex_basis = *v; }
         if let Some(v) = &r.flex_grow { self.flex_grow = *v; }
         if let Some(v) = &r.flex_shrink { self.flex_shrink = *v; }
-        if let Some(v) = &r.background { self.background = Some(v.clone()); }
+        if let Some(v) = &r.background { self.background = Some(*v); }
         if let Some(v) = &r.border_color { self.border_color = Some(*v); }
         self.corner_radii.refine(&r.corner_radii);
         if let Some(v) = &r.box_shadow { self.box_shadow = v.clone(); }
@@ -244,7 +244,7 @@ impl Refineable for StyleRefinement {
         if let Some(v) = &r.flex_basis { self.flex_basis = Some(*v); }
         if let Some(v) = &r.flex_grow { self.flex_grow = Some(*v); }
         if let Some(v) = &r.flex_shrink { self.flex_shrink = Some(*v); }
-        if let Some(v) = &r.background { self.background = Some(v.clone()); }
+        if let Some(v) = &r.background { self.background = Some(*v); }
         if let Some(v) = &r.border_color { self.border_color = Some(*v); }
         self.corner_radii.refine(&r.corner_radii);
         if let Some(v) = &r.box_shadow { self.box_shadow = Some(v.clone()); }
@@ -274,7 +274,7 @@ pub(crate) enum Visibility {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct BoxShadow {
     /// What color should the shadow have?
-    pub(crate) color: Hsla,
+    pub(crate) color: Rgba,
     /// How should it be offset from its element?
     pub(crate) offset: Point<Pixels>,
     /// How much should the shadow be blurred?
@@ -310,11 +310,11 @@ pub(crate) enum TextAlign {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct TextStyle {
     /// The color of the text
-    pub(crate) color: Hsla,
+    pub(crate) color: Rgba,
     /// The font family to use
     pub(crate) font_family: SharedString,
-    /// The font size to use, in pixels or rems.
-    pub(crate) font_size: AbsoluteLength,
+    /// The font size to use, in pixels.
+    pub(crate) font_size: Pixels,
     /// The line height to use, in pixels or fractions
     pub(crate) line_height: DefiniteLength,
     /// The font weight, e.g. bold
@@ -333,9 +333,9 @@ pub(crate) struct TextStyle {
 
 #[derive(Clone, Default, PartialEq)]
 pub(crate) struct TextStyleRefinement {
-    pub(crate) color: Option<Hsla>,
+    pub(crate) color: Option<Rgba>,
     pub(crate) font_family: Option<SharedString>,
-    pub(crate) font_size: Option<AbsoluteLength>,
+    pub(crate) font_size: Option<Pixels>,
     pub(crate) line_height: Option<DefiniteLength>,
     pub(crate) font_weight: Option<FontWeight>,
     pub(crate) font_style: Option<FontStyle>,
@@ -431,7 +431,7 @@ impl Default for TextStyle {
         TextStyle {
             color: black(),
             font_family: ".SystemUIFont".into(),
-            font_size: rems(1.).into(),
+            font_size: px(16.),
             line_height: phi(),
             font_weight: FontWeight::default(),
             font_style: FontStyle::default(),
@@ -454,8 +454,8 @@ impl TextStyle {
     }
 
     /// Returns the rounded line height in pixels.
-    pub(crate) fn line_height_in_pixels(&self, rem_size: Pixels) -> Pixels {
-        self.line_height.to_pixels(self.font_size, rem_size).round()
+    pub(crate) fn line_height_in_pixels(&self) -> Pixels {
+        self.line_height.to_pixels(self.font_size).round()
     }
 }
 
@@ -471,11 +471,7 @@ impl Style {
 
     /// Get the content mask for this element style, based on the given bounds.
     /// If the element does not hide its overflow, this will return `None`.
-    pub(crate) fn overflow_mask(
-        &self,
-        bounds: Bounds<Pixels>,
-        rem_size: Pixels,
-    ) -> Option<ContentMask<Pixels>> {
+    pub(crate) fn overflow_mask(&self, bounds: Bounds<Pixels>) -> Option<ContentMask<Pixels>> {
         match self.overflow {
             Point {
                 x: Overflow::Visible,
@@ -489,10 +485,10 @@ impl Style {
                     .border_color
                     .is_some_and(|color| !color.is_transparent())
                 {
-                    min.x += self.border_widths.left.to_pixels(rem_size);
-                    max.x -= self.border_widths.right.to_pixels(rem_size);
-                    min.y += self.border_widths.top.to_pixels(rem_size);
-                    max.y -= self.border_widths.bottom.to_pixels(rem_size);
+                    min.x += self.border_widths.left;
+                    max.x -= self.border_widths.right;
+                    min.y += self.border_widths.top;
+                    max.y -= self.border_widths.bottom;
                 }
 
                 let bounds = match (
@@ -528,22 +524,19 @@ impl Style {
         cx: &mut App,
         continuation: impl FnOnce(&mut Window, &mut App),
     ) {
-        let rem_size = window.rem_size();
-        let corner_radii = self
-            .corner_radii
-            .to_pixels(rem_size)
-            .clamp_radii_for_quad_size(bounds.size);
+        let corner_radii = self.corner_radii.clamp_radii_for_quad_size(bounds.size);
 
         window.paint_drop_shadows(bounds, corner_radii, &self.box_shadow);
 
-        let background_color = self.background.as_ref().and_then(Fill::color);
-        if background_color.is_some_and(|color| !color.is_transparent()) {
-            let mut border_color = background_color.map(|color| color.0).unwrap_or_default();
+        if let Some(background_color) = self.background
+            && !background_color.is_transparent()
+        {
+            let mut border_color = background_color;
             border_color.a = 0.;
             window.paint_quad(quad(
                 bounds,
                 corner_radii,
-                background_color.unwrap_or_default(),
+                background_color,
                 Edges::default(),
                 border_color,
             ));
@@ -554,14 +547,13 @@ impl Style {
         continuation(window, cx);
 
         if self.is_border_visible() {
-            let border_widths = self.border_widths.to_pixels(rem_size);
             let mut background = self.border_color.unwrap_or_default();
             background.a = 0.;
             window.paint_quad(quad(
                 bounds,
                 corner_radii,
                 background,
-                border_widths,
+                self.border_widths,
                 self.border_color.unwrap_or_default(),
             ));
         }
@@ -587,7 +579,7 @@ impl Default for Style {
             inset: Edges::auto(),
             margin: Edges::<Length>::zero(),
             padding: Edges::<DefiniteLength>::zero(),
-            border_widths: Edges::<AbsoluteLength>::zero(),
+            border_widths: Edges::default(),
             size: Size::auto(),
             min_size: Size::auto(),
             max_size: Size::auto(),
@@ -618,86 +610,7 @@ pub(crate) struct UnderlineStyle {
     /// The thickness of the underline.
     pub(crate) thickness: Pixels,
     /// The color of the underline.
-    pub(crate) color: Option<Hsla>,
-}
-
-#[derive(Clone, Default)]
-pub(crate) struct UnderlineStyleRefinement {
-    pub(crate) thickness: Option<Pixels>,
-    pub(crate) color: Option<Hsla>,
-}
-
-impl IsEmpty for UnderlineStyleRefinement {
-    fn is_empty(&self) -> bool {
-        self.thickness.is_none() && self.color.is_none()
-    }
-}
-
-impl From<UnderlineStyleRefinement> for UnderlineStyle {
-    fn from(v: UnderlineStyleRefinement) -> Self {
-        Self {
-            thickness: v.thickness.unwrap_or_default(),
-            color: v.color,
-        }
-    }
-}
-
-impl Refineable for UnderlineStyle {
-    type Refinement = UnderlineStyleRefinement;
-    fn refine(&mut self, r: &Self::Refinement) {
-        if let Some(v) = r.thickness { self.thickness = v; }
-        if let Some(v) = r.color { self.color = Some(v); }
-    }
-}
-
-impl Refineable for UnderlineStyleRefinement {
-    type Refinement = UnderlineStyleRefinement;
-    fn refine(&mut self, r: &Self::Refinement) {
-        if let Some(v) = r.thickness { self.thickness = Some(v); }
-        if let Some(v) = r.color { self.color = Some(v); }
-    }
-}
-
-/// The kinds of fill that can be applied to a shape.
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) enum Fill {
-    /// A solid color fill.
-    Color(Background),
-}
-
-impl Fill {
-    /// Unwrap this fill into a solid color, if it is one.
-    ///
-    /// If the fill is not a solid color, this method returns `None`.
-    pub(crate) fn color(&self) -> Option<Background> {
-        match self {
-            Fill::Color(color) => Some(*color),
-        }
-    }
-}
-
-impl Default for Fill {
-    fn default() -> Self {
-        Self::Color(Background::default())
-    }
-}
-
-impl From<Hsla> for Fill {
-    fn from(color: Hsla) -> Self {
-        Self::Color(color.into())
-    }
-}
-
-impl From<Rgba> for Fill {
-    fn from(color: Rgba) -> Self {
-        Self::Color(color.into())
-    }
-}
-
-impl From<Background> for Fill {
-    fn from(background: Background) -> Self {
-        Self::Color(background)
-    }
+    pub(crate) color: Option<Rgba>,
 }
 
 /// Used to control how child nodes are aligned on the cross axis.

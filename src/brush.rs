@@ -13,7 +13,7 @@ pub(crate) struct Brushes {
 impl Brushes {
     pub(crate) fn subtle(p: Palette) -> Self {
         Self {
-            rest: transparent_black().into(),
+            rest: transparent_black(),
             hover: rgba(p.subtle_secondary),
             pressed: rgba(p.subtle_tertiary),
         }
@@ -201,7 +201,7 @@ impl Element for BrushTransition {
             window,
             cx,
         );
-        self.element.style().background = Some(color.into());
+        self.element.style().background = Some(color);
         if let Some(hitbox) = hitbox.clone().filter(|_| !self.disabled) {
             window.on_mouse_event(move |_: &MouseMoveEvent, phase, window, _| {
                 if phase == DispatchPhase::Capture && hitbox.is_hovered(window) != hovered {

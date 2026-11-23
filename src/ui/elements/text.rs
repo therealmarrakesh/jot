@@ -140,12 +140,8 @@ struct TextLayoutInner {
 impl TextLayout {
     fn layout(&self, text: SharedString, window: &mut Window) -> LayoutId {
         let text_style = window.text_style();
-        let font_size = text_style.font_size.to_pixels(window.rem_size());
-        let line_height = window.pixel_snap(
-            text_style
-                .line_height
-                .to_pixels(font_size.into(), window.rem_size()),
-        );
+        let font_size = text_style.font_size;
+        let line_height = window.pixel_snap(text_style.line_height.to_pixels(font_size));
         let font = text_style.font();
 
         window.request_measured_layout(Default::default(), {

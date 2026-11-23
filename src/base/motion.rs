@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-use crate::ui::{App, ElementId, Hsla, Pixels, Point, Window, point, px};
+use crate::ui::{App, ElementId, Pixels, Point, Rgba, Window, point, px};
 
 /// A cubic bezier easing curve like CSS `cubic-bezier(x1, y1, x2, y2)`.
 pub(crate) fn cubic_bezier(x1: f32, y1: f32, x2: f32, y2: f32, t: f32) -> f32 {
@@ -113,12 +113,12 @@ impl Interpolate for Point<Pixels> {
     }
 }
 
-impl Interpolate for Hsla {
+impl Interpolate for Rgba {
     fn interpolate(&self, target: &Self, progress: f32) -> Self {
-        Hsla {
-            h: self.h.interpolate(&target.h, progress),
-            s: self.s.interpolate(&target.s, progress),
-            l: self.l.interpolate(&target.l, progress),
+        Rgba {
+            r: self.r.interpolate(&target.r, progress),
+            g: self.g.interpolate(&target.g, progress),
+            b: self.b.interpolate(&target.b, progress),
             a: self.a.interpolate(&target.a, progress),
         }
     }

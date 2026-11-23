@@ -12,7 +12,7 @@ use std::fmt::Debug;
 
 use crate::ui::smallvec::SmallVec;
 use crate::ui::{
-    AbsoluteLength, AlignItems, AlignSelf, App, Bounds, DefiniteLength, Display, Edges,
+    AlignItems, AlignSelf, App, Bounds, DefiniteLength, Display, Edges,
     FlexDirection, JustifyContent, Length, Overflow, Pixels, Point, Position, Size, Style, Window,
     size,
     util::{
@@ -90,19 +90,17 @@ enum Dim {
 
 impl Dim {
     #[inline]
-    fn from_length(len: Length, rem_size: Pixels, scale_factor: f32) -> Self {
+    fn from_length(len: Length, scale_factor: f32) -> Self {
         match len {
             Length::Auto => Dim::Auto,
-            Length::Definite(d) => Self::from_definite(d, rem_size, scale_factor),
+            Length::Definite(d) => Self::from_definite(d, scale_factor),
         }
     }
 
     #[inline]
-    fn from_definite(len: DefiniteLength, rem_size: Pixels, scale_factor: f32) -> Self {
+    fn from_definite(len: DefiniteLength, scale_factor: f32) -> Self {
         match len {
-            DefiniteLength::Absolute(a) => {
-                Dim::Length(round_to_device_pixel(a.to_pixels(rem_size).0, scale_factor))
-            }
+            DefiniteLength::Absolute(px) => Dim::Length(round_to_device_pixel(px.0, scale_factor)),
             DefiniteLength::Fraction(f) => Dim::Percent(f),
         }
     }
@@ -136,21 +134,21 @@ struct EdgeDim {
 }
 
 impl EdgeDim {
-    fn from_lengths(edges: &Edges<Length>, rem_size: Pixels, scale_factor: f32) -> Self {
+    fn from_lengths(edges: &Edges<Length>, scale_factor: f32) -> Self {
         Self {
-            top: Dim::from_length(edges.top, rem_size, scale_factor),
-            right: Dim::from_length(edges.right, rem_size, scale_factor),
-            bottom: Dim::from_length(edges.bottom, rem_size, scale_factor),
-            left: Dim::from_length(edges.left, rem_size, scale_factor),
+            top: Dim::from_length(edges.top, scale_factor),
+            right: Dim::from_length(edges.right, scale_factor),
+            bottom: Dim::from_length(edges.bottom, scale_factor),
+            left: Dim::from_length(edges.left, scale_factor),
         }
     }
 
-    fn from_definites(edges: &Edges<DefiniteLength>, rem_size: Pixels, scale_factor: f32) -> Self {
+    fn from_definites(edges: &Edges<DefiniteLength>, scale_factor: f32) -> Self {
         Self {
-            top: Dim::from_definite(edges.top, rem_size, scale_factor),
-            right: Dim::from_definite(edges.right, rem_size, scale_factor),
-            bottom: Dim::from_definite(edges.bottom, rem_size, scale_factor),
-            left: Dim::from_definite(edges.left, rem_size, scale_factor),
+            top: Dim::from_definite(edges.top, scale_factor),
+            right: Dim::from_definite(edges.right, scale_factor),
+            bottom: Dim::from_definite(edges.bottom, scale_factor),
+            left: Dim::from_definite(edges.left, scale_factor),
         }
     }
 
@@ -174,10 +172,8 @@ struct EdgeF32 {
 }
 
 impl EdgeF32 {
-    fn from_borders(edges: &Edges<AbsoluteLength>, rem_size: Pixels, scale_factor: f32) -> Self {
-        let snap = |w: AbsoluteLength| {
-            round_stroke_to_device_pixel(w.to_pixels(rem_size).0, scale_factor)
-        };
+    fn from_borders(edges: &Edges<Pixels>, scale_factor: f32) -> Self {
+        let snap = |w: Pixels| round_stroke_to_device_pixel(w.0, scale_factor);
         Self {
             top: snap(edges.top),
             right: snap(edges.right),
@@ -239,17 +235,17 @@ struct SizeDim {
 }
 
 impl SizeDim {
-    fn from_lengths(s: &Size<Length>, rem_size: Pixels, scale_factor: f32) -> Self {
+    fn from_lengths(s: &Size<Length>, scale_factor: f32) -> Self {
         Self {
-            width: Dim::from_length(s.width, rem_size, scale_factor),
-            height: Dim::from_length(s.height, rem_size, scale_factor),
+            width: Dim::from_length(s.width, scale_factor),
+            height: Dim::from_length(s.height, scale_factor),
         }
     }
 
-    fn from_definites(s: &Size<DefiniteLength>, rem_size: Pixels, scale_factor: f32) -> Self {
+    fn from_definites(s: &Size<DefiniteLength>, scale_factor: f32) -> Self {
         Self {
-            width: Dim::from_definite(s.width, rem_size, scale_factor),
-            height: Dim::from_definite(s.height, rem_size, scale_factor),
+            width: Dim::from_definite(s.width, scale_factor),
+            height: Dim::from_definite(s.height, scale_factor),
         }
     }
 
@@ -288,25 +284,25 @@ struct NodeStyle {
 }
 
 impl NodeStyle {
-    fn from_style(style: &Style, rem_size: Pixels, scale_factor: f32) -> Self {
+    fn from_style(style: &Style, scale_factor: f32) -> Self {
         Self {
             display: style.display,
             position: style.position,
             overflow_x: style.overflow.x,
             overflow_y: style.overflow.y,
-            inset: EdgeDim::from_lengths(&style.inset, rem_size, scale_factor),
-            size: SizeDim::from_lengths(&style.size, rem_size, scale_factor),
-            min_size: SizeDim::from_lengths(&style.min_size, rem_size, scale_factor),
-            max_size: SizeDim::from_lengths(&style.max_size, rem_size, scale_factor),
-            margin: EdgeDim::from_lengths(&style.margin, rem_size, scale_factor),
-            padding: EdgeDim::from_definites(&style.padding, rem_size, scale_factor),
-            border: EdgeF32::from_borders(&style.border_widths, rem_size, scale_factor),
-            gap: SizeDim::from_definites(&style.gap, rem_size, scale_factor),
+            inset: EdgeDim::from_lengths(&style.inset, scale_factor),
+            size: SizeDim::from_lengths(&style.size, scale_factor),
+            min_size: SizeDim::from_lengths(&style.min_size, scale_factor),
+            max_size: SizeDim::from_lengths(&style.max_size, scale_factor),
+            margin: EdgeDim::from_lengths(&style.margin, scale_factor),
+            padding: EdgeDim::from_definites(&style.padding, scale_factor),
+            border: EdgeF32::from_borders(&style.border_widths, scale_factor),
+            gap: SizeDim::from_definites(&style.gap, scale_factor),
             align_items: style.align_items,
             align_self: style.align_self,
             justify_content: style.justify_content,
             flex_direction: style.flex_direction,
-            flex_basis: Dim::from_length(style.flex_basis, rem_size, scale_factor),
+            flex_basis: Dim::from_length(style.flex_basis, scale_factor),
             flex_grow: style.flex_grow,
             flex_shrink: style.flex_shrink,
         }
@@ -491,7 +487,6 @@ impl LayoutEngine {
     pub(crate) fn request_layout(
         &mut self,
         style: Style,
-        rem_size: Pixels,
         scale_factor: f32,
         children: &[LayoutId],
     ) -> LayoutId {
@@ -503,7 +498,7 @@ impl LayoutEngine {
             self.nodes[child.idx()].parent = Some(id);
         }
         self.nodes.push(Node {
-            style: NodeStyle::from_style(&style, rem_size, scale_factor),
+            style: NodeStyle::from_style(&style, scale_factor),
             parent: None,
             children_start,
             children_len,
@@ -521,7 +516,6 @@ impl LayoutEngine {
     pub(crate) fn request_measured_layout(
         &mut self,
         style: Style,
-        rem_size: Pixels,
         scale_factor: f32,
         measure: impl FnMut(
             Size<Option<Pixels>>,
@@ -533,7 +527,7 @@ impl LayoutEngine {
     ) -> LayoutId {
         let id = LayoutId(self.nodes.len() as u32);
         self.nodes.push(Node {
-            style: NodeStyle::from_style(&style, rem_size, scale_factor),
+            style: NodeStyle::from_style(&style, scale_factor),
             parent: None,
             children_start: 0,
             children_len: 0,
@@ -1745,7 +1739,7 @@ mod tests {
         fn req(&mut self, refine: StyleRefinement, children: &[LayoutId], scale: f32) -> LayoutId {
             let mut style = Style::default();
             crate::ui::Refineable::refine(&mut style, &refine);
-            self.request_layout(style, px(16.), scale, children)
+            self.request_layout(style, scale, children)
         }
 
         fn req_measured(
@@ -1758,7 +1752,7 @@ mod tests {
             crate::ui::Refineable::refine(&mut style, &refine);
             let id = LayoutId(self.nodes.len() as u32);
             self.nodes.push(Node {
-                style: NodeStyle::from_style(&style, px(16.), scale),
+                style: NodeStyle::from_style(&style, scale),
                 parent: None,
                 children_start: 0,
                 children_len: 0,

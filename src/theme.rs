@@ -56,8 +56,8 @@ pub(crate) struct Palette {
 impl Global for Palette {}
 
 impl Palette {
-    pub(crate) fn selection(self) -> Hsla {
-        Hsla::from(rgb(if self.dark { 0x1d4ed8 } else { 0x55a0fc })).alpha(0.3)
+    pub(crate) fn selection(self) -> Rgba {
+        rgb(if self.dark { 0x1d4ed8 } else { 0x55a0fc }).alpha(0.3)
     }
 }
 
@@ -216,7 +216,7 @@ pub(crate) fn theme_shadow(dark: bool, z: f32, scale: f32) -> Vec<BoxShadow> {
     .into_iter()
     .filter(|(opacity, ..)| *opacity > 0.)
     .map(|(opacity, blur, y)| BoxShadow {
-        color: hsla(0., 0., 0., (opacity * 255.).floor() / 255.),
+        color: black().alpha((opacity * 255.).floor() / 255.),
         offset: point(px(0.), px(y * scale)),
         blur_radius: px((blur + CASTER_INSET) * scale / BLUR_RADIUS_PER_SIGMA),
         spread_radius: px(-CASTER_INSET * scale),

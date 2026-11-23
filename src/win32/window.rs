@@ -549,9 +549,7 @@ impl WindowsWindow {
     }
 
     pub(crate) fn set_title(&mut self, title: &str) {
-        unsafe { SetWindowTextW(self.0.hwnd, &HSTRING::from(title)) }
-            .inspect_err(|e| crate::ui::log::error!("Set title failed: {e}"))
-            .ok();
+        unsafe { SetWindowTextW(self.0.hwnd, &HSTRING::from(title)) }.log_err();
     }
 
     pub(crate) fn set_background_appearance(

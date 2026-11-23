@@ -141,10 +141,6 @@ impl DirectXRenderer {
         directx_devices: &DirectXDevices,
         disable_direct_composition: bool,
     ) -> Result<Self> {
-        if disable_direct_composition {
-            crate::ui::log::info!("Direct Composition is disabled.");
-        }
-
         let devices = DirectXRendererDevices::new(directx_devices, disable_direct_composition)
             .context("Creating DirectX devices")?;
         let atlas = Arc::new(DirectXAtlas::new(&devices.device, &devices.device_context));
@@ -805,12 +801,6 @@ impl<T> PipelineState<T> {
                 .len()
                 .next_power_of_two()
                 .min(MAX_INSTANCE_BUFFER_SIZE / element_size);
-            crate::ui::log::debug!(
-                "Updating {} buffer size from {} to {}",
-                self.label,
-                self.buffer_size,
-                new_buffer_size
-            );
             let buffer = create_buffer(device, std::mem::size_of::<T>(), new_buffer_size)?;
             let view = create_buffer_view(device, &buffer)?;
             self.buffer = buffer;

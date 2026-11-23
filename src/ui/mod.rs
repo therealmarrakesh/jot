@@ -18,7 +18,6 @@ mod elements;
 mod executor;
 pub(crate) mod futures;
 pub(crate) mod gpui_util;
-pub(crate) mod log;
 mod shared_string;
 pub(crate) mod slotmap;
 pub(crate) mod smallvec;
@@ -40,38 +39,6 @@ mod text_system;
 mod util;
 mod view;
 mod window;
-
-/// Minimal 128-bit identifier (replaces the external `uuid` crate).
-#[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Hash, Ord, PartialOrd)]
-pub(crate) struct Uuid(pub [u8; 16]);
-
-impl Uuid {
-    pub(crate) fn from_hash_bytes(data: &[u8]) -> Self {
-        use std::hash::Hasher as _;
-        let mut h1 = collections::FxHasher::with_seed(0x9e37_79b9_7f4a_7c15);
-        h1.write(data);
-        let a = h1.finish().to_be_bytes();
-        let mut h2 = collections::FxHasher::with_seed(0xbf58_476d_1ce4_e5b9);
-        h2.write(data);
-        let b = h2.finish().to_be_bytes();
-        Self([
-            a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7], b[0], b[1], b[2], b[3], b[4], b[5],
-            b[6], b[7],
-        ])
-    }
-}
-
-impl std::fmt::Display for Uuid {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let b = &self.0;
-        write!(
-            f,
-            "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-            b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7], b[8], b[9], b[10], b[11], b[12], b[13],
-            b[14], b[15]
-        )
-    }
-}
 
 mod seal {
     pub(crate) trait Sealed {}

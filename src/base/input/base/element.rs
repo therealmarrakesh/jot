@@ -644,7 +644,7 @@ impl Element for TextElement {
     ) -> Self::PrepaintState {
         let style = window.text_style();
         let font = style.font();
-        let text_size = style.font_size.to_pixels(window.rem_size());
+        let text_size = style.font_size;
         let space_width = window.text_system().space_width(&font, text_size);
 
         let mut bounds = bounds;
@@ -670,7 +670,7 @@ impl Element for TextElement {
         let placeholder = self.placeholder.clone();
 
         let (display_text, text_color) = if is_empty {
-            (&Rope::from(placeholder.as_str()), rgba(p.text_secondary).into())
+            (&Rope::from(placeholder.as_str()), rgba(p.text_secondary))
         } else {
             (&text, style.color)
         };

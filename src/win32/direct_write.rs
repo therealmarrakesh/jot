@@ -1445,7 +1445,7 @@ fn get_name(string: IDWriteLocalizedStrings, locale: &HSTRING) -> Result<String>
 fn get_system_ui_font_name() -> SharedString {
     unsafe {
         let mut info: LOGFONTW = std::mem::zeroed();
-        let font_family = if SystemParametersInfoW(
+        if SystemParametersInfoW(
             SPI_GETICONTITLELOGFONT,
             std::mem::size_of::<LOGFONTW>() as u32,
             Some(&mut info as *mut _ as _),
@@ -1460,9 +1460,7 @@ fn get_system_ui_font_name() -> SharedString {
         } else {
             let font_name = String::from_utf16_lossy(&info.lfFaceName);
             font_name.trim_matches(char::from(0)).to_owned().into()
-        };
-        crate::ui::log::info!("Use {} as UI font.", font_family);
-        font_family
+        }
     }
 }
 

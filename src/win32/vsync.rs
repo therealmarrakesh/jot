@@ -38,7 +38,6 @@ impl VSyncProvider {
         let wait_succeeded = unsafe { DwmFlush().is_ok() };
         let elapsed = vsync_start.elapsed();
         if !wait_succeeded || elapsed < VSYNC_INTERVAL_THRESHOLD {
-            crate::ui::log::trace!("VSyncProvider::wait_for_vsync() took less time than expected");
             std::thread::sleep(self.interval);
         }
     }

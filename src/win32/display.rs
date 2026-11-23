@@ -1,6 +1,8 @@
-use crate::ui::smallvec::SmallVec;
-use crate::ui::Uuid;
+use std::hash::Hasher as _;
+
+use crate::ui::collections::FxHasher;
 use crate::ui::gpui_util::ResultExt;
+use crate::ui::smallvec::SmallVec;
 use windows::{
     Win32::{
         Foundation::*,
@@ -23,7 +25,7 @@ pub(crate) struct WindowsDisplay {
     scale_factor: f32,
     bounds: Bounds<Pixels>,
     visible_bounds: Bounds<Pixels>,
-    uuid: Uuid,
+    device_hash: u64,
 }
 
 // The `HMONITOR` is thread-safe.
@@ -36,7 +38,7 @@ impl WindowsDisplay {
         let info = get_monitor_info(handle).log_err()?;
         let monitor_size = info.monitorInfo.rcMonitor;
         let work_area = info.monitorInfo.rcWork;
-        let uuid = generate_uuid(&info.szDevice);
+        let device_hash = hash_device_name(&info.szDevice);
         let scale_factor = get_scale_factor_for_monitor(handle).log_err()?;
         let physical_size = size(
             (monitor_size.right - monitor_size.left).into(),
@@ -63,7 +65,7 @@ impl WindowsDisplay {
                 )
                 .map(crate::ui::px),
             },
-            uuid,
+            device_hash,
         })
     }
 
@@ -75,10 +77,6 @@ impl WindowsDisplay {
         const POINT_ZERO: POINT = POINT { x: 0, y: 0 };
         let monitor = unsafe { MonitorFromPoint(POINT_ZERO, MONITOR_DEFAULTTOPRIMARY) };
         if monitor.is_invalid() {
-            crate::ui::log::error!(
-                "can not find the primary monitor: {}",
-                std::io::Error::last_os_error()
-            );
             return None;
         }
         WindowsDisplay::new(Self::display_id_for_monitor(monitor))
@@ -101,7 +99,7 @@ impl WindowsDisplay {
             let Some(display) = WindowsDisplay::new(Self::display_id_for_monitor(monitor)) else {
                 return false;
             };
-            display.uuid == self.uuid
+            display.device_hash == self.device_hash
         }
     }
 
@@ -177,12 +175,12 @@ fn get_monitor_info(hmonitor: HMONITOR) -> crate::ui::anyhow::Result<MONITORINFO
     }
 }
 
-fn generate_uuid(device_name: &[u16]) -> Uuid {
-    let name: Vec<u8> = device_name
-        .iter()
-        .flat_map(|&a| a.to_be_bytes())
-        .collect();
-    Uuid::from_hash_bytes(&name)
+fn hash_device_name(device_name: &[u16]) -> u64 {
+    let mut hasher = FxHasher::default();
+    for &unit in device_name {
+        hasher.write(&unit.to_ne_bytes());
+    }
+    hasher.finish()
 }
 
 fn get_scale_factor_for_monitor(monitor: HMONITOR) -> Result<f32> {

@@ -1,5 +1,5 @@
 use crate::ui::{
-    App, AppContext, Bounds, ClipboardItem, Context, Edges, Entity, EntityInputHandler,
+    App, AppContext, Bounds, Context, Edges, Entity, EntityInputHandler,
     FocusHandle, Focusable, InteractiveElement as _, IntoElement, KeyBinding, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Point, Render,
     ScrollDelta, ScrollHandle, ScrollWheelEvent, SharedString, Styled as _, Subscription,
@@ -212,7 +212,7 @@ impl EditorState {
             focus_handle,
             selection_focus: None,
             text: Rope::new(),
-            text_wrapper: TextWrapper::new(text_style.font(), window.rem_size(), None),
+            text_wrapper: TextWrapper::new(text_style.font(), text_style.font_size, None),
             tab_size: TabSize::default(),
             undo_manager,
             document_revision: 0,
@@ -957,7 +957,7 @@ impl EditorState {
             return;
         }
         let text = self.text.slice(self.selection).to_string();
-        cx.write_to_clipboard(ClipboardItem::new_string(text));
+        cx.write_clipboard_text(&text);
     }
 
     pub(super) fn cut(&mut self, _: &Cut, window: &mut Window, cx: &mut Context<Self>) {
@@ -965,16 +965,13 @@ impl EditorState {
             return;
         }
         let text = self.text.slice(self.selection).to_string();
-        cx.write_to_clipboard(ClipboardItem::new_string(text));
+        cx.write_clipboard_text(&text);
         self.undo_manager.set_pending_intent(EditIntent::Atomic);
         self.replace_text_in_range(None, "", window, cx);
     }
 
     pub(super) fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(clipboard) = cx.read_from_clipboard() {
-            let Some(mut new_text) = clipboard.text().filter(|text| !text.is_empty()) else {
-                return;
-            };
+        if let Some(mut new_text) = cx.read_clipboard_text().filter(|text| !text.is_empty()) {
             if new_text.contains('\r') {
                 new_text = new_text.replace("\r\n", "\n").replace('\r', "\n");
             }

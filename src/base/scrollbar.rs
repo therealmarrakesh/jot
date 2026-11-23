@@ -6,8 +6,8 @@ use std::{
 
 use crate::ui::{
     Anchor, App, Axis, Bounds, ContentMask, CursorStyle, Element, ElementId, EntityId,
-    GlobalElementId, Hitbox, HitboxBehavior, Hsla, IntoElement, LayoutId, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, Pixels, Point, Position, ScrollHandle, ScrollWheelEvent, Size,
+    GlobalElementId, Hitbox, HitboxBehavior, IntoElement, LayoutId, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, Pixels, Point, Position, Rgba, ScrollHandle, ScrollWheelEvent, Size,
     Style, Window, fill, point, px, relative, rgba, size,
 };
 
@@ -272,7 +272,7 @@ struct AxisLayout {
     bounds: Bounds<Pixels>,
     thumb_bounds: Bounds<Pixels>,
     thumb_fill: Bounds<Pixels>,
-    thumb_bg: Hsla,
+    thumb_bg: Rgba,
     radius: Pixels,
     geometry: ThumbGeometry,
     opacity: f32,
@@ -398,19 +398,19 @@ impl Element for Scrollbar {
             let is_thumb_hovered = inner.hovered_thumb == Some(axis);
             let (thumb_bg, target_width, radius) = if is_dragged {
                 (
-                    Hsla::from(rgba(p.text_primary)),
+                    rgba(p.text_primary),
                     THUMB_ACTIVE_WIDTH,
                     THUMB_ACTIVE_RADIUS,
                 )
             } else if is_thumb_hovered {
                 (
-                    Hsla::from(rgba(p.text_secondary)),
+                    rgba(p.text_secondary),
                     THUMB_ACTIVE_WIDTH,
                     THUMB_ACTIVE_RADIUS,
                 )
             } else {
                 (
-                    Hsla::from(rgba(p.text_tertiary)),
+                    rgba(p.text_tertiary),
                     THUMB_REST_WIDTH,
                     THUMB_REST_RADIUS,
                 )

@@ -6,7 +6,8 @@ use crate::ui::collections::FxHashMap;
 use crate::ui::smallvec::SmallVec;
 use crate::ui::sync::{Mutex, RwLock};
 use crate::ui::{
-    Bounds, DevicePixels, Hsla, Pixels, Point, Result, SharedString, Size, UnderlineStyle, px,
+    AtlasTextureKind, Bounds, DevicePixels, Pixels, Point, Result, Rgba, SharedString, Size,
+    UnderlineStyle, px,
 };
 use crate::win32::DirectWriteTextSystem;
 use std::{
@@ -407,7 +408,7 @@ impl WindowTextSystem {
         text: SharedString,
         font_size: Pixels,
         font: &Font,
-        color: Hsla,
+        color: Rgba,
         underline: Option<UnderlineStyle>,
         wrap_width: Option<Pixels>,
         line_clamp: Option<usize>,
@@ -769,7 +770,7 @@ pub(crate) struct TextRun {
     /// The font to use for this run.
     pub(crate) font: Font,
     /// The text color.
-    pub(crate) color: Hsla,
+    pub(crate) color: Rgba,
     /// The underline style (if any).
     pub(crate) underline: Option<UnderlineStyle>,
 }
@@ -789,6 +790,17 @@ pub(crate) struct RenderGlyphParams {
     pub(crate) scale_factor: f32,
     pub(crate) is_emoji: bool,
     pub(crate) dilation: u8,
+}
+
+impl RenderGlyphParams {
+    #[inline]
+    pub(crate) fn texture_kind(&self) -> AtlasTextureKind {
+        if self.is_emoji {
+            AtlasTextureKind::Polychrome
+        } else {
+            AtlasTextureKind::Monochrome
+        }
+    }
 }
 
 impl Eq for RenderGlyphParams {}

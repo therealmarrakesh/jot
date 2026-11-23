@@ -630,7 +630,7 @@ impl Interactivity {
 
                 window.with_text_style(style.text_style().cloned(), |window| {
                     window.with_content_mask(
-                        style.overflow_mask(bounds, window.rem_size()),
+                        style.overflow_mask(bounds),
                         |window| {
                             let hitbox = if self.should_insert_hitbox(&style) {
                                 Some(window.insert_hitbox(bounds, self.hitbox_behavior))
@@ -694,7 +694,7 @@ impl Interactivity {
                     style.paint(bounds, window, cx, |window: &mut Window, cx: &mut App| {
                         window.with_text_style(style.text_style().cloned(), |window| {
                             window.with_content_mask(
-                                style.overflow_mask(bounds, window.rem_size()),
+                                style.overflow_mask(bounds),
                                 |window| {
                                     if let Some(hitbox) = hitbox {
                                         if let Some(mouse_cursor) = style.mouse_cursor {

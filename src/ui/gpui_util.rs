@@ -1,4 +1,4 @@
-use std::{fmt, hash::Hasher, ops::AddAssign, panic::Location};
+use std::{fmt, hash::Hasher, ops::AddAssign};
 
 pub(crate) fn post_inc<T: From<u8> + AddAssign<T> + Copy>(value: &mut T) -> T {
     let prev = *value;
@@ -14,8 +14,6 @@ macro_rules! debug_panic {
     ( $($fmt_arg:tt)* ) => {
         if cfg!(debug_assertions) {
             panic!( $($fmt_arg)* );
-        } else {
-            $crate::ui::log::error!("{}", format_args!($($fmt_arg)*));
         }
     };
 }
@@ -38,7 +36,6 @@ pub(crate) trait ResultExt<E> {
     type Ok;
 
     fn log_err(self) -> Option<Self::Ok>;
-    fn log_with_level(self, level: crate::ui::log::Level) -> Option<Self::Ok>;
 }
 
 impl<T, E> ResultExt<E> for Result<T, E>
@@ -49,36 +46,13 @@ where
 
     #[track_caller]
     fn log_err(self) -> Option<T> {
-        self.log_with_level(crate::ui::log::Level::Error)
-    }
-
-    #[track_caller]
-    fn log_with_level(self, level: crate::ui::log::Level) -> Option<T> {
-        match self {
-            Ok(value) => Some(value),
-            Err(error) => {
-                log_error_with_caller(*Location::caller(), format_args!("{error:#}"), level);
-                None
-            }
+        #[cfg(debug_assertions)]
+        if let Err(error) = &self {
+            let caller = std::panic::Location::caller();
+            eprintln!("[{}:{}] {error:#}", caller.file(), caller.line());
         }
+        self.ok()
     }
-}
-
-#[inline(never)]
-fn log_error_with_caller(
-    caller: core::panic::Location<'_>,
-    arguments: fmt::Arguments<'_>,
-    level: crate::ui::log::Level,
-) {
-    crate::ui::log::logger().log(
-        &crate::ui::log::Record::builder()
-            .target("gpui")
-            .args(arguments)
-            .file(Some(caller.file()))
-            .line(Some(caller.line()))
-            .level(level)
-            .build(),
-    );
 }
 
 #[derive(Default, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]

@@ -1,6 +1,6 @@
 use crate::ui::{
-    AbsoluteLength, AlignItems, AlignSelf, BoxShadow, CursorStyle, DefiniteLength, Display, Fill,
-    FlexDirection, FontWeight, Hsla, JustifyContent, Length, Overflow, Position, SharedString,
+    AlignItems, AlignSelf, BoxShadow, CursorStyle, DefiniteLength, Display, FlexDirection,
+    FontWeight, JustifyContent, Length, Overflow, Pixels, Position, Rgba, SharedString,
     StyleRefinement, TextAlign, TextStyleRefinement, WhiteSpace, px, relative,
 };
 
@@ -175,41 +175,45 @@ pub(crate) trait Styled: Sized {
     }
 
     // -- Corners --
-    fn rounded(mut self, radius: impl Clone + Into<AbsoluteLength>) -> Self {
+    fn rounded(mut self, radius: impl Into<Pixels>) -> Self {
+        let radius = radius.into();
         let s = self.style();
-        s.corner_radii.top_left = Some(radius.clone().into());
-        s.corner_radii.top_right = Some(radius.clone().into());
-        s.corner_radii.bottom_right = Some(radius.clone().into());
-        s.corner_radii.bottom_left = Some(radius.into());
+        s.corner_radii.top_left = Some(radius);
+        s.corner_radii.top_right = Some(radius);
+        s.corner_radii.bottom_right = Some(radius);
+        s.corner_radii.bottom_left = Some(radius);
         self
     }
     fn rounded_full(self) -> Self {
         self.rounded(px(9999.))
     }
-    fn rounded_t(mut self, radius: impl Clone + Into<AbsoluteLength>) -> Self {
+    fn rounded_t(mut self, radius: impl Into<Pixels>) -> Self {
+        let radius = radius.into();
         let s = self.style();
-        s.corner_radii.top_left = Some(radius.clone().into());
-        s.corner_radii.top_right = Some(radius.into());
+        s.corner_radii.top_left = Some(radius);
+        s.corner_radii.top_right = Some(radius);
         self
     }
-    fn rounded_b(mut self, radius: impl Clone + Into<AbsoluteLength>) -> Self {
+    fn rounded_b(mut self, radius: impl Into<Pixels>) -> Self {
+        let radius = radius.into();
         let s = self.style();
-        s.corner_radii.bottom_left = Some(radius.clone().into());
-        s.corner_radii.bottom_right = Some(radius.into());
+        s.corner_radii.bottom_left = Some(radius);
+        s.corner_radii.bottom_right = Some(radius);
         self
     }
 
     // -- Border --
-    fn border_color<C: Into<Hsla>>(mut self, border_color: C) -> Self {
-        self.style().border_color = Some(border_color.into());
+    fn border_color(mut self, border_color: Rgba) -> Self {
+        self.style().border_color = Some(border_color);
         self
     }
-    fn border(mut self, width: impl Clone + Into<AbsoluteLength>) -> Self {
+    fn border(mut self, width: impl Into<Pixels>) -> Self {
+        let width = width.into();
         let s = self.style();
-        s.border_widths.top = Some(width.clone().into());
-        s.border_widths.right = Some(width.clone().into());
-        s.border_widths.bottom = Some(width.clone().into());
-        s.border_widths.left = Some(width.into());
+        s.border_widths.top = Some(width);
+        s.border_widths.right = Some(width);
+        s.border_widths.bottom = Some(width);
+        s.border_widths.left = Some(width);
         self
     }
     fn border_1(self) -> Self {
@@ -218,28 +222,28 @@ pub(crate) trait Styled: Sized {
     fn border_2(self) -> Self {
         self.border(px(2.))
     }
-    fn border_t(mut self, width: impl Into<AbsoluteLength>) -> Self {
+    fn border_t(mut self, width: impl Into<Pixels>) -> Self {
         self.style().border_widths.top = Some(width.into());
         self
     }
     fn border_t_1(self) -> Self {
         self.border_t(px(1.))
     }
-    fn border_b(mut self, width: impl Into<AbsoluteLength>) -> Self {
+    fn border_b(mut self, width: impl Into<Pixels>) -> Self {
         self.style().border_widths.bottom = Some(width.into());
         self
     }
     fn border_b_1(self) -> Self {
         self.border_b(px(1.))
     }
-    fn border_l(mut self, width: impl Into<AbsoluteLength>) -> Self {
+    fn border_l(mut self, width: impl Into<Pixels>) -> Self {
         self.style().border_widths.left = Some(width.into());
         self
     }
     fn border_l_1(self) -> Self {
         self.border_l(px(1.))
     }
-    fn border_r(mut self, width: impl Into<AbsoluteLength>) -> Self {
+    fn border_r(mut self, width: impl Into<Pixels>) -> Self {
         self.style().border_widths.right = Some(width.into());
         self
     }
@@ -292,12 +296,8 @@ pub(crate) trait Styled: Sized {
     }
 
     // -- Background & Opacity --
-    fn bg<F>(mut self, fill: F) -> Self
-    where
-        F: Into<Fill>,
-        Self: Sized,
-    {
-        self.style().background = Some(fill.into());
+    fn bg(mut self, color: Rgba) -> Self {
+        self.style().background = Some(color);
         self
     }
     fn opacity(mut self, opacity: f32) -> Self {
@@ -324,15 +324,15 @@ pub(crate) trait Styled: Sized {
         self.text_style().line_clamp = Some(lines);
         self.overflow_hidden()
     }
-    fn text_color(mut self, color: impl Into<Hsla>) -> Self {
-        self.text_style().color = Some(color.into());
+    fn text_color(mut self, color: Rgba) -> Self {
+        self.text_style().color = Some(color);
         self
     }
     fn font_weight(mut self, weight: FontWeight) -> Self {
         self.text_style().font_weight = Some(weight);
         self
     }
-    fn text_size(mut self, size: impl Into<AbsoluteLength>) -> Self {
+    fn text_size(mut self, size: impl Into<Pixels>) -> Self {
         self.text_style().font_size = Some(size.into());
         self
     }

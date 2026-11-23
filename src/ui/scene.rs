@@ -1,5 +1,5 @@
 use crate::ui::{
-    AtlasTextureId, AtlasTile, Background, Bounds, ContentMask, Corners, Edges, Hsla, ScaledPixels,
+    AtlasTextureId, AtlasTile, Bounds, ContentMask, Corners, Edges, Rgba, ScaledPixels,
     bounds_tree::BoundsTree,
 };
 use std::{fmt::Debug, iter::Peekable, ops::Range, slice};
@@ -301,8 +301,8 @@ pub(crate) struct Quad {
     pub(crate) pad: u32,
     pub(crate) bounds: Bounds<ScaledPixels>,
     pub(crate) content_mask: ContentMask<ScaledPixels>,
-    pub(crate) background: Background,
-    pub(crate) border_color: Hsla,
+    pub(crate) background: Rgba,
+    pub(crate) border_color: Rgba,
     pub(crate) corner_radii: Corners<ScaledPixels>,
     pub(crate) border_widths: Edges<ScaledPixels>,
 }
@@ -321,7 +321,7 @@ pub(crate) struct Shadow {
     pub(crate) bounds: Bounds<ScaledPixels>,
     pub(crate) corner_radii: Corners<ScaledPixels>,
     pub(crate) content_mask: ContentMask<ScaledPixels>,
-    pub(crate) color: Hsla,
+    pub(crate) color: Rgba,
     pub(crate) element_bounds: Bounds<ScaledPixels>,
     pub(crate) element_corner_radii: Corners<ScaledPixels>,
     /// 0 = drop shadow (rendered outside the element), 1 = inset shadow (rendered inside).
@@ -342,7 +342,7 @@ pub(crate) struct MonochromeSprite {
     pub(crate) pad: u32,
     pub(crate) bounds: Bounds<ScaledPixels>,
     pub(crate) content_mask: ContentMask<ScaledPixels>,
-    pub(crate) color: Hsla,
+    pub(crate) color: Rgba,
     pub(crate) tile: AtlasTile,
 }
 

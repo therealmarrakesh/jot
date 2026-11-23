@@ -1,11 +1,7 @@
 mod keystroke;
 
-use crate::ui::{
-    App, AsyncWindowContext, Bounds, DevicePixels, Pixels, RenderGlyphParams, SharedString, Size,
-    Window,
-};
+use crate::ui::{App, AsyncWindowContext, Bounds, DevicePixels, Pixels, SharedString, Size, Window};
 use std::fmt::{self, Debug};
-use std::hash::{Hash, Hasher};
 use std::ops::{self, Range};
 use std::time::Duration;
 
@@ -43,31 +39,6 @@ impl Debug for DisplayId {
 pub(crate) struct RequestFrameOptions {
     pub(crate) require_presentation: bool,
     pub(crate) force_render: bool,
-}
-
-#[derive(PartialEq, Eq, Hash, Clone)]
-pub(crate) enum AtlasKey {
-    Glyph(RenderGlyphParams),
-}
-
-impl AtlasKey {
-    pub(crate) fn texture_kind(&self) -> AtlasTextureKind {
-        match self {
-            AtlasKey::Glyph(params) => {
-                if params.is_emoji {
-                    AtlasTextureKind::Polychrome
-                } else {
-                    AtlasTextureKind::Monochrome
-                }
-            }
-        }
-    }
-}
-
-impl From<RenderGlyphParams> for AtlasKey {
-    fn from(params: RenderGlyphParams) -> Self {
-        Self::Glyph(params)
-    }
 }
 
 #[doc(hidden)]
@@ -350,110 +321,4 @@ pub(crate) enum CursorStyle {
     #[default]
     Arrow,
     IBeam,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct ClipboardItem {
-    pub(crate) entries: Vec<ClipboardEntry>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum ClipboardEntry {
-    String(ClipboardString),
-    ExternalPaths(crate::ui::ExternalPaths),
-}
-
-impl ClipboardItem {
-    pub(crate) fn new_string(text: String) -> Self {
-        Self {
-            entries: vec![ClipboardEntry::String(ClipboardString::new(text))],
-        }
-    }
-
-    pub(crate) fn text(&self) -> Option<String> {
-        let mut answer = String::new();
-
-        for entry in self.entries.iter() {
-            if let ClipboardEntry::String(ClipboardString { text, metadata: _ }) = entry {
-                answer.push_str(text);
-            }
-        }
-
-        if answer.is_empty() {
-            for entry in self.entries.iter() {
-                if let ClipboardEntry::ExternalPaths(paths) = entry {
-                    for path in &paths.0 {
-                        use std::fmt::Write as _;
-                        _ = write!(answer, "{}", path.display());
-                    }
-                }
-            }
-        }
-
-        if !answer.is_empty() {
-            Some(answer)
-        } else {
-            None
-        }
-    }
-
-    pub(crate) fn entries(&self) -> &[ClipboardEntry] {
-        &self.entries
-    }
-}
-
-impl From<ClipboardString> for ClipboardEntry {
-    fn from(value: ClipboardString) -> Self {
-        Self::String(value)
-    }
-}
-
-impl From<String> for ClipboardEntry {
-    fn from(value: String) -> Self {
-        Self::from(ClipboardString::from(value))
-    }
-}
-
-impl From<ClipboardEntry> for ClipboardItem {
-    fn from(value: ClipboardEntry) -> Self {
-        Self {
-            entries: vec![value],
-        }
-    }
-}
-
-impl From<String> for ClipboardItem {
-    fn from(value: String) -> Self {
-        Self::from(ClipboardEntry::from(value))
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct ClipboardString {
-    pub(crate) text: String,
-    pub(crate) metadata: Option<String>,
-}
-
-impl ClipboardString {
-    pub(crate) fn new(text: String) -> Self {
-        Self {
-            text,
-            metadata: None,
-        }
-    }
-
-    pub(crate) fn text_hash(text: &str) -> u64 {
-        let mut hasher = crate::ui::collections::FxHasher::default();
-        text.hash(&mut hasher);
-        hasher.finish()
-    }
-}
-
-impl From<String> for ClipboardString {
-    fn from(value: String) -> Self {
-        Self {
-            text: value,
-            metadata: None,
-        }
-    }
 }

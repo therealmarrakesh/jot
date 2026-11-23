@@ -49,20 +49,8 @@ impl DirectXDevices {
         let debug_layer_available = check_debug_layer_available();
         let dxgi_factory =
             get_dxgi_factory(debug_layer_available).context("Creating DXGI factory")?;
-        let (_adapter, device, device_context, feature_level) =
+        let (_adapter, device, device_context) =
             get_adapter(&dxgi_factory, debug_layer_available).context("Getting DXGI adapter")?;
-        match feature_level {
-            D3D_FEATURE_LEVEL_11_1 => {
-                crate::ui::log::info!("Created device with Direct3D 11.1 feature level.")
-            }
-            D3D_FEATURE_LEVEL_11_0 => {
-                crate::ui::log::info!("Created device with Direct3D 11.0 feature level.")
-            }
-            D3D_FEATURE_LEVEL_10_1 => {
-                crate::ui::log::info!("Created device with Direct3D 10.1 feature level.")
-            }
-            _ => unreachable!(),
-        }
 
         Ok(Self {
             dxgi_factory,
@@ -93,10 +81,6 @@ fn get_dxgi_factory(debug_layer_available: bool) -> Result<IDXGIFactory6> {
     let factory_flag = if debug_layer_available {
         DXGI_CREATE_FACTORY_DEBUG
     } else {
-        #[cfg(debug_assertions)]
-        crate::ui::log::warn!(
-            "Failed to get DXGI debug interface. DirectX debugging features will be disabled."
-        );
         DXGI_CREATE_FACTORY_FLAGS::default()
     };
     unsafe { Ok(CreateDXGIFactory2(factory_flag)?) }
@@ -106,33 +90,16 @@ fn get_dxgi_factory(debug_layer_available: bool) -> Result<IDXGIFactory6> {
 fn get_adapter(
     dxgi_factory: &IDXGIFactory6,
     debug_layer_available: bool,
-) -> Result<(
-    IDXGIAdapter1,
-    ID3D11Device,
-    ID3D11DeviceContext,
-    D3D_FEATURE_LEVEL,
-)> {
+) -> Result<(IDXGIAdapter1, ID3D11Device, ID3D11DeviceContext)> {
     for adapter_index in 0.. {
         let adapter: IDXGIAdapter1 = unsafe { dxgi_factory.EnumAdapters(adapter_index)?.cast()? };
-        if let Ok(desc) = unsafe { adapter.GetDesc1() } {
-            let gpu_name = String::from_utf16_lossy(&desc.Description)
-                .trim_matches(char::from(0))
-                .to_string();
-            crate::ui::log::info!("Using GPU: {}", gpu_name);
-        }
         // Check to see whether the adapter supports Direct3D 11 and create
         // the device if it does.
         let mut context: Option<ID3D11DeviceContext> = None;
-        let mut feature_level = D3D_FEATURE_LEVEL::default();
-        if let Some(device) = get_device(
-            &adapter,
-            Some(&mut context),
-            Some(&mut feature_level),
-            debug_layer_available,
-        )
-        .log_err()
+        if let Some(device) =
+            get_device(&adapter, Some(&mut context), None, debug_layer_available).log_err()
         {
-            return Ok((adapter, device, context.unwrap(), feature_level));
+            return Ok((adapter, device, context.unwrap()));
         }
     }
 

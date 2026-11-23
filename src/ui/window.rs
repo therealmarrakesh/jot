@@ -1,18 +1,17 @@
 use crate::ui::{
     Action, AnyElement, AnyView, App, AppContext, Arena, AsyncWindowContext, AvailableSpace,
-    Background, Bounds, BoxShadow, Capslock, Context, Corners, CursorStyle, DispatchActionListener,
+    Bounds, BoxShadow, Capslock, Context, Corners, CursorStyle, DispatchActionListener,
     DispatchNodeId, DispatchTree, DisplayId, Edges, Effect, Entity, EntityId, FileDropEvent,
-    FontId, GlobalElementId, GlyphId, Hsla, InputHandler, InputPreference, IsZero, KeyBinding,
+    FontId, GlobalElementId, GlyphId, InputHandler, InputPreference, IsZero, KeyBinding,
     KeyContext, KeyDownEvent, KeyEvent, Keystroke, KeystrokeEvent, LayoutId, Modifiers,
     ModifiersChangedEvent, MonochromeSprite, MouseButton, MouseEvent, MouseMoveEvent, MouseUpEvent, Pixels, PlatformInput, PlatformInputHandler, Point, PolychromeSprite, Quad,
-    Render, RenderGlyphParams, SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y, ScaledPixels, Scene,
+    Render, RenderGlyphParams, Rgba, SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y, ScaledPixels, Scene,
     Shadow, SharedString, Size, Style, SubscriberSet, Subscription, LayoutEngine, Task,
     TextStyle, TextStyleRefinement, UnderlineStyle, WindowAppearance, WindowBounds, WindowOptions,
     WindowParams, WindowTextSystem, IntoElement, point, px, size, transparent_black,
 };
 
 use crate::ui::Refineable;
-use crate::ui::Uuid;
 use crate::ui::anyhow::{Context as _, Result, anyhow};
 use crate::ui::collections::FxHashMap;
 use crate::ui::gpui_util::{ResultExt, measure};
@@ -289,10 +288,6 @@ impl Drop for ElementArenaScope {
         unsafe { &*self.entered }.borrow_mut().end_scope();
         if !self.exited && !std::thread::panicking() {
             debug_assert!(false, "ElementArenaScope dropped without calling exit()");
-            crate::ui::log::error!(
-                "ElementArenaScope dropped without calling exit(); \
-                 the arena clear for this draw was never requested"
-            );
         }
     }
 }
@@ -761,7 +756,6 @@ pub(crate) struct DeferredDraw {
     element_id_stack: ElementIdStack,
     text_style_stack: Vec<TextStyleRefinement>,
     content_mask: Option<ContentMask<Pixels>>,
-    rem_size: Pixels,
     element: Option<AnyElement>,
     absolute_offset: Point<Pixels>,
 }
@@ -879,8 +873,6 @@ pub(crate) struct Window {
     pub(crate) platform_window: WindowsWindow,
     sprite_atlas: Arc<DirectXAtlas>,
     text_system: WindowTextSystem,
-    rem_size: Pixels,
-    rem_size_override_stack: SmallVec<[Pixels; 8]>,
     pub(crate) viewport_size: Size<Pixels>,
     layout_engine: Option<LayoutEngine>,
     pub(crate) root: Option<AnyView>,
@@ -1123,7 +1115,6 @@ impl Window {
                 // Skip re-entrant draw requests while a draw is on this thread's stack
                 // (e.g. via a nested message pump in the Windows window procedure).
                 if draw_in_progress() {
-                    crate::ui::log::debug!("deferring re-entrant window draw request");
                     deferred_force_render |= request_frame_options.force_render;
                     return;
                 }
@@ -1283,8 +1274,6 @@ impl Window {
             platform_window,
             sprite_atlas,
             text_system,
-            rem_size: px(16.),
-            rem_size_override_stack: SmallVec::new(),
             viewport_size: content_size,
             layout_engine: Some(LayoutEngine::new()),
             root: None,
@@ -1552,14 +1541,6 @@ impl Window {
         self.scale_factor
     }
 
-    /// The size of an em for the base font of the application.
-    pub(crate) fn rem_size(&self) -> Pixels {
-        self.rem_size_override_stack
-            .last()
-            .copied()
-            .unwrap_or(self.rem_size)
-    }
-
     /// Acquire a globally unique identifier for the given ElementId.
     /// Only valid for the duration of the provided closure.
     pub(crate) fn with_global_id<R>(
@@ -1587,31 +1568,9 @@ impl Window {
         result
     }
 
-    /// Executes the provided function with the specified rem size.
-    ///
-    /// This method must only be called as part of element drawing.
-    // This function is called in a highly recursive manner in editor
-    // prepainting, make sure its inlined to reduce the stack burden
-    #[inline]
-    pub(crate) fn with_rem_size<F, R>(&mut self, rem_size: Option<impl Into<Pixels>>, f: F) -> R
-    where
-        F: FnOnce(&mut Self) -> R,
-    {
-        self.invalidator.debug_assert_paint_or_prepaint();
-
-        if let Some(rem_size) = rem_size {
-            self.rem_size_override_stack.push(rem_size.into());
-            let result = f(self);
-            self.rem_size_override_stack.pop();
-            result
-        } else {
-            f(self)
-        }
-    }
-
     /// The line height associated with the current text style.
     pub(crate) fn line_height(&self) -> Pixels {
-        self.text_style().line_height_in_pixels(self.rem_size())
+        self.text_style().line_height_in_pixels()
     }
 
     /// Rounds a logical value to the nearest device pixel.
@@ -1833,7 +1792,7 @@ impl Window {
             traversal_order.sort_by_key(|ix| self.next_frame.deferred_draws[*ix].priority);
 
             for deferred_draw_ix in traversal_order {
-                let (mut element, parent_node, current_view, rem_size, absolute_offset) = {
+                let (mut element, parent_node, current_view, absolute_offset) = {
                     let deferred_draw = &mut self.next_frame.deferred_draws[deferred_draw_ix];
                     self.element_id_stack
                         .clone_from(&deferred_draw.element_id_stack);
@@ -1843,17 +1802,14 @@ impl Window {
                         deferred_draw.element.take().unwrap(),
                         deferred_draw.parent_node,
                         deferred_draw.current_view,
-                        deferred_draw.rem_size,
                         deferred_draw.absolute_offset,
                     )
                 };
                 self.next_frame.dispatch_tree.set_active_node(parent_node);
 
                 self.with_rendered_view(current_view, |window| {
-                    window.with_rem_size(Some(rem_size), |window| {
-                        window.with_absolute_element_offset(absolute_offset, |window| {
-                            element.prepaint(window, cx);
-                        });
+                    window.with_absolute_element_offset(absolute_offset, |window| {
+                        element.prepaint(window, cx);
                     });
                 });
                 self.next_frame.deferred_draws[deferred_draw_ix].element = Some(element);
@@ -1886,9 +1842,7 @@ impl Window {
             let element = deferred_draw.element.as_mut().unwrap();
             self.with_rendered_view(deferred_draw.current_view, |window| {
                 window.with_content_mask(content_mask, |window| {
-                    window.with_rem_size(Some(deferred_draw.rem_size), |window| {
-                        element.paint(window, cx);
-                    });
+                    element.paint(window, cx);
                 })
             });
         }
@@ -2204,7 +2158,6 @@ impl Window {
             element_id_stack: self.element_id_stack.clone(),
             text_style_stack: self.text_style_stack.clone(),
             content_mask,
-            rem_size: self.rem_size(),
             priority,
             element: Some(element),
             absolute_offset,
@@ -2467,7 +2420,7 @@ impl Window {
         font_id: FontId,
         glyph_id: GlyphId,
         font_size: Pixels,
-        color: Hsla,
+        color: Rgba,
     ) -> Result<()> {
         self.invalidator.debug_assert_paint();
 
@@ -2500,7 +2453,7 @@ impl Window {
         if !raster_bounds.is_zero() {
             let tile = self
                 .sprite_atlas
-                .get_or_insert_with(params.clone().into(), || {
+                .get_or_insert_with(params.clone(), || {
                     let (size, bytes) = self.text_system().rasterize_glyph(&params)?;
                     Ok(Some((size, Cow::Owned(bytes))))
                 })?
@@ -2557,7 +2510,7 @@ impl Window {
         if !raster_bounds.is_zero() {
             let tile = self
                 .sprite_atlas
-                .get_or_insert_with(params.clone().into(), || {
+                .get_or_insert_with(params.clone(), || {
                     let (size, bytes) = self.text_system().rasterize_glyph(&params)?;
                     Ok(Some((size, Cow::Owned(bytes))))
                 })?
@@ -2600,15 +2553,12 @@ impl Window {
 
         cx.layout_id_buffer.clear();
         cx.layout_id_buffer.extend(children);
-        let rem_size = self.rem_size();
         let scale_factor = self.scale_factor();
 
-        self.layout_engine.as_mut().unwrap().request_layout(
-            style,
-            rem_size,
-            scale_factor,
-            &cx.layout_id_buffer,
-        )
+        self.layout_engine
+            .as_mut()
+            .unwrap()
+            .request_layout(style, scale_factor, &cx.layout_id_buffer)
     }
 
     /// Add a node to the layout tree for the current frame. Instead of taking a `Style` and children,
@@ -2626,12 +2576,11 @@ impl Window {
     {
         self.invalidator.debug_assert_prepaint();
 
-        let rem_size = self.rem_size();
         let scale_factor = self.scale_factor();
         self.layout_engine
             .as_mut()
             .unwrap()
-            .request_measured_layout(style, rem_size, scale_factor, measure)
+            .request_measured_layout(style, scale_factor, measure)
     }
 
     /// Compute the layout for the given id within the given available space.
@@ -3532,31 +3481,15 @@ impl Window {
 }
 
 /// An identifier for an [`Element`].
-///
-/// Can be constructed with a string, a number, or both, as well
-/// as other internal representations.
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub(crate) enum ElementId {
-    /// The ID of a View element
     View(EntityId),
-    /// An integer ID.
     Integer(u64),
-    /// A string based ID.
     Name(SharedString),
-    /// A UUID.
-    Uuid(Uuid),
-    /// An ID that's equated with a focus handle.
     FocusHandle(FocusId),
-    /// A combination of a name and an integer.
     NamedInteger(SharedString, u64),
-    /// A path.
-    Path(Arc<std::path::Path>),
-    /// A code location.
     CodeLocation(core::panic::Location<'static>),
-    /// A labeled child of an element.
     NamedChild(Arc<ElementId>, SharedString),
-    /// A byte array ID (used for text-anchors)
-    OpaqueId([u8; 20]),
 }
 
 impl Display for ElementId {
@@ -3567,26 +3500,11 @@ impl Display for ElementId {
             ElementId::Name(name) => write!(f, "{}", name)?,
             ElementId::FocusHandle(_) => write!(f, "FocusHandle")?,
             ElementId::NamedInteger(s, i) => write!(f, "{}-{}", s, i)?,
-            ElementId::Uuid(uuid) => write!(f, "{}", uuid)?,
-            ElementId::Path(path) => write!(f, "{}", path.display())?,
             ElementId::CodeLocation(location) => write!(f, "{}", location)?,
             ElementId::NamedChild(id, name) => write!(f, "{}-{}", id, name)?,
-            ElementId::OpaqueId(opaque_id) => write!(f, "{:x?}", opaque_id)?,
         }
 
         Ok(())
-    }
-}
-
-impl TryInto<SharedString> for ElementId {
-    type Error = crate::ui::anyhow::Error;
-
-    fn try_into(self) -> crate::ui::anyhow::Result<SharedString> {
-        if let ElementId::Name(name) = self {
-            Ok(name)
-        } else {
-            crate::ui::anyhow::bail!("element id is not string")
-        }
     }
 }
 
@@ -3626,12 +3544,6 @@ impl From<Arc<str>> for ElementId {
     }
 }
 
-impl From<Arc<std::path::Path>> for ElementId {
-    fn from(path: Arc<std::path::Path>) -> Self {
-        ElementId::Path(path)
-    }
-}
-
 impl From<&'static str> for ElementId {
     fn from(name: &'static str) -> Self {
         ElementId::Name(SharedString::new_static(name))
@@ -3668,12 +3580,6 @@ impl From<(&'static str, u64)> for ElementId {
     }
 }
 
-impl From<Uuid> for ElementId {
-    fn from(value: Uuid) -> Self {
-        Self::Uuid(value)
-    }
-}
-
 impl From<(&'static str, u32)> for ElementId {
     fn from((name, id): (&'static str, u32)) -> Self {
         ElementId::NamedInteger(SharedString::new_static(name), u64::from(id))
@@ -3686,36 +3592,18 @@ impl<T: Into<SharedString>> From<(ElementId, T)> for ElementId {
     }
 }
 
-impl From<&'static core::panic::Location<'static>> for ElementId {
-    fn from(location: &'static core::panic::Location<'static>) -> Self {
-        ElementId::CodeLocation(*location)
-    }
-}
-
-impl From<[u8; 20]> for ElementId {
-    fn from(opaque_id: [u8; 20]) -> Self {
-        ElementId::OpaqueId(opaque_id)
-    }
-}
-
 /// A rectangle to be rendered in the window at the given position and size.
-/// Passed as an argument [`Window::paint_quad`].
+/// Passed as an argument to [`Window::paint_quad`].
 #[derive(Clone)]
 pub(crate) struct PaintQuad {
-    /// The bounds of the quad within the window.
     pub(crate) bounds: Bounds<Pixels>,
-    /// The radii of the quad's corners.
     pub(crate) corner_radii: Corners<Pixels>,
-    /// The background color of the quad.
-    pub(crate) background: Background,
-    /// The widths of the quad's borders.
+    pub(crate) background: Rgba,
     pub(crate) border_widths: Edges<Pixels>,
-    /// The color of the quad's borders.
-    pub(crate) border_color: Hsla,
+    pub(crate) border_color: Rgba,
 }
 
 impl PaintQuad {
-    /// Sets the corner radii of the quad.
     pub(crate) fn corner_radii(self, corner_radii: impl Into<Corners<Pixels>>) -> Self {
         PaintQuad {
             corner_radii: corner_radii.into(),
@@ -3728,25 +3616,25 @@ impl PaintQuad {
 pub(crate) fn quad(
     bounds: Bounds<Pixels>,
     corner_radii: impl Into<Corners<Pixels>>,
-    background: impl Into<Background>,
+    background: Rgba,
     border_widths: impl Into<Edges<Pixels>>,
-    border_color: impl Into<Hsla>,
+    border_color: Rgba,
 ) -> PaintQuad {
     PaintQuad {
         bounds,
         corner_radii: corner_radii.into(),
-        background: background.into(),
+        background,
         border_widths: border_widths.into(),
-        border_color: border_color.into(),
+        border_color,
     }
 }
 
 /// Creates a filled quad with the given bounds and background color.
-pub(crate) fn fill(bounds: impl Into<Bounds<Pixels>>, background: impl Into<Background>) -> PaintQuad {
+pub(crate) fn fill(bounds: impl Into<Bounds<Pixels>>, background: Rgba) -> PaintQuad {
     PaintQuad {
         bounds: bounds.into(),
         corner_radii: (0.).into(),
-        background: background.into(),
+        background,
         border_widths: (0.).into(),
         border_color: transparent_black(),
     }

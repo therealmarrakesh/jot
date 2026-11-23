@@ -261,10 +261,7 @@ impl WindowsWindowInner {
         let new_logical_size = device_size.to_pixels(scale_factor);
 
         self.state.logical_size.set(new_logical_size);
-        if should_resize_renderer
-            && let Err(e) = self.state.renderer.borrow_mut().resize(device_size)
-        {
-            crate::ui::log::error!("Failed to resize renderer, invalidating devices: {}", e);
+        if should_resize_renderer && self.state.renderer.borrow_mut().resize(device_size).is_err() {
             self.state
                 .invalidate_devices
                 .store(true, std::sync::atomic::Ordering::Release);
@@ -278,18 +275,12 @@ impl WindowsWindowInner {
     fn handle_size_move_loop(&self, handle: HWND) -> Option<isize> {
         self.state.in_size_move_loop.set(true);
         unsafe {
-            let ret = SetTimer(
+            let _ = SetTimer(
                 Some(handle),
                 SIZE_MOVE_LOOP_TIMER_ID,
                 USER_TIMER_MINIMUM,
                 None,
             );
-            if ret == 0 {
-                crate::ui::log::error!(
-                    "unable to create timer: {}",
-                    std::io::Error::last_os_error()
-                );
-            }
         }
         None
     }
@@ -903,7 +894,6 @@ impl WindowsWindowInner {
     fn handle_display_change_msg(self: &Rc<Self>, handle: HWND) -> Option<isize> {
         let new_monitor = unsafe { MonitorFromWindow(handle, MONITOR_DEFAULTTONULL) };
         if new_monitor.is_invalid() {
-            crate::ui::log::error!("No monitor detected!");
             return None;
         }
         let new_display = WindowsDisplay::new(WindowsDisplay::display_id_for_monitor(new_monitor))?;
@@ -1179,11 +1169,9 @@ impl WindowsWindowInner {
         let parameter = PCWSTR::from_raw(lparam.0 as _);
         if unsafe { !parameter.is_null() && !parameter.is_empty() }
             && let Some(parameter_string) = unsafe { parameter.to_string() }.log_err()
+            && parameter_string.as_str() == "ImmersiveColorSet"
         {
-            crate::ui::log::info!("System settings changed: {}", parameter_string);
-            if parameter_string.as_str() == "ImmersiveColorSet" {
-                self.handle_appearance_changed(handle, true)?;
-            }
+            self.handle_appearance_changed(handle, true)?;
         }
         Some(0)
     }
@@ -1245,7 +1233,6 @@ impl WindowsWindowInner {
     #[inline]
     fn draw_window(&self, handle: HWND, force_render: bool) -> Option<isize> {
         let Some(_guard) = self.state.draw_coordinator.try_begin_draw() else {
-            crate::ui::log::debug!("deferring re-entrant draw of window {handle:?}");
             if force_render {
                 self.state.force_render_pending.set(true);
             }
@@ -1307,9 +1294,6 @@ impl WindowsWindowInner {
                     String::from_utf16(&[high_surrogate, code_point]).ok()
                 } else {
                     // Invalid low surrogate without a preceding high surrogate
-                    crate::ui::log::warn!(
-                        "Received low surrogate without a preceding high surrogate: {code_point:x}"
-                    );
                     None
                 }
             }
