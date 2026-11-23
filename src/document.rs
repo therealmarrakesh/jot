@@ -18,7 +18,7 @@ const TEMP_ATTEMPTS: usize = 100;
 const TEMP_SUFFIX: &str = ".jot-save";
 const BACKUP_SUFFIX: &str = ".jot-backup";
 const READ_ONLY: &str = "This file is read-only.";
-const NOTICES: &str = include_str!("../assets/THIRD-PARTY-NOTICES.txt");
+const NOTICES: &str = include_str!(concat!(env!("OUT_DIR"), "/notices.txt"));
 const NOTICES_FILE: &str = "THIRD-PARTY-NOTICES.txt";
 
 pub(crate) const UNTITLED: &str = "Untitled";
