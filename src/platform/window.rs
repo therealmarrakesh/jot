@@ -894,11 +894,25 @@ unsafe extern "system" fn window_wnd_proc(
         }
 
         WM_NCMOUSEMOVE => {
-            let ev = with_entry_mut(hwnd, |e| {
+            let info = with_entry_mut(hwnd, |e| {
                 if e.in_size_move {
                     return None;
                 }
-                if !e.tracking_nc_leave {
+                let need_track = !e.tracking_nc_leave;
+                e.hovered = true;
+                let position = screen_to_client_point(hwnd, lparam, e.scale_factor);
+                Some((
+                    need_track,
+                    PlatformEvent::MouseMove {
+                        window_id: e.window_id,
+                        position,
+                        pressed_button: e.pressed_button,
+                    },
+                ))
+            })
+            .flatten();
+            if let Some((need_track, ev)) = info {
+                if need_track {
                     let mut tme = TRACKMOUSEEVENT {
                         cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
                         dwFlags: TME_LEAVE | TME_NONCLIENT,
@@ -906,38 +920,29 @@ unsafe extern "system" fn window_wnd_proc(
                         dwHoverTime: 0,
                     };
                     if unsafe { TrackMouseEvent(&mut tme) }.is_ok() {
-                        e.tracking_nc_leave = true;
+                        with_entry_mut(hwnd, |e| e.tracking_nc_leave = true);
                     }
                 }
-                e.hovered = true;
-                let position = screen_to_client_point(hwnd, lparam, e.scale_factor);
-                Some(PlatformEvent::MouseMove {
-                    window_id: e.window_id,
-                    position,
-                    pressed_button: e.pressed_button,
-                })
-            })
-            .flatten();
-            if let Some(ev) = ev {
                 dispatch_if_free(ev);
             }
             unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
         }
 
         WM_NCMOUSELEAVE => {
-            let leave = with_entry_mut(hwnd, |e| {
+            let check_leave = with_entry_mut(hwnd, |e| {
                 e.tracking_nc_leave = false;
                 e.nc_button_down = None;
-                if !e.tracking_leave && !cursor_is_over_hwnd(hwnd) {
-                    e.hovered = false;
-                    Some(e.window_id)
-                } else {
-                    None
-                }
+                !e.tracking_leave
             })
-            .flatten();
-            if let Some(window_id) = leave {
-                dispatch_if_free(PlatformEvent::MouseLeave { window_id });
+            .unwrap_or(false);
+            if check_leave && !cursor_is_over_hwnd(hwnd) {
+                let window_id = with_entry_mut(hwnd, |e| {
+                    e.hovered = false;
+                    e.window_id
+                });
+                if let Some(window_id) = window_id {
+                    dispatch_if_free(PlatformEvent::MouseLeave { window_id });
+                }
             }
             LRESULT(0)
         }
@@ -1027,11 +1032,26 @@ unsafe extern "system" fn window_wnd_proc(
             } else {
                 None
             };
-            let ev = with_entry_mut(hwnd, |e| {
+            let info = with_entry_mut(hwnd, |e| {
                 if e.in_size_move {
                     return None;
                 }
-                if !e.tracking_leave {
+                let need_track = !e.tracking_leave;
+                e.hovered = true;
+                e.pressed_button = live_button;
+                let (_, _, position) = client_point_from_lparam(lparam, e.scale_factor);
+                Some((
+                    need_track,
+                    PlatformEvent::MouseMove {
+                        window_id: e.window_id,
+                        position,
+                        pressed_button: live_button,
+                    },
+                ))
+            })
+            .flatten();
+            if let Some((need_track, ev)) = info {
+                if need_track {
                     let mut tme = TRACKMOUSEEVENT {
                         cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
                         dwFlags: TME_LEAVE,
@@ -1039,38 +1059,28 @@ unsafe extern "system" fn window_wnd_proc(
                         dwHoverTime: 0,
                     };
                     if unsafe { TrackMouseEvent(&mut tme) }.is_ok() {
-                        e.tracking_leave = true;
+                        with_entry_mut(hwnd, |e| e.tracking_leave = true);
                     }
                 }
-                e.hovered = true;
-                e.pressed_button = live_button;
-                let (_, _, position) = client_point_from_lparam(lparam, e.scale_factor);
-                Some(PlatformEvent::MouseMove {
-                    window_id: e.window_id,
-                    position,
-                    pressed_button: live_button,
-                })
-            })
-            .flatten();
-            if let Some(ev) = ev {
                 dispatch_if_free(ev);
             }
             LRESULT(0)
         }
 
         WM_MOUSELEAVE => {
-            let leave = with_entry_mut(hwnd, |e| {
+            let check_leave = with_entry_mut(hwnd, |e| {
                 e.tracking_leave = false;
-                if !e.tracking_nc_leave && !cursor_is_over_hwnd(hwnd) {
-                    e.hovered = false;
-                    Some(e.window_id)
-                } else {
-                    None
-                }
+                !e.tracking_nc_leave
             })
-            .flatten();
-            if let Some(window_id) = leave {
-                dispatch_if_free(PlatformEvent::MouseLeave { window_id });
+            .unwrap_or(false);
+            if check_leave && !cursor_is_over_hwnd(hwnd) {
+                let window_id = with_entry_mut(hwnd, |e| {
+                    e.hovered = false;
+                    e.window_id
+                });
+                if let Some(window_id) = window_id {
+                    dispatch_if_free(PlatformEvent::MouseLeave { window_id });
+                }
             }
             LRESULT(0)
         }

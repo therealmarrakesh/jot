@@ -307,7 +307,13 @@ impl Platform {
         handler.borrow_mut().drive_frames();
 
         let mut msg = MSG::default();
-        while !handler.borrow().should_quit() && unsafe { GetMessageW(&mut msg, None, 0, 0) }.0 > 0 {
+        loop {
+            if handler.borrow().should_quit() {
+                break;
+            }
+            if unsafe { GetMessageW(&mut msg, None, 0, 0) }.0 <= 0 {
+                break;
+            }
             unsafe {
                 let _ = TranslateMessage(&msg);
                 DispatchMessageW(&msg);

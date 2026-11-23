@@ -355,6 +355,21 @@ impl App {
             })
         })
     }
+
+    #[cfg(test)]
+    pub(crate) fn tab_drag_detach_for_test(&mut self) {
+        let Some(mut drag) = self.tab_drag.take() else {
+            return;
+        };
+        drag.phase = Phase::Dragging;
+        let pt = ScreenPoint {
+            x: drag.press.x + 120,
+            y: drag.press.y + 200,
+        };
+        self.tab_drag_detach(&mut drag, false, pt);
+        self.tab_drag = Some(drag);
+        self.mark_all_dirty();
+    }
 }
 
 fn to_local(hwnd: WindowHwnd, pt: ScreenPoint) -> Point {
