@@ -1,4 +1,5 @@
 use super::*;
+use crate::tabs::TabId;
 use crate::ui::{SaveChoice, SavePathOptions};
 use document::{Encoding, Format, LoadError, default_directory, display_name, file_name};
 use std::collections::VecDeque;
@@ -14,15 +15,15 @@ const LOSSY_ANSI_WARNING: &str = "This file contains characters in Unicode forma
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum WorkflowStep {
-    SaveTab { id: EntityId, activate: bool },
-    SaveTabAs(EntityId),
-    ConfirmDiscard { id: EntityId, activate: bool },
+    SaveTab { id: TabId, activate: bool },
+    SaveTabAs(TabId),
+    ConfirmDiscard { id: TabId, activate: bool },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum WorkflowFinish {
     None,
-    RemoveTab(EntityId),
+    RemoveTab(TabId),
     CloseWindow,
 }
 
@@ -83,9 +84,9 @@ impl Jot {
         window.set_window_title(&format!("{} - {APP_NAME}", self.tab_name(self.active)));
     }
 
-    fn is_blank(&self, ix: usize, cx: &App) -> bool {
+    fn is_blank(&self, ix: usize) -> bool {
         let tab = &self.tabs[ix];
-        tab.data.path.is_none() && tab.data.editor.read(cx).text().len() == 0
+        tab.data.path.is_none() && tab.data.editor.text().len() == 0
     }
 
     pub(crate) fn open(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -175,7 +176,7 @@ impl Jot {
                         match result {
                             Ok(loaded) => {
                                 let tab = Self::create_tab(Some((path, loaded)), window, cx);
-                                if this.is_blank(this.active, cx) {
+                                if this.is_blank(this.active) {
                                     this.replace_tab(this.active, tab, window, cx);
                                 } else {
                                     this.push_tab(tab, window, cx);
@@ -199,7 +200,7 @@ impl Jot {
     }
 
     pub(crate) fn save(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let id = self.active_editor().entity_id();
+        let id = self.active_tab_id();
         self.start_file_workflow(
             FileWorkflow::single(
                 WorkflowStep::SaveTab {
@@ -214,7 +215,7 @@ impl Jot {
     }
 
     pub(crate) fn save_as(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let id = self.active_editor().entity_id();
+        let id = self.active_tab_id();
         self.start_file_workflow(
             FileWorkflow::single(WorkflowStep::SaveTabAs(id), WorkflowFinish::None),
             window,
@@ -223,7 +224,7 @@ impl Jot {
     }
 
     pub(crate) fn save_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let dirty = self.dirty_tabs(cx);
+        let dirty = self.dirty_tabs();
         if dirty.is_empty() {
             return;
         }
@@ -239,20 +240,20 @@ impl Jot {
         );
     }
 
-    fn dirty_tabs(&self, cx: &App) -> Vec<EntityId> {
+    fn dirty_tabs(&self) -> Vec<TabId> {
         self.tabs
             .iter()
-            .filter(|tab| tab.data.is_dirty(cx))
-            .map(|tab| tab.data.editor.entity_id())
+            .filter(|tab| tab.data.is_dirty())
+            .map(|tab| tab.data.id)
             .collect()
     }
 
     pub(crate) fn close_tab(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.tabs[ix].data.is_dirty(cx) {
+        if !self.tabs[ix].data.is_dirty() {
             self.remove_tab(ix, window, cx);
             return;
         }
-        let id = self.tabs[ix].data.editor.entity_id();
+        let id = self.tabs[ix].data.id;
         self.activate_tab(ix, window, cx);
         self.start_file_workflow(
             FileWorkflow::single(
@@ -272,7 +273,7 @@ impl Jot {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let dirty = self.dirty_tabs(cx);
+        let dirty = self.dirty_tabs();
         if dirty.is_empty() {
             return true;
         }
@@ -385,7 +386,7 @@ impl Jot {
 
     fn begin_save_tab_as(
         &mut self,
-        id: EntityId,
+        id: TabId,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -450,10 +451,9 @@ impl Jot {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let editor = self.tabs[ix].data.editor.clone();
-        let id = editor.entity_id();
-        let snapshot = editor.update(cx, |editor, _| editor.begin_save());
-        let text = editor.read(cx).text().clone();
+        let id = self.tabs[ix].data.id;
+        let snapshot = self.tabs[ix].data.editor.begin_save();
+        let text = self.tabs[ix].data.editor.text().clone();
         let path = std::path::absolute(&path).unwrap_or(path);
         let check_text = text.clone();
         let this = cx.weak_entity();
@@ -494,7 +494,7 @@ impl Jot {
     #[allow(clippy::too_many_arguments)]
     fn finish_write_tab(
         &mut self,
-        id: EntityId,
+        id: TabId,
         snapshot: u64,
         text: Rope,
         path: PathBuf,
@@ -515,9 +515,7 @@ impl Jot {
                             return;
                         };
                         let tab = &mut this.tabs[ix];
-                        tab.data.editor.update(cx, |editor, _| {
-                            editor.mark_saved_version(snapshot);
-                        });
+                        tab.data.editor.mark_saved_version(snapshot);
                         tab.data.path = Some(path);
                         tab.data.format = format;
                         this.refresh_title(window);
@@ -540,8 +538,8 @@ mod tests {
 
     #[test]
     fn file_workflow_queues_prepends_and_drains_steps_in_order() {
-        let id1 = EntityId(10);
-        let id2 = EntityId(20);
+        let id1 = TabId(10);
+        let id2 = TabId(20);
         let mut wf = FileWorkflow::batch(
             [
                 WorkflowStep::ConfirmDiscard {

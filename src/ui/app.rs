@@ -144,7 +144,6 @@ impl<V: 'static> WindowHandle<V> {
     }
 }
 
-type EntityObserver = Box<dyn FnMut(&mut App) -> bool>;
 type KeystrokeInterceptor = Box<dyn FnMut(&KeyDownEvent, &mut Window, &mut App) -> bool>;
 type GlobalCommandHandler = Box<dyn FnMut(Command, &mut App) -> bool>;
 type WindowClosedCallback = Box<dyn FnMut(&mut App, WindowId)>;
@@ -169,11 +168,14 @@ pub(crate) struct App {
     pub(crate) window_order: Vec<WindowId>,
     pub(crate) active_window: Option<WindowId>,
     pub(crate) dirty_entities: HashSet<EntityId>,
-    pending_focus_events: VecDeque<(WindowId, super::focus::FocusId, bool)>,
+    pending_focus_changes: VecDeque<(
+        WindowId,
+        Option<super::focus::FocusId>,
+        Option<super::focus::FocusId>,
+    )>,
     pub(crate) deferred: VecDeque<DeferredAppCallback>,
     update_depth: usize,
     pub(crate) flushing: bool,
-    entity_observers: HashMap<EntityId, Vec<CallbackSlot<EntityObserver>>>,
     keystroke_interceptors: Vec<CallbackSlot<KeystrokeInterceptor>>,
     global_commands: Vec<GlobalCommandHandler>,
     window_closed_listeners: Vec<CallbackSlot<WindowClosedCallback>>,
@@ -199,11 +201,10 @@ impl App {
                 window_order: Vec::new(),
                 active_window: None,
                 dirty_entities: HashSet::new(),
-                pending_focus_events: VecDeque::new(),
+                pending_focus_changes: VecDeque::new(),
                 deferred: VecDeque::new(),
                 update_depth: 0,
                 flushing: false,
-                entity_observers: HashMap::new(),
                 keystroke_interceptors: Vec::new(),
                 global_commands: Vec::new(),
                 window_closed_listeners: Vec::new(),
@@ -329,14 +330,14 @@ impl App {
         result
     }
 
-    pub(crate) fn queue_focus_event(
+    pub(crate) fn queue_focus_change(
         &mut self,
         window_id: WindowId,
-        focus_id: super::focus::FocusId,
-        focused_in: bool,
+        old_focus: Option<super::focus::FocusId>,
+        new_focus: Option<super::focus::FocusId>,
     ) {
-        self.pending_focus_events
-            .push_back((window_id, focus_id, focused_in));
+        self.pending_focus_changes
+            .push_back((window_id, old_focus, new_focus));
     }
 
     // ---- Notifications & deferred work ----
@@ -358,27 +359,14 @@ impl App {
         loop {
             let mut ran_any = false;
 
-            while let Some((wid, fid, focused_in)) = self.pending_focus_events.pop_front() {
+            while let Some((wid, old_focus, new_focus)) = self.pending_focus_changes.pop_front() {
                 ran_any = true;
                 let _ = self.update_window_impl(wid, |_, window, cx| {
-                    if focused_in {
-                        window.fire_focus_in(fid, cx);
-                    } else {
-                        window.fire_focus_out(fid, cx);
-                    }
+                    window.fire_focus_change(old_focus, new_focus, cx);
                 });
             }
 
-            let dirty: Vec<EntityId> = self.dirty_entities.drain().collect();
-            for id in dirty {
-                if let Some(mut observers) = self.entity_observers.remove(&id) {
-                    ran_any = true;
-                    observers.retain_mut(|slot| slot.active.get() && (slot.callback)(self));
-                    let entry = self.entity_observers.entry(id).or_default();
-                    observers.append(entry);
-                    *entry = observers;
-                }
-            }
+            self.dirty_entities.clear();
 
             if let Some(deferred) = self.deferred.pop_front() {
                 deferred(self);
@@ -694,18 +682,6 @@ impl App {
         self.quit_requested = true;
         self.platform.post_quit();
     }
-
-    pub(crate) fn add_entity_observer(
-        &mut self,
-        entity_id: EntityId,
-        active: Rc<Cell<bool>>,
-        callback: EntityObserver,
-    ) {
-        self.entity_observers
-            .entry(entity_id)
-            .or_default()
-            .push(CallbackSlot { active, callback });
-    }
 }
 
 /// Entity-scoped mutable context passed to `Render`, actions, and `Entity::update`.
@@ -782,28 +758,6 @@ impl<T: 'static> Context<'_, T> {
         }
     }
 
-    pub(crate) fn observe<Observed: 'static>(
-        &mut self,
-        observed: &Entity<Observed>,
-        mut f: impl FnMut(&mut T, Entity<Observed>, &mut Context<T>) + 'static,
-    ) -> Subscription {
-        let observer = self.weak_entity();
-        let observed_weak = observed.downgrade();
-        let active = Rc::new(Cell::new(true));
-        self.app.add_entity_observer(
-            observed.entity_id(),
-            active.clone(),
-            Box::new(move |app| {
-                let (Some(obs), Some(target)) = (observer.upgrade(), observed_weak.upgrade()) else {
-                    return false;
-                };
-                obs.update(app, |this, cx| f(this, target, cx));
-                true
-            }),
-        );
-        Subscription::new(move || active.set(false))
-    }
-
     pub(crate) fn observe_window_activation(
         &mut self,
         window: &mut Window,
@@ -849,53 +803,20 @@ impl<T: 'static> Context<'_, T> {
         })
     }
 
-    pub(crate) fn on_focus(
+    pub(crate) fn observe_focus_change(
         &mut self,
-        focus: &FocusHandle,
         window: &mut Window,
-        mut f: impl FnMut(&mut T, &mut Window, &mut Context<T>) + 'static,
+        mut f: impl FnMut(&mut T, Option<super::focus::FocusId>, Option<super::focus::FocusId>, &mut Window, &mut Context<T>)
+            + 'static,
     ) -> Subscription {
         let observer = self.weak_entity();
-        window.on_focus_in(focus.id(), move |window, app| {
+        window.on_focus_change(move |old_focus, new_focus, window, app| {
             let Some(obs) = observer.upgrade() else {
                 return false;
             };
-            obs.update(app, |this, cx| f(this, window, cx));
+            obs.update(app, |this, cx| f(this, old_focus, new_focus, window, cx));
             true
         })
-    }
-
-    pub(crate) fn on_blur(
-        &mut self,
-        focus: &FocusHandle,
-        window: &mut Window,
-        mut f: impl FnMut(&mut T, &mut Window, &mut Context<T>) + 'static,
-    ) -> Subscription {
-        let observer = self.weak_entity();
-        window.on_focus_out(focus.id(), move |window, app| {
-            let Some(obs) = observer.upgrade() else {
-                return false;
-            };
-            obs.update(app, |this, cx| f(this, window, cx));
-            true
-        })
-    }
-}
-
-pub(crate) trait AppContext {
-    #[allow(clippy::wrong_self_convention, clippy::new_ret_no_self)]
-    fn new<T: 'static>(&mut self, build: impl FnOnce(&mut Context<T>) -> T) -> Entity<T>;
-}
-
-impl AppContext for App {
-    fn new<T: 'static>(&mut self, build: impl FnOnce(&mut Context<T>) -> T) -> Entity<T> {
-        App::new(self, build)
-    }
-}
-
-impl<V: 'static> AppContext for Context<'_, V> {
-    fn new<T: 'static>(&mut self, build: impl FnOnce(&mut Context<T>) -> T) -> Entity<T> {
-        App::new(self.app, build)
     }
 }
 

@@ -1,5 +1,5 @@
 use super::*;
-use crate::editor::EditorState;
+use crate::editor::{Editor, EditorHost};
 
 pub(crate) const CONTROL_HEIGHT: f32 = 32.;
 pub(crate) const CONTROL_RADIUS: f32 = 4.;
@@ -203,7 +203,8 @@ fn field_glyph(
 }
 
 pub(crate) fn text_field(
-    input: &Entity<EditorState>,
+    input: &Editor,
+    host: EditorHost,
     search_icon: bool,
     surface: Surface,
     s: f32,
@@ -212,9 +213,9 @@ pub(crate) fn text_field(
 ) -> Div {
     let p = palette(cx);
     let u = |v: f32| px(v * s);
-    let focused = input.focus_handle(cx).is_focused(window);
-    let empty = input.read(cx).text().len() == 0;
-    let id = input.entity_id();
+    let focused = input.focus_handle().is_focused(window);
+    let empty = input.text().len() == 0;
+    let id = input.id();
     let (trailing, clear_right) = if search_icon {
         (
             2. * FIELD_GLYPH_WIDTH + FIELD_GLYPH_RIGHT,
@@ -251,7 +252,7 @@ pub(crate) fn text_field(
                 .text_size(u(BODY_SIZE))
                 .line_height(u(BODY_LINE + 2.))
                 .text_color(rgba(p.text_primary))
-                .child(input.clone()),
+                .child(input.render(host.clone())),
         )
         .child(bottom_edge(
             focused,
@@ -269,7 +270,7 @@ pub(crate) fn text_field(
             )
         })
         .when(focused && !empty, |this| {
-            this.child(clear_button(p, input.clone(), clear_right, s))
+            this.child(clear_button(p, id, host, clear_right, s))
         })
 }
 
@@ -284,8 +285,8 @@ fn bottom_edge(focused: bool, color: Rgba, s: f32) -> Div {
         .bg(color)
 }
 
-fn clear_button(p: Palette, input: Entity<EditorState>, right: f32, s: f32) -> Div {
-    field_glyph(p, ("field-clear", input.entity_id()), CLEAR_GLYPH, right, s)
+fn clear_button(p: Palette, id: usize, host: EditorHost, right: f32, s: f32) -> Div {
+    field_glyph(p, ("field-clear", id), CLEAR_GLYPH, right, s)
         .hover(move |style| style.bg(rgba(p.subtle_secondary)))
         .pressed(move |style| {
             style
@@ -297,9 +298,12 @@ fn clear_button(p: Palette, input: Entity<EditorState>, right: f32, s: f32) -> D
             cx.stop_propagation();
         })
         .on_click(move |_, window, cx| {
-            input.update(cx, |input, cx| {
-                input.set_value("", window, cx);
-                input.focus(window, cx);
+            let h = host.clone();
+            host.with_mut(cx, |input, cx| {
+                input.set_value("", cx);
+                input.focus_handle().focus(window, cx);
+                input.start_blink(&h, cx);
             });
+            host.notify(cx);
         })
 }

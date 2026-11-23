@@ -14,7 +14,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::app::{App, Context};
 use super::element::{Render, UiNode};
-use super::focus::{FocusHandle, Focusable};
 use super::types::{UiError, UiResult};
 use super::window::Window;
 
@@ -174,13 +173,6 @@ impl<T: 'static> Entity<T> {
         f: impl FnOnce(&mut T, &mut Context<T>) -> R,
     ) -> R {
         cx.with_app_mut(|app| app.update_entity_impl(self, f))
-    }
-
-    pub(crate) fn focus_handle(&self, cx: &App) -> FocusHandle
-    where
-        T: Focusable,
-    {
-        self.read(cx).focus_handle(cx)
     }
 }
 

@@ -86,7 +86,3 @@ impl WeakFocusHandle {
         self.inner.upgrade().map(|inner| FocusHandle { inner })
     }
 }
-
-pub(crate) trait Focusable: 'static {
-    fn focus_handle(&self, cx: &App) -> FocusHandle;
-}

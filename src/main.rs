@@ -20,8 +20,8 @@ mod tooltip;
 mod ui;
 mod win32;
 
+use crate::editor::{Editor, EditorHost, EditorSlot, Rope, RopeExt as _};
 use crate::ui::*;
-use crate::editor::{EditorState, Rope, RopeExt as _};
 use menu::MenuBar;
 use std::cell::Cell;
 use std::ops::Range;
@@ -360,19 +360,19 @@ pub(crate) fn text_width(window: &Window, text: &str, family: &'static str, size
 }
 
 struct TabData {
-    editor: Entity<EditorState>,
+    id: tabs::TabId,
+    editor: Editor,
     zoom: f32,
     path: Option<PathBuf>,
     format: document::Format,
 }
 
 impl TabData {
-    pub(crate) fn is_dirty(&self, cx: &App) -> bool {
-        let editor = self.editor.read(cx);
+    pub(crate) fn is_dirty(&self) -> bool {
         if self.path.is_some() {
-            !editor.is_clean()
+            !self.editor.is_clean()
         } else {
-            !editor.is_clean() && editor.text().len() > 0
+            !self.editor.is_clean() && self.editor.text().len() > 0
         }
     }
 }
@@ -422,7 +422,7 @@ struct Jot {
 impl Jot {
     fn new(initial: Option<TabData>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let tab = match initial {
-            Some(data) => Self::adopt_tab(data, window, cx),
+            Some(data) => Self::adopt_tab(data),
             None => Self::create_tab(None, window, cx),
         };
         let menu_bar = MenuBar::new(window, cx);
@@ -436,12 +436,24 @@ impl Jot {
                 if window.window_handle() != handle {
                     return;
                 }
-                if jot
+                let consumed = jot
                     .update(cx, |jot, cx| {
-                        !jot.dialogs.is_open() && jot.menu_key_down(&event.keystroke, window, cx)
+                        if !jot.dialogs.is_open()
+                            && jot.menu_key_down(&event.keystroke, window, cx)
+                        {
+                            return true;
+                        }
+                        if let Some(slot) = jot.focused_editor_slot(window) {
+                            let host = jot.editor_host(slot, cx);
+                            if let Some(ed) = jot.editor_by_slot_mut(slot) {
+                                ed.pause_blink(&host, cx);
+                                cx.notify();
+                            }
+                        }
+                        false
                     })
-                    .unwrap_or(false)
-                {
+                    .unwrap_or(false);
+                if consumed {
                     cx.stop_propagation();
                 }
             })
@@ -456,6 +468,31 @@ impl Jot {
                 if !window.is_window_active() {
                     this.menu_cancel(window, cx);
                     tooltip::window_deactivated(window.window_handle(), cx);
+                    this.stop_all_editor_blinks();
+                    cx.notify();
+                } else if let Some(slot) = this.focused_editor_slot(window) {
+                    let host = this.editor_host(slot, cx);
+                    if let Some(ed) = this.editor_by_slot_mut(slot) {
+                        ed.start_blink(&host, cx);
+                    }
+                    cx.notify();
+                }
+            }),
+            cx.observe_focus_change(window, |this, old_focus, new_focus, _, cx| {
+                if let Some(old) = old_focus
+                    && let Some(slot) = this.editor_slot_for_focus(old)
+                    && let Some(ed) = this.editor_by_slot_mut(slot)
+                {
+                    ed.on_blur();
+                    cx.notify();
+                }
+                if let Some(new) = new_focus
+                    && let Some(slot) = this.editor_slot_for_focus(new)
+                {
+                    let host = this.editor_host(slot, cx);
+                    if let Some(ed) = this.editor_by_slot_mut(slot) {
+                        ed.start_blink(&host, cx);
+                    }
                     cx.notify();
                 }
             }),
@@ -482,21 +519,97 @@ impl Jot {
         jot
     }
 
-    fn set_word_wrap(&mut self, word_wrap: bool, window: &mut Window, cx: &mut Context<Self>) {
-        for tab in &self.tabs {
-            tab.data
-                .editor
-                .update(cx, |editor, cx| editor.set_soft_wrap(word_wrap, window, cx));
+    pub(crate) fn active_tab_id(&self) -> tabs::TabId {
+        self.tabs[self.active].data.id
+    }
+
+    pub(crate) fn active_editor(&self) -> &Editor {
+        &self.tabs[self.active].data.editor
+    }
+
+    pub(crate) fn active_editor_mut(&mut self) -> &mut Editor {
+        &mut self.tabs[self.active].data.editor
+    }
+
+    pub(crate) fn editor_by_slot(&self, slot: EditorSlot) -> Option<&Editor> {
+        match slot {
+            EditorSlot::Tab(id) => self.tab_index(id).map(|ix| &self.tabs[ix].data.editor),
+            EditorSlot::FindQuery => Some(&self.find.query),
+            EditorSlot::FindReplace => Some(&self.find.replacement),
+            EditorSlot::GoToLine => Some(&self.dialogs.line),
+        }
+    }
+
+    pub(crate) fn editor_by_slot_mut(&mut self, slot: EditorSlot) -> Option<&mut Editor> {
+        match slot {
+            EditorSlot::Tab(id) => self.tab_index(id).map(|ix| &mut self.tabs[ix].data.editor),
+            EditorSlot::FindQuery => Some(&mut self.find.query),
+            EditorSlot::FindReplace => Some(&mut self.find.replacement),
+            EditorSlot::GoToLine => Some(&mut self.dialogs.line),
+        }
+    }
+
+    fn editor_slot_for_focus(&self, id: FocusId) -> Option<EditorSlot> {
+        if self.find.query.focus_handle().id() == id {
+            return Some(EditorSlot::FindQuery);
+        }
+        if self.find.replacement.focus_handle().id() == id {
+            return Some(EditorSlot::FindReplace);
+        }
+        if self.dialogs.line.focus_handle().id() == id {
+            return Some(EditorSlot::GoToLine);
+        }
+        self.tabs
+            .iter()
+            .find(|t| t.data.editor.focus_handle().id() == id)
+            .map(|t| EditorSlot::Tab(t.data.id))
+    }
+
+    fn focused_editor_slot(&self, window: &Window) -> Option<EditorSlot> {
+        window
+            .focused_id()
+            .and_then(|id| self.editor_slot_for_focus(id))
+    }
+
+    fn stop_all_editor_blinks(&mut self) {
+        for tab in &mut self.tabs {
+            tab.data.editor.stop_blink();
+        }
+        self.find.query.stop_blink();
+        self.find.replacement.stop_blink();
+        self.dialogs.line.stop_blink();
+    }
+
+    pub(crate) fn editor_host(&self, slot: EditorSlot, cx: &Context<Self>) -> EditorHost {
+        EditorHost::new(cx.weak_entity(), slot)
+    }
+
+    pub(crate) fn focus_editor(
+        &mut self,
+        slot: EditorSlot,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let host = self.editor_host(slot, cx);
+        if let Some(ed) = self.editor_by_slot_mut(slot) {
+            ed.focus_handle().focus(window, cx);
+            ed.start_blink(&host, cx);
+        }
+    }
+
+    pub(crate) fn focus_active_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.focus_editor(EditorSlot::Tab(self.active_tab_id()), window, cx);
+    }
+
+    fn set_word_wrap(&mut self, word_wrap: bool, _: &mut Window, cx: &mut Context<Self>) {
+        for tab in &mut self.tabs {
+            tab.data.editor.set_soft_wrap(word_wrap, cx);
         }
         cx.notify();
     }
 
-    fn active_editor(&self) -> &Entity<EditorState> {
-        &self.tabs[self.active].data.editor
-    }
-
-    fn has_text(&self, cx: &App) -> bool {
-        self.active_editor().read(cx).text().len() > 0
+    fn has_text(&self) -> bool {
+        self.active_editor().text().len() > 0
     }
 
     fn zoom(&self) -> f32 {
@@ -511,8 +624,8 @@ impl Jot {
         EDITOR_PADDING_TOP + EDITOR_PADDING_BOTTOM + self.line_height()
     }
 
-    fn status_metrics(&self, cx: &App) -> StatusMetrics {
-        let editor = self.active_editor().read(cx);
+    fn status_metrics(&self) -> StatusMetrics {
+        let editor = self.active_editor();
         let text = editor.text();
         let cursor = editor.cursor();
         let point = text.offset_to_point(cursor);
@@ -602,26 +715,24 @@ impl Jot {
         self.active = ix;
         self.reveal_tab(ix);
         self.find.clear_notice();
-        if self.find.is_open() && !self.has_text(cx) {
+        if self.find.is_open() && !self.has_text() {
             self.close_find(window, cx);
         }
-        self.active_editor().focus_handle(cx).focus(window, cx);
-        self.sync_selection_focus(cx);
+        self.focus_active_editor(window, cx);
+        self.sync_selection_focus();
         self.refresh_title(window);
         cx.notify();
     }
 
-    pub(crate) fn sync_selection_focus(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn sync_selection_focus(&mut self) {
         let focus = if self.menu_bar.is_open() {
             Some(self.menu_bar.focus_handle().clone())
         } else {
             self.find.selection_focus()
         };
-        for (ix, tab) in self.tabs.iter().enumerate() {
+        for (ix, tab) in self.tabs.iter_mut().enumerate() {
             let focus = (ix == self.active).then(|| focus.clone()).flatten();
-            tab.data
-                .editor
-                .update(cx, |editor, cx| editor.set_selection_focus(focus, cx));
+            tab.data.editor.set_selection_focus(focus);
         }
     }
 
@@ -666,10 +777,10 @@ impl Jot {
         true
     }
 
-    fn insert_time_date(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn insert_time_date(&mut self, _: &mut Window, cx: &mut Context<Self>) {
         let stamp = crate::win32::format_local_time_date();
-        self.active_editor()
-            .update(cx, |editor, cx| editor.replace(stamp, window, cx));
+        self.active_editor_mut().replace(&stamp, cx);
+        cx.notify();
     }
 
     fn set_zoom(&mut self, zoom: f32, cx: &mut Context<Self>) {
@@ -796,11 +907,10 @@ impl Jot {
     }
 
     fn show_context_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        let editor = self.active_editor().clone();
-        if !editor.focus_handle(cx).is_focused(window) {
+        if !self.active_editor().focus_handle().is_focused(window) {
             return false;
         }
-        let Some(caret) = editor.read(cx).caret_bounds() else {
+        let Some(caret) = self.active_editor().caret_bounds() else {
             return true;
         };
         let anchor = point(caret.right(), caret.bottom());
@@ -808,15 +918,18 @@ impl Jot {
         true
     }
 
-    fn editor(&self, find: Option<Div>, cx: &mut Context<Self>) -> Div {
+    fn editor(&mut self, find: Option<Div>, cx: &mut Context<Self>) -> Div {
         let p = palette(cx);
-        let editor = self.active_editor().clone();
         let caret_height = self.caret_height();
         let caret_hidden = self.menu_bar.access_active();
-        editor.update(cx, |state, _| {
-            state.set_caret_height(caret_height);
-            state.set_caret_hidden(caret_hidden);
-        });
+        let slot = EditorSlot::Tab(self.active_tab_id());
+        let host = self.editor_host(slot, cx);
+        let editor_view = {
+            let ed = self.active_editor_mut();
+            ed.set_caret_height(caret_height);
+            ed.set_caret_hidden(caret_hidden);
+            ed.render(host)
+        };
         div()
             .id("editor-area")
             .relative()
@@ -853,7 +966,7 @@ impl Jot {
                             .text_size(px(EDITOR_FONT_SIZE * self.zoom()))
                             .line_height(px(self.line_height()))
                             .text_color(rgba(p.text_primary))
-                            .child(editor),
+                            .child(editor_view),
                     ),
             )
             .children(find)
@@ -918,16 +1031,13 @@ fn status_spacer(p: Palette) -> CanvasNode {
 impl Render for Jot {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl Into<UiNode> {
         let p = palette(cx);
-        let status_metrics = cx
-            .shared
-            .view
-            .status_bar
-            .then(|| self.status_metrics(cx));
+        let status_metrics = cx.shared.view.status_bar.then(|| self.status_metrics());
         let strip = self.sample_tabs(window, cx);
         let menu = self.render_menu(window, cx);
         let dialogs = self.render_dialogs(window, cx);
         let min_size = self.min_size_probe(status_metrics, window, cx);
         let find = self.render_find(window, cx);
+        let editor = self.editor(find, cx);
 
         let root = div()
             .relative()
@@ -945,7 +1055,7 @@ impl Render for Jot {
                     .size_full()
                     .child(self.title_bar(&strip, window, cx))
                     .child(self.render_menu_bar(menu, p))
-                    .child(self.editor(find, cx))
+                    .child(editor)
                     .children(status_metrics.map(|metrics| self.status_bar(metrics, cx))),
             )
             .children(dialogs)
@@ -1137,42 +1247,57 @@ mod large_file_smoke {
         // TextWrapper: no-wrap
         let mut wrapper_nowrap = TextWrapper::new(font("Consolas"), px(14.0), None);
         let t0 = Instant::now();
-        wrapper_nowrap.update_for_bench(&loaded.text, &(0..0), &loaded.text, 0, &mut |_, _, _| {});
+        wrapper_nowrap.update_for_bench(&loaded.text, &(0..0), loaded.text.len(), 0, &mut |_, _, _| {});
         let nowrap_ms = t0.elapsed().as_secs_f64() * 1000.0;
-        println!("wrap (no-wrap):       {nowrap_ms:8.2} ms  ({} display rows)", wrapper_nowrap.len());
+        println!(
+            "wrap (no-wrap):       {nowrap_ms:8.2} ms  ({} display rows)",
+            wrapper_nowrap.visual_row_count()
+        );
 
         // TextWrapper: word-wrap at 900px (~110 ASCII chars per row, ascii_fit_len = 110)
         let mut wrapper_wrap = TextWrapper::new(font("Consolas"), px(14.0), Some(px(900.0)));
         let t0 = Instant::now();
-        wrapper_wrap.update_for_bench(&loaded.text, &(0..0), &loaded.text, 110, &mut |line, _, out| {
-            let mut i = 110;
-            while i < line.len() {
-                let b = line.floor_char_boundary(i);
-                if b > 0 && b < line.len() {
-                    out.push(crate::ui::Boundary { ix: b, next_indent: 0 });
+        wrapper_wrap.update_for_bench(
+            &loaded.text,
+            &(0..0),
+            loaded.text.len(),
+            110,
+            &mut |line, _, out| {
+                let mut i = 110;
+                while i < line.len() {
+                    let b = line.floor_char_boundary(i);
+                    if b > 0 && b < line.len() {
+                        out.push(crate::ui::Boundary {
+                            ix: b,
+                            next_indent: 0,
+                        });
+                    }
+                    i += 110;
                 }
-                i += 110;
-            }
-        });
+            },
+        );
         let wrap_ms = t0.elapsed().as_secs_f64() * 1000.0;
-        println!("wrap (word-wrap):     {wrap_ms:8.2} ms  ({} display rows)", wrapper_wrap.len());
+        println!(
+            "wrap (word-wrap):     {wrap_ms:8.2} ms  ({} display rows)",
+            wrapper_wrap.visual_row_count()
+        );
 
         // Incremental 1-line edit in the middle of the file
         let mid = loaded.text.len() / 2;
         let mut edited = loaded.text.clone();
         edited.insert(mid, "X");
-        let insert_rope = crate::editor::Rope::from("X");
         let t0 = Instant::now();
-        wrapper_wrap.update_for_bench(&edited, &(mid..mid), &insert_rope, 110, &mut |_, _, _| {});
+        wrapper_wrap.update_for_bench(&edited, &(mid..mid), 1, 110, &mut |_, _, _| {});
         let edit_ms = t0.elapsed().as_secs_f64() * 1000.0;
         println!("incremental edit:     {edit_ms:8.2} ms");
 
         // Display point queries (scrolling to middle & end)
         let t0 = Instant::now();
+        let total_rows = wrapper_wrap.visual_row_count();
         for i in 0..1000 {
-            let row = (i * (wrapper_wrap.len() / 1000)).min(wrapper_wrap.len().saturating_sub(1));
-            let off = wrapper_wrap.display_point_to_offset(WrapDisplayPoint::new(row, 0, 0));
-            let _ = wrapper_wrap.offset_to_display_point(off);
+            let row = (i * (total_rows / 1000)).min(total_rows.saturating_sub(1));
+            let off = wrapper_wrap.display_to_offset(WrapDisplayPoint::new(row, 0, 0));
+            let _ = wrapper_wrap.offset_to_display(off, false);
         }
         let query_ms = t0.elapsed().as_secs_f64() * 1000.0;
         println!("1000 scroll queries:  {query_ms:8.2} ms");
@@ -1518,10 +1643,10 @@ mod ui_regression_tests {
         // Add two tabs via the real '+' button.
         h.click_id("new-tab");
         h.click_id("new-tab");
-        let ids: Vec<EntityId> = h.read_jot(|j, _| {
+        let ids: Vec<tabs::TabId> = h.read_jot(|j, _| {
             assert_eq!(j.tabs.len(), 3);
             assert_eq!(j.active, 2);
-            j.tabs.iter().map(|t| t.data.editor.entity_id()).collect()
+            j.tabs.iter().map(|t| t.data.id).collect()
         });
 
         // Click tab 0 to switch to it, then click its 'x' close button.
@@ -1546,21 +1671,21 @@ mod ui_regression_tests {
         h.click_id(("close-tab", ids[2]));
         h.read_jot(|j, _| {
             assert_eq!(j.tabs.len(), 1, "clicking hovered inactive tab 'x' must close tab");
-            assert_eq!(j.tabs[0].data.editor.entity_id(), ids[1]);
+            assert_eq!(j.tabs[0].data.id, ids[1]);
         });
 
         // Add a tab and close it with middle-click on its tab face.
         h.click_id("new-tab");
         let second_id = h.read_jot(|j, _| {
             assert_eq!(j.tabs.len(), 2);
-            j.tabs[1].data.editor.entity_id()
+            j.tabs[1].data.id
         });
         h.middle_click_id(("tab-face", second_id));
         h.read_jot(|j, _| assert_eq!(j.tabs.len(), 1, "middle-clicking tab must close it"));
 
         // Dirty the sole remaining tab and click 'x' -> discard prompt opens -> click "Don't save" -> closes window.
         h.type_text("unsaved text");
-        let last_id = h.read_jot(|j, _| j.tabs[0].data.editor.entity_id());
+        let last_id = h.read_jot(|j, _| j.tabs[0].data.id);
         h.hover_id(("tab", last_id));
         h.click_id(("close-tab", last_id));
         h.read_jot(|j, _| {
@@ -1577,7 +1702,7 @@ mod ui_regression_tests {
 
         // Also verify closing a clean sole tab via 'x' immediately closes the window.
         let mut h2 = TestHarness::new();
-        let sole_id = h2.read_jot(|j, _| j.tabs[0].data.editor.entity_id());
+        let sole_id = h2.read_jot(|j, _| j.tabs[0].data.id);
         h2.click_id(("close-tab", sole_id));
         assert!(
             !h2.window_open(),
@@ -1594,7 +1719,7 @@ mod ui_regression_tests {
             let mut app = h.app_cell.inner.borrow_mut();
             app.update_window_impl(h.handle.id, |root, window, cx| {
                 let jot = root.downcast::<Jot>().unwrap();
-                let focus = jot.read(cx).active_editor().focus_handle(cx);
+                let focus = jot.read(cx).active_editor().focus_handle().clone();
                 assert!(window.shortcut_for_command_in(Command::Save, &focus).is_some());
                 assert!(window.shortcut_for_command_in(Command::NewTab, &focus).is_some());
             })
@@ -1662,10 +1787,10 @@ mod ui_regression_tests {
         h.click_point(on_text, MouseButton::Right);
         h.read_jot(|j, _| assert!(j.menu_bar.is_open(), "right-click must open context menu"));
         h.click_id(("menu-command", 4)); // Delete command button
-        h.read_jot(|j, cx| {
+        h.read_jot(|j, _| {
             assert!(!j.menu_bar.is_open());
             assert_eq!(
-                j.active_editor().read(cx).text().len(),
+                j.active_editor().text().len(),
                 0,
                 "context menu Delete command must erase selected text"
             );
@@ -1685,16 +1810,16 @@ mod ui_regression_tests {
         // Shift+Enter -> back to first "alpha".
         h.type_text("alpha");
         h.press_key("enter");
-        h.read_jot(|j, cx| {
-            assert_eq!(j.active_editor().read(cx).selected_range(), 0..5);
+        h.read_jot(|j, _| {
+            assert_eq!(j.active_editor().selected_range(), 0..5);
         });
         h.press_key("enter");
-        h.read_jot(|j, cx| {
-            assert_eq!(j.active_editor().read(cx).selected_range(), 11..16);
+        h.read_jot(|j, _| {
+            assert_eq!(j.active_editor().selected_range(), 11..16);
         });
         h.press_key("shift-enter");
-        h.read_jot(|j, cx| {
-            assert_eq!(j.active_editor().read(cx).selected_range(), 0..5);
+        h.read_jot(|j, _| {
+            assert_eq!(j.active_editor().selected_range(), 0..5);
         });
 
         // Click the inline clear 'x' button inside the Find query field (has on_mouse_down
@@ -1752,24 +1877,24 @@ mod ui_regression_tests {
         h.click_point(replacement_input_pt, MouseButton::Left);
         h.type_text("OMEGA");
         // Verify typing went into the replacement field (not the query field or main editor).
-        h.read_jot(|j, cx| {
-            assert_eq!(j.active_editor().read(cx).value().as_str(), "alpha beta alpha gamma");
+        h.read_jot(|j, _| {
+            assert_eq!(j.active_editor().value().as_str(), "alpha beta alpha gamma");
         });
         // Click "find-next" (icon_button calls prevent_default so focus stays on replacement input!)
         // and press Enter -> ReplaceNext via JotFindReplacement key context!
         h.click_id("find-next");
         h.press_key("enter");
-        h.read_jot(|j, cx| {
+        h.read_jot(|j, _| {
             assert_eq!(
-                j.active_editor().read(cx).value().as_str(),
+                j.active_editor().value().as_str(),
                 "alpha beta OMEGA gamma",
                 "Enter in replacement field must replace current match via JotFindReplacement"
             );
         });
         h.click_id("find-replace-all");
-        h.read_jot(|j, cx| {
+        h.read_jot(|j, _| {
             assert_eq!(
-                j.active_editor().read(cx).value().as_str(),
+                j.active_editor().value().as_str(),
                 "OMEGA beta OMEGA gamma",
                 "Replace all must replace remaining matches"
             );
@@ -1784,9 +1909,9 @@ mod ui_regression_tests {
         );
         h.click_point(ed_click, MouseButton::Left);
         h.type_text("!");
-        h.read_jot(|j, cx| {
+        h.read_jot(|j, _| {
             assert_eq!(
-                j.active_editor().read(cx).value().as_str(),
+                j.active_editor().value().as_str(),
                 "OMEGA beta OMEGA gamma!",
                 "clicking main editor while Find bar is open must focus main editor"
             );
@@ -1813,9 +1938,9 @@ mod ui_regression_tests {
         h.read_jot(|j, _| assert!(j.dialogs.is_open()));
         h.type_text("2");
         h.press_key("enter");
-        h.read_jot(|j, cx| {
+        h.read_jot(|j, _| {
             assert!(!j.dialogs.is_open());
-            let ed = j.active_editor().read(cx);
+            let ed = j.active_editor();
             assert_eq!(ed.text().offset_to_point(ed.cursor()).row, 1);
         });
 
@@ -1857,13 +1982,13 @@ mod ui_regression_tests {
         // Typing, Select All, Undo, Redo, Backspace.
         h.type_text("hello world");
         h.press_key("ctrl-a");
-        h.read_jot(|j, cx| assert_eq!(j.active_editor().read(cx).selected_range(), 0..11));
+        h.read_jot(|j, _| assert_eq!(j.active_editor().selected_range(), 0..11));
         h.press_key("backspace");
-        h.read_jot(|j, cx| assert_eq!(j.active_editor().read(cx).text().len(), 0));
+        h.read_jot(|j, _| assert_eq!(j.active_editor().text().len(), 0));
         h.press_key("ctrl-z");
-        h.read_jot(|j, cx| assert_eq!(j.active_editor().read(cx).value().as_str(), "hello world"));
+        h.read_jot(|j, _| assert_eq!(j.active_editor().value().as_str(), "hello world"));
         h.press_key("ctrl-y");
-        h.read_jot(|j, cx| assert_eq!(j.active_editor().read(cx).text().len(), 0));
+        h.read_jot(|j, _| assert_eq!(j.active_editor().text().len(), 0));
 
         // Scroll wheel scrolls multi-line document, activates Scrollbar, and scrollbar track
         // click scrolls without moving the editor caret/selection.
@@ -1871,7 +1996,7 @@ mod ui_regression_tests {
         h.type_text(&big);
         h.press_key("ctrl-home");
         h.scroll_wheel(editor_center, -6.0, Modifiers::default());
-        let after_wheel_y = h.read_jot(|j, cx| j.active_editor().read(cx).scroll_handle.offset().y);
+        let after_wheel_y = h.read_jot(|j, _| j.active_editor().scroll_offset().y);
         assert!(
             after_wheel_y < px(0.0),
             "scrolling down with mouse wheel must scroll editor viewport"
@@ -1879,10 +2004,10 @@ mod ui_regression_tests {
         let ed_bounds = h.element_bounds("editor-area").unwrap();
         let track_pt = point(ed_bounds.right() - px(6.0), ed_bounds.bottom() - px(40.0));
         h.click_point(track_pt, MouseButton::Left);
-        h.read_jot(|j, cx| {
-            let ed = j.active_editor().read(cx);
+        h.read_jot(|j, _| {
+            let ed = j.active_editor();
             assert!(
-                ed.scroll_handle.offset().y < after_wheel_y,
+                ed.scroll_offset().y < after_wheel_y,
                 "clicking vertical scrollbar track must jump scroll offset further down"
             );
             assert!(
@@ -1900,17 +2025,17 @@ mod ui_regression_tests {
             ed_bounds.top() + px(EDITOR_PADDING_TOP + 10.0),
         );
         h.click_point_count(first_char, MouseButton::Left, 2);
-        h.read_jot(|j, cx| {
+        h.read_jot(|j, _| {
             assert_eq!(
-                j.active_editor().read(cx).selected_range(),
+                j.active_editor().selected_range(),
                 0..5,
                 "double-click must select word"
             );
         });
         h.click_point_count(first_char, MouseButton::Left, 3);
-        h.read_jot(|j, cx| {
+        h.read_jot(|j, _| {
             assert_eq!(
-                j.active_editor().read(cx).selected_range(),
+                j.active_editor().selected_range(),
                 0..16,
                 "triple-click must select full line"
             );
@@ -1924,8 +2049,8 @@ mod ui_regression_tests {
             ed_bounds.top() + px(EDITOR_PADDING_TOP + 10.0),
         );
         h.drag_points(drag_start, drag_end);
-        h.read_jot(|j, cx| {
-            let sel = j.active_editor().read(cx).selected_range();
+        h.read_jot(|j, _| {
+            let sel = j.active_editor().selected_range();
             assert!(!sel.is_empty(), "dragging in editor must create a text selection");
         });
 
@@ -1957,13 +2082,13 @@ mod ui_regression_tests {
         // Pump foreground until background load delivers the file.
         for _ in 0..40 {
             h.draw();
-            if h.read_jot(|j, cx| j.active_editor().read(cx).value().as_str() == "dropped content 123") {
+            if h.read_jot(|j, _| j.active_editor().value().as_str() == "dropped content 123") {
                 break;
             }
             std::thread::sleep(Duration::from_millis(10));
         }
-        h.read_jot(|j, cx| {
-            assert_eq!(j.active_editor().read(cx).value().as_str(), "dropped content 123");
+        h.read_jot(|j, _| {
+            assert_eq!(j.active_editor().value().as_str(), "dropped content 123");
             assert!(j.tabs[0].data.path.is_some());
         });
         let _ = std::fs::remove_file(&tmp);
@@ -2347,7 +2472,7 @@ mod ui_regression_tests {
             assert_eq!(j.tabs.len(), 2);
             assert!(cx.shared.view.word_wrap);
             for tab in &j.tabs {
-                assert!(tab.data.editor.read(cx).soft_wrap_enabled());
+                assert!(tab.data.editor.soft_wrap_enabled());
             }
         });
         h.click_id("View");
@@ -2355,7 +2480,7 @@ mod ui_regression_tests {
         h.read_jot(|j, cx| {
             assert!(!cx.shared.view.word_wrap);
             for tab in &j.tabs {
-                assert!(!tab.data.editor.read(cx).soft_wrap_enabled());
+                assert!(!tab.data.editor.soft_wrap_enabled());
             }
         });
     }

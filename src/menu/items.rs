@@ -63,7 +63,7 @@ pub(super) struct CommandButton {
     pub(super) glyph: &'static str,
 }
 
-pub(super) fn context_menu(editor: &EditorState) -> (Vec<CommandButton>, Vec<Entry>) {
+pub(super) fn context_menu(editor: &Editor) -> (Vec<CommandButton>, Vec<Entry>) {
     let selection = !editor.selected_range().is_empty();
     let button = |label, glyph, enabled, command| CommandButton {
         command: MenuCommand::new(label, enabled, command),
@@ -195,7 +195,7 @@ impl MenuKind {
             .map_or(self, |ix| Self::ALL[ix])
     }
 
-    pub(super) fn entries(self, editor: &EditorState, cx: &App) -> Vec<Entry> {
+    pub(super) fn entries(self, editor: &Editor, cx: &App) -> Vec<Entry> {
         match self {
             Self::File => vec![
                 Entry::command("&New tab", Command::NewTab),

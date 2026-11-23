@@ -1,5 +1,5 @@
 use super::*;
-use crate::editor::{EditorState, Position};
+use crate::editor::{Editor, EditorSlot, Position};
 use crate::ui::{AnimStatus, animate_from};
 use field::{BODY_LINE, BODY_SIZE, text_field};
 
@@ -120,17 +120,14 @@ pub(crate) struct Dialogs {
     open: Vec<OpenDialog>,
     serial: usize,
     focus: FocusHandle,
-    line: Entity<EditorState>,
+    pub(crate) line: Editor,
 }
 
 impl Dialogs {
-    pub(crate) fn new(window: &mut Window, cx: &mut Context<Jot>) -> Self {
-        let line = cx.new(|cx| {
-            EditorState::single_line(window, cx)
-                .caret_height(px(field::FIELD_CARET))
-                .validate(|text, _| text.chars().all(|c| c.is_ascii_digit()))
-        });
-        line.read(cx).focus_handle(cx);
+    pub(crate) fn new(window: &Window, cx: &App) -> Self {
+        let line = Editor::single_line(window, cx)
+            .with_caret_height(px(field::FIELD_CARET))
+            .with_validate(|text| text.chars().all(|c| c.is_ascii_digit()));
         Self {
             open: Vec::new(),
             serial: 0,
@@ -188,20 +185,19 @@ impl Jot {
         if self.dialogs.active().is_some() {
             return;
         }
-        let editor = self.active_editor().read(cx);
+        let editor = self.active_editor();
         let row = editor.text().offset_to_point(editor.cursor()).row;
         self.show_go_to(Some(row + 1), window, cx);
     }
 
     fn show_go_to(&mut self, line: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
         self.dialogs.show(DialogKind::GoTo, cx);
-        self.dialogs.line.update(cx, |input, cx| {
-            if let Some(line) = line {
-                input.set_value(line.to_string(), window, cx);
-            }
-            input.select_all(window, cx);
-            input.focus(window, cx);
-        });
+        if let Some(line) = line {
+            self.dialogs.line.set_value(&line.to_string(), cx);
+        }
+        self.dialogs.line.select_all();
+        self.focus_editor(EditorSlot::GoToLine, window, cx);
+        cx.notify();
     }
 
     fn handle_dialog_command(
@@ -245,7 +241,7 @@ impl Jot {
         };
         let mut ring = Vec::with_capacity(dialog.buttons.len() + 1);
         if matches!(dialog.kind, DialogKind::GoTo) {
-            ring.push(self.dialogs.line.focus_handle(cx));
+            ring.push(self.dialogs.line.focus_handle().clone());
         }
         ring.extend(dialog.buttons.iter().cloned());
         if ring.is_empty() {
@@ -311,19 +307,19 @@ impl Jot {
 
     fn close_dialogs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.dialogs.hide();
-        self.active_editor().focus_handle(cx).focus(window, cx);
+        self.focus_active_editor(window, cx);
     }
 
     fn submit_go_to(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let value = self.dialogs.line.read(cx).value();
-        let editor = self.active_editor().clone();
-        let lines = editor.read(cx).text().lines_len();
+        let value = self.dialogs.line.value();
+        let lines = self.active_editor().text().lines_len();
         match value.parse::<usize>() {
             Ok(line) if (1..=lines).contains(&line) => {
                 self.close_dialogs(window, cx);
-                editor.update(cx, |editor, cx| {
-                    editor.set_cursor_position(Position::new((line - 1) as u32, 0), window, cx)
-                });
+                self.active_editor_mut()
+                    .set_cursor_position(Position::new((line - 1) as u32, 0));
+                self.focus_active_editor(window, cx);
+                cx.notify();
             }
             _ => {
                 self.dialogs.show(DialogKind::LineOutOfRange, cx);
@@ -452,6 +448,7 @@ impl Jot {
             )
             .child(text_field(
                 &self.dialogs.line,
+                self.editor_host(EditorSlot::GoToLine, cx),
                 false,
                 p.content_surface,
                 s,

@@ -4,7 +4,7 @@ use crate::win32::{
     top_visible_window_at,
 };
 use std::time::Instant;
-use tabs::{CAPTION_WIDTH, STRIP_LEFT, STRIP_TOP, TAB_HEIGHT, window_listeners};
+use tabs::{CAPTION_WIDTH, STRIP_LEFT, STRIP_TOP, TAB_HEIGHT, TabId, window_listeners};
 
 const DRAG_THRESHOLD: f32 = 10.;
 const DETACH_MAGNETISM: f32 = 15.;
@@ -29,7 +29,7 @@ enum Phase {
 pub(crate) struct TabDrag {
     owner: Owner,
     source: Owner,
-    tab: EntityId,
+    tab: TabId,
     grab: Point<f32>,
     start: f32,
     press: ScreenPoint,
@@ -63,7 +63,7 @@ fn jot_windows(cx: &App) -> impl Iterator<Item = Owner> + '_ {
 
 pub(crate) fn press(
     owner: Owner,
-    tab: EntityId,
+    tab: TabId,
     index: usize,
     grab: Point<f32>,
     position: Point<Pixels>,
@@ -98,7 +98,7 @@ pub(crate) fn dragging(cx: &App) -> bool {
         .is_some_and(|drag| matches!(drag.phase, Phase::Dragging))
 }
 
-pub(crate) fn forget(tab: EntityId, cx: &mut App) {
+pub(crate) fn forget(tab: TabId, cx: &mut App) {
     if cx
         .shared
         .tab_drag

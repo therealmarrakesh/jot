@@ -7,13 +7,13 @@ use std::collections::{HashMap, HashSet};
 use windows::Win32::Graphics::DirectWrite::IDWriteTextLayout;
 
 use crate::layout::{AvailableSpace, LayoutEngine, LayoutId};
-use crate::ui::app::{App, Context};
+use crate::ui::app::App;
 use crate::ui::color::Rgba;
 use crate::ui::element::{
-    ContentMask, DispatchPhase, ElementId, ElementInputHandler, EntityInputHandler,
-    ErasedInputHandler, GlobalElementId, Hitbox, HitboxBehavior, HitboxId, UiNode,
+    ContentMask, DispatchPhase, ElementId, GlobalElementId, Hitbox, HitboxBehavior, HitboxId,
+    InputHandler, UiNode,
 };
-use crate::ui::entity::{Entity, EntityId};
+use crate::ui::entity::EntityId;
 use crate::ui::focus::{FocusHandle, FocusId};
 use crate::ui::geometry::{Bounds, Corners, Pixels, Point, Size};
 use crate::ui::graphics::d2d_renderer::{BoxShadow, PaintQuad};
@@ -70,7 +70,7 @@ pub(super) struct FrameState {
     pub(super) drop_listeners: Vec<DropListener>,
     pub(super) focus_nodes: HashMap<FocusId, FocusNode>,
     pub(super) root_key_contexts: Vec<KeyContext>,
-    pub(super) input_handler: Option<(FocusId, Box<dyn ErasedInputHandler>)>,
+    pub(super) input_handler: Option<(FocusId, Box<dyn InputHandler>)>,
     #[cfg(test)]
     pub(super) element_bounds: HashMap<ElementId, Bounds<Pixels>>,
 }
@@ -102,18 +102,6 @@ impl Default for FrameState {
 
 impl Window {
     // ---- Persistent per-element state ----
-
-    pub(crate) fn use_state<T: 'static>(
-        &mut self,
-        cx: &mut App,
-        init: impl FnOnce(&mut Window, &mut Context<T>) -> T,
-    ) -> Entity<T> {
-        let gid = GlobalElementId(self.id_stack.clone());
-        self.with_element_state(&gid, |prev: Option<Entity<T>>, window| {
-            let entity = prev.unwrap_or_else(|| cx.new(|cx| init(window, cx)));
-            (entity.clone(), entity)
-        })
-    }
 
     pub(crate) fn with_element_state<S: 'static, R>(
         &mut self,
@@ -499,12 +487,7 @@ impl Window {
         });
     }
 
-    pub(crate) fn handle_input<V: EntityInputHandler>(
-        &mut self,
-        focus: &FocusHandle,
-        handler: ElementInputHandler<V>,
-        _cx: &mut App,
-    ) {
+    pub(crate) fn handle_input(&mut self, focus: &FocusHandle, handler: impl InputHandler) {
         if self.focused_id() == Some(focus.id()) {
             self.frame.input_handler = Some((focus.id(), Box::new(handler)));
         }
@@ -585,10 +568,6 @@ impl Window {
         self.focused_handle.as_ref().map(FocusHandle::id)
     }
 
-    pub(crate) fn focused(&self, _cx: &App) -> Option<FocusHandle> {
-        self.focused_handle.clone()
-    }
-
     pub(crate) fn focus_handle(&mut self, handle: FocusHandle, cx: &mut App) {
         let id = handle.id();
         let prev = self.focused_id();
@@ -597,10 +576,7 @@ impl Window {
         }
         self.focused_handle = Some(handle);
         self.dirty = true;
-        if let Some(old) = prev {
-            cx.queue_focus_event(self.id, old, false);
-        }
-        cx.queue_focus_event(self.id, id, true);
+        cx.queue_focus_change(self.id, prev, Some(id));
     }
 
     pub(crate) fn focus_contains(&self, ancestor: FocusId) -> bool {

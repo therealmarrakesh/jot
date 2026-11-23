@@ -514,13 +514,13 @@ impl Jot {
         self.menu_bar.submenu_timer.cancel();
         self.menu_bar.bar_focus = Some(kind);
         self.menu_bar.focus.focus(window, cx);
-        self.sync_selection_focus(cx);
+        self.sync_selection_focus();
         cx.notify();
     }
 
     fn menu_leave_bar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.menu_bar.bar_focus = None;
-        self.active_editor().focus_handle(cx).focus(window, cx);
+        self.focus_active_editor(window, cx);
         cx.notify();
     }
 
@@ -533,8 +533,9 @@ impl Jot {
 
     fn menu_open(&mut self, kind: MenuKind, window: &mut Window, cx: &mut Context<Self>) {
         let editor = self.active_editor();
-        let entries = kind.entries(editor.read(cx), cx);
-        let panel = Panel::new(entries, MIN_WIDTH, true, &editor.focus_handle(cx), window);
+        let entries = kind.entries(editor, cx);
+        let focus = editor.focus_handle().clone();
+        let panel = Panel::new(entries, MIN_WIDTH, true, &focus, window);
         self.menu_show(OpenMenu::new(Some(kind), panel), window, cx);
     }
 
@@ -545,14 +546,9 @@ impl Jot {
         cx: &mut Context<Self>,
     ) {
         let editor = self.active_editor();
-        let (commands, entries) = context_menu(editor.read(cx));
-        let panel = Panel::new(
-            entries,
-            CONTEXT_WIDTH,
-            false,
-            &editor.focus_handle(cx),
-            window,
-        );
+        let (commands, entries) = context_menu(editor);
+        let focus = editor.focus_handle().clone();
+        let panel = Panel::new(entries, CONTEXT_WIDTH, false, &focus, window);
         let focused_command = commands.iter().position(|button| button.command.enabled);
         self.menu_show(
             OpenMenu {
@@ -575,13 +571,8 @@ impl Jot {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let panel = Panel::new(
-            entries,
-            FLYOUT_MIN_WIDTH,
-            true,
-            &self.active_editor().focus_handle(cx),
-            window,
-        );
+        let focus = self.active_editor().focus_handle().clone();
+        let panel = Panel::new(entries, FLYOUT_MIN_WIDTH, true, &focus, window);
         let anchor = point(
             target.center().x - px((panel.width / 2.).floor()),
             target.top() - px(FLYOUT_GAP + panel.height()),
@@ -604,7 +595,7 @@ impl Jot {
         self.menu_bar.open = Some(OpenMenu { motion, ..open });
         self.menu_bar.submenu_timer.cancel();
         self.menu_bar.focus.focus(window, cx);
-        self.sync_selection_focus(cx);
+        self.sync_selection_focus();
         cx.notify();
     }
 
@@ -615,9 +606,9 @@ impl Jot {
             open.return_focus.take()
         });
         self.menu_bar.submenu_timer.cancel();
-        let target = return_focus.unwrap_or_else(|| self.active_editor().focus_handle(cx));
+        let target = return_focus.unwrap_or_else(|| self.active_editor().focus_handle().clone());
         target.focus(window, cx);
-        self.sync_selection_focus(cx);
+        self.sync_selection_focus();
         cx.notify();
     }
 
@@ -636,7 +627,7 @@ impl Jot {
 
     fn menu_dispatch(&mut self, command: Command, window: &mut Window, cx: &mut Context<Self>) {
         self.menu_close(window, cx);
-        let target = self.active_editor().focus_handle(cx);
+        let target = self.active_editor().focus_handle().clone();
         window.defer(cx, move |window, cx| {
             target.dispatch_command(command, window, cx);
         });
@@ -676,7 +667,7 @@ impl Jot {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let action_context = self.active_editor().focus_handle(cx);
+        let action_context = self.active_editor().focus_handle().clone();
         let serial = self.menu_bar.next_serial();
         self.menu_bar.submenu_timer.cancel();
         let Some(open) = self.menu_bar.live_open_mut() else {

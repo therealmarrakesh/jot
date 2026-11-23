@@ -1,5 +1,29 @@
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use super::*;
 use crate::ui::{AnimStatus, animate_from};
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct TabId(pub(crate) u64);
+
+impl TabId {
+    pub(crate) fn next() -> Self {
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        Self(NEXT.fetch_add(1, Ordering::Relaxed))
+    }
+}
+
+impl From<TabId> for ElementId {
+    fn from(id: TabId) -> Self {
+        ElementId::Integer(id.0)
+    }
+}
+
+impl From<(&'static str, TabId)> for ElementId {
+    fn from((name, id): (&'static str, TabId)) -> Self {
+        ElementId::NamedInteger(SharedString::new_static(name), id.0)
+    }
+}
 
 const TAB_WIDTH: f32 = 240.;
 const TAB_MIN_WIDTH: f32 = 80.;
@@ -67,7 +91,7 @@ struct Ghost {
 
 #[derive(Clone, Copy)]
 struct Drag {
-    id: EntityId,
+    id: TabId,
     grab: f32,
     last_move: f32,
     left: f32,
@@ -93,8 +117,8 @@ pub(crate) struct TabStrip {
     frozen: Option<f32>,
     ghosts: Vec<Ghost>,
     drag: Option<Drag>,
-    lifted: Option<EntityId>,
-    hovered: Option<EntityId>,
+    lifted: Option<TabId>,
+    hovered: Option<TabId>,
     area: Rc<Cell<Bounds<Pixels>>>,
     repeat: TimerHandle,
 }
@@ -178,7 +202,7 @@ impl TabStrip {
         }
     }
 
-    fn depart(&mut self, id: EntityId) {
+    fn depart(&mut self, id: TabId) {
         if self.drag.is_some_and(|drag| drag.id == id) {
             self.drag = None;
         }
@@ -362,43 +386,29 @@ fn tab_separator(p: Palette) -> Div {
 impl Jot {
     pub(crate) fn create_tab(
         content: Option<(PathBuf, document::Loaded)>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
+        window: &Window,
+        cx: &App,
     ) -> Tab {
         let word_wrap = cx.shared.view.word_wrap;
         let (path, text, format) = match content {
             Some((path, loaded)) => (Some(path), loaded.text, loaded.format),
             None => (None, Rope::new(), document::Format::default()),
         };
-        let editor = cx.new(|cx| {
-            let mut state = EditorState::multi_line(window, cx)
-                .soft_wrap(word_wrap)
-                .viewport_wheel_step()
-                .default_rope(text);
-            state.set_editor_paddings(EDITOR_PADDINGS);
-            state
-        });
-        Self::adopt_tab(
-            TabData {
-                editor,
-                zoom: 1.,
-                path,
-                format,
-            },
-            window,
-            cx,
-        )
+        let editor = Editor::multi_line(window, cx)
+            .with_soft_wrap(word_wrap)
+            .with_viewport_wheel_step()
+            .with_rope(text)
+            .with_paddings(EDITOR_PADDINGS);
+        Self::adopt_tab(TabData {
+            id: TabId::next(),
+            editor,
+            zoom: 1.,
+            path,
+            format,
+        })
     }
 
-    pub(crate) fn adopt_tab(data: TabData, window: &mut Window, cx: &mut Context<Self>) -> Tab {
-        let jot = cx.weak_entity();
-        data.editor.update(cx, |editor, cx| {
-            editor.attach_window(window, cx);
-            editor.on_context_menu(Rc::new(move |position, window, cx| {
-                jot.update(cx, |jot, cx| jot.open_context_menu(position, window, cx))
-                    .ok();
-            }));
-        });
+    pub(crate) fn adopt_tab(data: TabData) -> Tab {
         Tab {
             data,
             slot: SlotKey::default(),
@@ -409,10 +419,8 @@ impl Jot {
         document::display_name(self.tabs[ix].data.path.as_deref())
     }
 
-    pub(crate) fn tab_index(&self, id: EntityId) -> Option<usize> {
-        self.tabs
-            .iter()
-            .position(|tab| tab.data.editor.entity_id() == id)
+    pub(crate) fn tab_index(&self, id: TabId) -> Option<usize> {
+        self.tabs.iter().position(|tab| tab.data.id == id)
     }
 
     pub(crate) fn add_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -436,11 +444,11 @@ impl Jot {
     ) {
         tab.slot = self.tabs[ix].slot;
         let replaced = std::mem::replace(&mut self.tabs[ix], tab);
-        self.forget_tab(replaced.data.editor.entity_id(), cx);
+        self.forget_tab(replaced.data.id, cx);
         self.activate_tab(ix, window, cx);
     }
 
-    fn forget_tab(&mut self, id: EntityId, cx: &mut Context<Self>) {
+    fn forget_tab(&mut self, id: TabId, cx: &mut Context<Self>) {
         self.strip.depart(id);
         tab_drag::forget(id, cx);
     }
@@ -453,7 +461,7 @@ impl Jot {
         let width = self.strip.width;
         let name = self.tab_name(ix).into();
         let tab = self.tabs.remove(ix);
-        self.forget_tab(tab.data.editor.entity_id(), cx);
+        self.forget_tab(tab.data.id, cx);
         if ix < self.tabs.len() && self.strip.area.get().contains(&window.mouse_position()) {
             self.strip.frozen = Some(width);
         }
@@ -480,7 +488,7 @@ impl Jot {
     }
 
     fn tab_target(&self, ix: usize) -> f32 {
-        let id = self.tabs[ix].data.editor.entity_id();
+        let id = self.tabs[ix].data.id;
         self.strip
             .drag
             .filter(|drag| drag.id == id)
@@ -523,7 +531,7 @@ impl Jot {
 
     pub(crate) fn drag_tab(
         &mut self,
-        id: EntityId,
+        id: TabId,
         x: f32,
         grab: f32,
         start: f32,
@@ -551,7 +559,7 @@ impl Jot {
         self.strip.snap_scroll = true;
         self.strip.reveal(left, left + width);
         if to != from && (x - drag.last_move).abs() > REORDER_THRESHOLD {
-            let active = self.active_editor().entity_id();
+            let active = self.active_tab_id();
             let tab = self.tabs.remove(from);
             self.tabs.insert(to, tab);
             self.active = self.tab_index(active).unwrap_or(to);
@@ -571,7 +579,7 @@ impl Jot {
 
     pub(crate) fn take_tab(
         &mut self,
-        id: EntityId,
+        id: TabId,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<TabData> {
@@ -594,9 +602,9 @@ impl Jot {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let mut tab = Self::adopt_tab(data, window, cx);
+        let mut tab = Self::adopt_tab(data);
         tab.slot = self.strip.key();
-        let id = tab.data.editor.entity_id();
+        let id = tab.data.id;
         let count = self.tabs.len();
         self.strip.measure(count + 1);
         let (x, left, ix) = self.strip.place(x, grab, count);
@@ -620,7 +628,7 @@ impl Jot {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let mut tab = Self::adopt_tab(data, window, cx);
+        let mut tab = Self::adopt_tab(data);
         let ix = ix.min(self.tabs.len());
         tab.slot = self.strip.key();
         self.tabs.insert(ix, tab);
@@ -630,7 +638,7 @@ impl Jot {
 
     pub(crate) fn return_tab(
         &mut self,
-        id: EntityId,
+        id: TabId,
         ix: usize,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -664,7 +672,7 @@ impl Jot {
         let mut lifted_moving = false;
         let mut tabs = Vec::with_capacity(self.tabs.len());
         for (ix, tab) in self.tabs.iter().enumerate() {
-            let id = tab.data.editor.entity_id();
+            let id = tab.data.id;
             let dragged = self.strip.drag.is_some_and(|drag| drag.id == id);
             let (x, moving) = slide(
                 tab.slot.x(),
@@ -710,7 +718,7 @@ impl Jot {
     fn tab(&self, ix: usize, left: f32, cx: &mut Context<Self>) -> Div {
         let p = palette(cx);
         let tab = &self.tabs[ix];
-        let id = tab.data.editor.entity_id();
+        let id = tab.data.id;
         let active = ix == self.active;
         let hovered = self
             .strip
@@ -718,7 +726,7 @@ impl Jot {
             .and_then(|hovered| self.tab_index(hovered));
         let separator =
             !active && ix + 1 != self.active && hovered != Some(ix) && hovered != Some(ix + 1);
-        let dirty = tab.data.is_dirty(cx);
+        let dirty = tab.data.is_dirty();
         let show_close = self.strip.hovered == Some(id) || (active && !dirty);
         let show_dot = dirty && !show_close;
         let trailing = if show_close || show_dot {
@@ -794,7 +802,7 @@ impl Jot {
             .tooltip(tip)
     }
 
-    fn close_button(p: Palette, id: EntityId, inset: f32, cx: &mut Context<Self>) -> Div {
+    fn close_button(p: Palette, id: TabId, inset: f32, cx: &mut Context<Self>) -> Div {
         strip_button(
             p,
             ("close-tab", id),

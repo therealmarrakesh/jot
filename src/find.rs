@@ -1,7 +1,7 @@
 use super::*;
-use field::{BODY_SIZE, CONTROL_HEIGHT, CONTROL_RADIUS, OVERLAY_RADIUS, text_field};
-use crate::editor::EditorState;
+use crate::editor::{Editor, EditorSlot};
 use crate::ui::{AnimStatus, animate_from};
+use field::{BODY_SIZE, CONTROL_HEIGHT, CONTROL_RADIUS, OVERLAY_RADIUS, text_field};
 use menu::Entry;
 
 const QUERY_CONTEXT: &str = "JotFindQuery";
@@ -342,8 +342,8 @@ pub(crate) struct FindBar {
     match_case: bool,
     wrap_around: bool,
     focus: FocusHandle,
-    query: Entity<EditorState>,
-    replacement: Entity<EditorState>,
+    pub(crate) query: Editor,
+    pub(crate) replacement: Editor,
     notice: Option<SharedString>,
     notice_timer: TimerHandle,
     matcher: Option<Matcher>,
@@ -352,17 +352,13 @@ pub(crate) struct FindBar {
 }
 
 impl FindBar {
-    pub(crate) fn new(window: &mut Window, cx: &mut Context<Jot>) -> Self {
-        let query = cx.new(|cx| {
-            EditorState::single_line(window, cx)
-                .caret_height(px(field::FIELD_CARET))
-                .placeholder("Find")
-        });
-        let replacement = cx.new(|cx| {
-            EditorState::single_line(window, cx)
-                .caret_height(px(field::FIELD_CARET))
-                .placeholder("Replace")
-        });
+    pub(crate) fn new(window: &Window, cx: &App) -> Self {
+        let query = Editor::single_line(window, cx)
+            .with_caret_height(px(field::FIELD_CARET))
+            .with_placeholder("Find");
+        let replacement = Editor::single_line(window, cx)
+            .with_caret_height(px(field::FIELD_CARET))
+            .with_placeholder("Replace");
         Self {
             visible: false,
             closing: false,
@@ -381,8 +377,8 @@ impl FindBar {
         }
     }
 
-    fn prepare(&mut self, cx: &App) -> Option<String> {
-        let query = self.query.read(cx).value().to_string();
+    fn prepare(&mut self) -> Option<String> {
+        let query = self.query.value().to_string();
         if query.is_empty() {
             return None;
         }
@@ -471,25 +467,25 @@ impl FindBar {
 
 impl Jot {
     pub(crate) fn find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.has_text(cx) {
+        if self.has_text() {
             self.open_find(false, window, cx);
         }
     }
 
     pub(crate) fn replace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.has_text(cx) {
+        if self.has_text() {
             self.open_find(true, window, cx);
         }
     }
 
     pub(crate) fn find_next(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.has_text(cx) {
+        if self.has_text() {
             self.find_step(true, window, cx);
         }
     }
 
     pub(crate) fn find_previous(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.has_text(cx) {
+        if self.has_text() {
             self.find_step(false, window, cx);
         }
     }
@@ -505,77 +501,72 @@ impl Jot {
     }
 
     pub(crate) fn replace_next(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.find.prepare(cx).is_none() {
+        if self.find.prepare().is_none() {
             return;
         }
-        let editor = self.active_editor();
-        let selected = editor.read(cx).selected_text().to_string();
+        let selected = self.active_editor().selected_text().to_string();
         let is_match = self
             .find
             .matcher
             .as_ref()
             .is_some_and(|matcher| matcher.is_match(&selected));
         if is_match {
-            let replacement = self.find.replacement.read(cx).value();
-            editor.update(cx, |editor, cx| editor.replace(replacement, window, cx));
+            let replacement = self.find.replacement.value();
+            self.active_editor_mut().replace(replacement.as_str(), cx);
         }
         self.find_step(true, window, cx);
     }
 
     pub(crate) fn replace_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(query) = self.find.prepare(cx) else {
+        let Some(query) = self.find.prepare() else {
             return;
         };
-        let editor = self.active_editor().clone();
         let (text, cursor) = {
-            let editor = editor.read(cx);
+            let editor = self.active_editor();
             (editor.text().clone(), editor.cursor())
         };
-        let find = &mut self.find;
-        let ranges = match find.matcher.as_ref() {
-            Some(matcher) => matcher.all(&text, &mut find.buffer),
+        let ranges = match self.find.matcher.as_ref() {
+            Some(matcher) => matcher.all(&text, &mut self.find.buffer),
             None => return,
         };
         if ranges.is_empty() {
             self.show_notice(not_found(&query), cx);
             return;
         }
-        let replacement = self.find.replacement.read(cx).value().to_string();
+        let replacement = self.find.replacement.value().to_string();
         let next_cursor = cursor_after_replace_all(cursor, &ranges, replacement.len());
         let edits = merge_edits(&text, ranges, &replacement);
-        editor.update(cx, |editor, cx| {
-            editor.replace_ranges(&edits, window, cx);
-            let text = editor.text();
-            let cursor = text.floor_char_boundary(next_cursor.min(text.len()));
-            editor.set_selected_range(cursor..cursor, cx);
-        });
+        let editor = self.active_editor_mut();
+        editor.replace_ranges(&edits, cx);
+        let clamped = editor
+            .text()
+            .floor_char_boundary(next_cursor.min(editor.text().len()));
+        editor.set_selected_range(clamped..clamped);
         self.refocus_find(window, cx);
     }
 
     fn refocus_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.find.is_open() {
-            let target = if self.find.replace
+            let slot = if self.find.replace
                 && self
                     .find
                     .replacement
-                    .focus_handle(cx)
+                    .focus_handle()
                     .contains_focused(window, cx)
             {
-                &self.find.replacement
+                EditorSlot::FindReplace
             } else {
-                &self.find.query
+                EditorSlot::FindQuery
             };
-            target.update(cx, |input, cx| input.focus(window, cx));
+            self.focus_editor(slot, window, cx);
         }
         cx.notify();
     }
 
     fn open_find(&mut self, replace: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let selected = self.active_editor().read(cx).selected_text().to_string();
+        let selected = self.active_editor().selected_text().to_string();
         if !selected.is_empty() && !selected.contains('\n') {
-            self.find
-                .query
-                .update(cx, |input, cx| input.set_value(selected, window, cx));
+            self.find.query.set_value(&selected, cx);
         }
         if !self.find.is_open() {
             self.find.serial += 1;
@@ -583,11 +574,9 @@ impl Jot {
             self.find.closing = false;
         }
         self.find.replace = replace;
-        self.find.query.update(cx, |input, cx| {
-            input.select_all(window, cx);
-            input.focus(window, cx);
-        });
-        self.sync_selection_focus(cx);
+        self.find.query.select_all();
+        self.focus_editor(EditorSlot::FindQuery, window, cx);
+        self.sync_selection_focus();
         cx.notify();
     }
 
@@ -598,29 +587,30 @@ impl Jot {
         self.find.closing = true;
         self.find.notice = None;
         self.find.notice_timer.cancel();
-        self.sync_selection_focus(cx);
-        self.active_editor().focus_handle(cx).focus(window, cx);
+        self.sync_selection_focus();
+        self.focus_active_editor(window, cx);
     }
 
     fn find_step(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(query) = self.find.prepare(cx) else {
+        let Some(query) = self.find.prepare() else {
             self.open_find(false, window, cx);
             return;
         };
-        let editor = self.active_editor().clone();
         let (text, selection) = {
-            let editor = editor.read(cx);
+            let editor = self.active_editor();
             (editor.text().clone(), editor.selected_range())
         };
         let wrap = self.find.wrap_around;
-        let find = &mut self.find;
-        let found = find
+        let found = self
+            .find
             .matcher
             .as_ref()
-            .and_then(|matcher| matcher.search(&text, selection, forward, wrap, &mut find.buffer));
+            .and_then(|matcher| {
+                matcher.search(&text, selection, forward, wrap, &mut self.find.buffer)
+            });
         match found {
             Some((range, wrapped)) => {
-                editor.update(cx, |editor, cx| editor.set_selected_range(range, cx));
+                self.active_editor_mut().set_selected_range(range);
                 if wrapped {
                     let notice = if forward {
                         "Found next from the top"
@@ -635,7 +625,7 @@ impl Jot {
             None => self.show_notice(not_found(&query), cx),
         }
         if !self.find.is_open() {
-            editor.focus_handle(cx).focus(window, cx);
+            self.focus_active_editor(window, cx);
         }
         cx.notify();
     }
@@ -665,7 +655,7 @@ impl Jot {
                 Command::ToggleWrapAround,
             ),
         ];
-        let return_focus = self.find.query.focus_handle(cx);
+        let return_focus = self.find.query.focus_handle().clone();
         self.open_flyout_above(entries, target, return_focus, window, cx);
     }
 
@@ -795,6 +785,7 @@ impl Jot {
                     .key_context(QUERY_CONTEXT)
                     .child(text_field(
                         &self.find.query,
+                        self.editor_host(EditorSlot::FindQuery, cx),
                         true,
                         p.card_surface,
                         s,
@@ -877,6 +868,7 @@ impl Jot {
                     .key_context(REPLACEMENT_CONTEXT)
                     .child(text_field(
                         &self.find.replacement,
+                        self.editor_host(EditorSlot::FindReplace, cx),
                         false,
                         p.card_surface,
                         s,

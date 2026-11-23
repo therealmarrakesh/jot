@@ -2,13 +2,11 @@
 //! `AnchoredNode`, `ScrollHandle`, hitboxes, and IME `EntityInputHandler`.
 
 use std::any::Any;
-use std::cell::Cell;
 use std::ops::Range;
-use std::rc::Rc;
 
 use crate::layout::{AvailableSpace, LayoutId};
 
-use super::app::{App, Context};
+use super::app::App;
 use super::div::{Div, TextNode};
 use super::entity::{Entity, EntityId};
 use super::geometry::{Bounds, Length, Pixels, Point, Size, point, px, relative};
@@ -57,12 +55,6 @@ impl From<EntityId> for ElementId {
 impl From<(&'static str, usize)> for ElementId {
     fn from((name, ix): (&'static str, usize)) -> Self {
         Self::NamedInteger(SharedString::new_static(name), ix as u64)
-    }
-}
-
-impl From<(&'static str, EntityId)> for ElementId {
-    fn from((name, id): (&'static str, EntityId)) -> Self {
-        Self::NamedInteger(SharedString::new_static(name), id.0)
     }
 }
 
@@ -122,29 +114,9 @@ impl Hitbox {
     }
 }
 
-/// Shared 2D scroll offset handle used by `EditorState` and `Scrollbar`.
-#[derive(Clone, Debug, Default)]
-pub(crate) struct ScrollHandle(Rc<Cell<Point<Pixels>>>);
-
-impl ScrollHandle {
-    pub(crate) fn new() -> Self {
-        Self(Rc::new(Cell::new(Point::default())))
-    }
-
-    #[inline]
-    pub(crate) fn offset(&self) -> Point<Pixels> {
-        self.0.get()
-    }
-
-    #[inline]
-    pub(crate) fn set_offset(&self, offset: Point<Pixels>) {
-        self.0.set(offset);
-    }
-}
-
-/// View trait implemented by root windows and nested views (`Jot`, `EditorState`, overlays).
+/// View trait implemented by root windows (`Jot`, overlays).
 pub(crate) trait Render: 'static + Sized {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl Into<UiNode>;
+    fn render(&mut self, window: &mut Window, cx: &mut super::app::Context<Self>) -> impl Into<UiNode>;
 }
 
 /// Escape-hatch trait for custom 3-phase widgets (`Editor`, `Scrollbar`, `tooltip::Host`).
@@ -472,20 +444,6 @@ impl UiNode {
         window.compute_layout(lid, available, cx);
         window.layout_bounds(lid).size
     }
-
-    pub(crate) fn prepaint_as_root(
-        &mut self,
-        origin: Point<Pixels>,
-        available: Size<AvailableSpace>,
-        window: &mut Window,
-        cx: &mut App,
-    ) {
-        let lid = self.request_layout(window, cx);
-        window.compute_layout(lid, available, cx);
-        window.with_element_offset(origin, |window| {
-            self.prepaint(window, cx);
-        });
-    }
 }
 
 impl From<Div> for UiNode {
@@ -599,41 +557,7 @@ pub(crate) struct UTF16Selection {
     pub(crate) range: Range<usize>,
 }
 
-pub(crate) trait EntityInputHandler: 'static + Sized {
-    fn selected_text_range(
-        &mut self,
-        ignore_disabled_input: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Option<UTF16Selection>;
-
-    fn replace_text_in_range(
-        &mut self,
-        range_utf16: Option<Range<usize>>,
-        new_text: &str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    );
-
-    fn replace_and_mark_text_in_range(
-        &mut self,
-        range_utf16: Option<Range<usize>>,
-        new_text: &str,
-        new_selected_range_utf16: Option<Range<usize>>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    );
-
-    fn bounds_for_range(
-        &mut self,
-        range_utf16: Range<usize>,
-        bounds: Bounds<Pixels>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Option<Bounds<Pixels>>;
-}
-
-pub(crate) trait ErasedInputHandler {
+pub(crate) trait InputHandler: 'static {
     fn selected_text_range(&mut self, window: &mut Window, cx: &mut App) -> Option<UTF16Selection>;
     fn replace_text_in_range(
         &mut self,
@@ -656,65 +580,4 @@ pub(crate) trait ErasedInputHandler {
         window: &mut Window,
         cx: &mut App,
     ) -> Option<Bounds<Pixels>>;
-}
-
-pub(crate) struct ElementInputHandler<V: EntityInputHandler> {
-    bounds: Bounds<Pixels>,
-    entity: Entity<V>,
-}
-
-impl<V: EntityInputHandler> ElementInputHandler<V> {
-    pub(crate) fn new(bounds: Bounds<Pixels>, entity: Entity<V>) -> Self {
-        Self { bounds, entity }
-    }
-}
-
-impl<V: EntityInputHandler> ErasedInputHandler for ElementInputHandler<V> {
-    fn selected_text_range(&mut self, window: &mut Window, cx: &mut App) -> Option<UTF16Selection> {
-        self.entity
-            .update(cx, |this, cx| this.selected_text_range(false, window, cx))
-    }
-
-    fn replace_text_in_range(
-        &mut self,
-        range_utf16: Option<Range<usize>>,
-        new_text: &str,
-        window: &mut Window,
-        cx: &mut App,
-    ) {
-        self.entity.update(cx, |this, cx| {
-            this.replace_text_in_range(range_utf16, new_text, window, cx)
-        });
-    }
-
-    fn replace_and_mark_text_in_range(
-        &mut self,
-        range_utf16: Option<Range<usize>>,
-        new_text: &str,
-        new_selected_range_utf16: Option<Range<usize>>,
-        window: &mut Window,
-        cx: &mut App,
-    ) {
-        self.entity.update(cx, |this, cx| {
-            this.replace_and_mark_text_in_range(
-                range_utf16,
-                new_text,
-                new_selected_range_utf16,
-                window,
-                cx,
-            )
-        });
-    }
-
-    fn bounds_for_range(
-        &mut self,
-        range_utf16: Range<usize>,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> Option<Bounds<Pixels>> {
-        let bounds = self.bounds;
-        self.entity.update(cx, |this, cx| {
-            this.bounds_for_range(range_utf16, bounds, window, cx)
-        })
-    }
 }

@@ -15,10 +15,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use crate::layout::LayoutEngine;
 use crate::win32::WindowHwnd;
 
-use super::app::{AnyWindowHandle, App, Context, Subscription};
+use super::app::{AnyWindowHandle, App, Subscription};
 use super::color::transparent_black;
 use super::element::{ElementId, GlobalElementId, HitboxBehavior};
-use super::entity::{AnyView, Entity, EntityId};
+use super::entity::{AnyView, EntityId};
 use super::focus::{FocusHandle, FocusId};
 use super::geometry::{Bounds, Pixels, Point, Size, point, px};
 use super::graphics::d2d_renderer::D2DRenderer;
@@ -51,7 +51,10 @@ impl From<u64> for WindowId {
 
 type ShouldCloseCallback = Box<dyn FnMut(&mut Window, &mut App) -> bool>;
 type WindowCallback = (Rc<Cell<bool>>, Box<dyn FnMut(&mut Window, &mut App) -> bool>);
-type FocusCallback = (FocusId, Rc<Cell<bool>>, Box<dyn FnMut(&mut Window, &mut App) -> bool>);
+type FocusChangeCallback = (
+    Rc<Cell<bool>>,
+    Box<dyn FnMut(Option<FocusId>, Option<FocusId>, &mut Window, &mut App) -> bool>,
+);
 
 pub(crate) struct Window {
     id: WindowId,
@@ -91,8 +94,7 @@ pub(crate) struct Window {
     activation_observers: Vec<WindowCallback>,
     appearance_observers: Vec<WindowCallback>,
     bounds_observers: Vec<WindowCallback>,
-    focus_in_observers: Vec<FocusCallback>,
-    focus_out_observers: Vec<FocusCallback>,
+    focus_change_observers: Vec<FocusChangeCallback>,
 }
 
 impl Window {
@@ -145,8 +147,7 @@ impl Window {
             activation_observers: Vec::new(),
             appearance_observers: Vec::new(),
             bounds_observers: Vec::new(),
-            focus_in_observers: Vec::new(),
-            focus_out_observers: Vec::new(),
+            focus_change_observers: Vec::new(),
         })
     }
 
@@ -241,14 +242,6 @@ impl Window {
         self.text_style().line_height_in_pixels()
     }
 
-    pub(crate) fn current_view(&self) -> EntityId {
-        self.view_stack
-            .last()
-            .copied()
-            .or_else(|| self.root_view.as_ref().map(AnyView::entity_id))
-            .unwrap_or(EntityId(0))
-    }
-
     pub(crate) fn pixel_snap_point(&self, p: Point<Pixels>) -> Point<Pixels> {
         let s = self.native.scale_factor;
         point(
@@ -323,30 +316,6 @@ impl Window {
         }
     }
 
-    pub(crate) fn listener_for<T: 'static, E: ?Sized>(
-        &self,
-        entity: &Entity<T>,
-        mut f: impl FnMut(&mut T, &E, &mut Window, &mut Context<T>) + 'static,
-    ) -> impl FnMut(&E, &mut Window, &mut App) + 'static {
-        let weak = entity.downgrade();
-        move |event, window, app| {
-            let _ = weak.update(app, |this, cx| f(this, event, window, cx));
-        }
-    }
-
-    pub(crate) fn command_listener_for<T: 'static>(
-        &self,
-        entity: &Entity<T>,
-        mut f: impl FnMut(&mut T, super::keymap::Command, &mut Window, &mut Context<T>) -> bool
-            + 'static,
-    ) -> impl FnMut(super::keymap::Command, &mut Window, &mut App) -> bool + 'static {
-        let weak = entity.downgrade();
-        move |command, window, app| {
-            weak.update(app, |this, cx| f(this, command, window, cx))
-                .unwrap_or(false)
-        }
-    }
-
     // ---- Observers ----
 
     pub(crate) fn on_activation_change(
@@ -376,25 +345,13 @@ impl Window {
         Subscription::new(move || active.set(false))
     }
 
-    pub(crate) fn on_focus_in(
+    pub(crate) fn on_focus_change(
         &mut self,
-        id: FocusId,
-        f: impl FnMut(&mut Window, &mut App) -> bool + 'static,
+        f: impl FnMut(Option<FocusId>, Option<FocusId>, &mut Window, &mut App) -> bool + 'static,
     ) -> Subscription {
         let active = Rc::new(Cell::new(true));
-        self.focus_in_observers
-            .push((id, active.clone(), Box::new(f)));
-        Subscription::new(move || active.set(false))
-    }
-
-    pub(crate) fn on_focus_out(
-        &mut self,
-        id: FocusId,
-        f: impl FnMut(&mut Window, &mut App) -> bool + 'static,
-    ) -> Subscription {
-        let active = Rc::new(Cell::new(true));
-        self.focus_out_observers
-            .push((id, active.clone(), Box::new(f)));
+        self.focus_change_observers
+            .push((active.clone(), Box::new(f)));
         Subscription::new(move || active.set(false))
     }
 
@@ -423,18 +380,16 @@ impl Window {
         self.bounds_observers = obs;
     }
 
-    pub(crate) fn fire_focus_in(&mut self, id: FocusId, cx: &mut App) {
-        let mut obs = std::mem::take(&mut self.focus_in_observers);
-        obs.retain_mut(|(target, a, cb)| a.get() && (*target != id || cb(self, cx)));
-        obs.append(&mut self.focus_in_observers);
-        self.focus_in_observers = obs;
-    }
-
-    pub(crate) fn fire_focus_out(&mut self, id: FocusId, cx: &mut App) {
-        let mut obs = std::mem::take(&mut self.focus_out_observers);
-        obs.retain_mut(|(target, a, cb)| a.get() && (*target != id || cb(self, cx)));
-        obs.append(&mut self.focus_out_observers);
-        self.focus_out_observers = obs;
+    pub(crate) fn fire_focus_change(
+        &mut self,
+        old_focus: Option<FocusId>,
+        new_focus: Option<FocusId>,
+        cx: &mut App,
+    ) {
+        let mut obs = std::mem::take(&mut self.focus_change_observers);
+        obs.retain_mut(|(a, cb)| a.get() && cb(old_focus, new_focus, self, cx));
+        obs.append(&mut self.focus_change_observers);
+        self.focus_change_observers = obs;
     }
 
     // ---- Frame lifecycle ----
