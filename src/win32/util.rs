@@ -57,21 +57,6 @@ impl HiLoWord for LPARAM {
     }
 }
 
-/// Queries a `u32` setting via `SystemParametersInfoW`.
-pub(crate) fn system_parameters_u32(action: u32) -> Option<u32> {
-    let mut value = 0u32;
-    unsafe {
-        SystemParametersInfoW(
-            SYSTEM_PARAMETERS_INFO_ACTION(action),
-            0,
-            Some((&raw mut value).cast()),
-            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
-        )
-    }
-    .is_ok()
-    .then_some(value)
-}
-
 /// Queries a `REG_DWORD` value under `HKEY_CURRENT_USER`.
 pub(crate) fn reg_get_dword(subkey: PCWSTR, value: PCWSTR) -> Option<u32> {
     let mut out = 0u32;

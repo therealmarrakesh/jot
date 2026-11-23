@@ -11,7 +11,9 @@ fn main() {
     println!("cargo:rerun-if-changed=Cargo.toml");
 
     compile_resources();
-    shader_compilation::compile_shaders();
+    if env::var_os("CARGO_FEATURE_D2D").is_none() {
+        shader_compilation::compile_shaders();
+    }
 }
 
 fn compile_resources() {

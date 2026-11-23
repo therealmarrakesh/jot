@@ -9,6 +9,7 @@ mod files;
 mod find;
 mod instance;
 mod keytips;
+mod layout;
 mod measure;
 mod menu;
 mod overlay;
@@ -17,6 +18,10 @@ mod tab_drag;
 mod tabs;
 mod theme;
 mod tooltip;
+#[cfg(not(feature = "d2d"))]
+mod ui;
+#[cfg(feature = "d2d")]
+#[path = "core/mod.rs"]
 mod ui;
 mod win32;
 
@@ -875,6 +880,7 @@ impl Jot {
                 .font_family(SMALL_FONT)
                 .text_size(px(12.))
                 .text_color(rgba(p.text_secondary))
+                .whitespace_nowrap()
                 .child(format!("Ln {}, Col {}", metrics.line, metrics.column))
                 .child(status_divider(p))
                 .child(character_count(metrics.selected, metrics.total))
@@ -1240,5 +1246,1002 @@ mod large_file_smoke {
     fn large_file_smoke_profile() {
         run_profile(50);
         run_profile(100);
+    }
+}
+
+#[cfg(all(test, feature = "d2d"))]
+mod d2d_regression_tests {
+    use super::*;
+
+    struct TestHarness {
+        app_cell: Rc<crate::ui::AppCell>,
+        handle: WindowHandle<Jot>,
+    }
+
+    impl TestHarness {
+        fn new() -> Self {
+            let platform = Rc::new(
+                crate::ui::WindowsPlatform::new().expect("WindowsPlatform::new failed"),
+            );
+            let app_cell = crate::ui::App::new_rc(platform);
+            let handle = {
+                let mut app = app_cell.inner.borrow_mut();
+                // Settle transitions in 1 frame so hit-tests are deterministic without sleeps.
+                app.set_reduce_motion(true);
+                editor::init(&mut app);
+                theme::apply(app.window_appearance(), &mut app);
+                app.set_global(ViewSettings {
+                    status_bar: true,
+                    word_wrap: true,
+                });
+                app.bind_keys(key_bindings());
+                app.bind_keys(menu::key_bindings());
+                app.bind_keys(dialog::key_bindings());
+                app.bind_keys(find::key_bindings());
+                app.on_action(|_: &NewWindow, cx| {
+                    let mut opts = window_options(Some(size(px(800.), px(600.))), cx);
+                    opts.show = false;
+                    opts.focus = false;
+                    let _ = cx.open_window(opts, |window, cx| {
+                        cx.new(|cx| Jot::new(None, window, cx))
+                    });
+                });
+                app.on_action(|_: &ToggleStatusBar, cx| {
+                    cx.update_global::<ViewSettings, _>(|view, _| {
+                        view.status_bar = !view.status_bar;
+                    });
+                });
+                app.on_action(|_: &ToggleTheme, cx| {
+                    cx.set_window_appearance(Some(if palette(cx).dark {
+                        WindowAppearance::Light
+                    } else {
+                        WindowAppearance::Dark
+                    }));
+                });
+                app.on_action(|_: &ToggleWordWrap, cx| {
+                    cx.update_global::<ViewSettings, _>(|view, _| {
+                        view.word_wrap = !view.word_wrap;
+                    });
+                });
+
+                let mut opts = window_options(Some(size(px(1024.), px(700.))), &app);
+                opts.show = false;
+                opts.focus = false;
+                let handle = app
+                    .open_window(opts, |window, cx| cx.new(|cx| Jot::new(None, window, cx)))
+                    .expect("open_window failed");
+                app.flush_effects();
+                handle
+            };
+            let mut harness = Self { app_cell, handle };
+            harness.draw();
+            harness
+        }
+
+        fn draw(&mut self) {
+            for _ in 0..2 {
+                {
+                    let mut app = self.app_cell.inner.borrow_mut();
+                    let _ = app.update_window_impl(self.handle.id, |root, window, cx| {
+                        window.draw_frame(&root, cx);
+                    });
+                    app.flush_effects();
+                }
+                let fg = self.app_cell.inner.borrow().foreground.clone();
+                fg.drain_ready();
+                {
+                    let mut app = self.app_cell.inner.borrow_mut();
+                    app.flush_effects();
+                }
+            }
+        }
+
+        fn window_open(&self) -> bool {
+            let app = self.app_cell.inner.borrow();
+            app.windows
+                .get(&self.handle.id)
+                .and_then(Option::as_ref)
+                .is_some()
+        }
+
+        fn read_jot<R>(&self, f: impl FnOnce(&Jot, &App) -> R) -> R {
+            let app = self.app_cell.inner.borrow();
+            let jot = self.handle.read(&app).expect("Jot window should be open");
+            f(jot, &app)
+        }
+
+        fn element_bounds(&self, id: impl Into<ElementId>) -> Option<Bounds<Pixels>> {
+            let id = id.into();
+            let app = self.app_cell.inner.borrow();
+            let win = app.windows.get(&self.handle.id)?.as_ref()?;
+            win.test_element_bounds(&id)
+        }
+
+        fn move_mouse(&mut self, pos: Point<Pixels>) {
+            {
+                let mut app = self.app_cell.inner.borrow_mut();
+                let _ = app.update_window_impl(self.handle.id, |_, window, cx| {
+                    window.dispatch_mouse_move(
+                        MouseMoveEvent {
+                            position: pos,
+                            pressed_button: None,
+                            modifiers: Modifiers::default(),
+                        },
+                        cx,
+                    );
+                });
+            }
+            self.draw();
+        }
+
+        fn click_point_count(
+            &mut self,
+            pos: Point<Pixels>,
+            button: MouseButton,
+            click_count: usize,
+        ) {
+            self.move_mouse(pos);
+            {
+                let mut app = self.app_cell.inner.borrow_mut();
+                let _ = app.update_window_impl(self.handle.id, |_, window, cx| {
+                    window.dispatch_mouse_down(
+                        MouseDownEvent {
+                            button,
+                            position: pos,
+                            modifiers: Modifiers::default(),
+                            click_count,
+                        },
+                        cx,
+                    );
+                });
+            }
+            self.draw();
+            {
+                let mut app = self.app_cell.inner.borrow_mut();
+                let _ = app.update_window_impl(self.handle.id, |_, window, cx| {
+                    window.dispatch_mouse_up(
+                        MouseUpEvent {
+                            button,
+                            position: pos,
+                            modifiers: Modifiers::default(),
+                            click_count,
+                        },
+                        cx,
+                    );
+                });
+            }
+            self.draw();
+        }
+
+        fn click_point(&mut self, pos: Point<Pixels>, button: MouseButton) {
+            self.click_point_count(pos, button, 1);
+        }
+
+        fn drag_points(&mut self, from: Point<Pixels>, to: Point<Pixels>) {
+            self.move_mouse(from);
+            {
+                let mut app = self.app_cell.inner.borrow_mut();
+                let _ = app.update_window_impl(self.handle.id, |_, window, cx| {
+                    window.dispatch_mouse_down(
+                        MouseDownEvent {
+                            button: MouseButton::Left,
+                            position: from,
+                            modifiers: Modifiers::default(),
+                            click_count: 1,
+                        },
+                        cx,
+                    );
+                });
+            }
+            self.draw();
+            {
+                let mut app = self.app_cell.inner.borrow_mut();
+                let _ = app.update_window_impl(self.handle.id, |_, window, cx| {
+                    window.dispatch_mouse_move(
+                        MouseMoveEvent {
+                            position: to,
+                            pressed_button: Some(MouseButton::Left),
+                            modifiers: Modifiers::default(),
+                        },
+                        cx,
+                    );
+                });
+            }
+            self.draw();
+            {
+                let mut app = self.app_cell.inner.borrow_mut();
+                let _ = app.update_window_impl(self.handle.id, |_, window, cx| {
+                    window.dispatch_mouse_up(
+                        MouseUpEvent {
+                            button: MouseButton::Left,
+                            position: to,
+                            modifiers: Modifiers::default(),
+                            click_count: 1,
+                        },
+                        cx,
+                    );
+                });
+            }
+            self.draw();
+        }
+
+        fn click_id(&mut self, id: impl Into<ElementId>) {
+            let id = id.into();
+            let bounds = self
+                .element_bounds(id.clone())
+                .unwrap_or_else(|| panic!("element {id:?} was not laid out"));
+            assert!(
+                !bounds.is_empty(),
+                "element {id:?} laid out with empty bounds {bounds:?}"
+            );
+            self.click_point(bounds.center(), MouseButton::Left);
+        }
+
+        fn middle_click_id(&mut self, id: impl Into<ElementId>) {
+            let id = id.into();
+            let bounds = self
+                .element_bounds(id.clone())
+                .unwrap_or_else(|| panic!("element {id:?} was not laid out"));
+            self.click_point(bounds.center(), MouseButton::Middle);
+        }
+
+        fn hover_id(&mut self, id: impl Into<ElementId>) {
+            let id = id.into();
+            let bounds = self
+                .element_bounds(id.clone())
+                .unwrap_or_else(|| panic!("element {id:?} was not laid out"));
+            self.move_mouse(bounds.center());
+        }
+
+        fn press_key(&mut self, spec: &str) {
+            let keystroke = Keystroke::parse(spec);
+            {
+                let mut app = self.app_cell.inner.borrow_mut();
+                let _ = app.update_window_impl(self.handle.id, |_, window, cx| {
+                    window.dispatch_key_down(
+                        KeyDownEvent {
+                            keystroke,
+                            is_held: false,
+                        },
+                        cx,
+                    );
+                });
+            }
+            self.draw();
+        }
+
+        fn type_text(&mut self, text: &str) {
+            {
+                let mut app = self.app_cell.inner.borrow_mut();
+                let _ = app.update_window_impl(self.handle.id, |_, window, cx| {
+                    window.dispatch_text_input(text, cx);
+                });
+            }
+            self.draw();
+        }
+
+        fn scroll_wheel(&mut self, pos: Point<Pixels>, lines_y: f32, modifiers: Modifiers) {
+            {
+                let mut app = self.app_cell.inner.borrow_mut();
+                let _ = app.update_window_impl(self.handle.id, |_, window, cx| {
+                    window.dispatch_scroll_wheel(
+                        ScrollWheelEvent {
+                            position: pos,
+                            delta: ScrollDelta::Lines(point(0.0, lines_y)),
+                            modifiers,
+                        },
+                        cx,
+                    );
+                });
+            }
+            self.draw();
+        }
+
+        fn close_if_open(&mut self) {
+            let mut app = self.app_cell.inner.borrow_mut();
+            app.remove_window_by_id(self.handle.id);
+        }
+    }
+
+    impl Drop for TestHarness {
+        fn drop(&mut self) {
+            self.close_if_open();
+        }
+    }
+
+    #[test]
+    fn tab_close_button_new_tab_hover_and_middle_click() {
+        let mut h = TestHarness::new();
+
+        // Add two tabs via the real '+' button.
+        h.click_id("new-tab");
+        h.click_id("new-tab");
+        let ids: Vec<EntityId> = h.read_jot(|j, _| {
+            assert_eq!(j.tabs.len(), 3);
+            assert_eq!(j.active, 2);
+            j.tabs.iter().map(|t| t.data.editor.entity_id()).collect()
+        });
+
+        // Click tab 0 to switch to it, then click its 'x' close button.
+        h.click_id(("tab", ids[0]));
+        h.read_jot(|j, _| assert_eq!(j.active, 0));
+        h.click_id(("close-tab", ids[0]));
+        h.read_jot(|j, cx| {
+            assert_eq!(j.tabs.len(), 2, "clicking active tab 'x' must close tab");
+            assert!(j.tab_index(ids[0]).is_none());
+            assert!(
+                !tab_drag::active(cx),
+                "tab close button must stop_propagation so parent tab drag does not start"
+            );
+        });
+
+        // Hover inactive tab (ids[2]) so its 'x' appears, then click 'x' to close it.
+        h.hover_id(("tab", ids[2]));
+        assert!(
+            h.element_bounds(("close-tab", ids[2])).is_some(),
+            "hovering inactive tab must reveal its 'x' button"
+        );
+        h.click_id(("close-tab", ids[2]));
+        h.read_jot(|j, _| {
+            assert_eq!(j.tabs.len(), 1, "clicking hovered inactive tab 'x' must close tab");
+            assert_eq!(j.tabs[0].data.editor.entity_id(), ids[1]);
+        });
+
+        // Add a tab and close it with middle-click on its tab face.
+        h.click_id("new-tab");
+        let second_id = h.read_jot(|j, _| {
+            assert_eq!(j.tabs.len(), 2);
+            j.tabs[1].data.editor.entity_id()
+        });
+        h.middle_click_id(("tab-face", second_id));
+        h.read_jot(|j, _| assert_eq!(j.tabs.len(), 1, "middle-clicking tab must close it"));
+
+        // Dirty the sole remaining tab and click 'x' -> discard prompt opens -> click "Don't save" -> closes window.
+        h.type_text("unsaved text");
+        let last_id = h.read_jot(|j, _| j.tabs[0].data.editor.entity_id());
+        h.hover_id(("tab", last_id));
+        h.click_id(("close-tab", last_id));
+        h.read_jot(|j, _| {
+            assert!(
+                j.dialogs.is_open(),
+                "closing dirty tab via 'x' must open save confirmation dialog"
+            );
+        });
+        h.click_id(("button", 1)); // "Don't save"
+        assert!(
+            !h.window_open(),
+            "confirming Don't save on last tab must close the window"
+        );
+
+        // Also verify closing a clean sole tab via 'x' immediately closes the window.
+        let mut h2 = TestHarness::new();
+        let sole_id = h2.read_jot(|j, _| j.tabs[0].data.editor.entity_id());
+        h2.click_id(("close-tab", sole_id));
+        assert!(
+            !h2.window_open(),
+            "clicking 'x' on sole clean tab must close the window"
+        );
+    }
+
+    #[test]
+    fn menus_shortcuts_toggles_submenus_and_context_menu() {
+        let mut h = TestHarness::new();
+
+        // Verify shortcut hints resolve even while AppCell is mutably borrowed.
+        {
+            let mut app = h.app_cell.inner.borrow_mut();
+            app.update_window_impl(h.handle.id, |root, window, cx| {
+                let jot = root.downcast::<Jot>().unwrap();
+                let focus = jot.read(cx).active_editor().focus_handle(cx);
+                assert!(window.highest_precedence_binding_for_action_in(&Save, &focus).is_some());
+                assert!(window.highest_precedence_binding_for_action_in(&NewTab, &focus).is_some());
+            })
+            .unwrap();
+        }
+
+        // Open File menu -> click "New tab" (row 0).
+        h.click_id("File");
+        h.read_jot(|j, _| assert!(j.menu_bar.is_open()));
+        h.click_id(("menu-row", 0));
+        h.read_jot(|j, _| {
+            assert_eq!(j.tabs.len(), 2, "File -> New tab must add a tab");
+            assert!(!j.menu_bar.is_open(), "menu must close after activation");
+        });
+
+        // Open View menu -> open Zoom submenu (row 0) -> click "Zoom in" (submenu row 0).
+        h.click_id("View");
+        h.click_id(("menu-row", 0));
+        h.click_id(("menu-row", 0));
+        h.read_jot(|j, _| {
+            assert_eq!(
+                (j.zoom() * 100.).round() as u32,
+                110,
+                "View -> Zoom -> Zoom in must zoom to 110%"
+            );
+        });
+
+        // Open View menu -> toggle Word wrap (row 2) and Status bar (row 1).
+        h.click_id("View");
+        h.click_id(("menu-row", 2));
+        h.read_jot(|_, cx| assert!(!cx.global::<ViewSettings>().word_wrap));
+
+        h.click_id("View");
+        h.click_id(("menu-row", 1));
+        h.read_jot(|_, cx| assert!(!cx.global::<ViewSettings>().status_bar));
+
+        // Open File menu -> hover Edit trigger -> switches open menu; click editor -> closes menu.
+        h.click_id("File");
+        h.hover_id("Edit");
+        h.read_jot(|j, _| assert!(j.menu_bar.is_open()));
+        let editor_bounds = h.element_bounds("editor-area").unwrap();
+        h.click_point(editor_bounds.center(), MouseButton::Left);
+        h.read_jot(|j, _| assert!(!j.menu_bar.is_open(), "clicking outside menu must close it"));
+
+        // Alt activates access key mode; pressing 'f' opens File menu; Down+Escape navigates & closes.
+        h.press_key("alt");
+        h.read_jot(|j, _| assert!(j.menu_bar.access_active()));
+        h.press_key("f");
+        h.read_jot(|j, _| assert!(j.menu_bar.is_open(), "Alt then F must open File menu"));
+        h.press_key("down");
+        h.press_key("escape");
+        h.press_key("escape");
+        h.read_jot(|j, _| {
+            assert!(!j.menu_bar.is_open());
+            assert!(!j.menu_bar.access_active());
+        });
+
+        // Right-click on selected text opens context menu with Delete enabled; clicking Delete erases it.
+        h.type_text("delete me");
+        h.press_key("ctrl-a");
+        let on_text = point(
+            editor_bounds.left() + px(EDITOR_PADDING_LEFT + 12.0),
+            editor_bounds.top() + px(EDITOR_PADDING_TOP + 10.0),
+        );
+        h.click_point(on_text, MouseButton::Right);
+        h.read_jot(|j, _| assert!(j.menu_bar.is_open(), "right-click must open context menu"));
+        h.click_id(("menu-command", 4)); // Delete command button
+        h.read_jot(|j, cx| {
+            assert!(!j.menu_bar.is_open());
+            assert_eq!(
+                j.active_editor().read(cx).text().len(),
+                0,
+                "context menu Delete command must erase selected text"
+            );
+        });
+    }
+
+    #[test]
+    fn find_replace_bar_clear_button_and_key_contexts() {
+        let mut h = TestHarness::new();
+        h.type_text("alpha beta alpha gamma");
+
+        // Ctrl+F opens Find bar and focuses query input.
+        h.press_key("ctrl-f");
+        h.read_jot(|j, _| assert!(j.find.is_open()));
+
+        // Type query, press Enter -> FindNext selects first "alpha"; Enter again -> second "alpha";
+        // Shift+Enter -> back to first "alpha".
+        h.type_text("alpha");
+        h.press_key("enter");
+        h.read_jot(|j, cx| {
+            assert_eq!(j.active_editor().read(cx).selected_range(), 0..5);
+        });
+        h.press_key("enter");
+        h.read_jot(|j, cx| {
+            assert_eq!(j.active_editor().read(cx).selected_range(), 11..16);
+        });
+        h.press_key("shift-enter");
+        h.read_jot(|j, cx| {
+            assert_eq!(j.active_editor().read(cx).selected_range(), 0..5);
+        });
+
+        // Click the inline clear 'x' button inside the Find query field (has on_mouse_down
+        // prevent_default + stop_propagation AND on_click) -> clears the query field!
+        let clear_bounds = {
+            let app = h.app_cell.inner.borrow();
+            let win = app.windows.get(&h.handle.id).unwrap().as_ref().unwrap();
+            win.find_test_element_bounds(|id| {
+                matches!(id, ElementId::NamedInteger(name, _) if name.as_str() == "field-clear")
+            })
+            .expect("find query clear 'x' button must be laid out when query is non-empty")
+        };
+        h.click_point(clear_bounds.center(), MouseButton::Left);
+        {
+            let app = h.app_cell.inner.borrow();
+            let win = app.windows.get(&h.handle.id).unwrap().as_ref().unwrap();
+            assert!(
+                win.find_test_element_bounds(|id| {
+                    matches!(id, ElementId::NamedInteger(name, _) if name.as_str() == "field-clear")
+                })
+                .is_none(),
+                "clicking field-clear 'x' must empty query so clear button disappears"
+            );
+        }
+
+        // Re-type query, open Find options flyout -> toggle Match case on & off.
+        h.type_text("ALPHA");
+        h.click_id("find-options");
+        h.read_jot(|j, _| assert!(j.menu_bar.is_open(), "find-options must open flyout"));
+        h.click_id(("menu-row", 0)); // Match case toggle ON
+        h.click_id("find-options");
+        h.click_id(("menu-row", 0)); // Match case toggle OFF
+
+        // Click "find-expand" -> click replacement text field (tests click-to-focus via
+        // `track_focus`!) -> type "OMEGA" -> click find-next -> press Enter (`JotFindReplacement`
+        // -> ReplaceNext!) -> then click "Replace all"!
+        h.click_id("find-expand");
+        let replace_btn_bounds = h
+            .element_bounds("find-replace")
+            .expect("Replace button must be laid out after expanding replace row");
+        let query_clear_bounds = {
+            let app = h.app_cell.inner.borrow();
+            let win = app.windows.get(&h.handle.id).unwrap().as_ref().unwrap();
+            win.find_test_element_bounds(|id| {
+                matches!(id, ElementId::NamedInteger(name, _) if name.as_str() == "field-clear")
+            })
+            .expect("query field clear button must be laid out")
+        };
+        // Replacement input sits directly to the left of the "Replace" button, horizontally aligned
+        // with the query row above it.
+        let replacement_input_pt = point(
+            query_clear_bounds.left() - px(40.0),
+            replace_btn_bounds.center().y,
+        );
+        h.click_point(replacement_input_pt, MouseButton::Left);
+        h.type_text("OMEGA");
+        // Verify typing went into the replacement field (not the query field or main editor).
+        h.read_jot(|j, cx| {
+            assert_eq!(j.active_editor().read(cx).value().as_str(), "alpha beta alpha gamma");
+        });
+        // Click "find-next" (icon_button calls prevent_default so focus stays on replacement input!)
+        // and press Enter -> ReplaceNext via JotFindReplacement key context!
+        h.click_id("find-next");
+        h.press_key("enter");
+        h.read_jot(|j, cx| {
+            assert_eq!(
+                j.active_editor().read(cx).value().as_str(),
+                "alpha beta OMEGA gamma",
+                "Enter in replacement field must replace current match via JotFindReplacement"
+            );
+        });
+        h.click_id("find-replace-all");
+        h.read_jot(|j, cx| {
+            assert_eq!(
+                j.active_editor().read(cx).value().as_str(),
+                "OMEGA beta OMEGA gamma",
+                "Replace all must replace remaining matches"
+            );
+        });
+
+        // Clicking inside the main editor while Find bar is open must transfer focus back to the
+        // main editor so subsequent typing edits the document!
+        let ed_bounds = h.element_bounds("editor-area").unwrap();
+        let ed_click = point(
+            ed_bounds.left() + px(EDITOR_PADDING_LEFT + 5.0),
+            ed_bounds.bottom() - px(40.0),
+        );
+        h.click_point(ed_click, MouseButton::Left);
+        h.type_text("!");
+        h.read_jot(|j, cx| {
+            assert_eq!(
+                j.active_editor().read(cx).value().as_str(),
+                "OMEGA beta OMEGA gamma!",
+                "clicking main editor while Find bar is open must focus main editor"
+            );
+        });
+
+        // Click "find-close" 'x' button -> closes Find bar cleanly.
+        h.click_id("find-close");
+        h.read_jot(|j, _| assert!(!j.find.is_open(), "find-close 'x' must close Find bar"));
+    }
+
+    #[test]
+    fn go_to_dialog_navigation_and_out_of_range_flow() {
+        let mut h = TestHarness::new();
+        h.type_text("one");
+        h.press_key("enter");
+        h.type_text("two");
+        h.press_key("enter");
+        h.type_text("three");
+        h.press_key("enter");
+        h.type_text("four");
+
+        // Ctrl+G -> type "2" -> Enter jumps cursor to line 2 (row 1).
+        h.press_key("ctrl-g");
+        h.read_jot(|j, _| assert!(j.dialogs.is_open()));
+        h.type_text("2");
+        h.press_key("enter");
+        h.read_jot(|j, cx| {
+            assert!(!j.dialogs.is_open());
+            let ed = j.active_editor().read(cx);
+            assert_eq!(ed.text().offset_to_point(ed.cursor()).row, 1);
+        });
+
+        // Out-of-range line -> shows error dialog -> OK returns to Go To -> Escape closes.
+        h.press_key("ctrl-g");
+        h.type_text("999");
+        h.press_key("enter");
+        h.read_jot(|j, _| assert!(j.dialogs.is_open()));
+        h.click_id(("button", 0)); // OK -> returns to Go To
+        h.read_jot(|j, _| assert!(j.dialogs.is_open()));
+        h.press_key("tab"); // cycle focus to button
+        h.press_key("shift-tab"); // cycle back to input
+        h.press_key("escape");
+        h.read_jot(|j, _| assert!(!j.dialogs.is_open()));
+    }
+
+    #[test]
+    fn theme_zoom_editing_undo_scrollbar_and_caption_hit_tests() {
+        let mut h = TestHarness::new();
+
+        // Theme button click toggles dark/light and back.
+        let initial_dark = h.read_jot(|_, cx| palette(cx).dark);
+        h.click_id("theme");
+        h.read_jot(|_, cx| assert_eq!(palette(cx).dark, !initial_dark));
+        h.click_id("theme");
+        h.read_jot(|_, cx| assert_eq!(palette(cx).dark, initial_dark));
+
+        // Zoom via keyboard and Ctrl+wheel.
+        h.press_key("ctrl-=");
+        h.read_jot(|j, _| assert_eq!((j.zoom() * 100.).round() as u32, 110));
+        h.press_key("ctrl--");
+        h.read_jot(|j, _| assert_eq!((j.zoom() * 100.).round() as u32, 100));
+        let editor_center = h.element_bounds("editor-area").unwrap().center();
+        h.scroll_wheel(editor_center, 3.0, Modifiers::control());
+        h.read_jot(|j, _| assert_eq!((j.zoom() * 100.).round() as u32, 110));
+        h.press_key("ctrl-0");
+        h.read_jot(|j, _| assert_eq!((j.zoom() * 100.).round() as u32, 100));
+
+        // Typing, Select All, Undo, Redo, Backspace.
+        h.type_text("hello world");
+        h.press_key("ctrl-a");
+        h.read_jot(|j, cx| assert_eq!(j.active_editor().read(cx).selected_range(), 0..11));
+        h.press_key("backspace");
+        h.read_jot(|j, cx| assert_eq!(j.active_editor().read(cx).text().len(), 0));
+        h.press_key("ctrl-z");
+        h.read_jot(|j, cx| assert_eq!(j.active_editor().read(cx).value().as_str(), "hello world"));
+        h.press_key("ctrl-y");
+        h.read_jot(|j, cx| assert_eq!(j.active_editor().read(cx).text().len(), 0));
+
+        // Scroll wheel scrolls multi-line document, activates Scrollbar, and scrollbar track
+        // click scrolls without moving the editor caret/selection.
+        let big: String = (0..120).map(|i| format!("Line {i}\n")).collect();
+        h.type_text(&big);
+        h.press_key("ctrl-home");
+        h.scroll_wheel(editor_center, -6.0, Modifiers::default());
+        let after_wheel_y = h.read_jot(|j, cx| j.active_editor().read(cx).scroll_handle.offset().y);
+        assert!(
+            after_wheel_y < px(0.0),
+            "scrolling down with mouse wheel must scroll editor viewport"
+        );
+        let ed_bounds = h.element_bounds("editor-area").unwrap();
+        let track_pt = point(ed_bounds.right() - px(6.0), ed_bounds.bottom() - px(40.0));
+        h.click_point(track_pt, MouseButton::Left);
+        h.read_jot(|j, cx| {
+            let ed = j.active_editor().read(cx);
+            assert!(
+                ed.scroll_handle.offset().y < after_wheel_y,
+                "clicking vertical scrollbar track must jump scroll offset further down"
+            );
+            assert!(
+                ed.selected_range().is_empty(),
+                "clicking scrollbar must stop_propagation and not select editor text"
+            );
+        });
+
+        // Double-click word selection, triple-click line selection, and drag selection.
+        h.press_key("ctrl-a");
+        h.press_key("backspace");
+        h.type_text("alpha beta gamma");
+        let first_char = point(
+            ed_bounds.left() + px(EDITOR_PADDING_LEFT + 12.0),
+            ed_bounds.top() + px(EDITOR_PADDING_TOP + 10.0),
+        );
+        h.click_point_count(first_char, MouseButton::Left, 2);
+        h.read_jot(|j, cx| {
+            assert_eq!(
+                j.active_editor().read(cx).selected_range(),
+                0..5,
+                "double-click must select word"
+            );
+        });
+        h.click_point_count(first_char, MouseButton::Left, 3);
+        h.read_jot(|j, cx| {
+            assert_eq!(
+                j.active_editor().read(cx).selected_range(),
+                0..16,
+                "triple-click must select full line"
+            );
+        });
+        let drag_start = point(
+            ed_bounds.left() + px(EDITOR_PADDING_LEFT + 1.0),
+            ed_bounds.top() + px(EDITOR_PADDING_TOP + 10.0),
+        );
+        let drag_end = point(
+            ed_bounds.left() + px(EDITOR_PADDING_LEFT + 70.0),
+            ed_bounds.top() + px(EDITOR_PADDING_TOP + 10.0),
+        );
+        h.drag_points(drag_start, drag_end);
+        h.read_jot(|j, cx| {
+            let sel = j.active_editor().read(cx).selected_range();
+            assert!(!sel.is_empty(), "dragging in editor must create a text selection");
+        });
+
+        // Caption button hit-testing resolves Min / Max / Close areas cleanly.
+        let close_pt = h.element_bounds("caption-close").unwrap().center();
+        let max_pt = h.element_bounds("caption-maximize").unwrap().center();
+        let min_pt = h.element_bounds("caption-minimize").unwrap().center();
+        let app = h.app_cell.inner.borrow();
+        let win = app.windows.get(&h.handle.id).unwrap().as_ref().unwrap();
+        assert_eq!(win.hit_test_control_area(close_pt), Some(WindowControlArea::Close));
+        assert_eq!(win.hit_test_control_area(max_pt), Some(WindowControlArea::Max));
+        assert_eq!(win.hit_test_control_area(min_pt), Some(WindowControlArea::Min));
+    }
+
+    #[test]
+    fn dirty_window_close_file_drop_and_multi_window() {
+        let mut h = TestHarness::new();
+
+        // File drop opens a real file from disk into the blank initial tab.
+        let tmp = std::env::temp_dir().join(format!("jot-drop-test-{}.txt", std::process::id()));
+        std::fs::write(&tmp, "dropped content 123").unwrap();
+        let ed_center = h.element_bounds("editor-area").unwrap().center();
+        {
+            let mut app = h.app_cell.inner.borrow_mut();
+            let _ = app.update_window_impl(h.handle.id, |_, window, cx| {
+                window.dispatch_file_drop(ExternalPaths(vec![tmp.clone()]), ed_center, cx);
+            });
+        }
+        // Pump foreground until background load delivers the file.
+        for _ in 0..40 {
+            h.draw();
+            if h.read_jot(|j, cx| j.active_editor().read(cx).value().as_str() == "dropped content 123") {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        h.read_jot(|j, cx| {
+            assert_eq!(j.active_editor().read(cx).value().as_str(), "dropped content 123");
+            assert!(j.tabs[0].data.path.is_some());
+        });
+        let _ = std::fs::remove_file(&tmp);
+
+        // Multi-window via Ctrl+Shift+N creates a second window cleanly.
+        h.press_key("ctrl-shift-n");
+        let extra_id = {
+            let app = h.app_cell.inner.borrow();
+            assert_eq!(app.window_order.len(), 2, "Ctrl+Shift+N must open a 2nd window");
+            app.window_order[1]
+        };
+        {
+            let mut app = h.app_cell.inner.borrow_mut();
+            app.remove_window_by_id(extra_id);
+            assert_eq!(app.window_order.len(), 1);
+        }
+
+        // Dirty window close prompt: Cancel keeps window open, Don't save closes it.
+        h.type_text("!");
+        let allow_close = {
+            let mut app = h.app_cell.inner.borrow_mut();
+            app.update_window_impl(h.handle.id, |_, window, cx| window.check_should_close(cx))
+                .unwrap()
+        };
+        assert!(!allow_close, "dirty window must intercept close and show prompt");
+        h.draw();
+        h.read_jot(|j, _| assert!(j.dialogs.is_open()));
+        h.click_id(("button", 2)); // Cancel
+        assert!(h.window_open(), "Cancel must keep window open");
+
+        let allow_close = {
+            let mut app = h.app_cell.inner.borrow_mut();
+            app.update_window_impl(h.handle.id, |_, window, cx| window.check_should_close(cx))
+                .unwrap()
+        };
+        assert!(!allow_close);
+        h.draw();
+        h.click_id(("button", 1)); // Don't save
+        assert!(!h.window_open(), "Don't save must close the window");
+    }
+
+    #[test]
+    fn overlay_window_resizes_from_1x1_and_renders() {
+        let h = TestHarness::new();
+        let overlay = {
+            let mut app = h.app_cell.inner.borrow_mut();
+            overlay::open(|_| TooltipTestView, &mut app).expect("overlay::open failed")
+        };
+        overlay::place(
+            overlay.hwnd,
+            ScreenRect {
+                left: 10,
+                top: 10,
+                right: 170,
+                bottom: 50,
+            },
+        );
+        {
+            let mut app = h.app_cell.inner.borrow_mut();
+            app.update_window_impl(overlay.handle.window_id(), |root, window, cx| {
+                window.draw_frame(&root, cx);
+                assert!(
+                    window.viewport_size().width > px(10.0)
+                        && window.viewport_size().height > px(10.0),
+                    "overlay must sync resized client rect before drawing"
+                );
+            })
+            .unwrap();
+            app.remove_window_by_id(overlay.handle.window_id());
+        }
+    }
+
+    struct TooltipTestView;
+    impl Render for TooltipTestView {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().bg(rgba(0x202020ff)).child("Tip")
+        }
+    }
+
+    #[test]
+    fn status_bar_min_width_and_no_vertical_char_wrapping() {
+        use windows::Win32::{
+            Foundation::{LPARAM, WPARAM},
+            UI::WindowsAndMessaging::{MINMAXINFO, SendMessageW, WM_GETMINMAXINFO},
+        };
+
+        let mut h = TestHarness::new();
+        h.type_text("a");
+
+        let (hwnd, min_size) = h.read_jot(|j, _| {
+            let cached = j
+                .min_size
+                .get()
+                .expect("min_size_probe must populate min_size cache on first draw");
+            (j.hwnd, cached.size)
+        });
+        assert!(
+            min_size.width >= px(420.0),
+            "status bar min width must reflect unwrapped single-line labels, got {:?}",
+            min_size.width
+        );
+
+        // Real WM_GETMINMAXINFO on the window HWND must enforce ptMinTrackSize >= min_size.
+        let mut mmi = MINMAXINFO::default();
+        unsafe {
+            let _ = SendMessageW(
+                hwnd.raw(),
+                WM_GETMINMAXINFO,
+                Some(WPARAM(0)),
+                Some(LPARAM((&raw mut mmi) as isize)),
+            );
+        }
+        let scale = {
+            let app = h.app_cell.inner.borrow();
+            app.windows
+                .get(&h.handle.id)
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .scale_factor()
+        };
+        assert!(
+            mmi.ptMinTrackSize.x >= (min_size.width.as_f32() * scale).ceil() as i32,
+            "WM_GETMINMAXINFO ptMinTrackSize.x ({}) must enforce min_size.width ({:?})",
+            mmi.ptMinTrackSize.x,
+            min_size.width
+        );
+
+        // Even when laid out at exact min width OR forced narrower than min width (e.g. toggling
+        // Status Bar on while squished), every status bar label must remain single-line.
+        let mut app = h.app_cell.inner.borrow_mut();
+        app.update_window_impl(h.handle.id, |_, window, cx| {
+            let p = palette(cx);
+            for test_width in [min_size.width, px(220.0)] {
+                let mut bar = div()
+                    .w(test_width)
+                    .flex()
+                    .items_center()
+                    .gap(px(24.))
+                    .h(px(STATUS_BAR_HEIGHT))
+                    .px(px(22.))
+                    .font_family(SMALL_FONT)
+                    .text_size(px(12.))
+                    .text_color(rgba(p.text_secondary))
+                    .child(div().id("sb-pos").child("Ln 1, Col 1"))
+                    .child(status_divider(p))
+                    .child(div().id("sb-chars").child("1 character"))
+                    .child(status_spacer(p))
+                    .child(div().id("sb-zoom").child("100%"))
+                    .child(status_divider(p))
+                    .child(div().id("sb-eol").child("Windows (CRLF)"))
+                    .child(status_divider(p))
+                    .child(div().id("sb-enc").child("UTF-8"))
+                    .into_any_element();
+                let root_lid = bar.request_layout(window, cx);
+                window.compute_layout(
+                    root_lid,
+                    size(
+                        AvailableSpace::Definite(test_width),
+                        AvailableSpace::Definite(px(STATUS_BAR_HEIGHT)),
+                    ),
+                    cx,
+                );
+                bar.prepaint(window, cx);
+                for label_id in ["sb-pos", "sb-chars", "sb-zoom", "sb-eol", "sb-enc"] {
+                    let b = window
+                        .frame_element_bounds(&ElementId::from(label_id))
+                        .expect("status bar label bounds missing");
+                    assert!(
+                        b.size.height <= px(STATUS_BAR_HEIGHT),
+                        "label {label_id} wrapped vertically at width {test_width:?}: bounds={b:?}"
+                    );
+                    assert!(
+                        b.size.width >= px(25.0),
+                        "label {label_id} squished below single-line width at {test_width:?}: bounds={b:?}"
+                    );
+                }
+            }
+
+            // Constrained definite-width text (e.g. dialog body) must still wrap across lines.
+            let mut dialog_body = div()
+                .flex()
+                .flex_col()
+                .w(px(180.0))
+                .font_family(TEXT_FONT)
+                .text_size(px(14.0))
+                .line_height(px(20.0))
+                .child(
+                    div()
+                        .id("dlg-msg")
+                        .child("Do you want to save changes to a very long untitled document?"),
+                )
+                .into_any_element();
+            let dlid = dialog_body.request_layout(window, cx);
+            window.compute_layout(
+                dlid,
+                size(AvailableSpace::Definite(px(180.0)), AvailableSpace::MaxContent),
+                cx,
+            );
+            dialog_body.prepaint(window, cx);
+            let msg_bounds = window
+                .frame_element_bounds(&ElementId::from("dlg-msg"))
+                .expect("dialog msg bounds missing");
+            assert!(
+                msg_bounds.size.height >= px(40.0),
+                "constrained dialog text must still wrap across multiple lines: bounds={msg_bounds:?}"
+            );
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn real_win32_message_loop_wakes_timers_and_quits_cleanly() {
+        let platform = Rc::new(
+            crate::ui::WindowsPlatform::new().expect("WindowsPlatform::new failed"),
+        );
+        Application::with_platform(platform).run(|cx| {
+            ui::reduce_motion::init(cx);
+            editor::init(cx);
+            theme::apply(cx.window_appearance(), cx);
+            cx.set_global(ViewSettings {
+                status_bar: true,
+                word_wrap: true,
+            });
+            let mut opts = window_options(None, cx);
+            opts.show = false;
+            opts.focus = false;
+            let handle = cx
+                .open_window(opts, |window, cx| cx.new(|cx| Jot::new(None, window, cx)))
+                .expect("open_window in Application::run failed");
+            cx.on_window_closed(|cx, _| cx.quit()).detach();
+            cx.spawn(async move |cx| {
+                cx.background_executor()
+                    .timer(Duration::from_millis(25))
+                    .await;
+                cx.update(|cx| {
+                    cx.remove_window_by_id(handle.id);
+                });
+            })
+            .detach();
+        });
     }
 }

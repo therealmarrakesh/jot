@@ -8,6 +8,14 @@ publish = false
 name = "Jot"
 path = "src/main.rs"
 
+[features]
+default = []
+d2d = [
+    "windows/Win32_Graphics_Direct2D",
+    "windows/Win32_Graphics_Direct2D_Common",
+    "windows/Win32_UI_Controls",
+]
+
 [dependencies]
 ropey = { version = "=2.0.0-beta.1", features = [
     "metric_chars",

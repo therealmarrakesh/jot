@@ -2126,6 +2126,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(feature = "d2d"))]
     #[test]
     fn directwrite_status_bar_shapes_all_labels_including_null_glyph_offsets() {
         let dw = std::sync::Arc::new(crate::win32::DirectWriteTextSystem::new(None).unwrap());
@@ -2183,6 +2184,95 @@ mod tests {
                         sz.width = sz.width.max(ls.width).ceil();
                     }
                     *cache.borrow_mut() = Some((wrap_width, sz));
+                    sz
+                })
+            };
+            let t0 = text_node(engine, "Ln 1, Col 1");
+            let d1 = engine.req(s().flex_none().w(px(1.)).h(px(16.)), &[], scale);
+            let t2 = text_node(engine, "0 characters");
+            let sp = engine.req(s().flex_1().min_w(px(1.)).h(px(16.)), &[], scale);
+            let t4 = text_node(engine, "100%");
+            let d5 = engine.req(s().flex_none().w(px(1.)).h(px(16.)), &[], scale);
+            let t6 = text_node(engine, "Windows (CRLF)");
+            let d7 = engine.req(s().flex_none().w(px(1.)).h(px(16.)), &[], scale);
+            let t8 = text_node(engine, "UTF-8");
+            let row = engine.req(
+                s().flex()
+                    .items_center()
+                    .gap(px(24.))
+                    .h(px(31.))
+                    .px(px(22.)),
+                &[t0, d1, t2, sp, t4, d5, t6, d7, t8],
+                scale,
+            );
+            let sep = engine.req(s().flex_none().h(px(1.)), &[], scale);
+            let bar = engine.req(s().flex_none(), &[sep, row], scale);
+            (bar, [t0, d1, t2, sp, t4, d5, t6, d7, t8])
+        };
+
+        let mut probe = LayoutEngine::new();
+        let (bar_probe, _) = make_status(&mut probe, 1.0);
+        probe.run(bar_probe, AvailableSpace::min_size(), 1.0);
+        let min_sz = probe.layout_bounds(bar_probe, 1.0).size;
+
+        let mut win = LayoutEngine::new();
+        let (bar_win, kids) = make_status(&mut win, 1.0);
+        let root = win.req(s().size_full().flex().flex_col(), &[bar_win], 1.0);
+        win.run(root, size(min_sz.width, px(200.)).into(), 1.0);
+
+        let spacer = win.layout_bounds(kids[3], 1.0);
+        let zoom = win.layout_bounds(kids[4], 1.0);
+        let next_div = win.layout_bounds(kids[5], 1.0);
+        assert_eq!(spacer.size.width, px(1.));
+        assert!(zoom.size.width > px(20.), "100% width was {:?}", zoom.size.width);
+        assert_eq!(zoom.left(), spacer.right() + px(24.));
+        assert_eq!(next_div.left(), zoom.right() + px(24.));
+    }
+
+    #[cfg(feature = "d2d")]
+    #[test]
+    fn directwrite_status_bar_shapes_all_labels_d2d() {
+        let ts = std::rc::Rc::new(crate::ui::TextSystem::new());
+        let font = crate::ui::font("Segoe UI Variable Small");
+        for label in ["Ln 1, Col 1", "0 characters", "100%", "42", "Windows (CRLF)", "UTF-8"] {
+            let run = crate::ui::TextRun {
+                len: label.len(),
+                font: font.clone(),
+                color: crate::ui::black(),
+                underline: None,
+            };
+            let layout = ts.layout_line(label, px(12.), &[run]);
+            assert!(
+                layout.width > px(0.),
+                "expected non-empty layout for {label:?}, got width={:?}",
+                layout.width,
+            );
+        }
+
+        let make_status = |engine: &mut LayoutEngine, scale: f32| {
+            let text_node = |engine: &mut LayoutEngine, text: &'static str| {
+                let ts = ts.clone();
+                let font = font.clone();
+                engine.req_measured(s(), scale, move |known, avail| {
+                    let wrap_width = known.width.or(match avail.width {
+                        AvailableSpace::Definite(x) => Some(x),
+                        _ => None,
+                    });
+                    let lines = ts.shape_text(
+                        crate::ui::SharedString::new_static(text),
+                        px(12.),
+                        &font,
+                        crate::ui::black(),
+                        None,
+                        wrap_width,
+                        None,
+                    );
+                    let mut sz: Size<Pixels> = Size::default();
+                    for line in &lines {
+                        let ls = line.size(px(16.));
+                        sz.height += ls.height;
+                        sz.width = sz.width.max(ls.width).ceil();
+                    }
                     sz
                 })
             };

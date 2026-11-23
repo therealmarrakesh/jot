@@ -43,15 +43,30 @@ use windows::Win32::{
             IsWindowVisible, IsZoomed, PostMessageW, SC_MOVE, SM_SWAPBUTTON,
             SPI_GETCLIENTAREAANIMATION, SPI_GETMENUSHOWDELAY, SPI_GETMOUSEHOVERTIME,
             SPI_GETWHEELSCROLLCHARS, SPI_GETWHEELSCROLLLINES, SW_HIDE, SW_RESTORE,
-            SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SetForegroundWindow,
-            SetWindowPlacement, SetWindowPos, ShowWindow, USER_DEFAULT_SCREEN_DPI, WINDOWPLACEMENT,
-            WM_CANCELMODE, WM_SYSCOMMAND, WS_EX_TRANSPARENT, HWND_TOPMOST,
+            SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER,
+            SYSTEM_PARAMETERS_INFO_ACTION, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
+            SetForegroundWindow, SetWindowPlacement, SetWindowPos, ShowWindow,
+            SystemParametersInfoW, USER_DEFAULT_SCREEN_DPI, WINDOWPLACEMENT, WM_CANCELMODE,
+            WM_SYSCOMMAND, WS_EX_TRANSPARENT, HWND_TOPMOST,
         },
     },
 };
 use windows::core::{BOOL, PCWSTR};
 
-use super::system_parameters_u32;
+/// Queries a `u32` setting via `SystemParametersInfoW`.
+pub(crate) fn system_parameters_u32(action: u32) -> Option<u32> {
+    let mut value = 0u32;
+    unsafe {
+        SystemParametersInfoW(
+            SYSTEM_PARAMETERS_INFO_ACTION(action),
+            0,
+            Some((&raw mut value).cast()),
+            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+        )
+    }
+    .is_ok()
+    .then_some(value)
+}
 
 /// Physical screen coordinates in device pixels.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
