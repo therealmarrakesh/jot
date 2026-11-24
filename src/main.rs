@@ -20,6 +20,7 @@ mod types;
 mod ui;
 mod widgets;
 mod window;
+mod wrap;
 #[cfg(test)]
 mod tests;
 
