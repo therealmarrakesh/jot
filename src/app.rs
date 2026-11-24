@@ -8,7 +8,7 @@ use crate::document::{self, Format};
 use crate::editor::{EditorTimer, Rope};
 use crate::files::{self, WorkflowGen};
 use crate::geom::{Rect, ScreenPoint, Size, point, size};
-use crate::gfx::{Direct2DDevices, TextSystem};
+use crate::gfx::{Gpu, TextSystem};
 use crate::keytips::KeyTips;
 use crate::platform::{
     HandoffCommand, Jobs, MouseButton, NativeWindow, Platform, PlatformEvent, PlatformHandler,
@@ -135,12 +135,13 @@ pub(crate) struct App {
     #[cfg(test)]
     pub(crate) headless: bool,
     quit: bool,
+    pub(crate) gpu: Rc<Gpu>,
     // Declared last so windows, overlays, and COM objects drop before COM uninitialize.
     pub(crate) platform: Rc<Platform>,
 }
 
 impl App {
-    pub(crate) fn new(platform: Rc<Platform>) -> Self {
+    pub(crate) fn new(platform: Rc<Platform>, gpu: Rc<Gpu>) -> Self {
         let jobs = Jobs::new();
         jobs.attach_platform(&platform);
         let settings = system_settings();
@@ -171,6 +172,7 @@ impl App {
             #[cfg(test)]
             headless: false,
             quit: false,
+            gpu,
             platform,
         }
     }
@@ -301,21 +303,30 @@ impl App {
         target_point: Option<ScreenPoint>,
     ) -> std::result::Result<(WindowId, WindowHwnd), Box<OpenWindowError>> {
         let opts = self.window_options(window_size, target_point);
-        let native =
-            match NativeWindow::create(self.platform.devices(), &opts, self.appearance) {
-                Ok(n) => n,
-                Err(err) => {
-                    let message = err.to_string();
-                    crate::diag::debug_log(&format!("NativeWindow::create failed: {message}"));
-                    return Err(Box::new(OpenWindowError {
-                        tab: initial,
-                        message,
-                    }));
-                }
-            };
+        let (native, surface) = match NativeWindow::create(&opts, self.appearance).and_then(|n| {
+            let (w, h) = n.physical_size();
+            let s = crate::gfx::Surface::new(
+                self.gpu.clone(),
+                n.hwnd().raw(),
+                w,
+                h,
+                n.scale_factor(),
+            )?;
+            Ok((n, s))
+        }) {
+            Ok(created) => created,
+            Err(err) => {
+                let message = err.to_string();
+                crate::diag::debug_log(&format!("window/surface create failed: {message}"));
+                return Err(Box::new(OpenWindowError {
+                    tab: initial,
+                    message,
+                }));
+            }
+        };
         let id = native.id;
         let hwnd = native.hwnd();
-        let win = MainWindow::new(native, initial, self.view.word_wrap, &self.jobs);
+        let win = MainWindow::new(native, surface, initial, self.view.word_wrap, &self.jobs);
         self.windows.push(win);
         self.active_window = Some(id);
         Ok((id, hwnd))
@@ -485,28 +496,6 @@ impl App {
         }
     }
 
-    fn recover_device_loss(&mut self) {
-        match Direct2DDevices::new() {
-            Ok(new_devices) => {
-                self.platform.replace_devices(new_devices.clone());
-                for w in &mut self.windows {
-                    if let Err(err) = w.native.recreate_renderer(new_devices.clone()) {
-                        crate::diag::debug_log(&format!(
-                            "recreate_renderer failed for window {:?}: {err}",
-                            w.id()
-                        ));
-                    }
-                    w.dirty = true;
-                }
-                self.keytips.recreate_renderer(new_devices.clone());
-                self.tooltips.recreate_renderer(new_devices);
-            }
-            Err(err) => {
-                crate::diag::debug_log(&format!("Direct2DDevices recovery failed: {err}"));
-            }
-        }
-    }
-
     fn evaluate_tooltip_for(&mut self, ix: usize, pressed_any: bool) {
         let w = &self.windows[ix];
         let wid = w.id();
@@ -514,7 +503,6 @@ impl App {
         let pos = w.last_mouse_pos;
         let origin = w.native.hwnd().client_origin();
         let scale = w.native.scale_factor();
-        let devices = self.platform.devices();
         self.tooltips.evaluate(
             wid,
             hovered,
@@ -523,45 +511,38 @@ impl App {
             origin,
             scale,
             &w.ui.frame,
-            &devices,
+            &self.gpu,
             self.appearance,
             &self.text_system,
             &self.jobs,
         );
     }
 
-    fn paint_window_ix(&mut self, ix: usize, now: Instant) -> (bool, bool) {
+    fn paint_window_ix(&mut self, ix: usize, now: Instant) -> bool {
         let p = self.palette;
         let view = self.view;
         let reduce_motion = self.reduce_motion;
-        let res = match self.windows[ix].render_frame(
+        let needs_vsync = self.windows[ix].render_frame(
             p,
             view,
             reduce_motion,
             now,
             &self.text_system,
             &self.jobs,
-        ) {
-            Ok(res) => (res.needs_vsync, res.device_lost),
-            Err(err) => {
-                crate::diag::debug_log(&format!("render_frame error: {err}"));
-                (false, true)
-            }
-        };
+        );
         let wid = self.windows[ix].id();
         if self.windows[ix].menu_bar.access_active() || self.keytips.is_owner(wid) {
             let tips = self.windows[ix].key_tips(&self.text_system);
             let origin = self.windows[ix].native.hwnd().client_origin();
             let scale = self.windows[ix].native.scale_factor();
-            let devices = self.platform.devices();
             self.keytips
-                .sync(wid, origin, scale, tips, &devices, self.appearance);
+                .sync(wid, origin, scale, tips, &self.gpu, self.appearance);
         }
         if self.windows[ix].pointer_hovered {
             let pressed = self.windows[ix].pointer_pressed;
             self.evaluate_tooltip_for(ix, pressed);
         }
-        res
+        needs_vsync
     }
 }
 
@@ -577,8 +558,8 @@ impl PlatformHandler for App {
             } => {
                 if let Some(ix) = self.window_ix(window_id) {
                     self.windows[ix]
-                        .native
-                        .sync_size(physical_width, physical_height, scale);
+                        .surface
+                        .resize(physical_width, physical_height, scale);
                     self.windows[ix].cancel_menu(&self.jobs);
                     self.windows[ix].dirty = true;
                 }
@@ -838,12 +819,11 @@ impl PlatformHandler for App {
                             &w.ui.frame,
                         )
                     });
-                    let devices = self.platform.devices();
                     self.tooltips.on_show_timer(
                         window,
                         hit,
                         state,
-                        &devices,
+                        &self.gpu,
                         self.appearance,
                         &self.text_system,
                         &self.jobs,
@@ -1083,28 +1063,25 @@ impl PlatformHandler for App {
             return;
         }
         let now = Instant::now();
+        let gen_before = self.gpu.generation();
         let mut any_vsync = false;
-        let mut any_lost = false;
         let mut painted_any = false;
         for ix in 0..self.windows.len() {
             if self.windows[ix].dirty {
                 painted_any = true;
-                let (vsync, lost) = self.paint_window_ix(ix, now);
-                any_vsync |= vsync;
-                any_lost |= lost;
+                any_vsync |= self.paint_window_ix(ix, now);
             }
         }
         if painted_any {
             self.text_system.finish_frame();
         }
-        any_lost |= self.keytips.paint(self.palette, &self.text_system);
-        let (tt_vsync, tt_lost) =
-            self.tooltips
-                .paint(self.palette, self.reduce_motion, now, &self.text_system);
-        any_vsync |= tt_vsync;
-        any_lost |= tt_lost;
-        if any_lost {
-            self.recover_device_loss();
+        any_vsync |= self.keytips.paint(self.palette, &self.text_system);
+        any_vsync |= self
+            .tooltips
+            .paint(self.palette, self.reduce_motion, now, &self.text_system);
+        if self.gpu.generation() != gen_before {
+            self.mark_all_dirty();
+            any_vsync = true;
         }
         if any_vsync {
             self.platform.request_frame_tick();

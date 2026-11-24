@@ -63,7 +63,6 @@ use windows::Win32::{
 use windows::core::{BOOL, HSTRING, PCWSTR, w};
 
 use crate::geom::{Point, Rect, Size, point, size};
-use crate::gfx::{D2DRenderer, Direct2DDevices};
 use crate::types::{Result, SharedStr};
 
 use super::input::{
@@ -317,6 +316,7 @@ impl MouseButtons {
 
 struct WindowState {
     scale_factor: Cell<f32>,
+    physical_size: Cell<(u32, u32)>,
     logical_size: Cell<Size>,
     origin: Cell<Point>,
     active: Cell<bool>,
@@ -477,13 +477,11 @@ pub(crate) struct NativeWindow {
     hwnd: HWND,
     pub(crate) kind: WindowKind,
     state: Rc<WindowState>,
-    renderer: Option<D2DRenderer>,
     destroyed: bool,
 }
 
 impl NativeWindow {
     pub(crate) fn create(
-        devices: Direct2DDevices,
         options: &WindowOptions,
         appearance: WindowAppearance,
     ) -> Result<Self> {
@@ -539,6 +537,7 @@ impl NativeWindow {
         let init_scale = dpi as f32 / USER_DEFAULT_SCREEN_DPI as f32;
         let state = Rc::new(WindowState {
             scale_factor: Cell::new(init_scale),
+            physical_size: Cell::new((1, 1)),
             logical_size: Cell::new(Size::ZERO),
             origin: Cell::new(Point::ZERO),
             active: Cell::new(options.show && options.focus),
@@ -627,25 +626,15 @@ impl NativeWindow {
 
         let (phys_w, phys_h) = query_physical_size(hwnd);
         let (logical_size, origin) = query_client_metrics(hwnd, scale_factor);
+        state.physical_size.set((phys_w, phys_h));
         state.logical_size.set(logical_size);
         state.origin.set(origin);
-        let renderer = match D2DRenderer::new(devices, hwnd, phys_w, phys_h, scale_factor) {
-            Ok(r) => r,
-            Err(err) => {
-                HWND_REGISTRY.with(|map| {
-                    map.borrow_mut().remove(&(hwnd.0 as isize));
-                });
-                let _ = unsafe { DestroyWindow(hwnd) };
-                return Err(err);
-            }
-        };
 
         let win = Self {
             id,
             hwnd,
             kind: options.kind,
             state,
-            renderer: Some(renderer),
             destroyed: false,
         };
         if options.show {
@@ -707,6 +696,11 @@ impl NativeWindow {
     }
 
     #[inline]
+    pub(crate) fn physical_size(&self) -> (u32, u32) {
+        self.state.physical_size.get()
+    }
+
+    #[inline]
     pub(crate) fn logical_size(&self) -> Size {
         self.state.logical_size.get()
     }
@@ -755,49 +749,25 @@ impl NativeWindow {
         }
     }
 
-    pub(crate) fn renderer_mut(&mut self) -> Option<&mut D2DRenderer> {
-        self.renderer.as_mut()
-    }
-
-    pub(crate) fn sync_size(&mut self, physical_width: u32, physical_height: u32, scale: f32) {
-        self.state.scale_factor.set(scale);
-        self.state.logical_size.set(size(
-            physical_width as f32 / scale,
-            physical_height as f32 / scale,
-        ));
-        if let Some(renderer) = &mut self.renderer {
-            let _ = renderer.resize(physical_width, physical_height, scale);
-        }
-    }
-
-    pub(crate) fn sync_live_metrics(&mut self) -> bool {
+    pub(crate) fn sync_live_metrics(&self) -> Option<(u32, u32, f32)> {
         let mut rc = RECT::default();
         if unsafe { GetClientRect(self.hwnd, &mut rc) }.is_err() {
-            return false;
+            return None;
         }
         let w = rc.right - rc.left;
         let h = rc.bottom - rc.top;
         if w <= 0 || h <= 0 {
-            return false;
+            return None;
         }
         let dpi = unsafe { GetDpiForWindow(self.hwnd) }.max(USER_DEFAULT_SCREEN_DPI);
         let scale = dpi as f32 / USER_DEFAULT_SCREEN_DPI as f32;
-        self.sync_size(w as u32, h as u32, scale);
-        true
-    }
-
-    pub(crate) fn recreate_renderer(&mut self, devices: Direct2DDevices) -> Result<()> {
-        // Drop old swapchain and DComp target before creating the replacement.
-        self.renderer = None;
-        let (w, h) = query_physical_size(self.hwnd);
-        self.renderer = Some(D2DRenderer::new(
-            devices,
-            self.hwnd,
-            w,
-            h,
-            self.scale_factor(),
-        )?);
-        Ok(())
+        let (pw, ph) = (w as u32, h as u32);
+        self.state.scale_factor.set(scale);
+        self.state.physical_size.set((pw, ph));
+        self.state
+            .logical_size
+            .set(size(pw as f32 / scale, ph as f32 / scale));
+        Some((pw, ph, scale))
     }
 
     pub(crate) fn destroy(&mut self) {
@@ -1516,6 +1486,7 @@ fn window_wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
                 && h > 0
                 && let Some((window_id, scale)) = with_entry(hwnd, |e| {
                     let s = e.state.scale_factor.get();
+                    e.state.physical_size.set((w, h));
                     e.state
                         .logical_size
                         .set(size(w as f32 / s, h as f32 / s));
@@ -1570,6 +1541,7 @@ fn window_wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
                 }
                 let (w, h) = query_physical_size(hwnd);
                 with_entry(hwnd, |e| {
+                    e.state.physical_size.set((w, h));
                     e.state
                         .logical_size
                         .set(size(w as f32 / scale, h as f32 / scale));

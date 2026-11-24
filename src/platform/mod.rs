@@ -67,8 +67,7 @@ use windows::Win32::{
 use windows::core::{HSTRING, PCWSTR, w};
 
 use crate::geom::{Rect, Size, point, size};
-use crate::gfx::Direct2DDevices;
-use crate::types::{Error, Result};
+use crate::types::Result;
 
 const WM_APP_WAKE: u32 = WM_APP + 1;
 const WM_APP_VSYNC: u32 = WM_APP + 2;
@@ -235,8 +234,6 @@ impl VsyncPacer {
 }
 
 pub(crate) struct Platform {
-    devices: RefCell<Direct2DDevices>,
-    gpu_generation: Cell<u64>,
     wake_hwnd: HWND,
     vsync: Arc<VsyncPacer>,
     com_initialized: bool,
@@ -277,13 +274,9 @@ impl Platform {
             )?
         };
 
-        let devices = Direct2DDevices::new()
-            .map_err(|err| Error::new(format!("initializing Direct3D11/Direct2D devices: {err}")))?;
         let vsync = VsyncPacer::spawn(wake_hwnd.0 as isize);
 
         Ok(Self {
-            devices: RefCell::new(devices),
-            gpu_generation: Cell::new(0),
             wake_hwnd,
             vsync,
             com_initialized,
@@ -299,21 +292,6 @@ impl Platform {
     fn disable_handoff(&self) {
         HANDOFF_ACCEPTING.with(|flag| flag.set(false));
         let _ = unsafe { SetWindowTextW(self.wake_hwnd, w!("")) };
-    }
-
-    pub(crate) fn devices(&self) -> Direct2DDevices {
-        self.devices.borrow().clone()
-    }
-
-    pub(crate) fn replace_devices(&self, next: Direct2DDevices) {
-        *self.devices.borrow_mut() = next;
-        self.gpu_generation
-            .set(self.gpu_generation.get().wrapping_add(1));
-    }
-
-    #[cfg(test)]
-    pub(crate) fn gpu_generation(&self) -> u64 {
-        self.gpu_generation.get()
     }
 
     pub(super) fn wake_callback(&self) -> Arc<dyn Fn() + Send + Sync> {
@@ -448,9 +426,7 @@ fn wake_wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::color::rgb;
     use crate::geom::rect;
-    use crate::gfx::fill;
     use std::time::Duration;
     use windows::Win32::UI::WindowsAndMessaging::{
         SendMessageW, WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE, WM_SIZE, WM_TIMER,
@@ -468,16 +444,6 @@ mod tests {
 
     impl PlatformHandler for TestHandler {
         fn on_event(&mut self, event: PlatformEvent) -> bool {
-            if let PlatformEvent::Resized {
-                physical_width,
-                physical_height,
-                scale,
-                ..
-            } = &event
-                && let Some(w) = &mut self.window
-            {
-                w.sync_size(*physical_width, *physical_height, *scale);
-            }
             self.events.push(event);
             false
         }
@@ -492,20 +458,14 @@ mod tests {
         }
 
         fn drive_frames(&mut self) {
-            if let Some(w) = &mut self.window
-                && let Some(renderer) = w.renderer_mut()
-            {
-                renderer.begin_frame(rgb(0x272727));
-                renderer.paint_quad(fill(rect(0.0, 0.0, 100.0, 50.0), rgb(0x005fb8)));
-                let lost = renderer.end_frame().expect("end_frame failed");
-                assert!(!lost);
+            if self.window.is_some() {
                 self.paints += 1;
             }
         }
     }
 
     #[test]
-    fn real_win32_loop_wakes_timers_cleans_hwnd_registry_and_paints_d2d() {
+    fn real_win32_loop_wakes_timers_cleans_hwnd_registry() {
         let platform = Rc::new(Platform::new().expect("Platform::new failed"));
         let jobs = Jobs::new();
         jobs.attach_platform(&platform);
@@ -517,8 +477,7 @@ mod tests {
             ..Default::default()
         };
         let win =
-            NativeWindow::create(platform.devices(), &opts, WindowAppearance::Dark)
-                .expect("NativeWindow::create failed");
+            NativeWindow::create(&opts, WindowAppearance::Dark).expect("NativeWindow::create failed");
         let hwnd = win.hwnd();
         assert!(window::has_hwnd_entry(hwnd));
 

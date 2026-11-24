@@ -1,17 +1,20 @@
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use crate::app::AppEvent;
-use crate::color::{rgb, rgba, transparent_black};
-use crate::geom::{Rect, ScreenPoint, ScreenRect, Size, point, size};
-use crate::gfx::{Direct2DDevices, TextAlign, TextSystem, font};
+use crate::color::{rgb, rgba};
+use crate::geom::{ScreenPoint, ScreenRect, Size, size};
+use crate::gfx::{Gpu, TextAlign, TextSystem, font};
 use crate::platform::{
-    Jobs, Modifiers, NativeWindow, TimerHandle, WindowAppearance, WindowBackdrop, WindowId,
-    WindowKind, WindowOptions, cursor_screen_pos, monitor_work_area_and_scale, system_settings,
+    Jobs, Modifiers, TimerHandle, WindowAppearance, WindowId, cursor_screen_pos,
+    monitor_work_area_and_scale, system_settings,
 };
 use crate::theme::{Palette, theme_shadow};
 use crate::types::SharedStr;
 use crate::ui::controls::{CONTROL_RADIUS, SMALL_FONT};
-use crate::ui::{AnimKey, AvailSize, Easing, Frame, HitId, Node, UiState, box_, text};
+use crate::ui::{
+    AnimKey, AvailSize, Easing, Frame, HitId, Node, OverlaySurface, UiState, box_, text,
+};
 
 const PADDING_X: f32 = 9.;
 const PADDING_TOP: f32 = 6.;
@@ -116,8 +119,7 @@ struct Shown {
 
 #[derive(Default)]
 pub(crate) struct Tooltips {
-    popup: Option<NativeWindow>,
-    create_failed: bool,
+    overlay: OverlaySurface,
     ui: UiState,
     text: SharedStr,
     card_size: Size,
@@ -179,7 +181,7 @@ impl Tooltips {
         origin: ScreenPoint,
         scale: f32,
         frame: &Frame,
-        devices: &Direct2DDevices,
+        gpu: &Rc<Gpu>,
         appearance: WindowAppearance,
         ts: &TextSystem,
         jobs: &Jobs<AppEvent>,
@@ -218,7 +220,7 @@ impl Tooltips {
         if let Some(obs) = observed {
             self.transition(obs);
         }
-        self.sync(devices, appearance, ts, jobs);
+        self.sync(gpu, appearance, ts, jobs);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -227,7 +229,7 @@ impl Tooltips {
         window: WindowId,
         hit: HitId,
         window_state: Option<(bool, crate::geom::Point, ScreenPoint, f32, &Frame)>,
-        devices: &Direct2DDevices,
+        gpu: &Rc<Gpu>,
         appearance: WindowAppearance,
         ts: &TextSystem,
         jobs: &Jobs<AppEvent>,
@@ -242,7 +244,7 @@ impl Tooltips {
                     origin,
                     scale,
                     frame,
-                    devices,
+                    gpu,
                     appearance,
                     ts,
                     jobs,
@@ -255,28 +257,14 @@ impl Tooltips {
             }
         }
         self.transition(Report::Timer(Key { window, hit }));
-        self.sync(devices, appearance, ts, jobs);
+        self.sync(gpu, appearance, ts, jobs);
     }
 
     pub(crate) fn on_hide_timer(&mut self) {
-        if self.shown.is_none()
-            && let Some(popup) = &self.popup
-        {
-            popup.hwnd().hide();
+        if self.shown.is_none() {
+            self.overlay.hide();
         }
         self.hiding = None;
-    }
-
-    pub(crate) fn recreate_renderer(&mut self, devices: Direct2DDevices) {
-        self.create_failed = false;
-        if let Some(popup) = &mut self.popup {
-            if let Err(err) = popup.recreate_renderer(devices) {
-                crate::diag::debug_log(&format!("tooltip recreate_renderer failed: {err}"));
-            }
-            if self.visible {
-                self.dirty = true;
-            }
-        }
     }
 
     fn transition(&mut self, report: Report) {
@@ -327,7 +315,7 @@ impl Tooltips {
 
     fn sync(
         &mut self,
-        devices: &Direct2DDevices,
+        gpu: &Rc<Gpu>,
         appearance: WindowAppearance,
         ts: &TextSystem,
         jobs: &Jobs<AppEvent>,
@@ -340,7 +328,7 @@ impl Tooltips {
         if let Some(snap) = showing
             && self.shown.is_none()
         {
-            self.show(snap, devices, appearance, ts);
+            self.show(snap, gpu, appearance, ts);
         }
     }
 
@@ -357,36 +345,10 @@ impl Tooltips {
     fn show(
         &mut self,
         snap: Snap,
-        devices: &Direct2DDevices,
+        gpu: &Rc<Gpu>,
         appearance: WindowAppearance,
         ts: &TextSystem,
     ) {
-        if self.popup.is_none() {
-            if self.create_failed {
-                return;
-            }
-            let opts = WindowOptions {
-                bounds: Some(Rect::new(point(0., 0.), size(1., 1.))),
-                title: "".into(),
-                focus: false,
-                show: false,
-                kind: WindowKind::Overlay,
-                is_resizable: false,
-                is_minimizable: false,
-                display_id: None,
-                backdrop: WindowBackdrop::Transparent,
-                min_size: None,
-            };
-            match NativeWindow::create(devices.clone(), &opts, appearance) {
-                Ok(win) => self.popup = Some(win),
-                Err(err) => {
-                    self.create_failed = true;
-                    crate::diag::debug_log(&format!("tooltip overlay create failed: {err}"));
-                    return;
-                }
-            }
-        }
-
         let entered = snap.entered;
         let (work, scale) = monitor_work_area_and_scale(entered);
         let measured = measure_tooltip(&snap.text, ts);
@@ -415,12 +377,7 @@ impl Tooltips {
             key: snap.key,
             owner: snap.owner,
         });
-
-        if let Some(popup) = &self.popup {
-            let hwnd = popup.hwnd();
-            hwnd.place_topmost_noactivate(rect);
-            hwnd.show_noactivate();
-        }
+        self.overlay.show(gpu, rect, appearance);
     }
 
     pub(crate) fn paint(
@@ -429,62 +386,44 @@ impl Tooltips {
         reduce_motion: bool,
         now: Instant,
         ts: &TextSystem,
-    ) -> (bool, bool) {
+    ) -> bool {
         if !self.dirty {
-            return (false, false);
+            return false;
         }
         self.dirty = false;
-        let Some(popup) = &mut self.popup else {
-            return (false, false);
-        };
-        if !popup.sync_live_metrics() {
-            return (false, false);
-        }
-        let logical = popup.logical_size();
-        let scale = popup.scale_factor();
-
-        self.ui.begin_frame(now, reduce_motion);
-        let opacity = self.ui.animate_f32(
-            AnimKey::TooltipFade,
-            if self.visible { 1. } else { 0. },
-            FADE,
-            Easing::EaseOutCubic,
-        );
-        let tree = box_()
-            .size_full()
-            .opacity(opacity)
-            .child(
+        let visible = self.visible;
+        let text = self.text.clone();
+        let card_size = self.card_size;
+        let ui = &mut self.ui;
+        let mut animating = false;
+        let needs_retry = self.overlay.paint(|logical, scale, renderer| {
+            ui.begin_frame(now, reduce_motion);
+            let opacity = ui.animate_f32(
+                AnimKey::TooltipFade,
+                if visible { 1. } else { 0. },
+                FADE,
+                Easing::EaseOutCubic,
+            );
+            let tree = box_().size_full().opacity(opacity).child(
                 box_()
                     .absolute()
                     .left(SHADOW_SIDE)
                     .top(SHADOW_TOP)
-                    .child(tooltip_card(p, self.text.clone(), self.card_size)),
+                    .child(tooltip_card(p, text, card_size)),
             );
-        let frame = Frame::layout(
-            tree,
-            AvailSize::definite(logical.width, logical.height),
-            scale,
-            ts,
-        );
-        let lost = match popup.renderer_mut() {
-            Some(renderer) => {
-                renderer.begin_frame(transparent_black());
-                frame.paint(renderer, &mut |_, _, _| {});
-                match renderer.end_frame() {
-                    Ok(lost) => lost,
-                    Err(err) => {
-                        crate::diag::debug_log(&format!("tooltip end_frame failed: {err}"));
-                        true
-                    }
-                }
-            }
-            None => true,
-        };
-        let animating = self.ui.finish_frame(frame);
-        if animating {
+            let frame = Frame::layout(
+                tree,
+                AvailSize::definite(logical.width, logical.height),
+                scale,
+                ts,
+            );
+            frame.paint(renderer, &mut |_, _, _| {});
+            animating = ui.finish_frame(frame);
+        });
+        if animating || needs_retry {
             self.dirty = true;
         }
-        (animating, lost)
+        animating || needs_retry
     }
 }
 

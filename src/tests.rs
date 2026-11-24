@@ -12,7 +12,7 @@ use crate::document;
 use crate::editor::RopeExt as _;
 use crate::find;
 use crate::geom::{Point, Rect, ScreenRect, point, size};
-use crate::gfx::font;
+use crate::gfx::{Gpu, Surface, font};
 use crate::menu::MenuKind;
 use crate::platform::window::hit_test_control_areas;
 use crate::platform::{
@@ -78,7 +78,8 @@ struct TestHarness {
 impl TestHarness {
     fn new() -> Self {
         let platform = Rc::new(Platform::new().expect("Platform::new failed"));
-        let mut app = App::new(platform);
+        let gpu = Gpu::new().expect("Gpu::new failed");
+        let mut app = App::new(platform, gpu);
         app.reduce_motion = true;
         app.headless = true;
         let (window_id, _) = app
@@ -691,7 +692,7 @@ fn dirty_window_close_file_drop_and_multi_window() {
 #[test]
 fn overlay_window_resizes_from_1x1_and_renders() {
     let h = TestHarness::new();
-    let devices = h.app.borrow().platform.devices();
+    let gpu = h.app.borrow().gpu.clone();
     let opts = WindowOptions {
         bounds: Some(Rect::new(point(0., 0.), size(1., 1.))),
         title: "".into(),
@@ -704,23 +705,27 @@ fn overlay_window_resizes_from_1x1_and_renders() {
         backdrop: WindowBackdrop::Transparent,
         min_size: None,
     };
-    let mut overlay =
-        NativeWindow::create(devices, &opts, WindowAppearance::Dark).expect("overlay create");
+    let mut overlay = NativeWindow::create(&opts, WindowAppearance::Dark).expect("overlay create");
+    let (pw, ph) = overlay.physical_size();
+    let mut surface =
+        Surface::new(gpu, overlay.hwnd().raw(), pw, ph, overlay.scale_factor()).expect("surface");
     overlay.hwnd().place_topmost_noactivate(ScreenRect {
         left: 10,
         top: 10,
         right: 170,
         bottom: 50,
     });
-    assert!(overlay.sync_live_metrics());
+    let (w, h_px, scale) = overlay
+        .sync_live_metrics()
+        .expect("overlay must sync resized client rect");
+    surface.resize(w, h_px, scale);
     assert!(
         overlay.logical_size().width > 10.0 && overlay.logical_size().height > 10.0,
         "overlay must sync resized client rect before drawing"
     );
-    let renderer = overlay.renderer_mut().expect("overlay renderer");
-    renderer.begin_frame(crate::color::transparent_black());
-    let lost = renderer.end_frame().expect("overlay end_frame");
-    assert!(!lost);
+    let needs_retry = surface.draw(crate::color::transparent_black(), |_| {});
+    assert!(!needs_retry);
+    drop(surface);
     overlay.destroy();
 }
 
@@ -913,7 +918,8 @@ fn hwnd_registry_cleanup_reentrant_queue_and_modal_size_move_timer() {
 #[test]
 fn real_win32_message_loop_wakes_timers_and_quits_cleanly() {
     let platform = Rc::new(Platform::new().expect("Platform::new failed"));
-    let app = Rc::new(RefCell::new(App::new(platform)));
+    let gpu = Gpu::new().expect("Gpu::new failed");
+    let app = Rc::new(RefCell::new(App::new(platform, gpu)));
     let mut _timer = None;
     Platform::run(app, |app| {
         app.headless = true;
@@ -1040,28 +1046,24 @@ fn tab_drag_pop_out_and_reattach_does_not_panic() {
 #[test]
 fn device_loss_recreates_devices_and_renders_new_windows_cleanly() {
     let mut h = TestHarness::new();
-    let gen0 = h.read(|_, app| app.platform.gpu_generation());
+    let gen0 = h.read(|_, app| app.gpu.generation());
     {
         let mut app = h.app.borrow_mut();
-        app.windows[0]
-            .native
-            .renderer_mut()
-            .expect("renderer")
-            .mark_device_lost_for_test();
+        app.windows[0].surface.mark_device_lost_for_test();
         app.windows[0].dirty = true;
     }
     h.draw();
-    let gen1 = h.read(|_, app| app.platform.gpu_generation());
+    let gen1 = h.read(|_, app| app.gpu.generation());
     assert_eq!(
         gen1,
         gen0 + 1,
-        "device loss must replace shared Platform devices"
+        "device loss must replace shared Gpu devices"
     );
     h.press_key("ctrl-shift-n");
     {
-        let mut app = h.app.borrow_mut();
+        let app = h.app.borrow();
         assert_eq!(app.windows.len(), 2);
-        assert!(app.windows[1].native.renderer_mut().is_some());
+        assert!(app.windows[1].surface.is_ready());
     }
 }
 

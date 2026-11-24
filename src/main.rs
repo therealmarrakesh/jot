@@ -31,6 +31,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use app::App;
+use gfx::Gpu;
 use platform::{Arbitration, Platform, arbitrate_instance};
 
 pub(crate) const APP_NAME: &str = "Jot";
@@ -62,10 +63,17 @@ fn main() {
             return;
         }
     };
+    let gpu = match Gpu::new() {
+        Ok(g) => g,
+        Err(err) => {
+            diag::show_error_dialog(APP_NAME, &format!("Jot couldn't start.\n\n{err}"));
+            return;
+        }
+    };
     if let Some(ref lock) = lock {
         platform.enable_handoff(&lock.window_title);
     }
-    let app = Rc::new(RefCell::new(App::new(platform)));
+    let app = Rc::new(RefCell::new(App::new(platform, gpu)));
 
     Platform::run(app, move |app| match app.open_window(None, None) {
         Ok((id, _)) => {

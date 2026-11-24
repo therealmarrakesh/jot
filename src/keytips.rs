@@ -1,11 +1,11 @@
-use crate::color::{rgb, transparent_black};
+use std::rc::Rc;
+
+use crate::color::rgb;
 use crate::geom::{Rect, ScreenPoint, ScreenRect, point, size};
-use crate::gfx::{Direct2DDevices, TextSystem};
-use crate::platform::{
-    NativeWindow, WindowAppearance, WindowBackdrop, WindowId, WindowKind, WindowOptions,
-};
+use crate::gfx::{Gpu, TextSystem};
+use crate::platform::{WindowAppearance, WindowId};
 use crate::theme::Palette;
-use crate::ui::{AvailSize, Frame, Node, box_, text};
+use crate::ui::{AvailSize, Frame, Node, OverlaySurface, box_, text};
 
 const PADDING: f32 = 4.;
 const MARGIN: f32 = 1.;
@@ -58,8 +58,7 @@ pub(crate) fn layout_tip(
 
 #[derive(Default)]
 pub(crate) struct KeyTips {
-    overlay: Option<NativeWindow>,
-    create_failed: bool,
+    overlay: OverlaySurface,
     owner: Option<WindowId>,
     rect: ScreenRect,
     tips: Vec<KeyTip>,
@@ -76,9 +75,7 @@ impl KeyTips {
         self.rect = ScreenRect::default();
         self.tips.clear();
         self.dirty = false;
-        if let Some(overlay) = &self.overlay {
-            overlay.hwnd().hide();
-        }
+        self.overlay.hide();
     }
 
     pub(crate) fn hide_owner(&mut self, owner: WindowId) {
@@ -93,25 +90,13 @@ impl KeyTips {
         }
     }
 
-    pub(crate) fn recreate_renderer(&mut self, devices: Direct2DDevices) {
-        self.create_failed = false;
-        if let Some(overlay) = &mut self.overlay {
-            if let Err(err) = overlay.recreate_renderer(devices) {
-                crate::diag::debug_log(&format!("keytips recreate_renderer failed: {err}"));
-            }
-            if self.owner.is_some() {
-                self.dirty = true;
-            }
-        }
-    }
-
     pub(crate) fn sync(
         &mut self,
         owner: WindowId,
         origin: ScreenPoint,
         scale: f32,
         mut tips: Vec<KeyTip>,
-        devices: &Direct2DDevices,
+        gpu: &Rc<Gpu>,
         appearance: WindowAppearance,
     ) {
         let Some(union) = tips.iter().map(|t| t.bounds).reduce(Rect::union) else {
@@ -125,40 +110,11 @@ impl KeyTips {
         if self.owner == Some(owner) && self.rect == rect && self.tips == tips {
             return;
         }
-        if self.overlay.is_none() {
-            if self.create_failed {
-                return;
-            }
-            let opts = WindowOptions {
-                bounds: Some(Rect::new(point(0., 0.), size(1., 1.))),
-                title: "".into(),
-                focus: false,
-                show: false,
-                kind: WindowKind::Overlay,
-                is_resizable: false,
-                is_minimizable: false,
-                display_id: None,
-                backdrop: WindowBackdrop::Transparent,
-                min_size: None,
-            };
-            match NativeWindow::create(devices.clone(), &opts, appearance) {
-                Ok(win) => self.overlay = Some(win),
-                Err(err) => {
-                    self.create_failed = true;
-                    crate::diag::debug_log(&format!("keytips overlay create failed: {err}"));
-                    return;
-                }
-            }
-        }
         self.tips = tips;
         self.owner = Some(owner);
         self.rect = rect;
         self.dirty = true;
-        if let Some(overlay) = &self.overlay {
-            let hwnd = overlay.hwnd();
-            hwnd.place_topmost_noactivate(rect);
-            hwnd.show_noactivate();
-        }
+        self.overlay.show(gpu, rect, appearance);
     }
 
     pub(crate) fn paint(&mut self, p: Palette, ts: &TextSystem) -> bool {
@@ -169,35 +125,21 @@ impl KeyTips {
         if self.owner.is_none() || self.tips.is_empty() {
             return false;
         }
-        let Some(overlay) = &mut self.overlay else {
-            return false;
-        };
-        if !overlay.sync_live_metrics() {
-            return false;
+        let tips = &self.tips;
+        let needs_retry = self.overlay.paint(|logical, scale, renderer| {
+            let tree = render_tips(tips, p);
+            let frame = Frame::layout(
+                tree,
+                AvailSize::definite(logical.width, logical.height),
+                scale,
+                ts,
+            );
+            frame.paint(renderer, &mut |_, _, _| {});
+        });
+        if needs_retry {
+            self.dirty = true;
         }
-        let logical = overlay.logical_size();
-        let scale = overlay.scale_factor();
-        let tree = render_tips(&self.tips, p);
-        let frame = Frame::layout(
-            tree,
-            AvailSize::definite(logical.width, logical.height),
-            scale,
-            ts,
-        );
-        match overlay.renderer_mut() {
-            Some(renderer) => {
-                renderer.begin_frame(transparent_black());
-                frame.paint(renderer, &mut |_, _, _| {});
-                match renderer.end_frame() {
-                    Ok(lost) => lost,
-                    Err(err) => {
-                        crate::diag::debug_log(&format!("keytips end_frame failed: {err}"));
-                        true
-                    }
-                }
-            }
-            None => true,
-        }
+        needs_retry
     }
 }
 

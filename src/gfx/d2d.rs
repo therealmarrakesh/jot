@@ -1,4 +1,6 @@
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::time::Instant;
 
 use windows::Win32::{
@@ -83,16 +85,16 @@ fn to_d2d_rect(r: Rect) -> D2D_RECT_F {
 }
 
 #[derive(Clone)]
-pub(crate) struct Direct2DDevices {
-    pub(crate) dxgi_factory: IDXGIFactory6,
-    pub(crate) d3d_device: ID3D11Device,
-    pub(crate) dxgi_device: IDXGIDevice,
-    pub(crate) d2d_factory: ID2D1Factory1,
-    pub(crate) d2d_device: ID2D1Device,
+struct Direct2DDevices {
+    dxgi_factory: IDXGIFactory6,
+    d3d_device: ID3D11Device,
+    dxgi_device: IDXGIDevice,
+    d2d_factory: ID2D1Factory1,
+    d2d_device: ID2D1Device,
 }
 
 impl Direct2DDevices {
-    pub(crate) fn new() -> Result<Self> {
+    fn new() -> Result<Self> {
         let dxgi_factory: IDXGIFactory6 =
             unsafe { CreateDXGIFactory2(DXGI_CREATE_FACTORY_FLAGS(0))? };
         let feature_levels = [D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0];
@@ -145,6 +147,191 @@ impl Direct2DDevices {
             d2d_factory,
             d2d_device,
         })
+    }
+}
+
+struct GpuInner {
+    devices: Direct2DDevices,
+    generation: u64,
+}
+
+pub(crate) struct Gpu {
+    inner: RefCell<GpuInner>,
+}
+
+impl Gpu {
+    pub(crate) fn new() -> Result<Rc<Self>> {
+        let devices = Direct2DDevices::new()
+            .map_err(|err| Error::new(format!("initializing Direct3D11/Direct2D devices: {err}")))?;
+        Ok(Rc::new(Self {
+            inner: RefCell::new(GpuInner {
+                devices,
+                generation: 0,
+            }),
+        }))
+    }
+
+    pub(crate) fn generation(&self) -> u64 {
+        self.inner.borrow().generation
+    }
+
+    fn snapshot(&self) -> (u64, Direct2DDevices) {
+        let inner = self.inner.borrow();
+        (inner.generation, inner.devices.clone())
+    }
+
+    fn recover(&self, stale_gen: u64) -> Result<(u64, Direct2DDevices)> {
+        {
+            let inner = self.inner.borrow();
+            if inner.generation != stale_gen {
+                return Ok((inner.generation, inner.devices.clone()));
+            }
+        }
+        let next_devices = Direct2DDevices::new()?;
+        let mut inner = self.inner.borrow_mut();
+        if inner.generation == stale_gen {
+            inner.devices = next_devices;
+            inner.generation = inner.generation.wrapping_add(1);
+        }
+        Ok((inner.generation, inner.devices.clone()))
+    }
+}
+
+enum SurfaceState {
+    Ready {
+        generation: u64,
+        renderer: Box<D2DRenderer>,
+    },
+    Lost,
+}
+
+pub(crate) struct Surface {
+    gpu: Rc<Gpu>,
+    hwnd: HWND,
+    state: SurfaceState,
+    width: u32,
+    height: u32,
+    scale: f32,
+}
+
+impl Surface {
+    pub(crate) fn new(
+        gpu: Rc<Gpu>,
+        hwnd: HWND,
+        physical_width: u32,
+        physical_height: u32,
+        scale_factor: f32,
+    ) -> Result<Self> {
+        let (generation, devices) = gpu.snapshot();
+        let renderer = Box::new(D2DRenderer::new(
+            devices,
+            hwnd,
+            physical_width,
+            physical_height,
+            scale_factor,
+        )?);
+        Ok(Self {
+            gpu,
+            hwnd,
+            state: SurfaceState::Ready {
+                generation,
+                renderer,
+            },
+            width: physical_width.max(1),
+            height: physical_height.max(1),
+            scale: scale_factor,
+        })
+    }
+
+    pub(crate) fn resize(&mut self, physical_width: u32, physical_height: u32, scale_factor: f32) {
+        self.width = physical_width.max(1);
+        self.height = physical_height.max(1);
+        self.scale = scale_factor;
+        if let SurfaceState::Ready { renderer, .. } = &mut self.state
+            && let Err(err) = renderer.resize(self.width, self.height, self.scale)
+            && renderer.needs_recreate
+        {
+            crate::diag::debug_log(&format!("surface resize lost device: {err}"));
+            self.state = SurfaceState::Lost;
+        }
+    }
+
+    pub(crate) fn draw(&mut self, clear: Rgba, paint: impl FnOnce(&mut D2DRenderer)) -> bool {
+        let current_gen = self.gpu.generation();
+        if let SurfaceState::Ready { generation, .. } = &self.state
+            && *generation != current_gen
+        {
+            // Drop old swapchain and DComp target before creating the replacement.
+            self.state = SurfaceState::Lost;
+        }
+        if matches!(self.state, SurfaceState::Lost) {
+            let (generation, devices) = self.gpu.snapshot();
+            match D2DRenderer::new(devices, self.hwnd, self.width, self.height, self.scale) {
+                Ok(renderer) => {
+                    self.state = SurfaceState::Ready {
+                        generation,
+                        renderer: Box::new(renderer),
+                    };
+                }
+                Err(err) => {
+                    crate::diag::debug_log(&format!("surface recreate failed: {err}"));
+                    return false;
+                }
+            }
+        }
+        let SurfaceState::Ready {
+            generation,
+            renderer,
+        } = &mut self.state
+        else {
+            return false;
+        };
+        let used_gen = *generation;
+        renderer.begin_frame(clear);
+        paint(renderer);
+        match renderer.end_frame() {
+            Ok(false) => false,
+            Ok(true) => {
+                // Drop old swapchain and DComp target before creating the replacement.
+                self.state = SurfaceState::Lost;
+                match self.gpu.recover(used_gen) {
+                    Ok((new_gen, new_devices)) => {
+                        if let Ok(new_renderer) = D2DRenderer::new(
+                            new_devices,
+                            self.hwnd,
+                            self.width,
+                            self.height,
+                            self.scale,
+                        ) {
+                            self.state = SurfaceState::Ready {
+                                generation: new_gen,
+                                renderer: Box::new(new_renderer),
+                            };
+                        }
+                    }
+                    Err(err) => {
+                        crate::diag::debug_log(&format!("GPU recovery failed: {err}"));
+                    }
+                }
+                true
+            }
+            Err(err) => {
+                crate::diag::debug_log(&format!("D2D end_frame failed: {err}"));
+                false
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_ready(&self) -> bool {
+        matches!(self.state, SurfaceState::Ready { .. })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn mark_device_lost_for_test(&mut self) {
+        if let SurfaceState::Ready { renderer, .. } = &mut self.state {
+            renderer.mark_device_lost_for_test();
+        }
     }
 }
 
@@ -217,7 +404,7 @@ pub(crate) struct D2DRenderer {
 }
 
 impl D2DRenderer {
-    pub(crate) fn new(
+    fn new(
         devices: Direct2DDevices,
         hwnd: HWND,
         physical_width: u32,
@@ -334,7 +521,7 @@ impl D2DRenderer {
         Ok(())
     }
 
-    pub(crate) fn resize(
+    fn resize(
         &mut self,
         physical_width: u32,
         physical_height: u32,
@@ -383,7 +570,7 @@ impl D2DRenderer {
         Ok(())
     }
 
-    pub(crate) fn begin_frame(&mut self, clear_color: Rgba) {
+    fn begin_frame(&mut self, clear_color: Rgba) {
         self.scopes.clear();
         if self.target_bitmap.is_none() && self.attach_backbuffer(self.scale_factor).is_err() {
             self.needs_recreate = true;
@@ -395,7 +582,7 @@ impl D2DRenderer {
         }
     }
 
-    pub(crate) fn end_frame(&mut self) -> Result<bool> {
+    fn end_frame(&mut self) -> Result<bool> {
         while let Some(scope) = self.scopes.pop() {
             match scope {
                 RenderScope::Clip => {
@@ -433,7 +620,7 @@ impl D2DRenderer {
     }
 
     #[cfg(test)]
-    pub(crate) fn mark_device_lost_for_test(&mut self) {
+    fn mark_device_lost_for_test(&mut self) {
         self.needs_recreate = true;
     }
 

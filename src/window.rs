@@ -16,7 +16,7 @@ use crate::files::{
 };
 use crate::find::FindBar;
 use crate::geom::{Edges, Point, Rect, Size, point, size};
-use crate::gfx::{TextSystem, fill, font};
+use crate::gfx::{Surface, TextSystem, fill, font};
 use crate::keytips::KeyTip;
 use crate::menu::{MenuBar, MenuKind, MenuOutcome};
 use crate::platform::{
@@ -28,7 +28,6 @@ use crate::tabs::{
     SCROLL_STEP, STRIP_TOP, TAB_HEIGHT, Tab, TabData, TabId, TabSaveState, TabStrip, WHEEL_SHARE,
 };
 use crate::theme::Palette;
-use crate::types::Result;
 use crate::ui::controls::{
     BODY_LINE, BODY_SIZE, CONTROL_RADIUS, ICON_FONT, IconButtonStyle, SMALL_FONT, TEXT_FONT,
     icon_button,
@@ -94,11 +93,6 @@ pub(crate) enum WindowAction {
     ForgetTabDrag(TabId),
 }
 
-pub(crate) struct FrameResult {
-    pub(crate) needs_vsync: bool,
-    pub(crate) device_lost: bool,
-}
-
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct StatusMetrics {
     line: usize,
@@ -160,6 +154,8 @@ impl EditorTimers for WindowEditorTimers<'_> {
 }
 
 pub(crate) struct MainWindow {
+    // Declared before native so swapchain/DComp target drop before DestroyWindow.
+    pub(crate) surface: Surface,
     pub(crate) native: NativeWindow,
     pub(crate) ui: UiState,
     pub(crate) tabs: Vec<Tab>,
@@ -185,6 +181,7 @@ pub(crate) struct MainWindow {
 impl MainWindow {
     pub(crate) fn new(
         native: NativeWindow,
+        surface: Surface,
         initial: Option<TabData>,
         word_wrap: bool,
         jobs: &Jobs<AppEvent>,
@@ -196,6 +193,7 @@ impl MainWindow {
         let active_id = tab.data.id;
 
         let mut win = Self {
+            surface,
             native,
             ui: UiState::default(),
             tabs: vec![tab],
@@ -2054,7 +2052,7 @@ impl MainWindow {
         now: Instant,
         ts: &TextSystem,
         jobs: &Jobs<AppEvent>,
-    ) -> Result<FrameResult> {
+    ) -> bool {
         self.dirty = false;
         let logical = self.native.logical_size();
         let scale = self.native.scale_factor();
@@ -2133,13 +2131,12 @@ impl MainWindow {
         self.active_editor_mut().set_caret_height(caret_height);
         self.active_editor_mut().set_caret_hidden(caret_hidden);
 
-        let device_lost = if let Some(renderer) = self.native.renderer_mut() {
-            let clear = if p.high_contrast {
-                rgb(p.editor)
-            } else {
-                transparent_black()
-            };
-            renderer.begin_frame(clear);
+        let clear = if p.high_contrast {
+            rgb(p.editor)
+        } else {
+            transparent_black()
+        };
+        let needs_retry = self.surface.draw(clear, |renderer| {
             frame.paint(renderer, &mut |token, rect, renderer| {
                 match token {
                     CustomDraw::Editor(slot) => match slot {
@@ -2241,16 +2238,7 @@ impl MainWindow {
                     }
                 }
             });
-            match renderer.end_frame() {
-                Ok(lost) => lost,
-                Err(err) => {
-                    crate::diag::debug_log(&format!("D2D end_frame failed: {err}"));
-                    true
-                }
-            }
-        } else {
-            true
-        };
+        });
 
         let ime_caret = self
             .focused_editor_slot()
@@ -2275,14 +2263,11 @@ impl MainWindow {
             self.native.set_cursor(cursor);
         }
         let needs_vsync =
-            ui_animating || editor_needs_vsync || editor_needs_redraw || hover_shifted;
+            ui_animating || editor_needs_vsync || editor_needs_redraw || hover_shifted || needs_retry;
         if needs_vsync {
             self.dirty = true;
         }
-        Ok(FrameResult {
-            needs_vsync,
-            device_lost,
-        })
+        needs_vsync
     }
 
     fn title_bar(
