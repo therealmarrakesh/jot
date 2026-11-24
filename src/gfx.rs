@@ -161,14 +161,12 @@ const SWAPCHAIN_BUFFERS: u32 = 2;
 const MAX_SHADOW_CACHE_ENTRIES: usize = 16;
 const SHADOW_CACHE_KEEP_FRAMES: u64 = 120;
 
-#[inline]
 fn is_device_lost_hr(hr: HRESULT) -> bool {
     hr == D2DERR_RECREATE_TARGET
         || hr == DXGI_ERROR_DEVICE_REMOVED
         || hr == DXGI_ERROR_DEVICE_RESET
 }
 
-#[inline]
 fn to_d2d_color(c: Rgba) -> D2D1_COLOR_F {
     D2D1_COLOR_F {
         r: c.r,
@@ -178,7 +176,6 @@ fn to_d2d_color(c: Rgba) -> D2D1_COLOR_F {
     }
 }
 
-#[inline]
 fn to_d2d_rect(r: Rect) -> D2D_RECT_F {
     D2D_RECT_F {
         left: r.left(),
@@ -640,7 +637,6 @@ pub(crate) struct PaintQuad {
     pub(crate) border_color: Rgba,
 }
 
-#[inline]
 pub(crate) fn fill(bounds: Rect, background: Rgba) -> PaintQuad {
     PaintQuad {
         bounds,
@@ -774,7 +770,6 @@ impl Canvas {
         );
     }
 
-    #[inline]
     fn set_brush_color(&self, color: Rgba) {
         unsafe {
             self.solid_brush.SetColor(&to_d2d_color(color));
@@ -1151,7 +1146,6 @@ pub(crate) enum FontWeight {
 }
 
 impl FontWeight {
-    #[inline]
     fn to_dwrite(self) -> DWRITE_FONT_WEIGHT {
         match self {
             Self::Normal => DWRITE_FONT_WEIGHT(400),
@@ -1188,7 +1182,6 @@ impl Default for TextStyle {
 }
 
 impl TextStyle {
-    #[inline]
     fn quantize_size(size: f32) -> u32 {
         let safe = if size.is_finite() {
             size.clamp(1.0, 4096.0)
@@ -1209,12 +1202,10 @@ impl TextStyle {
         Self::new(Font { family: family.into(), weight: FontWeight::Normal }, size)
     }
 
-    #[inline]
     pub(crate) fn set_size(&mut self, size: f32) {
         self.size_hundredths = Self::quantize_size(size);
     }
 
-    #[inline]
     pub(crate) fn size(&self) -> f32 {
         self.size_hundredths as f32 / 100.0
     }
@@ -1445,7 +1436,6 @@ pub(crate) struct FontFace {
 }
 
 impl FontFace {
-    #[inline]
     pub(crate) fn space_width(&self) -> f32 {
         self.space_width
     }
@@ -1843,7 +1833,6 @@ fn encode_single_line_utf16(text: &str) -> Vec<u16> {
     out
 }
 
-#[inline]
 pub(crate) fn utf8_to_utf16_offset(text: &str, utf8_offset: usize, is_ascii: bool) -> u32 {
     if is_ascii {
         return utf8_offset.min(text.len()) as u32;
@@ -1852,7 +1841,6 @@ pub(crate) fn utf8_to_utf16_offset(text: &str, utf8_offset: usize, is_ascii: boo
     text[..clamped].encode_utf16().count() as u32
 }
 
-#[inline]
 pub(crate) fn utf16_to_utf8_offset(text: &str, utf16_offset: u32, is_ascii: bool) -> usize {
     if is_ascii {
         return (utf16_offset as usize).min(text.len());
@@ -1887,7 +1875,6 @@ const CHAR_WIDTH_RANGES: [RangeInclusive<u32>; 17] = [
     0xff01..=0xffee,
 ];
 
-#[inline]
 fn is_printable_ascii_or_tab(bytes: &[u8]) -> bool {
     bytes.iter().all(|&b| b == b'\t' || (0x20..=0x7e).contains(&b))
 }
@@ -1925,7 +1912,6 @@ impl AdvanceTable {
         }
     }
 
-    #[inline]
     fn advance(&mut self, ch: char, current_x: f32) -> f32 {
         if ch == '\t' {
             let stop = (self.ascii[0] * TAB_STOP_COLUMNS).max(1.0);
