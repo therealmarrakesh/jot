@@ -6,8 +6,8 @@ use crate::geom::{ScreenPoint, ScreenRect};
 use crate::gfx::{Gpu, TextSystem};
 use crate::ids::{Frame, HitId};
 use crate::platform::{
-    Jobs, Modifiers, TimerHandle, WindowAppearance, WindowId, cursor_screen_pos,
-    monitor_work_area_and_scale, system_settings,
+    Jobs, Modifiers, TimerHandle, WindowId, cursor_screen_pos, monitor_work_area_and_scale,
+    system_settings,
 };
 use crate::theme::{Palette, theme_shadow};
 use crate::types::SharedStr;
@@ -183,7 +183,6 @@ impl Tooltips {
         &mut self,
         probe: TooltipProbe<'_>,
         gpu: &Rc<Gpu>,
-        appearance: WindowAppearance,
         ts: &TextSystem,
         jobs: &Jobs<AppEvent>,
     ) {
@@ -228,7 +227,7 @@ impl Tooltips {
         if let Some(obs) = observed {
             self.transition(obs);
         }
-        self.sync(gpu, appearance, ts, jobs);
+        self.sync(gpu, ts, jobs);
     }
 
     pub(crate) fn on_show_timer(
@@ -236,13 +235,12 @@ impl Tooltips {
         target: TooltipTarget,
         probe: Option<TooltipProbe<'_>>,
         gpu: &Rc<Gpu>,
-        appearance: WindowAppearance,
         ts: &TextSystem,
         jobs: &Jobs<AppEvent>,
     ) {
         match probe {
             Some(probe) => {
-                self.evaluate(probe, gpu, appearance, ts, jobs);
+                self.evaluate(probe, gpu, ts, jobs);
             }
             None => {
                 if let Some(key) = self.state.key().filter(|k| k.window == target.window) {
@@ -251,7 +249,7 @@ impl Tooltips {
             }
         }
         self.transition(Report::Timer(target));
-        self.sync(gpu, appearance, ts, jobs);
+        self.sync(gpu, ts, jobs);
     }
 
     pub(crate) fn on_hide_timer(&mut self) {
@@ -307,13 +305,7 @@ impl Tooltips {
         }
     }
 
-    fn sync(
-        &mut self,
-        gpu: &Rc<Gpu>,
-        appearance: WindowAppearance,
-        ts: &TextSystem,
-        jobs: &Jobs<AppEvent>,
-    ) {
+    fn sync(&mut self, gpu: &Rc<Gpu>, ts: &TextSystem, jobs: &Jobs<AppEvent>) {
         self.sync_hide_and_timer(jobs);
         let showing = match &self.state {
             State::Showing { snap } => Some(snap.clone()),
@@ -322,7 +314,7 @@ impl Tooltips {
         if let Some(snap) = showing
             && self.shown.is_none()
         {
-            self.show(snap, gpu, appearance, ts);
+            self.show(snap, gpu, ts);
         }
     }
 
@@ -335,13 +327,7 @@ impl Tooltips {
         self.hiding = Some(jobs.after(FADE, AppEvent::TooltipHideTimer));
     }
 
-    fn show(
-        &mut self,
-        snap: Snap,
-        gpu: &Rc<Gpu>,
-        appearance: WindowAppearance,
-        ts: &TextSystem,
-    ) {
+    fn show(&mut self, snap: Snap, gpu: &Rc<Gpu>, ts: &TextSystem) {
         let entered = snap.entered;
         let (work, scale) = monitor_work_area_and_scale(entered);
         let measured = GenericFrame::measure_fit(
@@ -372,7 +358,7 @@ impl Tooltips {
             key: snap.key,
             owner: snap.owner,
         });
-        self.overlay.show(gpu, rect, appearance);
+        self.overlay.show(gpu, rect);
     }
 
     pub(crate) fn paint(

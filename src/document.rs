@@ -28,8 +28,6 @@ const MAX_SIBLING_STEM_CHARS: usize = 200;
 const TEMP_SUFFIX: &str = ".jot-save";
 const BACKUP_SUFFIX: &str = ".jot-backup";
 pub(crate) const READ_ONLY: &str = "This file is read-only.";
-const NOTICES: &str = include_str!(concat!(env!("OUT_DIR"), "/notices.txt"));
-const NOTICES_FILE: &str = "THIRD-PARTY-NOTICES.txt";
 
 pub(crate) const UNTITLED: &str = "Untitled";
 
@@ -832,14 +830,6 @@ fn create_temp(path: &Path) -> io::Result<(PathBuf, fs::File)> {
         }
     }
     Err(io::Error::from(io::ErrorKind::AlreadyExists))
-}
-
-pub(crate) fn write_notices() -> io::Result<PathBuf> {
-    let dir = std::env::temp_dir().join(crate::APP_NAME);
-    fs::create_dir_all(&dir)?;
-    let path = dir.join(NOTICES_FILE);
-    fs::write(&path, NOTICES)?;
-    Ok(path)
 }
 
 fn normalize_path_key(path: &Path) -> String {

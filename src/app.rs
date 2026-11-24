@@ -14,9 +14,9 @@ use crate::gfx::{Gpu, TextSystem};
 use crate::ids::{EditorSlot, HitId};
 use crate::keytips::KeyTips;
 use crate::platform::{
-    HandoffCommand, Jobs, Key, MouseButton, NativeWindow, Platform, PlatformEvent, PlatformHandler,
-    SystemSettings, WindowAppearance, WindowBackdrop, WindowHwnd, WindowId, WindowKind,
-    WindowOptions, WindowsDisplay, cursor_screen_pos, system_settings,
+    HandoffCommand, Jobs, Key, MainWindowConfig, MouseButton, NativeWindow, Platform,
+    PlatformEvent, PlatformHandler, SystemSettings, WindowAppearance, WindowHwnd, WindowId,
+    WindowsDisplay, cursor_screen_pos, system_settings,
 };
 use crate::tab_drag::TabDragState;
 use crate::tabs::{TabData, TabId};
@@ -446,11 +446,11 @@ impl App {
         }
     }
 
-    fn window_options(
+    fn window_config(
         &mut self,
         window_size: Option<Size>,
         target_point: Option<ScreenPoint>,
-    ) -> WindowOptions {
+    ) -> MainWindowConfig {
         let display = if let Some(pt) = target_point {
             WindowsDisplay::from_point(pt).or_else(WindowsDisplay::primary)
         } else if let Some(origin) = self
@@ -501,17 +501,12 @@ impl App {
         let (focus, show) = (!self.headless, !self.headless);
         #[cfg(not(test))]
         let (focus, show) = (true, true);
-        WindowOptions {
+        MainWindowConfig {
             bounds: Some(bounds),
             title: APP_NAME.into(),
+            display_id: display.map(|d| d.id()),
             focus,
             show,
-            kind: WindowKind::Normal,
-            is_resizable: true,
-            is_minimizable: true,
-            display_id: display.map(|d| d.id()),
-            backdrop: WindowBackdrop::MicaAlt,
-            min_size: None,
         }
     }
 
@@ -529,9 +524,9 @@ impl App {
         window_size: Option<Size>,
         target_point: Option<ScreenPoint>,
     ) -> std::result::Result<(WindowId, WindowHwnd), Box<OpenWindowError>> {
-        let opts = self.window_options(window_size, target_point);
+        let config = self.window_config(window_size, target_point);
         let (native, surface) =
-            match NativeWindow::create(&opts, self.shell.appearance).and_then(|n| {
+            match NativeWindow::create_main(&config, self.shell.appearance).and_then(|n| {
                 let (w, h) = n.physical_size();
                 let s = crate::gfx::Surface::new(
                     self.shell.gpu.clone(),
@@ -663,7 +658,6 @@ impl App {
         self.tooltips.evaluate(
             probe,
             &self.shell.gpu,
-            self.shell.appearance,
             &self.shell.text_system,
             &self.shell.jobs,
         );
@@ -680,14 +674,8 @@ impl App {
             let tips = self.windows[ix].key_tips(&self.shell.text_system);
             let origin = self.windows[ix].native.hwnd().client_origin();
             let scale = self.windows[ix].native.scale_factor();
-            self.keytips.sync(
-                wid,
-                origin,
-                scale,
-                tips,
-                &self.shell.gpu,
-                self.shell.appearance,
-            );
+            self.keytips
+                .sync(wid, origin, scale, tips, &self.shell.gpu);
         }
         if self.windows[ix].ui.pointer().is_some() {
             self.evaluate_tooltip_for(ix);
@@ -915,7 +903,6 @@ impl PlatformHandler for App {
                         TooltipTarget { window, hit },
                         probe,
                         &self.shell.gpu,
-                        self.shell.appearance,
                         &self.shell.text_system,
                         &self.shell.jobs,
                     );

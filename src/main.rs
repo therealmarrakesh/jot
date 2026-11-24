@@ -37,6 +37,16 @@ use platform::{Arbitration, Platform, arbitrate_instance};
 
 pub(crate) const APP_NAME: &str = "Jot";
 const NOTICES_FLAG: &str = "--notices";
+const NOTICES: &str = include_str!(concat!(env!("OUT_DIR"), "/notices.txt"));
+const NOTICES_FILE: &str = "THIRD-PARTY-NOTICES.txt";
+
+fn write_notices() -> std::io::Result<PathBuf> {
+    let dir = std::env::temp_dir().join(APP_NAME);
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join(NOTICES_FILE);
+    std::fs::write(&path, NOTICES)?;
+    Ok(path)
+}
 
 fn main() {
     diag::install_panic_hook();
@@ -46,7 +56,7 @@ fn main() {
         .map(PathBuf::from)
         .partition(|arg| arg.as_os_str() == NOTICES_FLAG);
     if !flags.is_empty() {
-        match document::write_notices() {
+        match write_notices() {
             Ok(path) => paths.push(path),
             Err(err) => diag::debug_log(&format!("Failed to write notices file: {err}")),
         }

@@ -19,7 +19,7 @@ use crate::menu::MenuKind;
 use crate::platform::window::hit_test_control_areas;
 use crate::platform::{
     Key, KeyEvent, Modifiers, MouseButton, NativeWindow, Platform, PlatformEvent, PlatformHandler,
-    WindowAppearance, WindowBackdrop, WindowControlArea, WindowId, WindowKind, WindowOptions,
+    WindowControlArea, WindowId,
 };
 use crate::tabs::TabId;
 use crate::ui::controls::{SMALL_FONT, TEXT_FONT};
@@ -727,19 +727,7 @@ fn dirty_window_close_file_drop_and_multi_window() {
 fn overlay_window_resizes_from_1x1_and_renders() {
     let h = TestHarness::new();
     let gpu = h.app.borrow().shell.gpu.clone();
-    let opts = WindowOptions {
-        bounds: Some(Rect::new(point(0., 0.), size(1., 1.))),
-        title: "".into(),
-        focus: false,
-        show: false,
-        kind: WindowKind::Overlay,
-        is_resizable: false,
-        is_minimizable: false,
-        display_id: None,
-        backdrop: WindowBackdrop::Transparent,
-        min_size: None,
-    };
-    let mut overlay = NativeWindow::create(&opts, WindowAppearance::Dark).expect("overlay create");
+    let mut overlay = NativeWindow::create_overlay().expect("overlay create");
     let (pw, ph) = overlay.physical_size();
     let mut surface =
         Surface::new(gpu, overlay.hwnd().raw(), pw, ph, overlay.scale_factor()).expect("surface");

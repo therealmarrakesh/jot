@@ -95,20 +95,6 @@ pub(crate) enum WindowAppearance {
     Dark,
 }
 
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) enum WindowBackdrop {
-    Transparent,
-    #[default]
-    MicaAlt,
-}
-
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) enum WindowKind {
-    #[default]
-    Normal,
-    Overlay,
-}
-
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub(crate) enum WindowControlArea {
     Drag,
@@ -136,32 +122,22 @@ pub(crate) enum CursorStyle {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct WindowOptions {
+pub(crate) struct MainWindowConfig {
     pub(crate) bounds: Option<Rect>,
     pub(crate) title: SharedStr,
+    pub(crate) display_id: Option<DisplayId>,
     pub(crate) focus: bool,
     pub(crate) show: bool,
-    pub(crate) kind: WindowKind,
-    pub(crate) is_resizable: bool,
-    pub(crate) is_minimizable: bool,
-    pub(crate) display_id: Option<DisplayId>,
-    pub(crate) backdrop: WindowBackdrop,
-    pub(crate) min_size: Option<Size>,
 }
 
-impl Default for WindowOptions {
+impl Default for MainWindowConfig {
     fn default() -> Self {
         Self {
             bounds: None,
             title: SharedStr::new_static("Jot"),
+            display_id: None,
             focus: true,
             show: true,
-            kind: WindowKind::Normal,
-            is_resizable: true,
-            is_minimizable: true,
-            display_id: None,
-            backdrop: WindowBackdrop::MicaAlt,
-            min_size: None,
         }
     }
 }
@@ -330,7 +306,6 @@ struct HwndEntry {
     window_id: WindowId,
     state: Rc<WindowState>,
     is_overlay: bool,
-    is_resizable: bool,
     min_size: Option<Size>,
     cursor: CursorStyle,
     control_areas: Vec<(Rect, Option<WindowControlArea>)>,
@@ -475,57 +450,108 @@ pub(super) fn dispatch(event: PlatformEvent) -> bool {
 pub(crate) struct NativeWindow {
     pub(crate) id: WindowId,
     hwnd: HWND,
-    pub(crate) kind: WindowKind,
+    is_overlay: bool,
     state: Rc<WindowState>,
     destroyed: bool,
 }
 
 impl NativeWindow {
-    pub(crate) fn create(
-        options: &WindowOptions,
+    pub(crate) fn create_main(
+        config: &MainWindowConfig,
         appearance: WindowAppearance,
     ) -> Result<Self> {
+        let ex_style = WS_EX_APPWINDOW | WS_EX_NOREDIRECTIONBITMAP;
+        let style = WS_SYSMENU | WS_THICKFRAME | WS_MAXIMIZEBOX | WS_MINIMIZEBOX;
+        let (id, hwnd, state, init_scale) = Self::create_and_register(
+            ex_style,
+            style,
+            config.title.as_str(),
+            (CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT),
+            false,
+            config.show && config.focus,
+        )?;
+
+        configure_backdrop(hwnd);
+        configure_dark_mode(hwnd, appearance);
+
+        let target_scale = config
+            .display_id
+            .and_then(WindowsDisplay::from_id)
+            .map_or(init_scale, |d| d.scale_factor());
+
+        if let Some(b) = config.bounds {
+            let target_dpi = (target_scale * USER_DEFAULT_SCREEN_DPI as f32).round() as u32;
+            let (bx, by) = frame_thickness_for_dpi(target_dpi);
+            let x = (b.origin.x * target_scale).round() as i32 - bx;
+            let y = (b.origin.y * target_scale).round() as i32;
+            let w = (b.size.width * target_scale).round().max(1.0) as i32 + bx * 2;
+            let h = (b.size.height * target_scale).round().max(1.0) as i32 + by;
+            unsafe {
+                let _ = SetWindowPos(
+                    hwnd,
+                    None,
+                    x,
+                    y,
+                    w,
+                    h,
+                    SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+                );
+            }
+        }
+
+        unsafe { DragAcceptFiles(hwnd, true) };
+        let win = Self::finish_create(id, hwnd, false, state);
+        if config.show {
+            win.show(config.focus);
+        }
+        Ok(win)
+    }
+
+    pub(crate) fn create_overlay() -> Result<Self> {
+        let ex_style = WS_EX_NOACTIVATE
+            | WS_EX_TOOLWINDOW
+            | WS_EX_TOPMOST
+            | WS_EX_TRANSPARENT
+            | WS_EX_LAYERED
+            | WS_EX_NOREDIRECTIONBITMAP;
+        let (id, hwnd, state, _) =
+            Self::create_and_register(ex_style, WS_POPUP, "", (0, 0, 1, 1), true, false)?;
+
+        set_dwm_u32(
+            hwnd,
+            DWMWA_WINDOW_CORNER_PREFERENCE,
+            DWMWCP_DONOTROUND.0 as u32,
+        );
+        set_dwm_u32(hwnd, DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE);
+        set_dwm_u32(hwnd, DWMWA_TRANSITIONS_FORCEDISABLED, 1);
+        unsafe {
+            let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), 255, LWA_ALPHA);
+        }
+
+        Ok(Self::finish_create(id, hwnd, true, state))
+    }
+
+    fn create_and_register(
+        ex_style: windows::Win32::UI::WindowsAndMessaging::WINDOW_EX_STYLE,
+        style: windows::Win32::UI::WindowsAndMessaging::WINDOW_STYLE,
+        title: &str,
+        (x, y, w, h): (i32, i32, i32, i32),
+        is_overlay: bool,
+        active: bool,
+    ) -> Result<(WindowId, HWND, Rc<WindowState>, f32)> {
         let id = WindowId::next();
         let hinstance: HINSTANCE = unsafe { GetModuleHandleW(None)? }.into();
-        let is_overlay = matches!(options.kind, WindowKind::Overlay);
-
-        let (mut ex_style, style) = if is_overlay {
-            (
-                WS_EX_NOACTIVATE
-                    | WS_EX_TOOLWINDOW
-                    | WS_EX_TOPMOST
-                    | WS_EX_TRANSPARENT
-                    | WS_EX_LAYERED,
-                WS_POPUP,
-            )
-        } else {
-            let mut st = WS_SYSMENU;
-            if options.is_resizable {
-                st |= WS_THICKFRAME | WS_MAXIMIZEBOX;
-            }
-            if options.is_minimizable {
-                st |= WS_MINIMIZEBOX;
-            }
-            (WS_EX_APPWINDOW, st)
-        };
-        ex_style |= WS_EX_NOREDIRECTIONBITMAP;
-
-        let wide_title = HSTRING::from(options.title.as_str());
-        let (init_x, init_y, init_w, init_h) = if is_overlay {
-            (0, 0, 1, 1)
-        } else {
-            (CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT)
-        };
+        let wide_title = HSTRING::from(title);
         let hwnd = unsafe {
             CreateWindowExW(
                 ex_style,
                 WINDOW_CLASS,
                 &wide_title,
                 style,
-                init_x,
-                init_y,
-                init_w,
-                init_h,
+                x,
+                y,
+                w,
+                h,
                 None,
                 None,
                 Some(hinstance),
@@ -540,7 +566,7 @@ impl NativeWindow {
             physical_size: Cell::new((1, 1)),
             logical_size: Cell::new(Size::ZERO),
             origin: Cell::new(Point::ZERO),
-            active: Cell::new(options.show && options.focus),
+            active: Cell::new(active),
             in_size_move: Cell::new(false),
             ime_caret: Cell::new(None),
             sys_caret_px: Cell::new(None),
@@ -553,8 +579,7 @@ impl NativeWindow {
                     window_id: id,
                     state: state.clone(),
                     is_overlay,
-                    is_resizable: options.is_resizable && !is_overlay,
-                    min_size: if is_overlay { None } else { options.min_size },
+                    min_size: None,
                     cursor: CursorStyle::Arrow,
                     control_areas: Vec::new(),
                     hovered: false,
@@ -569,78 +594,25 @@ impl NativeWindow {
                 },
             );
         });
+        Ok((id, hwnd, state, init_scale))
+    }
 
-        let target_scale = options
-            .display_id
-            .and_then(WindowsDisplay::from_id)
-            .map_or(init_scale, |d| d.scale_factor());
-
-        if is_overlay {
-            set_dwm_u32(
-                hwnd,
-                DWMWA_WINDOW_CORNER_PREFERENCE,
-                DWMWCP_DONOTROUND.0 as u32,
-            );
-            set_dwm_u32(hwnd, DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE);
-            set_dwm_u32(hwnd, DWMWA_TRANSITIONS_FORCEDISABLED, 1);
-            unsafe {
-                let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), 255, LWA_ALPHA);
-            }
-        } else {
-            configure_backdrop(hwnd, options.backdrop);
-            configure_dark_mode(hwnd, appearance);
-        }
-
-        if let Some(b) = options.bounds {
-            let mut x = (b.origin.x * target_scale).round() as i32;
-            let y = (b.origin.y * target_scale).round() as i32;
-            let mut w = (b.size.width * target_scale).round().max(1.0) as i32;
-            let mut h = (b.size.height * target_scale).round().max(1.0) as i32;
-            if !is_overlay && options.is_resizable {
-                let target_dpi = (target_scale * USER_DEFAULT_SCREEN_DPI as f32).round() as u32;
-                let (bx, by) = frame_thickness_for_dpi(target_dpi);
-                x -= bx;
-                w += bx * 2;
-                h += by;
-            }
-            unsafe {
-                let _ = SetWindowPos(
-                    hwnd,
-                    None,
-                    x,
-                    y,
-                    w,
-                    h,
-                    SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
-                );
-            }
-        }
-
+    fn finish_create(id: WindowId, hwnd: HWND, is_overlay: bool, state: Rc<WindowState>) -> Self {
         let final_dpi = unsafe { GetDpiForWindow(hwnd) }.max(USER_DEFAULT_SCREEN_DPI);
         let scale_factor = final_dpi as f32 / USER_DEFAULT_SCREEN_DPI as f32;
         state.scale_factor.set(scale_factor);
-
-        if !is_overlay {
-            unsafe { DragAcceptFiles(hwnd, true) };
-        }
-
         let (phys_w, phys_h) = query_physical_size(hwnd);
         let (logical_size, origin) = query_client_metrics(hwnd, scale_factor);
         state.physical_size.set((phys_w, phys_h));
         state.logical_size.set(logical_size);
         state.origin.set(origin);
-
-        let win = Self {
+        Self {
             id,
             hwnd,
-            kind: options.kind,
+            is_overlay,
             state,
             destroyed: false,
-        };
-        if options.show {
-            win.show(options.focus);
         }
-        Ok(win)
     }
 
     pub(crate) fn show(&self, focus: bool) {
@@ -657,7 +629,7 @@ impl NativeWindow {
     }
 
     pub(crate) fn set_appearance(&self, appearance: WindowAppearance) {
-        if matches!(self.kind, WindowKind::Normal) {
+        if !self.is_overlay {
             configure_dark_mode(self.hwnd, appearance);
         }
     }
@@ -865,7 +837,7 @@ fn frame_thickness_for_dpi(dpi: u32) -> (i32, i32) {
     }
 }
 
-fn configure_backdrop(hwnd: HWND, backdrop: WindowBackdrop) {
+fn configure_backdrop(hwnd: HWND) {
     let margins = MARGINS {
         cxLeftWidth: -1,
         cxRightWidth: -1,
@@ -873,17 +845,15 @@ fn configure_backdrop(hwnd: HWND, backdrop: WindowBackdrop) {
         cyBottomHeight: -1,
     };
     let _ = unsafe { DwmExtendFrameIntoClientArea(hwnd, &margins) };
-    if matches!(backdrop, WindowBackdrop::MicaAlt) {
-        let b = DWM_SYSTEMBACKDROP_TYPE(DWMSBT_TABBEDWINDOW);
-        let _ = unsafe {
-            DwmSetWindowAttribute(
-                hwnd,
-                DWMWA_SYSTEMBACKDROP_TYPE,
-                (&raw const b).cast(),
-                std::mem::size_of::<DWM_SYSTEMBACKDROP_TYPE>() as u32,
-            )
-        };
-    }
+    let b = DWM_SYSTEMBACKDROP_TYPE(DWMSBT_TABBEDWINDOW);
+    let _ = unsafe {
+        DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_SYSTEMBACKDROP_TYPE,
+            (&raw const b).cast(),
+            std::mem::size_of::<DWM_SYSTEMBACKDROP_TYPE>() as u32,
+        )
+    };
 }
 
 fn apply_cursor(style: CursorStyle) {
@@ -989,7 +959,7 @@ fn window_wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
                 let _ = unsafe { GetWindowRect(hwnd, &mut rc) };
                 let sx = (lparam.0 & 0xFFFF) as i16 as i32;
                 let sy = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
-                if e.is_resizable && !unsafe { IsZoomed(hwnd) }.as_bool() {
+                if !unsafe { IsZoomed(hwnd) }.as_bool() {
                     let dpi = unsafe { GetDpiForWindow(hwnd) }.max(USER_DEFAULT_SCREEN_DPI);
                     let (bx, by) = frame_thickness_for_dpi(dpi);
                     if sy < rc.top + by {

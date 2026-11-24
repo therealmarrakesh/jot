@@ -2,7 +2,7 @@ use std::rc::Rc;
 
 use crate::geom::{Rect, ScreenPoint, ScreenRect, point, size};
 use crate::gfx::{Gpu, TextStyle, TextSystem};
-use crate::platform::{WindowAppearance, WindowId};
+use crate::platform::WindowId;
 use crate::theme::Palette;
 use crate::ui::{AvailSize, Frame, Node, OverlaySurface, box_, text};
 
@@ -97,7 +97,6 @@ impl KeyTips {
         scale: f32,
         mut tips: Vec<KeyTip>,
         gpu: &Rc<Gpu>,
-        appearance: WindowAppearance,
     ) {
         let Some(union) = tips.iter().map(|t| t.bounds).reduce(Rect::union) else {
             self.hide_owner(owner);
@@ -114,7 +113,7 @@ impl KeyTips {
         self.owner = Some(owner);
         self.rect = rect;
         self.dirty = true;
-        self.overlay.show(gpu, rect, appearance);
+        self.overlay.show(gpu, rect);
     }
 
     pub(crate) fn paint(&mut self, p: Palette, ts: &TextSystem) -> bool {

@@ -30,8 +30,8 @@ pub(crate) use settings::{
     HighContrastColors, SystemSettings, format_local_time_date, system_settings,
 };
 pub(crate) use window::{
-    CursorStyle, NativeWindow, PlatformEvent, PlatformHandler, WindowAppearance, WindowBackdrop,
-    WindowControlArea, WindowId, WindowKind, WindowOptions,
+    CursorStyle, MainWindowConfig, NativeWindow, PlatformEvent, PlatformHandler, WindowAppearance,
+    WindowControlArea, WindowId,
 };
 
 use std::cell::{Cell, RefCell};
@@ -474,14 +474,14 @@ mod tests {
         let jobs = Jobs::new();
         jobs.attach_platform(&platform);
 
-        let opts = WindowOptions {
+        let config = MainWindowConfig {
             bounds: Some(rect(40.0, 40.0, 320.0, 200.0)),
             show: false,
             focus: false,
             ..Default::default()
         };
-        let win =
-            NativeWindow::create(&opts, WindowAppearance::Dark).expect("NativeWindow::create failed");
+        let win = NativeWindow::create_main(&config, WindowAppearance::Dark)
+            .expect("NativeWindow::create_main failed");
         let hwnd = win.hwnd();
         assert!(window::has_hwnd_entry(hwnd));
 
