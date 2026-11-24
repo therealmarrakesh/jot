@@ -212,19 +212,16 @@ impl Editor {
         }
     }
 
-    #[inline]
     pub(crate) fn model(&self) -> &TextModel {
         &self.model
     }
 
-    #[inline]
     fn fresh_frame(&self) -> Option<&FrameLayout> {
         self.frame
             .as_ref()
             .filter(|f| f.revision == self.model.revision())
     }
 
-    #[inline]
     pub(crate) fn caret_bounds(&self) -> Option<Rect> {
         self.fresh_frame().map(|f| f.caret_rect)
     }
@@ -238,17 +235,14 @@ impl Editor {
     }
 
     #[cfg(test)]
-    #[inline]
     pub(crate) fn soft_wrap_enabled(&self) -> bool {
         self.doc.as_deref().is_some_and(|d| d.soft_wrap)
     }
 
-    #[inline]
     pub(crate) fn scroll_offset(&self) -> Point {
         point(self.scroll.x, self.scroll.y as f32)
     }
 
-    #[inline]
     fn request_reveal(
         &mut self,
         offset: usize,
@@ -264,7 +258,6 @@ impl Editor {
         });
     }
 
-    #[inline]
     fn reset_pointer_selection_state(&mut self) {
         self.word_anchor = None;
         self.selecting = false;
@@ -286,17 +279,14 @@ impl Editor {
         self.request_reveal(self.model.cursor(), aff, None, true);
     }
 
-    #[inline]
     pub(crate) fn is_selecting(&self) -> bool {
         self.selecting
     }
 
-    #[inline]
     pub(crate) fn scrollbar_drag_axis(&self) -> Option<Axis> {
         self.doc.as_deref().and_then(|d| d.scrollbar.drag_axis())
     }
 
-    #[inline]
     pub(crate) fn scrollbar_interactive(&self, axis: Axis) -> bool {
         self.doc
             .as_deref()
@@ -408,7 +398,6 @@ pub(crate) struct BlinkState {
 }
 
 impl BlinkState {
-    #[inline]
     pub(crate) fn visible(&self) -> bool {
         self.paused || self.visible
     }
@@ -1074,7 +1063,6 @@ struct VisibleSlice {
     shape_rows: Range<usize>,
 }
 
-#[inline]
 fn snap_point(pt: Point, scale: f32) -> Point {
     point(
         (pt.x * scale).round() / scale,
@@ -1866,7 +1854,6 @@ pub(crate) struct TextPoint {
 }
 
 impl TextPoint {
-    #[inline]
     pub(crate) fn new(row: usize, column: usize) -> Self {
         Self { row, column }
     }
@@ -1880,7 +1867,6 @@ pub(crate) struct Selection {
 }
 
 impl Selection {
-    #[inline]
     pub(crate) fn caret(offset: usize) -> Self {
         Self {
             anchor: offset,
@@ -1889,7 +1875,6 @@ impl Selection {
         }
     }
 
-    #[inline]
     pub(crate) fn from_range(range: Range<usize>) -> Self {
         Self {
             anchor: range.start,
@@ -1898,32 +1883,26 @@ impl Selection {
         }
     }
 
-    #[inline]
     pub(crate) fn start(&self) -> usize {
         self.anchor.min(self.head)
     }
 
-    #[inline]
     pub(crate) fn end(&self) -> usize {
         self.anchor.max(self.head)
     }
 
-    #[inline]
     pub(crate) fn range(&self) -> Range<usize> {
         self.start()..self.end()
     }
 
-    #[inline]
     pub(crate) fn is_empty(&self) -> bool {
         self.anchor == self.head
     }
 
-    #[inline]
     pub(crate) fn contains(&self, offset: usize) -> bool {
         offset >= self.start() && offset < self.end()
     }
 
-    #[inline]
     pub(crate) fn place(&mut self, offset: usize, end_affinity: bool) {
         self.anchor = offset;
         self.head = offset;
@@ -2389,27 +2368,22 @@ impl TextModel {
         self
     }
 
-    #[inline]
     pub(crate) fn is_multi_line(&self) -> bool {
         self.policy.multi_line
     }
 
-    #[inline]
     pub(crate) fn text(&self) -> &Rope {
         &self.text
     }
 
-    #[inline]
     pub(crate) fn revision(&self) -> u64 {
         self.revision
     }
 
-    #[inline]
     pub(crate) fn selection(&self) -> Selection {
         self.selection
     }
 
-    #[inline]
     pub(crate) fn composition(&self) -> Option<&Composition> {
         self.composition.as_ref()
     }
@@ -3453,7 +3427,6 @@ pub(crate) struct DisplayPos {
 }
 
 impl DisplayPos {
-    #[inline]
     pub(crate) fn new(row: usize, sub_row: usize, col: usize) -> Self {
         Self { row, sub_row, col }
     }
@@ -3466,7 +3439,6 @@ pub(crate) enum LineRanges {
 }
 
 impl LineRanges {
-    #[inline]
     pub(crate) fn len(&self) -> usize {
         match self {
             Self::Single(_) => 1,
@@ -3482,7 +3454,6 @@ impl LineRanges {
         }
     }
 
-    #[inline]
     pub(crate) fn last(&self) -> Range<usize> {
         match self {
             Self::Single(byte_len) => 0..*byte_len,
@@ -3499,7 +3470,6 @@ pub(crate) struct WrappedLine {
 }
 
 impl WrappedLine {
-    #[inline]
     pub(crate) fn row_count(&self) -> usize {
         self.ranges.len()
     }
@@ -3514,7 +3484,6 @@ struct ChunkSummary {
 }
 
 impl ChunkSummary {
-    #[inline]
     fn single(line: &WrappedLine) -> Self {
         Self {
             buffer_lines: 1,
@@ -3524,7 +3493,6 @@ impl ChunkSummary {
         }
     }
 
-    #[inline]
     fn combine(&mut self, other: &Self) {
         if other.max_line_bytes > self.max_line_bytes {
             self.longest_line = self.buffer_lines + other.longest_line;
@@ -3689,7 +3657,6 @@ impl LineChunks {
     }
 }
 
-#[inline]
 fn is_printable_ascii(bytes: &[u8]) -> bool {
     bytes.iter().all(|&b| (0x20..=0x7e).contains(&b))
 }
@@ -3721,22 +3688,18 @@ impl WrapIndex {
         }
     }
 
-    #[inline]
     pub(crate) fn visual_row_count(&self) -> usize {
         self.chunks.total.visual_rows
     }
 
-    #[inline]
     pub(crate) fn line_count(&self) -> usize {
         self.chunks.total.buffer_lines
     }
 
-    #[inline]
     pub(crate) fn longest_line(&self) -> usize {
         self.chunks.total.longest_line
     }
 
-    #[inline]
     pub(crate) fn line(&self, row: usize) -> Option<&WrappedLine> {
         self.chunks.get_by_line(row).1
     }
@@ -4030,7 +3993,6 @@ impl From<ShapedRow> for VisualRow {
 }
 
 impl VisualRow {
-    #[inline]
     pub(crate) fn byte_len(&self) -> usize {
         match self {
             Self::Shaped(line) => line.len,
@@ -4039,7 +4001,6 @@ impl VisualRow {
         }
     }
 
-    #[inline]
     pub(crate) fn width(&self) -> f32 {
         match self {
             Self::Shaped(line) => line.width,
@@ -4048,7 +4009,6 @@ impl VisualRow {
         }
     }
 
-    #[inline]
     pub(crate) fn is_shaped(&self) -> bool {
         !matches!(self, Self::Placeholder(_))
     }
@@ -4181,7 +4141,6 @@ impl RowLayout {
         Self::from_slice(rows, 0, 0, total, 0.0)
     }
 
-    #[inline]
     pub(crate) fn indent_for(&self, abs_sub_row: usize) -> f32 {
         if abs_sub_row == 0 {
             0.0
@@ -4499,7 +4458,6 @@ const FADE_OUT_DURATION: Duration = Duration::from_millis(200);
 const EXPAND_DURATION: Duration = Duration::from_millis(120);
 const DRAG_NOTIFY_INTERVAL: Duration = Duration::from_micros(8_333);
 
-#[inline]
 fn axis_ix(axis: Axis) -> usize {
     match axis {
         Axis::Vertical => 0,
@@ -4507,7 +4465,6 @@ fn axis_ix(axis: Axis) -> usize {
     }
 }
 
-#[inline]
 fn axis_val(p: Point, axis: Axis) -> f32 {
     match axis {
         Axis::Vertical => p.y,
@@ -4515,7 +4472,6 @@ fn axis_val(p: Point, axis: Axis) -> f32 {
     }
 }
 
-#[inline]
 fn set_axis_val(p: &mut Point, axis: Axis, v: f32) {
     match axis {
         Axis::Vertical => p.y = v,
@@ -4523,7 +4479,6 @@ fn set_axis_val(p: &mut Point, axis: Axis, v: f32) {
     }
 }
 
-#[inline]
 fn axis_size(s: Size, axis: Axis) -> f32 {
     match axis {
         Axis::Vertical => s.height,
@@ -4531,7 +4486,6 @@ fn axis_size(s: Size, axis: Axis) -> f32 {
     }
 }
 
-#[inline]
 fn clamp_radius(radius: f32, width: f32, height: f32) -> f32 {
     radius.min(width * 0.5).min(height * 0.5).max(0.0)
 }
