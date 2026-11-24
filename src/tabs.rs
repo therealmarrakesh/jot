@@ -4,7 +4,8 @@ use std::time::Duration;
 
 use crate::command::{AppCommand, shortcut_tooltip};
 use crate::document::{self, DocPath, Format, PathKey};
-use crate::editor::{DocOptions, Editor, Rope};
+use crate::editor::{DocOptions, Editor};
+use crate::text::Rope;
 use crate::geom::{Edges, size, transparent_black};
 use crate::platform::{CursorStyle, TimerHandle};
 use crate::theme::{OVERLAY_RADIUS, Palette, SMALL_FONT};

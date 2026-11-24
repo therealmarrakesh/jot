@@ -60,7 +60,7 @@ fn byte_exact_document_round_trips_and_locked_target_fallback() {
         .share_mode(0x0000_0001 | 0x0000_0002)
         .open(&locked_path)
         .unwrap();
-    let rope = crate::editor::Rope::from("after locked write");
+    let rope = crate::text::Rope::from("after locked write");
     document::write_rope(&locked_path, &rope, document::Format::default()).unwrap();
     drop(_holder);
     assert_eq!(std::fs::read(&locked_path).unwrap(), b"after locked write");
@@ -159,7 +159,7 @@ fn wrap_handles_tabs_emoji_combining_marks_and_u2028_single_line() {
 
     let ts = TextSystem::new().unwrap();
     let sample = "\tindented e\u{0301} 👨‍👩‍👧\u{2028}after_lsep more words to wrap cleanly across rows";
-    let rope = crate::editor::Rope::from(sample);
+    let rope = crate::text::Rope::from(sample);
     let style = TextStyle::regular("Consolas", 14.0);
     let mut wrap = WrapIndex::new(style.clone(), Some(180.0));
     wrap.sync_layout(&rope, &style, Some(180.0), &ts);

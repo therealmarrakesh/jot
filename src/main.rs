@@ -13,6 +13,7 @@ mod menu;
 mod platform;
 mod shell;
 mod tabs;
+mod text;
 mod theme;
 mod tooltip;
 mod types;
@@ -29,7 +30,7 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use crate::document::{DocPath, Format, PathKey};
-use crate::editor::Rope;
+use crate::text::Rope;
 use crate::files::{
     DocHost, FileIo, FileOps, FileRequest, Prompt, PromptId, TabSnapshot, spawn_file_io,
 };

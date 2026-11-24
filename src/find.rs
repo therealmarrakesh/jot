@@ -817,7 +817,8 @@ impl Matcher {
 mod tests {
     use std::time::Instant;
 
-    use crate::editor::{DocOptions, Rope};
+    use crate::editor::DocOptions;
+    use crate::text::Rope;
     use crate::geom::Edges;
     use crate::platform::Jobs;
     use crate::shell::AppEvent;

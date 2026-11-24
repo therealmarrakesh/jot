@@ -8,7 +8,7 @@ use crate::document::{
     self, DocPath, Encoding, Format, LoadError, PathKey, SaveError, default_directory,
     display_name, file_name,
 };
-use crate::editor::Rope;
+use crate::text::Rope;
 use crate::platform::{
     Jobs, OpenDialogOptions, SaveChoice, SaveDialogOptions, SaveDialogResult, WindowHandle,
     WindowId, run_open_dialog, run_save_dialog,

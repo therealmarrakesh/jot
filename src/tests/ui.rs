@@ -1,5 +1,6 @@
 use crate::command::AppCommand;
-use crate::editor::{EditCommand, RopeExt as _};
+use crate::editor::EditCommand;
+use crate::text::RopeExt as _;
 use crate::geom::point;
 use crate::layout::{AvailSize, Space, snap_border_edges};
 use crate::platform::{
