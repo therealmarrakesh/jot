@@ -80,7 +80,7 @@ impl TestHarness {
         let platform = Rc::new(Platform::new().expect("Platform::new failed"));
         let gpu = Gpu::new().expect("Gpu::new failed");
         let mut app = App::new(platform, gpu);
-        app.reduce_motion = true;
+        app.shell.reduce_motion = true;
         app.headless = true;
         let (window_id, _) = app
             .open_window(None, Some(size(1024., 700.)))
@@ -375,11 +375,11 @@ fn menus_shortcuts_toggles_submenus_and_context_menu() {
 
     h.click_hit(HitId::MenuTrigger(MenuKind::View));
     h.click_menu_item(2);
-    h.read(|_, app| assert!(!app.view.word_wrap));
+    h.read(|_, app| assert!(!app.shell.view.word_wrap));
 
     h.click_hit(HitId::MenuTrigger(MenuKind::View));
     h.click_menu_item(1);
-    h.read(|_, app| assert!(!app.view.status_bar));
+    h.read(|_, app| assert!(!app.shell.view.status_bar));
 
     h.click_hit(HitId::MenuTrigger(MenuKind::File));
     h.hover_hit(HitId::MenuTrigger(MenuKind::Edit));
@@ -550,11 +550,11 @@ fn go_to_dialog_navigation_and_out_of_range_flow() {
 fn theme_zoom_editing_undo_scrollbar_and_caption_hit_tests() {
     let mut h = TestHarness::new();
 
-    let initial_dark = h.read(|_, app| app.palette.dark);
+    let initial_dark = h.read(|_, app| app.shell.palette.dark);
     h.click_hit(HitId::ThemeToggle);
-    h.read(|_, app| assert_eq!(app.palette.dark, !initial_dark));
+    h.read(|_, app| assert_eq!(app.shell.palette.dark, !initial_dark));
     h.click_hit(HitId::ThemeToggle);
-    h.read(|_, app| assert_eq!(app.palette.dark, initial_dark));
+    h.read(|_, app| assert_eq!(app.shell.palette.dark, initial_dark));
 
     h.press_key("ctrl-=");
     h.read(|w, _| assert_eq!((w.zoom() * 100.).round() as u32, 110));
@@ -724,7 +724,7 @@ fn dirty_window_close_file_drop_and_multi_window() {
 #[test]
 fn overlay_window_resizes_from_1x1_and_renders() {
     let h = TestHarness::new();
-    let gpu = h.app.borrow().gpu.clone();
+    let gpu = h.app.borrow().shell.gpu.clone();
     let opts = WindowOptions {
         bounds: Some(Rect::new(point(0., 0.), size(1., 1.))),
         title: "".into(),
@@ -800,8 +800,8 @@ fn status_bar_min_width_and_no_vertical_char_wrapping() {
     );
 
     let app = h.app.borrow();
-    let ts = &app.text_system;
-    let p = app.palette;
+    let ts = &app.shell.text_system;
+    let p = app.shell.palette;
     for test_width in [min_size.width, 220.0] {
         let bar = row()
             .w(test_width)
@@ -910,6 +910,7 @@ fn hwnd_registry_cleanup_reentrant_queue_and_modal_size_move_timer() {
     let ran = Arc::new(AtomicBool::new(false));
     h.app
         .borrow()
+        .shell
         .jobs
         .post(AppEvent::TestFlag(ran.clone()));
 
@@ -956,7 +957,11 @@ fn real_win32_message_loop_wakes_timers_and_quits_cleanly() {
     Platform::run(app, |app| {
         app.headless = true;
         let (id, _) = app.open_window(None, None).expect("open_window failed");
-        _timer = Some(app.jobs.after(Duration::from_millis(25), AppEvent::TestCloseWindow(id)));
+        _timer = Some(
+            app.shell
+                .jobs
+                .after(Duration::from_millis(25), AppEvent::TestCloseWindow(id)),
+        );
     });
 }
 
@@ -983,7 +988,7 @@ fn window_anim_tracks_prune_unused_tracks_and_word_wrap_updates_tabs() {
     h.press_key("ctrl-n");
     h.read(|w, app| {
         assert_eq!(w.tabs.len(), 2);
-        assert!(app.view.word_wrap);
+        assert!(app.shell.view.word_wrap);
         for tab in &w.tabs {
             assert!(tab.data.editor.soft_wrap_enabled());
         }
@@ -991,7 +996,7 @@ fn window_anim_tracks_prune_unused_tracks_and_word_wrap_updates_tabs() {
     h.click_hit(HitId::MenuTrigger(MenuKind::View));
     h.click_menu_item(2);
     h.read(|w, app| {
-        assert!(!app.view.word_wrap);
+        assert!(!app.shell.view.word_wrap);
         for tab in &w.tabs {
             assert!(!tab.data.editor.soft_wrap_enabled());
         }
@@ -1078,14 +1083,14 @@ fn tab_drag_pop_out_and_reattach_does_not_panic() {
 #[test]
 fn device_loss_recreates_devices_and_renders_new_windows_cleanly() {
     let mut h = TestHarness::new();
-    let gen0 = h.read(|_, app| app.gpu.generation());
+    let gen0 = h.read(|_, app| app.shell.gpu.generation());
     {
         let mut app = h.app.borrow_mut();
         app.windows[0].surface.mark_device_lost_for_test();
         app.windows[0].dirty = true;
     }
     h.draw();
-    let gen1 = h.read(|_, app| app.gpu.generation());
+    let gen1 = h.read(|_, app| app.shell.gpu.generation());
     assert_eq!(
         gen1,
         gen0 + 1,
@@ -1116,6 +1121,7 @@ fn stale_file_events_do_not_advance_unrelated_discard_workflow() {
     let stale_gen = crate::files::WorkflowGen::next();
     h.app
         .borrow()
+        .shell
         .jobs
         .post(AppEvent::FileSaved {
             window: wid,
@@ -1153,7 +1159,7 @@ fn close_save_keeps_window_open_when_edited_mid_write_and_migrated_save_cleans_t
             true,
             EDITOR_PADDINGS,
         ));
-        app.windows[0].replace_tab(0, tab, &app.jobs);
+        app.windows[0].replace_tab(0, tab, &app.shell.jobs);
     }
     h.draw();
     h.type_text(" v2");
@@ -1195,9 +1201,9 @@ fn close_save_keeps_window_open_when_edited_mid_write_and_migrated_save_cleans_t
     {
         let mut app_guard = h2.app.borrow_mut();
         let app = &mut *app_guard;
-        let data = app.windows[0].take_tab(tab_id, &app.jobs).unwrap();
+        let data = app.windows[0].take_tab(tab_id, &app.shell.jobs).unwrap();
         let _ = app.open_window(Some(data), Some(size(600.0, 400.0))).unwrap();
-        app.jobs.post(AppEvent::FileSaved {
+        app.shell.jobs.post(AppEvent::FileSaved {
             window: wid1,
             wf_gen: crate::files::WorkflowGen::next(),
             tab: tab_id,

@@ -36,12 +36,6 @@ pub(crate) struct EditorPaintOutcome {
     pub(crate) needs_vsync: bool,
 }
 
-#[derive(Copy, Clone, Debug, Default)]
-pub(crate) struct EditorMouseOutcome {
-    pub(crate) dirty: bool,
-    pub(crate) open_context_menu: Option<Point>,
-}
-
 #[derive(Copy, Clone, Debug)]
 pub(super) struct ScrollAnchor {
     line: usize,
@@ -169,11 +163,6 @@ impl AutoScroll {
         } else {
             None
         }
-    }
-
-    #[inline]
-    pub(crate) fn is_active(&self) -> bool {
-        self.delta.is_some()
     }
 
     pub(crate) fn stop(&mut self) {
@@ -378,7 +367,7 @@ impl Editor {
         modifiers: Modifiers,
         click_count: usize,
         timers: &mut dyn EditorTimers,
-    ) -> EditorMouseOutcome {
+    ) {
         if button == MouseButton::Left
             && self.multi_line
             && let Some(next) = self
@@ -387,10 +376,7 @@ impl Editor {
         {
             self.reveal = None;
             self.clamp_and_set_scroll_f64(next.x, f64::from(next.y));
-            return EditorMouseOutcome {
-                dirty: true,
-                open_context_menu: None,
-            };
+            return;
         }
 
         self.commit_composition();
@@ -400,37 +386,24 @@ impl Editor {
 
         if button == MouseButton::Left && click_count >= 3 {
             self.select_line_at(offset);
-            return EditorMouseOutcome {
-                dirty: true,
-                open_context_menu: None,
-            };
+            return;
         }
         if button == MouseButton::Left && click_count == 2 {
             self.select_word_at(offset);
-            return EditorMouseOutcome {
-                dirty: true,
-                open_context_menu: None,
-            };
+            return;
         }
         if button == MouseButton::Right {
             if !self.selection.contains(offset) {
                 self.move_to_with_affinity(offset, None, aff, false, Some(timers));
             }
             self.pending_context_menu = Some((position, offset));
-            return EditorMouseOutcome {
-                dirty: true,
-                open_context_menu: None,
-            };
+            return;
         }
         if modifiers.shift {
             self.select_to_with_affinity(offset, aff);
             self.request_reveal(self.cursor(), aff, None, false);
         } else {
             self.move_to_with_affinity(offset, None, aff, false, Some(timers));
-        }
-        EditorMouseOutcome {
-            dirty: true,
-            open_context_menu: None,
         }
     }
 
@@ -479,8 +452,7 @@ impl Editor {
         button: MouseButton,
         position: Point,
         timers: &mut dyn EditorTimers,
-    ) -> EditorMouseOutcome {
-        let mut dirty = false;
+    ) -> Option<Point> {
         let mut open_context_menu = None;
 
         if self.multi_line
@@ -490,7 +462,6 @@ impl Editor {
         {
             self.reveal = None;
             self.clamp_and_set_scroll_f64(next.x, f64::from(next.y));
-            dirty = true;
         }
 
         if button == MouseButton::Right
@@ -501,19 +472,12 @@ impl Editor {
                 self.move_to_with_affinity(offset, None, false, false, Some(timers));
             }
             open_context_menu = Some(pos);
-            dirty = true;
         }
         if self.selection.is_empty() {
             self.selection.reversed = false;
         }
-        if self.selecting || self.auto_scroll.is_active() {
-            dirty = true;
-        }
         self.reset_pointer_selection_state();
-        EditorMouseOutcome {
-            dirty,
-            open_context_menu,
-        }
+        open_context_menu
     }
 
     pub(crate) fn on_mouse_leave(&mut self) -> bool {
@@ -1135,7 +1099,7 @@ mod tests {
             ..Default::default()
         };
         scroll.stop();
-        assert!(!scroll.is_active());
+        assert!(scroll.delta.is_none());
         assert_eq!(scroll.last_drag_pos, None);
     }
 }

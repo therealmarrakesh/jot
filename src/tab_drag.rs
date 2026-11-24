@@ -46,6 +46,10 @@ impl TabDragState {
     pub(crate) fn owner(&self) -> WindowId {
         self.owner
     }
+
+    pub(crate) fn tab(&self) -> TabId {
+        self.tab
+    }
 }
 
 impl App {
@@ -53,6 +57,16 @@ impl App {
         self.tab_drag
             .as_ref()
             .is_some_and(TabDragState::is_dragging)
+    }
+
+    pub(crate) fn sync_tab_drag(&mut self) {
+        if let Some(drag) = &self.tab_drag
+            && self
+                .window(drag.owner())
+                .is_none_or(|w| w.tab_index(drag.tab()).is_none())
+        {
+            self.tab_drag_end();
+        }
     }
 
     fn mark_window_dirty(&mut self, id: WindowId) {
@@ -87,18 +101,6 @@ impl App {
         self.mark_window_dirty(window_id);
     }
 
-    pub(crate) fn tab_drag_forget(&mut self, tab: TabId) {
-        if self.tab_drag.as_ref().is_some_and(|d| d.tab == tab) {
-            self.tab_drag_end();
-        }
-    }
-
-    pub(crate) fn tab_drag_window_closed(&mut self, id: WindowId) {
-        if self.tab_drag.as_ref().is_some_and(|d| d.owner == id) {
-            self.tab_drag_end();
-        }
-    }
-
     fn tab_drag_end(&mut self) -> Option<TabDragState> {
         let drag = self.tab_drag.take();
         if let Some(d) = &drag {
@@ -111,6 +113,7 @@ impl App {
     }
 
     pub(crate) fn tab_drag_size_move_changed(&mut self, window_id: WindowId, entering: bool) {
+        self.sync_tab_drag();
         let Some(drag) = self.tab_drag.as_mut() else {
             return;
         };
@@ -127,6 +130,7 @@ impl App {
     }
 
     pub(crate) fn tab_drag_moved(&mut self, pressed_left: bool) {
+        self.sync_tab_drag();
         if !pressed_left {
             self.tab_drag_released();
             return;
@@ -174,6 +178,7 @@ impl App {
     }
 
     pub(crate) fn tab_drag_released(&mut self) {
+        self.sync_tab_drag();
         if self
             .tab_drag
             .as_ref()
@@ -197,6 +202,7 @@ impl App {
     }
 
     pub(crate) fn tab_drag_cancel(&mut self) {
+        self.sync_tab_drag();
         let Some(drag) = self.tab_drag_end() else {
             return;
         };
@@ -209,7 +215,7 @@ impl App {
         if drag.owner == drag.source {
             if drag.is_dragging() {
                 if let Some(ix) = self.window_ix(drag.source) {
-                    self.windows[ix].return_tab(tab, index, &self.jobs);
+                    self.windows[ix].return_tab(tab, index, &self.shell.jobs);
                 }
             } else if let Some(placement) = drag.source_placement
                 && let Some(hwnd) = self.window_hwnd(drag.source)
@@ -221,7 +227,7 @@ impl App {
 
         let Some(data) = self
             .window_ix(drag.owner)
-            .and_then(|ix| self.windows[ix].take_tab(tab, &self.jobs))
+            .and_then(|ix| self.windows[ix].take_tab(tab, &self.shell.jobs))
         else {
             return;
         };
@@ -229,7 +235,7 @@ impl App {
 
         if let Some(ix) = self.window_ix(drag.source) {
             let src_hwnd = self.windows[ix].native.hwnd();
-            self.windows[ix].restore_tab(data, index, &self.jobs);
+            self.windows[ix].restore_tab(data, index, &self.shell.jobs);
             src_hwnd.set_foreground();
         } else {
             match self.open_window(Some(data), None) {
@@ -243,7 +249,7 @@ impl App {
                         && let Some(win) = self.windows.last_mut()
                     {
                         let ix = win.tabs.len();
-                        win.restore_tab(tab_data, ix, &self.jobs);
+                        win.restore_tab(tab_data, ix, &self.shell.jobs);
                     }
                 }
             }
@@ -258,7 +264,7 @@ impl App {
         let prev_owner = drag.owner;
         let Some(data) = self
             .window_ix(prev_owner)
-            .and_then(|ix| self.windows[ix].take_tab(tab, &self.jobs))
+            .and_then(|ix| self.windows[ix].take_tab(tab, &self.shell.jobs))
         else {
             return;
         };
@@ -267,7 +273,7 @@ impl App {
         let x = to_local(target_hwnd, pt).x;
         let grab = drag.grab.x;
         if let Some(ix) = self.window_ix(target_id) {
-            self.windows[ix].insert_dragged_tab(data, x, grab, &self.jobs);
+            self.windows[ix].insert_dragged_tab(data, x, grab, &self.shell.jobs);
         }
         drag.owner = target_id;
         drag.phase = Phase::Dragging;
@@ -292,7 +298,7 @@ impl App {
                     native.logical_size()
                 };
                 self.windows[ix]
-                    .take_tab(tab, &self.jobs)
+                    .take_tab(tab, &self.shell.jobs)
                     .map(|data| (data, sz))
             });
             let Some((data, sz)) = taken else {
@@ -304,10 +310,14 @@ impl App {
                 Err(err) => {
                     if let Some(tab_data) = err.tab {
                         if let Some(ix) = self.window_ix(source_win) {
-                            self.windows[ix].restore_tab(tab_data, drag.source_index, &self.jobs);
+                            self.windows[ix].restore_tab(
+                                tab_data,
+                                drag.source_index,
+                                &self.shell.jobs,
+                            );
                         } else if let Some(win) = self.windows.last_mut() {
                             let ix = win.tabs.len();
-                            win.restore_tab(tab_data, ix, &self.jobs);
+                            win.restore_tab(tab_data, ix, &self.shell.jobs);
                         }
                     }
                     return;
@@ -351,10 +361,14 @@ impl App {
         drag.phase = Phase::Entering {
             since: Instant::now(),
         };
-        drag.poll_timer = self.jobs.every(MOVE_POLL, MOVE_POLL, || AppEvent::TabDragPoll);
+        drag.poll_timer = self
+            .shell
+            .jobs
+            .every(MOVE_POLL, MOVE_POLL, || AppEvent::TabDragPoll);
     }
 
     pub(crate) fn tab_drag_poll(&mut self) {
+        self.sync_tab_drag();
         let Some(mut drag) = self.tab_drag.take() else {
             return;
         };
