@@ -70,7 +70,7 @@ pub(crate) struct TabSet {
     pub(super) ghosts: Vec<Ghost>,
     pub(super) drag: Option<Drag>,
     pub(super) lifted: Option<TabId>,
-    repeat: TimerHandle,
+    repeat: Option<TimerHandle>,
 }
 
 impl Index<usize> for TabSet {
@@ -100,7 +100,7 @@ impl TabSet {
             ghosts: Vec::new(),
             drag: None,
             lifted: None,
-            repeat: TimerHandle::default(),
+            repeat: None,
         };
         let slot = set.next_slot();
         set.tabs.push(Tab::new(initial, slot));
@@ -479,11 +479,11 @@ impl TabSet {
     }
 
     pub(crate) fn set_scroll_repeat(&mut self, handle: TimerHandle) {
-        self.repeat = handle;
+        self.repeat = Some(handle);
     }
 
     pub(crate) fn stop_scroll_repeat(&mut self) {
-        self.repeat.cancel();
+        self.repeat = None;
     }
 
     #[inline]

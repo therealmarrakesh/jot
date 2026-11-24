@@ -332,15 +332,15 @@ fn theme_zoom_editing_undo_scrollbar_and_caption_hit_tests() {
         let areas = w.frame().control_areas();
         assert_eq!(
             hit_test_control_areas(&areas, close_pt),
-            Some(WindowControlArea::Close)
+            WindowControlArea::Close
         );
         assert_eq!(
             hit_test_control_areas(&areas, max_pt),
-            Some(WindowControlArea::Max)
+            WindowControlArea::Max
         );
         assert_eq!(
             hit_test_control_areas(&areas, min_pt),
-            Some(WindowControlArea::Min)
+            WindowControlArea::Min
         );
     });
 }
@@ -588,7 +588,7 @@ fn keyboard_system_chords_altgr_menu_gate_popup_occlusion_and_fractional_borders
     h.read(|w, _| {
         assert_eq!(
             hit_test_control_areas(&w.frame().control_areas(), close_pt),
-            None,
+            WindowControlArea::Client,
             "modal dialog backdrop must occlude caption buttons"
         );
     });

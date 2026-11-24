@@ -14,7 +14,7 @@ use crate::platform::{
     HandoffCommand, Key, MouseButton, Platform, PlatformEvent, PlatformHandler, WindowHwnd,
     WindowId,
 };
-use crate::shell::{AppEvent, Cx, Effect, Shell};
+use crate::shell::{AppEvent, Cx, Effect, Shell, WindowTimer};
 use crate::tabs::TabData;
 use crate::tooltip::{TooltipTarget, Tooltips};
 use crate::window::{InputMode, MainWindow};
@@ -37,12 +37,13 @@ pub(crate) struct App {
 impl App {
     pub(crate) fn new(platform: Rc<Platform>, gpu: Rc<Gpu>) -> Self {
         let shell = Shell::new(&platform, gpu);
+        let tooltips = Tooltips::new(shell.settings.mouse_hover_time);
         Self {
             windows: Windows::new(),
             tab_drag: None,
             file_ops: FileOps::default(),
             keytips: KeyTips::default(),
-            tooltips: Tooltips::default(),
+            tooltips,
             quit: false,
             shell,
             platform,
@@ -267,13 +268,11 @@ impl App {
         {
             self.end_tab_drag();
         }
-        let block = self
-            .windows
-            .any_dirty()
-            .then_some("You have unsaved changes.");
-        for w in self.windows.iter() {
-            w.set_block_shutdown(block);
-        }
+        self.platform.set_block_shutdown(
+            self.windows
+                .any_dirty()
+                .then_some("You have unsaved changes."),
+        );
         if self.windows.is_empty() && !self.quit && self.file_ops.in_flight_writes() == 0 {
             self.request_quit();
         }
@@ -373,8 +372,9 @@ impl PlatformHandler for App {
                     w.on_paint_requested();
                 }
             }
-            PlatformEvent::ThemeChanged => {
-                self.shell.sync_theme();
+            PlatformEvent::SettingsChanged(settings) => {
+                self.shell.apply_settings(settings);
+                self.tooltips.set_hover_time(settings.mouse_hover_time);
                 self.windows.apply_theme(self.shell.appearance());
             }
             PlatformEvent::MouseMove {
@@ -517,33 +517,19 @@ impl PlatformHandler for App {
     fn on_wake(&mut self) {
         while let Some(ev) = self.shell.jobs.pop() {
             match ev {
-                AppEvent::EditorTimer { window, slot, kind } => {
-                    let target_ix = match slot {
-                        EditorSlot::Tab(id) => self
+                AppEvent::Window { window, timer } => {
+                    let target = match timer {
+                        WindowTimer::Editor {
+                            slot: EditorSlot::Tab(id),
+                            ..
+                        } => self
                             .windows
                             .owner_of(id)
-                            .map(|(wix, _)| wix)
-                            .or_else(|| self.windows.ix(window)),
-                        _ => self.windows.ix(window),
+                            .map(|(ix, _)| self.windows[ix].id())
+                            .unwrap_or(window),
+                        _ => window,
                     };
-                    if let Some(ix) = target_ix {
-                        self.windows[ix].on_editor_timer(slot, kind, &self.shell);
-                    }
-                }
-                AppEvent::TabScrollRepeat { window, step } => {
-                    if let Some(w) = self.windows.get_mut(window) {
-                        w.on_tab_scroll_repeat(step);
-                    }
-                }
-                AppEvent::MenuSubmenuTimer { window, target } => {
-                    if let Some(w) = self.windows.get_mut(window) {
-                        w.on_menu_submenu_timer(target, &self.shell);
-                    }
-                }
-                AppEvent::FindNoticeDismiss { window } => {
-                    if let Some(w) = self.windows.get_mut(window) {
-                        w.on_find_notice_dismiss();
-                    }
+                    self.with_window_quiet(target, |w, cx| w.on_timer(timer, cx.shell));
                 }
                 AppEvent::TooltipShowTimer { window, hit } => {
                     let probe = self.windows.get(window).map(MainWindow::tooltip_probe);

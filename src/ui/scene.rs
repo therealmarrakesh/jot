@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 use crate::color::{Rgba, black, transparent_black};
 use crate::geom::{Corners, Edges, Point, Rect, Shadows, Size, point};
 use crate::gfx::{
-    D2DRenderer, FontWeight, Label, LabelLayout, PaintQuad, TextAlign, TextStyle, TextSystem,
+    Canvas, FontWeight, Label, LabelLayout, PaintQuad, Scope, TextAlign, TextStyle, TextSystem,
 };
 use crate::platform::{CursorStyle, MouseButton, WindowControlArea};
 use crate::types::SharedStr;
@@ -428,7 +428,7 @@ pub(crate) struct Frame<H, C> {
     child_order: Vec<usize>,
     root: Option<usize>,
     hits: Vec<HitEntry>,
-    control_areas: Vec<(Rect, Option<WindowControlArea>)>,
+    control_areas: Vec<(Rect, WindowControlArea)>,
 }
 
 impl<H, C> Default for Frame<H, C> {
@@ -671,9 +671,9 @@ impl<H: Copy + Eq, C: Copy> Frame<H, C> {
 
         if !clipped.is_empty() {
             if let Some(area) = self.nodes[idx].window_area {
-                self.control_areas.push((clipped, Some(area)));
+                self.control_areas.push((clipped, area));
             } else if self.nodes[idx].hit.is_some() {
-                self.control_areas.push((clipped, None));
+                self.control_areas.push((clipped, WindowControlArea::Client));
             }
             if self.nodes[idx].hit.is_some() {
                 self.hits.push(HitEntry {
@@ -695,7 +695,7 @@ impl<H: Copy + Eq, C: Copy> Frame<H, C> {
         }
     }
 
-    pub(crate) fn control_areas(&self) -> Vec<(Rect, Option<WindowControlArea>)> {
+    pub(crate) fn control_areas(&self) -> Vec<(Rect, WindowControlArea)> {
         self.control_areas.clone()
     }
 
@@ -768,84 +768,81 @@ impl<H: Copy + Eq, C: Copy> Frame<H, C> {
 
     pub(crate) fn paint(
         &self,
-        renderer: &mut D2DRenderer,
-        draw_custom: &mut impl FnMut(C, Rect, &mut D2DRenderer),
+        canvas: &mut Canvas,
+        draw_custom: &mut impl FnMut(C, Rect, &mut Canvas),
     ) {
         if let Some(root) = self.root {
-            self.paint_node(root, renderer, draw_custom);
+            self.paint_node(root, canvas, draw_custom);
         }
     }
 
     fn paint_node(
         &self,
         idx: usize,
-        renderer: &mut D2DRenderer,
-        draw_custom: &mut impl FnMut(C, Rect, &mut D2DRenderer),
+        canvas: &mut Canvas,
+        draw_custom: &mut impl FnMut(C, Rect, &mut Canvas),
     ) {
         let node = &self.nodes[idx];
         if node.opacity <= 0.0 || node.scale.0 <= 1e-3 || node.scale.1 <= 1e-3 {
             return;
         }
-        let pushed_layer = node.opacity < 1.0 - 1e-4;
-        if pushed_layer {
-            renderer.push_opacity_layer(node.opacity);
-        }
-        let pushed_transform =
-            (node.scale.0 - 1.0).abs() > 1e-4 || (node.scale.1 - 1.0).abs() > 1e-4;
-        if pushed_transform {
-            renderer.push_scale(node.rect.center(), node.scale.0, node.scale.1);
-        }
+        let opacity = (node.opacity < 1.0 - 1e-4).then_some(node.opacity);
+        let scale = ((node.scale.0 - 1.0).abs() > 1e-4 || (node.scale.1 - 1.0).abs() > 1e-4)
+            .then_some((node.rect.center(), node.scale.0, node.scale.1));
 
-        if !node.shadows.is_empty() {
-            renderer.paint_shadows(node.rect, node.corners, node.shadows);
-        }
-
-        if !node.bg.is_transparent()
-            || (!node.border_color.is_transparent() && node.border.any_nonzero())
-        {
-            renderer.paint_quad(PaintQuad {
-                bounds: node.rect,
-                corner_radii: node.corners,
-                background: node.bg,
-                border_widths: node.border,
-                border_color: node.border_color,
-            });
-        }
-
-        let pushed_clip = node.clip;
-        if pushed_clip {
-            renderer.push_clip(node.rect);
-        }
-
-        match &node.kind {
-            FlatKind::Box {
-                children_start,
-                children_len,
-            } => {
-                for offset in 0..*children_len {
-                    let child_idx = self.child_order[*children_start + offset];
-                    self.paint_node(child_idx, renderer, draw_custom);
+        canvas.scoped(
+            Scope {
+                opacity,
+                scale,
+                clip: None,
+            },
+            |canvas| {
+                if !node.shadows.is_empty() {
+                    canvas.paint_shadows(node.rect, node.corners, node.shadows);
                 }
-            }
-            FlatKind::Text { style, label, .. } => {
-                if let Some(label) = label {
-                    renderer.draw_label(label, node.rect.origin, node.rect.size.width, style.color);
+                if !node.bg.is_transparent()
+                    || (!node.border_color.is_transparent() && node.border.any_nonzero())
+                {
+                    canvas.paint_quad(PaintQuad {
+                        bounds: node.rect,
+                        corner_radii: node.corners,
+                        background: node.bg,
+                        border_widths: node.border,
+                        border_color: node.border_color,
+                    });
                 }
-            }
-            FlatKind::Custom(token) => {
-                draw_custom(*token, node.rect, renderer);
-            }
-        }
-
-        if pushed_clip {
-            renderer.pop_clip();
-        }
-        if pushed_transform {
-            renderer.pop_transform();
-        }
-        if pushed_layer {
-            renderer.pop_layer();
-        }
+                canvas.scoped(
+                    Scope {
+                        clip: node.clip.then_some(node.rect),
+                        ..Default::default()
+                    },
+                    |canvas| match &node.kind {
+                        FlatKind::Box {
+                            children_start,
+                            children_len,
+                        } => {
+                            for offset in 0..*children_len {
+                                let child_idx = self.child_order[*children_start + offset];
+                                self.paint_node(child_idx, canvas, draw_custom);
+                            }
+                        }
+                        FlatKind::Text { style, label, .. } => {
+                            if let Some(label) = label {
+                                canvas.draw_label(
+                                    label,
+                                    node.rect.origin,
+                                    node.rect.size.width,
+                                    style.color,
+                                );
+                            }
+                        }
+                        FlatKind::Custom(token) => {
+                            draw_custom(*token, node.rect, canvas);
+                        }
+                    },
+                );
+            },
+        );
     }
 }
 

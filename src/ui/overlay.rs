@@ -2,7 +2,7 @@ use std::rc::Rc;
 
 use crate::color::transparent_black;
 use crate::geom::{ScreenRect, Size};
-use crate::gfx::{D2DRenderer, Gpu, Surface};
+use crate::gfx::{Canvas, Gpu, Surface};
 use crate::platform::NativeWindow;
 
 struct LiveOverlay {
@@ -50,7 +50,7 @@ impl OverlaySurface {
         }
     }
 
-    pub(crate) fn paint(&mut self, render: impl FnOnce(Size, f32, &mut D2DRenderer)) -> bool {
+    pub(crate) fn paint(&mut self, render: impl FnOnce(Size, f32, &mut Canvas)) -> bool {
         let Some(live) = &mut self.live else {
             return false;
         };

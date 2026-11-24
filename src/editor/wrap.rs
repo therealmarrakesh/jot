@@ -5,7 +5,7 @@ use ropey::Rope;
 
 use crate::color::Rgba;
 use crate::geom::{Point, Size, point, size};
-use crate::gfx::{AdvanceTable, D2DRenderer, ShapedRow, TextStyle, TextSystem};
+use crate::gfx::{AdvanceTable, Canvas, ShapedRow, TextStyle, TextSystem};
 
 use super::buffer::{RopeExt, TextPoint};
 use super::model::LineChange;
@@ -125,11 +125,11 @@ impl VisualRow {
         line_height: f32,
         color: Rgba,
         underline: Option<Range<usize>>,
-        renderer: &mut D2DRenderer,
+        canvas: &mut Canvas,
     ) {
         match self {
             Self::Shaped(line) => {
-                renderer.draw_row(line, origin, line_height, color, underline);
+                canvas.draw_row(line, origin, line_height, color, underline);
             }
             Self::Windowed {
                 start_byte,
@@ -143,7 +143,7 @@ impl VisualRow {
                     let e = r.end.min(*end_byte);
                     (s < e).then_some((s - *start_byte)..(e - *start_byte))
                 });
-                renderer.draw_row(line, origin + point(*start_x, 0.0), line_height, color, ul);
+                canvas.draw_row(line, origin + point(*start_x, 0.0), line_height, color, ul);
             }
             Self::Placeholder(_) => {}
         }
@@ -288,7 +288,7 @@ impl RowLayout {
         line_height: f32,
         color: Rgba,
         underline: Option<Range<usize>>,
-        renderer: &mut D2DRenderer,
+        canvas: &mut Canvas,
     ) {
         let mut cursor = self.leading_bytes;
         for (ix, row) in self.rows.iter().enumerate() {
@@ -304,7 +304,7 @@ impl RowLayout {
                 line_height,
                 color,
                 sub_ul,
-                renderer,
+                canvas,
             );
             cursor += len;
         }

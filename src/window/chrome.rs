@@ -13,7 +13,7 @@ use crate::theme::Palette;
 use crate::ui::controls::{CONTROL_RADIUS, ICON_FONT, IconButtonStyle, SMALL_FONT, icon_button};
 use crate::ui::{AvailSize, Brushes, box_, custom, row, text};
 
-use super::{EDITOR_FONT_SIZE, EDITOR_PADDINGS, MainWindow, WindowEditorTimers};
+use super::{EDITOR_FONT_SIZE, EDITOR_PADDINGS, MainWindow};
 
 pub(super) const HEADER_WIDTH: f32 = 5.;
 pub(super) const STRIP_TOP: f32 = 10.;
@@ -220,7 +220,7 @@ impl MainWindow {
         let slot = self.active_slot();
         let lh = self.line_height();
         let wid = self.id();
-        let mut timers = WindowEditorTimers::new(shell, wid, slot);
+        let mut timers = shell.window_timers(wid).for_editor(slot);
         let scrollbars = self
             .tabs
             .active_mut()

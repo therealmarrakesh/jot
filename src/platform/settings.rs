@@ -1,4 +1,3 @@
-use std::cell::Cell;
 use std::time::Duration;
 
 use windows::Win32::{
@@ -54,10 +53,30 @@ pub(crate) struct SystemSettings {
     pub(crate) caret_blink_interval: Option<Duration>,
     pub(crate) caret_blink_timeout: Option<Duration>,
     pub(crate) caret_width_px: u32,
-    pub(crate) mouse_hover_time_ms: u32,
-    pub(crate) menu_show_delay_ms: u32,
+    pub(crate) mouse_hover_time: Duration,
+    pub(crate) menu_show_delay: Duration,
     pub(crate) wheel_scroll_lines: u32,
     pub(crate) wheel_scroll_chars: u32,
+}
+
+#[cfg(test)]
+impl Default for SystemSettings {
+    fn default() -> Self {
+        Self {
+            appearance: WindowAppearance::Light,
+            accent_light: None,
+            accent_dark: None,
+            high_contrast: None,
+            reduce_motion: false,
+            caret_blink_interval: None,
+            caret_blink_timeout: None,
+            caret_width_px: 1,
+            mouse_hover_time: Duration::from_millis(u64::from(DEFAULT_HOVER_TIME_MS)),
+            menu_show_delay: Duration::from_millis(u64::from(DEFAULT_MENU_SHOW_DELAY_MS)),
+            wheel_scroll_lines: DEFAULT_WHEEL_LINES,
+            wheel_scroll_chars: DEFAULT_WHEEL_CHARS,
+        }
+    }
 }
 
 impl SystemSettings {
@@ -66,6 +85,10 @@ impl SystemSettings {
         let (accent_light, accent_dark) = query_system_accents();
         let reduce_motion = system_parameters_u32(SPI_GETCLIENTAREAANIMATION.0)
             .is_some_and(|enabled| enabled == 0);
+        let hover_ms =
+            system_parameters_u32(SPI_GETMOUSEHOVERTIME.0).unwrap_or(DEFAULT_HOVER_TIME_MS);
+        let menu_ms =
+            system_parameters_u32(SPI_GETMENUSHOWDELAY.0).unwrap_or(DEFAULT_MENU_SHOW_DELAY_MS);
         Self {
             appearance,
             accent_light,
@@ -77,10 +100,8 @@ impl SystemSettings {
             caret_width_px: system_parameters_u32(SPI_GETCARETWIDTH.0)
                 .unwrap_or(1)
                 .clamp(1, 20),
-            mouse_hover_time_ms: system_parameters_u32(SPI_GETMOUSEHOVERTIME.0)
-                .unwrap_or(DEFAULT_HOVER_TIME_MS),
-            menu_show_delay_ms: system_parameters_u32(SPI_GETMENUSHOWDELAY.0)
-                .unwrap_or(DEFAULT_MENU_SHOW_DELAY_MS),
+            mouse_hover_time: Duration::from_millis(u64::from(hover_ms)),
+            menu_show_delay: Duration::from_millis(u64::from(menu_ms)),
             wheel_scroll_lines: system_parameters_u32(SPI_GETWHEELSCROLLLINES.0)
                 .unwrap_or(DEFAULT_WHEEL_LINES),
             wheel_scroll_chars: system_parameters_u32(SPI_GETWHEELSCROLLCHARS.0)
@@ -105,27 +126,6 @@ impl SystemSettings {
             self.wheel_scroll_lines
         }
     }
-}
-
-thread_local! {
-    static CACHED_SETTINGS: Cell<Option<SystemSettings>> = const { Cell::new(None) };
-}
-
-pub(crate) fn system_settings() -> SystemSettings {
-    CACHED_SETTINGS.with(|slot| match slot.get() {
-        Some(s) => s,
-        None => {
-            let fresh = SystemSettings::query();
-            slot.set(Some(fresh));
-            fresh
-        }
-    })
-}
-
-pub(crate) fn refresh_system_settings() -> SystemSettings {
-    let fresh = SystemSettings::query();
-    CACHED_SETTINGS.with(|slot| slot.set(Some(fresh)));
-    fresh
 }
 
 fn system_parameters_u32(action: u32) -> Option<u32> {

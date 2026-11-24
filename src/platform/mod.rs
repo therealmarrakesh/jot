@@ -27,9 +27,7 @@ pub(crate) use os::{
     WindowHwnd, WindowPlacement, cursor_screen_pos, monitor_work_area_and_scale,
     primary_mouse_button_down, release_mouse_capture, top_visible_window_at,
 };
-pub(crate) use settings::{
-    HighContrastColors, SystemSettings, format_local_time_date, system_settings,
-};
+pub(crate) use settings::{HighContrastColors, SystemSettings, format_local_time_date};
 pub(crate) use window::{
     CursorStyle, MainWindowConfig, NativeWindow, PlatformEvent, PlatformHandler, WindowAppearance,
     WindowControlArea, WindowId,
@@ -169,6 +167,22 @@ thread_local! {
         const { RefCell::new(None) };
     static WAKE_PENDING: Cell<bool> = const { Cell::new(false) };
     static HANDOFF_ACCEPTING: Cell<bool> = const { Cell::new(false) };
+    static SETTINGS: Cell<Option<SystemSettings>> = const { Cell::new(None) };
+}
+
+pub(super) fn cached_settings() -> SystemSettings {
+    SETTINGS.with(|slot| match slot.get() {
+        Some(s) => s,
+        None => {
+            let fresh = SystemSettings::query();
+            slot.set(Some(fresh));
+            fresh
+        }
+    })
+}
+
+pub(super) fn set_cached_settings(settings: SystemSettings) {
+    SETTINGS.with(|slot| slot.set(Some(settings)));
 }
 
 pub(super) fn mark_wake_pending() {
@@ -279,6 +293,7 @@ impl Platform {
             )?
         };
 
+        set_cached_settings(SystemSettings::query());
         let vsync = VsyncPacer::spawn(wake_hwnd.0 as isize);
 
         Ok(Self {
@@ -286,6 +301,14 @@ impl Platform {
             vsync,
             com_initialized,
         })
+    }
+
+    pub(crate) fn settings(&self) -> SystemSettings {
+        cached_settings()
+    }
+
+    pub(crate) fn set_block_shutdown(&self, reason: Option<&'static str>) {
+        window::set_block_shutdown(reason);
     }
 
     pub(crate) fn enable_handoff(&self, title: &str) {

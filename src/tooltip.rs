@@ -7,7 +7,6 @@ use crate::gfx::{Gpu, TextSystem};
 use crate::ids::{Frame, HitId};
 use crate::platform::{
     Jobs, Modifiers, TimerHandle, WindowId, cursor_screen_pos, monitor_work_area_and_scale,
-    system_settings,
 };
 use crate::theme::{Palette, theme_shadow};
 use crate::types::SharedStr;
@@ -125,7 +124,6 @@ struct Shown {
     owner: ScreenRect,
 }
 
-#[derive(Default)]
 pub(crate) struct Tooltips {
     overlay: OverlaySurface,
     fade: AnimTracks<()>,
@@ -137,9 +135,29 @@ pub(crate) struct Tooltips {
     closed_at: Option<Instant>,
     control_only: bool,
     opening: Option<(TooltipTarget, TimerHandle)>,
+    hover_time: Duration,
 }
 
 impl Tooltips {
+    pub(crate) fn new(hover_time: Duration) -> Self {
+        Self {
+            overlay: OverlaySurface::default(),
+            fade: AnimTracks::default(),
+            text: SharedStr::default(),
+            dirty: false,
+            state: State::default(),
+            pressed: false,
+            shown: None,
+            closed_at: None,
+            control_only: false,
+            opening: None,
+            hover_time,
+        }
+    }
+
+    pub(crate) fn set_hover_time(&mut self, hover_time: Duration) {
+        self.hover_time = hover_time;
+    }
     pub(crate) fn on_mouse_down(&mut self, window: WindowId, jobs: &Jobs<AppEvent>) {
         self.pressed = true;
         self.apply_report(Report::Suppress(window), jobs);
@@ -281,7 +299,7 @@ impl Tooltips {
                 let reshow = self
                     .closed_at
                     .is_some_and(|closed| closed.elapsed() < RESHOW_WINDOW);
-                let delay = show_delay(reshow);
+                let delay = show_delay(self.hover_time, reshow);
                 let timer = jobs.after(
                     delay,
                     AppEvent::TooltipShowTimer {
@@ -394,14 +412,13 @@ impl Tooltips {
     }
 }
 
-fn show_delay(reshow: bool) -> Duration {
-    let hover = system_settings().mouse_hover_time_ms as f32;
+fn show_delay(hover_time: Duration, reshow: bool) -> Duration {
     let factor = if reshow {
         RESHOW_DELAY_FACTOR
     } else {
         SHOW_DELAY_FACTOR
     };
-    Duration::from_millis((hover * factor) as u64)
+    hover_time.mul_f32(factor)
 }
 
 fn tooltip_card(p: Palette, content: SharedStr) -> GenericNode<(), ()> {

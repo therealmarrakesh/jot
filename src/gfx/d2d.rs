@@ -193,39 +193,196 @@ impl Gpu {
     }
 }
 
-enum SurfaceState {
-    Ready {
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum FrameOutcome {
+    Presented,
+    DeviceLost,
+    Failed,
+}
+
+struct Target {
+    generation: u64,
+    swap_chain: IDXGISwapChain1,
+    _comp_device: IDCompositionDevice,
+    _comp_target: IDCompositionTarget,
+    _comp_visual: IDCompositionVisual,
+    target_bitmap: Option<ID2D1Bitmap1>,
+    canvas: Canvas,
+}
+
+impl Target {
+    fn new(
+        devices: Direct2DDevices,
         generation: u64,
-        renderer: Box<D2DRenderer>,
-    },
-    Lost,
+        hwnd: HWND,
+        width: u32,
+        height: u32,
+        scale: f32,
+    ) -> Result<Self> {
+        let desc = DXGI_SWAP_CHAIN_DESC1 {
+            Width: width,
+            Height: height,
+            Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            Stereo: false.into(),
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
+            BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
+            BufferCount: SWAPCHAIN_BUFFERS,
+            Scaling: DXGI_SCALING_STRETCH,
+            SwapEffect: DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL,
+            AlphaMode: DXGI_ALPHA_MODE_PREMULTIPLIED,
+            Flags: 0,
+        };
+        let swap_chain = unsafe {
+            devices
+                .dxgi_factory
+                .CreateSwapChainForComposition(&devices.d3d_device, &desc, None)?
+        };
+
+        let (comp_device, comp_target, comp_visual) = unsafe {
+            let comp_device: IDCompositionDevice =
+                DCompositionCreateDevice(&devices.dxgi_device)?;
+            let comp_target = comp_device.CreateTargetForHwnd(hwnd, true)?;
+            let comp_visual = comp_device.CreateVisual()?;
+            comp_visual.SetContent(&swap_chain)?;
+            comp_target.SetRoot(&comp_visual)?;
+            comp_device.Commit()?;
+            (comp_device, comp_target, comp_visual)
+        };
+
+        let canvas = Canvas::new(devices, scale)?;
+        let mut target = Self {
+            generation,
+            swap_chain,
+            _comp_device: comp_device,
+            _comp_target: comp_target,
+            _comp_visual: comp_visual,
+            target_bitmap: None,
+            canvas,
+        };
+        target.attach_backbuffer(scale)?;
+        Ok(target)
+    }
+
+    fn attach_backbuffer(&mut self, scale: f32) -> Result<()> {
+        let surface: IDXGISurface = unsafe { self.swap_chain.GetBuffer(0)? };
+        let dpi = 96.0 * scale;
+        let props = D2D1_BITMAP_PROPERTIES1 {
+            pixelFormat: D2D1_PIXEL_FORMAT {
+                format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+            },
+            dpiX: dpi,
+            dpiY: dpi,
+            bitmapOptions: D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
+            ..Default::default()
+        };
+        let bitmap = unsafe {
+            let bitmap = self
+                .canvas
+                .context
+                .CreateBitmapFromDxgiSurface(&surface, Some(&props))?;
+            self.canvas.context.SetDpi(dpi, dpi);
+            self.canvas.context.SetTarget(&bitmap);
+            bitmap
+        };
+        self.target_bitmap = Some(bitmap);
+        Ok(())
+    }
+
+    fn resize(&mut self, width: u32, height: u32, scale: f32) -> std::result::Result<(), bool> {
+        unsafe {
+            self.canvas.context.SetTarget(None);
+        }
+        self.target_bitmap = None;
+        if let Err(err) = unsafe {
+            self.swap_chain.ResizeBuffers(
+                SWAPCHAIN_BUFFERS,
+                width,
+                height,
+                DXGI_FORMAT_B8G8R8A8_UNORM,
+                DXGI_SWAP_CHAIN_FLAG(0),
+            )
+        } {
+            let lost = is_device_lost_hr(err.code());
+            if lost {
+                crate::platform::diag::debug_log(&format!("surface resize lost device: {err}"));
+            }
+            return Err(lost);
+        }
+        if let Err(err) = self.attach_backbuffer(scale) {
+            let lost = err.hresult().is_some_and(|hr| is_device_lost_hr(HRESULT(hr)));
+            if lost {
+                crate::platform::diag::debug_log(&format!("surface resize lost device: {err}"));
+            }
+            return Err(lost);
+        }
+        if (scale - self.canvas.scale_factor).abs() >= f32::EPSILON {
+            self.canvas.shadow_cache.clear();
+        }
+        self.canvas.scale_factor = scale;
+        Ok(())
+    }
+
+    fn begin_frame(&mut self, scale: f32, clear: Rgba) -> bool {
+        let mut attach_failed = false;
+        if self.target_bitmap.is_none() && self.attach_backbuffer(scale).is_err() {
+            attach_failed = true;
+        }
+        self.canvas.transform = Matrix3x2::identity();
+        unsafe {
+            self.canvas.context.BeginDraw();
+            self.canvas.context.SetTransform(&self.canvas.transform);
+            self.canvas.context.Clear(Some(&to_d2d_color(clear)));
+        }
+        attach_failed
+    }
+
+    fn end_frame(&mut self, force_lost: bool) -> FrameOutcome {
+        let end_res = unsafe { self.canvas.context.EndDraw(None, None) };
+        if force_lost {
+            return FrameOutcome::DeviceLost;
+        }
+        if let Err(err) = end_res {
+            let removed =
+                unsafe { self.canvas.devices.d3d_device.GetDeviceRemovedReason() }.is_err();
+            if is_device_lost_hr(err.code()) || removed {
+                return FrameOutcome::DeviceLost;
+            }
+            crate::platform::diag::debug_log(&format!("D2D end_frame failed: {err}"));
+            return FrameOutcome::Failed;
+        }
+        let hr = unsafe { self.swap_chain.Present(0, DXGI_PRESENT(0)) };
+        let removed = if hr.is_err() {
+            unsafe { self.canvas.devices.d3d_device.GetDeviceRemovedReason() }.is_err()
+        } else {
+            false
+        };
+        if is_device_lost_hr(hr) || removed {
+            return FrameOutcome::DeviceLost;
+        }
+        if let Err(err) = hr.ok() {
+            crate::platform::diag::debug_log(&format!("DXGI present failed: {err}"));
+            return FrameOutcome::Failed;
+        }
+        FrameOutcome::Presented
+    }
 }
 
 pub(crate) struct Surface {
     gpu: Rc<Gpu>,
     hwnd: HWND,
-    state: SurfaceState,
     width: u32,
     height: u32,
     scale: f32,
+    target: Option<Target>,
+    #[cfg(test)]
+    force_device_lost: bool,
 }
 
 impl Surface {
-    fn build_state(
-        hwnd: HWND,
-        width: u32,
-        height: u32,
-        scale: f32,
-        generation: u64,
-        devices: Direct2DDevices,
-    ) -> Result<SurfaceState> {
-        let renderer = Box::new(D2DRenderer::new(devices, hwnd, width, height, scale)?);
-        Ok(SurfaceState::Ready {
-            generation,
-            renderer,
-        })
-    }
-
     pub(crate) fn new(
         gpu: Rc<Gpu>,
         hwnd: HWND,
@@ -236,75 +393,84 @@ impl Surface {
         let width = physical_width.max(1);
         let height = physical_height.max(1);
         let (generation, devices) = gpu.snapshot();
-        let state = Self::build_state(hwnd, width, height, scale_factor, generation, devices)?;
+        let target = Target::new(devices, generation, hwnd, width, height, scale_factor)?;
         Ok(Self {
             gpu,
             hwnd,
-            state,
             width,
             height,
             scale: scale_factor,
+            target: Some(target),
+            #[cfg(test)]
+            force_device_lost: false,
         })
     }
 
     pub(crate) fn resize(&mut self, physical_width: u32, physical_height: u32, scale_factor: f32) {
-        self.width = physical_width.max(1);
-        self.height = physical_height.max(1);
+        let width = physical_width.max(1);
+        let height = physical_height.max(1);
+        let same = width == self.width
+            && height == self.height
+            && (scale_factor - self.scale).abs() < f32::EPSILON;
+        self.width = width;
+        self.height = height;
         self.scale = scale_factor;
-        if let SurfaceState::Ready { renderer, .. } = &mut self.state
-            && let Err(err) = renderer.resize(self.width, self.height, self.scale)
-            && renderer.needs_recreate
-        {
-            crate::platform::diag::debug_log(&format!("surface resize lost device: {err}"));
-            self.state = SurfaceState::Lost;
+        if let Some(target) = &mut self.target {
+            if same && target.target_bitmap.is_some() {
+                return;
+            }
+            if let Err(true) = target.resize(width, height, scale_factor) {
+                self.target = None;
+            }
         }
     }
 
-    pub(crate) fn draw(&mut self, clear: Rgba, paint: impl FnOnce(&mut D2DRenderer)) -> bool {
+    pub(crate) fn draw(&mut self, clear: Rgba, paint: impl FnOnce(&mut Canvas)) -> bool {
         let current_gen = self.gpu.generation();
-        if let SurfaceState::Ready { generation, .. } = &self.state
-            && *generation != current_gen
+        if self
+            .target
+            .as_ref()
+            .is_some_and(|t| t.generation != current_gen)
         {
             // Drop old swapchain and DComp target before creating the replacement.
-            self.state = SurfaceState::Lost;
+            self.target = None;
         }
-        if matches!(self.state, SurfaceState::Lost) {
+        if self.target.is_none() {
             let (generation, devices) = self.gpu.snapshot();
-            match Self::build_state(self.hwnd, self.width, self.height, self.scale, generation, devices) {
-                Ok(ready) => self.state = ready,
+            match Target::new(devices, generation, self.hwnd, self.width, self.height, self.scale) {
+                Ok(target) => self.target = Some(target),
                 Err(err) => {
                     crate::platform::diag::debug_log(&format!("surface recreate failed: {err}"));
                     return false;
                 }
             }
         }
-        let SurfaceState::Ready {
-            generation,
-            renderer,
-        } = &mut self.state
-        else {
+        let Some(target) = &mut self.target else {
             return false;
         };
-        let used_gen = *generation;
-        renderer.begin_frame(clear);
-        paint(renderer);
-        match renderer.end_frame() {
-            Ok(false) => false,
-            Ok(true) => {
+        let used_gen = target.generation;
+        let attach_failed = target.begin_frame(self.scale, clear);
+        paint(&mut target.canvas);
+        #[cfg(test)]
+        let force_lost = attach_failed || std::mem::take(&mut self.force_device_lost);
+        #[cfg(not(test))]
+        let force_lost = attach_failed;
+        match target.end_frame(force_lost) {
+            FrameOutcome::Presented | FrameOutcome::Failed => false,
+            FrameOutcome::DeviceLost => {
                 // Drop old swapchain and DComp target before creating the replacement.
-                self.state = SurfaceState::Lost;
+                self.target = None;
                 match self.gpu.recover(used_gen) {
                     Ok((new_gen, new_devices)) => {
-                        if let Ok(ready) = Self::build_state(
+                        self.target = Target::new(
+                            new_devices,
+                            new_gen,
                             self.hwnd,
                             self.width,
                             self.height,
                             self.scale,
-                            new_gen,
-                            new_devices,
-                        ) {
-                            self.state = ready;
-                        }
+                        )
+                        .ok();
                     }
                     Err(err) => {
                         crate::platform::diag::debug_log(&format!("GPU recovery failed: {err}"));
@@ -312,23 +478,17 @@ impl Surface {
                 }
                 true
             }
-            Err(err) => {
-                crate::platform::diag::debug_log(&format!("D2D end_frame failed: {err}"));
-                false
-            }
         }
     }
 
     #[cfg(test)]
     pub(crate) fn is_ready(&self) -> bool {
-        matches!(self.state, SurfaceState::Ready { .. })
+        self.target.is_some()
     }
 
     #[cfg(test)]
     pub(crate) fn mark_device_lost_for_test(&mut self) {
-        if let SurfaceState::Ready { renderer, .. } = &mut self.state {
-            renderer.mark_device_lost_for_test();
-        }
+        self.force_device_lost = true;
     }
 }
 
@@ -366,78 +526,27 @@ pub(crate) fn fill(bounds: Rect, background: Rgba) -> PaintQuad {
     }
 }
 
-#[derive(Copy, Clone, Debug, PartialEq)]
-enum RenderScope {
-    Clip,
-    Layer,
-    Transform(Matrix3x2),
+#[derive(Copy, Clone, Debug, Default, PartialEq)]
+pub(crate) struct Scope {
+    pub(crate) opacity: Option<f32>,
+    pub(crate) scale: Option<(Point, f32, f32)>,
+    pub(crate) clip: Option<Rect>,
 }
 
-pub(crate) struct D2DRenderer {
+pub(crate) struct Canvas {
     devices: Direct2DDevices,
-    swap_chain: IDXGISwapChain1,
-    _comp_device: IDCompositionDevice,
-    _comp_target: IDCompositionTarget,
-    _comp_visual: IDCompositionVisual,
     context: ID2D1DeviceContext,
-    target_bitmap: Option<ID2D1Bitmap1>,
     solid_brush: ID2D1SolidColorBrush,
     shadow_context: Option<ID2D1DeviceContext>,
     shadow_white_brush: Option<ID2D1SolidColorBrush>,
     shadow_effect: Option<ID2D1Effect>,
     shadow_cache: HashMap<ShadowCacheKey, CachedShadow>,
-    physical_width: u32,
-    physical_height: u32,
     scale_factor: f32,
     transform: Matrix3x2,
-    scopes: Vec<RenderScope>,
-    needs_recreate: bool,
 }
 
-impl D2DRenderer {
-    fn new(
-        devices: Direct2DDevices,
-        hwnd: HWND,
-        physical_width: u32,
-        physical_height: u32,
-        scale_factor: f32,
-    ) -> Result<Self> {
-        let width = physical_width.max(1);
-        let height = physical_height.max(1);
-
-        let desc = DXGI_SWAP_CHAIN_DESC1 {
-            Width: width,
-            Height: height,
-            Format: DXGI_FORMAT_B8G8R8A8_UNORM,
-            Stereo: false.into(),
-            SampleDesc: DXGI_SAMPLE_DESC {
-                Count: 1,
-                Quality: 0,
-            },
-            BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
-            BufferCount: SWAPCHAIN_BUFFERS,
-            Scaling: DXGI_SCALING_STRETCH,
-            SwapEffect: DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL,
-            AlphaMode: DXGI_ALPHA_MODE_PREMULTIPLIED,
-            Flags: 0,
-        };
-        let swap_chain = unsafe {
-            devices
-                .dxgi_factory
-                .CreateSwapChainForComposition(&devices.d3d_device, &desc, None)?
-        };
-
-        let (comp_device, comp_target, comp_visual) = unsafe {
-            let comp_device: IDCompositionDevice =
-                DCompositionCreateDevice(&devices.dxgi_device)?;
-            let comp_target = comp_device.CreateTargetForHwnd(hwnd, true)?;
-            let comp_visual = comp_device.CreateVisual()?;
-            comp_visual.SetContent(&swap_chain)?;
-            comp_target.SetRoot(&comp_visual)?;
-            comp_device.Commit()?;
-            (comp_device, comp_target, comp_visual)
-        };
-
+impl Canvas {
+    fn new(devices: Direct2DDevices, scale_factor: f32) -> Result<Self> {
         let (context, solid_brush) = unsafe {
             let context = devices
                 .d2d_device
@@ -464,236 +573,91 @@ impl D2DRenderer {
             unsafe { ctx.CreateEffect(&CLSID_D2D1Shadow) }.ok()
         });
 
-        let mut renderer = Self {
+        Ok(Self {
             devices,
-            swap_chain,
-            _comp_device: comp_device,
-            _comp_target: comp_target,
-            _comp_visual: comp_visual,
             context,
-            target_bitmap: None,
             solid_brush,
             shadow_context,
             shadow_white_brush,
             shadow_effect,
             shadow_cache: HashMap::new(),
-            physical_width: width,
-            physical_height: height,
             scale_factor,
             transform: Matrix3x2::identity(),
-            scopes: Vec::with_capacity(8),
-            needs_recreate: false,
-        };
-        renderer.attach_backbuffer(scale_factor)?;
-        Ok(renderer)
+        })
     }
 
-    fn attach_backbuffer(&mut self, scale_factor: f32) -> Result<()> {
-        let surface: IDXGISurface = unsafe { self.swap_chain.GetBuffer(0)? };
-        let dpi = 96.0 * scale_factor;
-        let props = D2D1_BITMAP_PROPERTIES1 {
-            pixelFormat: D2D1_PIXEL_FORMAT {
-                format: DXGI_FORMAT_B8G8R8A8_UNORM,
-                alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
-            },
-            dpiX: dpi,
-            dpiY: dpi,
-            bitmapOptions: D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
-            ..Default::default()
-        };
-        let bitmap = unsafe {
-            let bitmap = self
-                .context
-                .CreateBitmapFromDxgiSurface(&surface, Some(&props))?;
-            self.context.SetDpi(dpi, dpi);
-            self.context.SetTarget(&bitmap);
-            bitmap
-        };
-        self.target_bitmap = Some(bitmap);
-        Ok(())
-    }
-
-    fn resize(
-        &mut self,
-        physical_width: u32,
-        physical_height: u32,
-        scale_factor: f32,
-    ) -> Result<()> {
-        let width = physical_width.max(1);
-        let height = physical_height.max(1);
-        if self.target_bitmap.is_some()
-            && width == self.physical_width
-            && height == self.physical_height
-            && (scale_factor - self.scale_factor).abs() < f32::EPSILON
-        {
-            return Ok(());
-        }
-        unsafe {
-            self.context.SetTarget(None);
-        }
-        self.target_bitmap = None;
-        let resize_res = unsafe {
-            self.swap_chain.ResizeBuffers(
-                SWAPCHAIN_BUFFERS,
-                width,
-                height,
-                DXGI_FORMAT_B8G8R8A8_UNORM,
-                DXGI_SWAP_CHAIN_FLAG(0),
-            )
-        };
-        if let Err(err) = resize_res {
-            if is_device_lost_hr(err.code()) {
-                self.needs_recreate = true;
-            }
-            return Err(err.into());
-        }
-        if let Err(err) = self.attach_backbuffer(scale_factor) {
-            if err.hresult().is_some_and(|hr| is_device_lost_hr(HRESULT(hr))) {
-                self.needs_recreate = true;
-            }
-            return Err(err);
-        }
-        if (scale_factor - self.scale_factor).abs() >= f32::EPSILON {
-            self.shadow_cache.clear();
-        }
-        self.physical_width = width;
-        self.physical_height = height;
-        self.scale_factor = scale_factor;
-        Ok(())
-    }
-
-    fn begin_frame(&mut self, clear_color: Rgba) {
-        self.scopes.clear();
-        self.transform = Matrix3x2::identity();
-        if self.target_bitmap.is_none() && self.attach_backbuffer(self.scale_factor).is_err() {
-            self.needs_recreate = true;
-        }
-        unsafe {
-            self.context.BeginDraw();
-            self.context.SetTransform(&self.transform);
-            self.context.Clear(Some(&to_d2d_color(clear_color)));
-        }
-    }
-
-    fn end_frame(&mut self) -> Result<bool> {
-        while let Some(scope) = self.scopes.pop() {
-            match scope {
-                RenderScope::Clip => {
-                    unsafe { self.context.PopAxisAlignedClip() }
-                }
-                RenderScope::Layer => {
-                    unsafe { self.context.PopLayer() }
-                }
-                RenderScope::Transform(prev) => {
-                    self.transform = prev;
-                    unsafe { self.context.SetTransform(&prev) }
-                }
+    pub(crate) fn scoped(&mut self, scope: Scope, draw: impl FnOnce(&mut Self)) {
+        if let Some(opacity) = scope.opacity {
+            let params = D2D1_LAYER_PARAMETERS1 {
+                contentBounds: D2D_RECT_F {
+                    left: f32::NEG_INFINITY,
+                    top: f32::NEG_INFINITY,
+                    right: f32::INFINITY,
+                    bottom: f32::INFINITY,
+                },
+                geometricMask: std::mem::ManuallyDrop::new(None),
+                maskAntialiasMode: D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+                maskTransform: Matrix3x2::identity(),
+                opacity: opacity.clamp(0.0, 1.0),
+                opacityBrush: std::mem::ManuallyDrop::new(None),
+                layerOptions: D2D1_LAYER_OPTIONS1_NONE,
+            };
+            unsafe {
+                self.context.PushLayer(&params, None);
             }
         }
-        let end_res = unsafe { self.context.EndDraw(None, None) };
-        if self.needs_recreate {
-            return Ok(true);
-        }
-        if let Err(err) = end_res {
-            let removed = unsafe { self.devices.d3d_device.GetDeviceRemovedReason() }.is_err();
-            if is_device_lost_hr(err.code()) || removed {
-                self.needs_recreate = true;
-                return Ok(true);
+        let prev_transform = scope.scale.map(|(origin, sx, sy)| {
+            let local = Matrix3x2 {
+                M11: sx,
+                M12: 0.0,
+                M21: 0.0,
+                M22: sy,
+                M31: origin.x * (1.0 - sx),
+                M32: origin.y * (1.0 - sy),
+            };
+            let prev = self.transform;
+            self.transform = local * prev;
+            unsafe {
+                self.context.SetTransform(&self.transform);
             }
-            return Err(err.into());
+            prev
+        });
+        if let Some(bounds) = scope.clip {
+            let rect = to_d2d_rect(bounds);
+            unsafe {
+                self.context
+                    .PushAxisAlignedClip(&rect, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+            }
         }
-        let hr = unsafe { self.swap_chain.Present(0, DXGI_PRESENT(0)) };
-        let removed = if hr.is_err() {
-            unsafe { self.devices.d3d_device.GetDeviceRemovedReason() }.is_err()
-        } else {
-            false
-        };
-        if is_device_lost_hr(hr) || removed {
-            self.needs_recreate = true;
-            return Ok(true);
-        }
-        hr.ok()?;
-        Ok(false)
-    }
 
-    #[cfg(test)]
-    fn mark_device_lost_for_test(&mut self) {
-        self.needs_recreate = true;
-    }
+        draw(self);
 
-    pub(crate) fn push_clip(&mut self, bounds: Rect) {
-        let rect = to_d2d_rect(bounds);
-        unsafe {
-            self.context
-                .PushAxisAlignedClip(&rect, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-        }
-        self.scopes.push(RenderScope::Clip);
-    }
-
-    pub(crate) fn pop_clip(&mut self) {
-        if self.scopes.last() == Some(&RenderScope::Clip) {
-            self.scopes.pop();
+        if scope.clip.is_some() {
             unsafe {
                 self.context.PopAxisAlignedClip();
             }
         }
-    }
-
-    pub(crate) fn push_opacity_layer(&mut self, opacity: f32) {
-        let params = D2D1_LAYER_PARAMETERS1 {
-            contentBounds: D2D_RECT_F {
-                left: f32::NEG_INFINITY,
-                top: f32::NEG_INFINITY,
-                right: f32::INFINITY,
-                bottom: f32::INFINITY,
-            },
-            geometricMask: std::mem::ManuallyDrop::new(None),
-            maskAntialiasMode: D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
-            maskTransform: Matrix3x2::identity(),
-            opacity: opacity.clamp(0.0, 1.0),
-            opacityBrush: std::mem::ManuallyDrop::new(None),
-            layerOptions: D2D1_LAYER_OPTIONS1_NONE,
-        };
-        unsafe {
-            self.context.PushLayer(&params, None);
+        if let Some(prev) = prev_transform {
+            self.transform = prev;
+            unsafe {
+                self.context.SetTransform(&prev);
+            }
         }
-        self.scopes.push(RenderScope::Layer);
-    }
-
-    pub(crate) fn pop_layer(&mut self) {
-        if self.scopes.last() == Some(&RenderScope::Layer) {
-            self.scopes.pop();
+        if scope.opacity.is_some() {
             unsafe {
                 self.context.PopLayer();
             }
         }
     }
 
-    pub(crate) fn push_scale(&mut self, origin: Point, sx: f32, sy: f32) {
-        let local = Matrix3x2 {
-            M11: sx,
-            M12: 0.0,
-            M21: 0.0,
-            M22: sy,
-            M31: origin.x * (1.0 - sx),
-            M32: origin.y * (1.0 - sy),
-        };
-        let prev = self.transform;
-        self.transform = local * prev;
-        unsafe {
-            self.context.SetTransform(&self.transform);
-        }
-        self.scopes.push(RenderScope::Transform(prev));
-    }
-
-    pub(crate) fn pop_transform(&mut self) {
-        if let Some(RenderScope::Transform(prev)) = self.scopes.last().copied() {
-            self.scopes.pop();
-            self.transform = prev;
-            unsafe {
-                self.context.SetTransform(&prev);
-            }
-        }
+    pub(crate) fn with_clip(&mut self, bounds: Rect, draw: impl FnOnce(&mut Self)) {
+        self.scoped(
+            Scope {
+                clip: Some(bounds),
+                ..Default::default()
+            },
+            draw,
+        );
     }
 
     #[inline]

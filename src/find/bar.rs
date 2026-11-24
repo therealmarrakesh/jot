@@ -6,6 +6,7 @@ use crate::geom::{Point, point};
 use crate::gfx::TextSystem;
 use crate::ids::{AnimKey, CustomDraw, EditorSlot, Focus, HitId, Node, UiState};
 use crate::platform::{CursorStyle, Key, KeyEvent, TimerHandle};
+use crate::shell::{WindowTimer, WindowTimers};
 use crate::theme::{Palette, theme_shadow};
 use crate::types::SharedStr;
 use crate::ui::controls::{
@@ -39,7 +40,7 @@ const CARD_Z: f32 = 32.;
 const NOTICE_Z: f32 = 16.;
 const COLLAPSED_SIZE: f32 = 20.;
 const EXPAND_START_SCALE: f32 = 0.01;
-pub(crate) const NOTICE_DURATION: Duration = Duration::from_secs(3);
+const NOTICE_DURATION: Duration = Duration::from_secs(3);
 const MAX_SEED_QUERY_CHARS: usize = 256;
 const CARD_WIDTH: f32 = 860.;
 const CARD_TOP: f32 = 12.;
@@ -74,11 +75,12 @@ pub(crate) enum FindKey {
     Command(AppCommand),
 }
 
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct FindOutcome {
-    pub(crate) searched: bool,
-    pub(crate) replaced: bool,
-    pub(crate) arm_notice: bool,
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(crate) enum FindOutcome {
+    EmptyQuery,
+    Found { wrapped: bool },
+    NotFound,
+    Replaced(usize),
 }
 
 pub(crate) struct FindBar {
@@ -89,7 +91,7 @@ pub(crate) struct FindBar {
     pub(crate) query: Editor,
     pub(crate) replacement: Editor,
     notice: Option<SharedStr>,
-    notice_timer: TimerHandle,
+    notice_timer: Option<TimerHandle>,
     matcher: Option<Matcher>,
     buffer: String,
 }
@@ -120,7 +122,7 @@ impl FindBar {
             query,
             replacement,
             notice: None,
-            notice_timer: TimerHandle::default(),
+            notice_timer: None,
             matcher: None,
             buffer: String::new(),
         }
@@ -188,19 +190,15 @@ impl FindBar {
 
     pub(crate) fn clear_notice(&mut self) {
         self.notice = None;
-        self.notice_timer.cancel();
+        self.notice_timer = None;
     }
 
-    pub(crate) fn set_notice_timer(&mut self, timer: TimerHandle) {
-        self.notice_timer = timer;
-    }
-
-    fn show_notice(&mut self, notice: impl Into<SharedStr>) -> bool {
+    fn show_notice(&mut self, notice: impl Into<SharedStr>, timers: WindowTimers<'_>) {
         if !self.is_open() {
-            return false;
+            return;
         }
         self.notice = Some(notice.into());
-        true
+        self.notice_timer = Some(timers.after(NOTICE_DURATION, WindowTimer::FindNotice));
     }
 
     pub(crate) fn on_notice_dismiss(&mut self) -> bool {
@@ -242,9 +240,14 @@ impl FindBar {
         self.matcher.as_ref().map(|_| query)
     }
 
-    pub(crate) fn step(&mut self, editor: &mut Editor, forward: bool) -> FindOutcome {
+    pub(crate) fn step(
+        &mut self,
+        editor: &mut Editor,
+        forward: bool,
+        timers: WindowTimers<'_>,
+    ) -> FindOutcome {
         let Some(query) = self.prepare() else {
-            return FindOutcome::default();
+            return FindOutcome::EmptyQuery;
         };
         let text = editor.model().text().clone();
         let selection = editor.model().selected_range();
@@ -253,7 +256,7 @@ impl FindBar {
             .matcher
             .as_ref()
             .and_then(|m| m.search(&text, selection, forward, wrap, &mut self.buffer));
-        let arm_notice = match found {
+        match found {
             Some((range, wrapped)) => {
                 editor.set_selected_range(range);
                 if wrapped {
@@ -262,24 +265,27 @@ impl FindBar {
                     } else {
                         "Found previous from the bottom"
                     };
-                    self.show_notice(msg)
+                    self.show_notice(msg, timers);
                 } else {
                     self.clear_notice();
-                    false
                 }
+                FindOutcome::Found { wrapped }
             }
-            None => self.show_notice(not_found(&query)),
-        };
-        FindOutcome {
-            searched: true,
-            replaced: false,
-            arm_notice,
+            None => {
+                self.show_notice(not_found(&query), timers);
+                FindOutcome::NotFound
+            }
         }
     }
 
-    pub(crate) fn replace_next(&mut self, editor: &mut Editor, ts: &TextSystem) -> FindOutcome {
+    pub(crate) fn replace_next(
+        &mut self,
+        editor: &mut Editor,
+        ts: &TextSystem,
+        timers: WindowTimers<'_>,
+    ) -> FindOutcome {
         if self.prepare().is_none() {
-            return FindOutcome::default();
+            return FindOutcome::EmptyQuery;
         }
         let sel_len = editor.model().selected_range().len();
         let is_match = self.matcher.as_ref().is_some_and(|m| {
@@ -291,35 +297,36 @@ impl FindBar {
             let replacement = self.replacement.model().value();
             editor.replace(&replacement, ts);
         }
-        let mut out = self.step(editor, true);
-        out.replaced = is_match;
-        out
+        let out = self.step(editor, true, timers);
+        if is_match {
+            FindOutcome::Replaced(1)
+        } else {
+            out
+        }
     }
 
-    pub(crate) fn replace_all(&mut self, editor: &mut Editor, ts: &TextSystem) -> FindOutcome {
+    pub(crate) fn replace_all(
+        &mut self,
+        editor: &mut Editor,
+        ts: &TextSystem,
+        timers: WindowTimers<'_>,
+    ) -> FindOutcome {
         let Some(query) = self.prepare() else {
-            return FindOutcome::default();
+            return FindOutcome::EmptyQuery;
         };
         let text = editor.model().text().clone();
         let ranges = match self.matcher.as_ref() {
             Some(m) => m.all(&text, &mut self.buffer),
-            None => return FindOutcome::default(),
+            None => return FindOutcome::EmptyQuery,
         };
         if ranges.is_empty() {
-            let arm_notice = self.show_notice(not_found(&query));
-            return FindOutcome {
-                searched: true,
-                replaced: false,
-                arm_notice,
-            };
+            self.show_notice(not_found(&query), timers);
+            return FindOutcome::NotFound;
         }
+        let count = ranges.len();
         let replacement = self.replacement.model().value();
         editor.replace_all(&ranges, &replacement, ts);
-        FindOutcome {
-            searched: true,
-            replaced: true,
-            arm_notice: false,
-        }
+        FindOutcome::Replaced(count)
     }
 
     fn card_size(&self, viewport_width: f32) -> (f32, f32) {
@@ -642,12 +649,18 @@ fn find_icon_button(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Instant;
+
     use crate::editor::{DocOptions, Rope};
     use crate::geom::Edges;
+    use crate::platform::Jobs;
+    use crate::shell::AppEvent;
 
     #[test]
     fn find_bar_step_wrap_replace_next_and_replace_all_return_outcomes() {
         let ts = TextSystem::new();
+        let jobs = Jobs::new();
+        let timers = WindowTimers::for_test(&jobs);
         let mut bar = FindBar::new();
         let mut ed = Editor::document(
             Rope::from("foo bar foo baz"),
@@ -661,32 +674,33 @@ mod tests {
         assert!(bar.is_open());
         assert_eq!(bar.query.model().value(), "foo");
 
-        let s1 = bar.step(&mut ed, true);
-        assert_eq!(s1, FindOutcome { searched: true, replaced: false, arm_notice: false });
+        assert_eq!(bar.step(&mut ed, true, timers), FindOutcome::Found { wrapped: false });
         assert_eq!(ed.model().selected_range(), 0..3);
 
-        let s2 = bar.step(&mut ed, true);
-        assert_eq!(s2, FindOutcome { searched: true, replaced: false, arm_notice: false });
+        assert_eq!(bar.step(&mut ed, true, timers), FindOutcome::Found { wrapped: false });
         assert_eq!(ed.model().selected_range(), 8..11);
 
-        let s3 = bar.step(&mut ed, true);
-        assert_eq!(s3, FindOutcome { searched: true, replaced: false, arm_notice: true });
+        assert_eq!(bar.step(&mut ed, true, timers), FindOutcome::Found { wrapped: true });
         assert_eq!(ed.model().selected_range(), 0..3);
+        assert!(matches!(
+            jobs.pop_at(Instant::now() + NOTICE_DURATION + Duration::from_secs(1)),
+            Some(AppEvent::Window {
+                timer: WindowTimer::FindNotice,
+                ..
+            })
+        ));
 
         bar.replacement.set_value("qux", &ts);
-        let r1 = bar.replace_next(&mut ed, &ts);
-        assert!(r1.replaced);
+        assert_eq!(bar.replace_next(&mut ed, &ts, timers), FindOutcome::Replaced(1));
         assert_eq!(ed.model().value(), "qux bar foo baz");
         assert_eq!(ed.model().selected_range(), 8..11);
 
         bar.query.set_value("o", &ts);
-        let ra = bar.replace_all(&mut ed, &ts);
-        assert_eq!(ra, FindOutcome { searched: true, replaced: true, arm_notice: false });
+        assert_eq!(bar.replace_all(&mut ed, &ts, timers), FindOutcome::Replaced(2));
         assert_eq!(ed.model().value(), "qux bar fquxqux baz");
 
         bar.query.set_value("missing", &ts);
-        let miss = bar.step(&mut ed, true);
-        assert_eq!(miss, FindOutcome { searched: true, replaced: false, arm_notice: true });
+        assert_eq!(bar.step(&mut ed, true, timers), FindOutcome::NotFound);
         assert!(bar.on_notice_dismiss());
         assert!(!bar.on_notice_dismiss());
     }

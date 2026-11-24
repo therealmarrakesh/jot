@@ -69,9 +69,7 @@ impl<E> TimerHeap<E> {
             action,
         }));
         self.rearm(now);
-        TimerHandle {
-            cancelled: Some(cancelled),
-        }
+        TimerHandle { cancelled }
     }
 
     fn pop_due(&mut self, now: Instant) -> Option<E> {
@@ -172,22 +170,13 @@ impl<E> BgQueue<E> {
     }
 }
 
-#[derive(Default)]
 pub(crate) struct TimerHandle {
-    cancelled: Option<Rc<Cell<bool>>>,
-}
-
-impl TimerHandle {
-    pub(crate) fn cancel(&mut self) {
-        if let Some(flag) = self.cancelled.take() {
-            flag.set(true);
-        }
-    }
+    cancelled: Rc<Cell<bool>>,
 }
 
 impl Drop for TimerHandle {
     fn drop(&mut self) {
-        self.cancel();
+        self.cancelled.set(true);
     }
 }
 
@@ -306,7 +295,7 @@ mod tests {
         );
         assert_eq!(jobs.pop_at(t0 + Duration::from_millis(30)), None);
 
-        let mut repeating = jobs.every(
+        let repeating = jobs.every(
             Duration::from_millis(15),
             Duration::from_millis(15),
             || TestEvent::Tick,
@@ -320,16 +309,16 @@ mod tests {
             jobs.pop_at(t1 + Duration::from_millis(40)),
             Some(TestEvent::Tick)
         );
-        repeating.cancel();
+        drop(repeating);
         assert_eq!(jobs.pop_at(t1 + Duration::from_millis(100)), None);
     }
 
     #[test]
     fn cancel_prevents_already_elapsed_timer_from_firing() {
         let jobs = Jobs::new();
-        let mut handle = jobs.after(Duration::from_millis(5), TestEvent::Cancelled);
+        let handle = jobs.after(Duration::from_millis(5), TestEvent::Cancelled);
         let after_due = Instant::now() + Duration::from_millis(20);
-        handle.cancel();
+        drop(handle);
         assert_eq!(jobs.pop_at(after_due), None);
     }
 

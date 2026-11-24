@@ -17,7 +17,7 @@ use crate::color::Rgba;
 use crate::geom::{Point, Rect, Size, point, size};
 use crate::types::SharedStr;
 
-use super::d2d::{D2DRenderer, fill};
+use super::d2d::{Canvas, fill};
 use super::wrap::{AdvanceTable, analyze_break_opportunities};
 
 const MAX_LAYOUT_CACHE: usize = 512;
@@ -273,7 +273,7 @@ impl Label {
     }
 }
 
-impl D2DRenderer {
+impl Canvas {
     pub(crate) fn draw_row(
         &mut self,
         row: &ShapedRow,
@@ -324,17 +324,18 @@ impl D2DRenderer {
             }
             TextAlign::Left => 0.0,
         };
+        let draw_origin = point(origin.x + align_offset_x, origin.y);
         if label.clamped {
             let clip_w = label
                 .layout_box_width
                 .map_or(align_width, |bw| align_width.max(bw))
                 .max(label.width)
                 + 2.0;
-            self.push_clip(Rect::new(origin, size(clip_w, label.size().height)));
-        }
-        self.draw_text_layout(point(origin.x + align_offset_x, origin.y), layout, color);
-        if label.clamped {
-            self.pop_clip();
+            self.with_clip(Rect::new(origin, size(clip_w, label.size().height)), |c| {
+                c.draw_text_layout(draw_origin, layout, color);
+            });
+        } else {
+            self.draw_text_layout(draw_origin, layout, color);
         }
     }
 }

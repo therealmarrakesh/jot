@@ -1,13 +1,12 @@
 use std::rc::Rc;
+use std::time::Duration;
 
-use crate::editor::EditorTimer;
+use crate::editor::{EditorTimer, EditorTimers};
 use crate::files::{FileEvent, FileRequest, PromptAnswer, PromptId};
 use crate::geom::Point;
 use crate::gfx::{Gpu, TextSystem};
 use crate::ids::{EditorSlot, HitId, TabId};
-use crate::platform::{
-    Jobs, Platform, SystemSettings, WindowAppearance, WindowId, system_settings,
-};
+use crate::platform::{Jobs, Platform, SystemSettings, TimerHandle, WindowAppearance, WindowId};
 use crate::theme::Palette;
 
 #[derive(Copy, Clone, Debug)]
@@ -25,22 +24,21 @@ impl Default for ViewSettings {
     }
 }
 
-pub(crate) enum AppEvent {
-    EditorTimer {
-        window: WindowId,
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub(crate) enum WindowTimer {
+    Editor {
         slot: EditorSlot,
         kind: EditorTimer,
     },
-    TabScrollRepeat {
+    TabScrollRepeat(f32),
+    Submenu(Option<usize>),
+    FindNotice,
+}
+
+pub(crate) enum AppEvent {
+    Window {
         window: WindowId,
-        step: f32,
-    },
-    MenuSubmenuTimer {
-        window: WindowId,
-        target: Option<usize>,
-    },
-    FindNoticeDismiss {
-        window: WindowId,
+        timer: WindowTimer,
     },
     TooltipShowTimer {
         window: WindowId,
@@ -52,6 +50,97 @@ pub(crate) enum AppEvent {
     TestCloseWindow(WindowId),
     #[cfg(test)]
     TestFlag(std::sync::Arc<std::sync::atomic::AtomicBool>),
+}
+
+#[derive(Copy, Clone)]
+pub(crate) struct WindowTimers<'a> {
+    jobs: &'a Jobs<AppEvent>,
+    window: WindowId,
+    settings: SystemSettings,
+}
+
+impl<'a> WindowTimers<'a> {
+    pub(crate) fn after(&self, delay: Duration, timer: WindowTimer) -> TimerHandle {
+        self.jobs.after(
+            delay,
+            AppEvent::Window {
+                window: self.window,
+                timer,
+            },
+        )
+    }
+
+    pub(crate) fn every(
+        &self,
+        delay: Duration,
+        interval: Duration,
+        timer: WindowTimer,
+    ) -> TimerHandle {
+        let window = self.window;
+        self.jobs.every(delay, interval, move || AppEvent::Window {
+            window,
+            timer,
+        })
+    }
+
+    #[inline]
+    pub(crate) fn menu_show_delay(&self) -> Duration {
+        self.settings.menu_show_delay
+    }
+
+    #[inline]
+    pub(crate) fn for_editor(self, slot: EditorSlot) -> SlotTimers<'a> {
+        SlotTimers { timers: self, slot }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(jobs: &'a Jobs<AppEvent>) -> Self {
+        Self {
+            jobs,
+            window: WindowId(0),
+            settings: SystemSettings::default(),
+        }
+    }
+}
+
+pub(crate) struct SlotTimers<'a> {
+    timers: WindowTimers<'a>,
+    slot: EditorSlot,
+}
+
+impl EditorTimers for SlotTimers<'_> {
+    fn after(&mut self, delay: Duration, kind: EditorTimer) -> Option<TimerHandle> {
+        Some(self.timers.after(
+            delay,
+            WindowTimer::Editor {
+                slot: self.slot,
+                kind,
+            },
+        ))
+    }
+
+    fn every(
+        &mut self,
+        delay: Duration,
+        interval: Duration,
+        kind: EditorTimer,
+    ) -> Option<TimerHandle> {
+        Some(self.timers.every(
+            delay,
+            interval,
+            WindowTimer::Editor {
+                slot: self.slot,
+                kind,
+            },
+        ))
+    }
+
+    fn blink_timing(&self) -> (Option<Duration>, Option<Duration>) {
+        (
+            self.timers.settings.caret_blink_interval,
+            self.timers.settings.caret_blink_timeout,
+        )
+    }
 }
 
 pub(crate) enum Effect {
@@ -86,8 +175,8 @@ impl<'a> Cx<'a> {
     }
 
     #[inline]
-    pub(crate) fn jobs(&self) -> &'a Jobs<AppEvent> {
-        &self.shell.jobs
+    pub(crate) fn timers(&self, window: WindowId) -> WindowTimers<'a> {
+        self.shell.window_timers(window)
     }
 
     #[inline]
@@ -111,7 +200,7 @@ impl Shell {
     pub(crate) fn new(platform: &Rc<Platform>, gpu: Rc<Gpu>) -> Self {
         let jobs = Jobs::new();
         jobs.attach_platform(platform);
-        let settings = system_settings();
+        let settings = platform.settings();
         let appearance = settings.appearance;
         let dark = matches!(appearance, WindowAppearance::Dark);
         let palette = Palette::resolve(dark, settings.accent(dark), settings.high_contrast);
@@ -127,8 +216,18 @@ impl Shell {
         }
     }
 
+    #[inline]
     pub(crate) fn appearance(&self) -> WindowAppearance {
         self.appearance
+    }
+
+    #[inline]
+    pub(crate) fn window_timers(&self, window: WindowId) -> WindowTimers<'_> {
+        WindowTimers {
+            jobs: &self.jobs,
+            window,
+            settings: self.settings,
+        }
     }
 
     pub(crate) fn toggle_theme(&mut self) {
@@ -138,16 +237,20 @@ impl Shell {
             WindowAppearance::Dark
         };
         self.appearance_override = Some(next);
-        self.sync_theme();
+        self.rebuild_palette();
     }
 
-    pub(crate) fn sync_theme(&mut self) {
-        let settings = system_settings();
+    pub(crate) fn apply_settings(&mut self, settings: SystemSettings) {
         self.settings = settings;
-        let next = self.appearance_override.unwrap_or(settings.appearance);
+        self.rebuild_palette();
+    }
+
+    fn rebuild_palette(&mut self) {
+        let next = self.appearance_override.unwrap_or(self.settings.appearance);
         let dark = matches!(next, WindowAppearance::Dark);
         self.appearance = next;
-        self.palette = Palette::resolve(dark, settings.accent(dark), settings.high_contrast);
+        self.palette =
+            Palette::resolve(dark, self.settings.accent(dark), self.settings.high_contrast);
     }
 
     pub(crate) fn cx<'a>(&'a self, fx: &'a mut Vec<Effect>) -> Cx<'a> {

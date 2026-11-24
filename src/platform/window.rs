@@ -71,7 +71,7 @@ use super::input::{
 };
 use super::instance::HandoffCommand;
 use super::os::WindowHwnd;
-use super::settings::{refresh_system_settings, system_settings};
+use super::settings::SystemSettings;
 use super::{ACTIVE_HANDLER, DisplayId, WindowsDisplay};
 
 const WINDOW_CLASS: PCWSTR = w!("JotWindow");
@@ -98,6 +98,7 @@ pub(crate) enum WindowAppearance {
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub(crate) enum WindowControlArea {
+    Client,
     Drag,
     Min,
     Max,
@@ -105,14 +106,14 @@ pub(crate) enum WindowControlArea {
 }
 
 pub(crate) fn hit_test_control_areas(
-    areas: &[(Rect, Option<WindowControlArea>)],
+    areas: &[(Rect, WindowControlArea)],
     pos: Point,
-) -> Option<WindowControlArea> {
+) -> WindowControlArea {
     areas
         .iter()
         .rev()
         .find(|(rect, _)| rect.contains(pos))
-        .and_then(|(_, area)| *area)
+        .map_or(WindowControlArea::Client, |(_, area)| *area)
 }
 
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
@@ -161,7 +162,7 @@ pub(crate) enum PlatformEvent {
     PaintRequested {
         window_id: WindowId,
     },
-    ThemeChanged,
+    SettingsChanged(SystemSettings),
     MouseMove {
         window_id: WindowId,
         position: Point,
@@ -300,7 +301,7 @@ struct WindowMetrics {
 struct WindowChrome {
     min_size: Option<Size>,
     cursor: CursorStyle,
-    control_areas: Vec<(Rect, Option<WindowControlArea>)>,
+    control_areas: Vec<(Rect, WindowControlArea)>,
 }
 
 struct WindowInput {
@@ -323,7 +324,6 @@ struct WindowShared {
     in_size_move: Cell<bool>,
     ime_caret: Cell<Option<Rect>>,
     sys_caret_px: Cell<Option<(i32, i32, i32, i32)>>,
-    block_shutdown: Cell<Option<&'static str>>,
     last_origin_px: Cell<Option<(i32, i32)>>,
     chrome: RefCell<WindowChrome>,
     input: RefCell<WindowInput>,
@@ -338,7 +338,6 @@ impl WindowShared {
             in_size_move: Cell::new(false),
             ime_caret: Cell::new(None),
             sys_caret_px: Cell::new(None),
-            block_shutdown: Cell::new(None),
             last_origin_px: Cell::new(None),
             chrome: RefCell::new(WindowChrome {
                 min_size: None,
@@ -381,6 +380,18 @@ impl WindowShared {
 thread_local! {
     static HWND_REGISTRY: RefCell<HashMap<isize, Rc<WindowShared>>> = RefCell::new(HashMap::new());
     static PENDING_EVENTS: RefCell<VecDeque<PlatformEvent>> = const { RefCell::new(VecDeque::new()) };
+    static SHUTDOWN_BLOCK: Cell<Option<&'static str>> = const { Cell::new(None) };
+}
+
+pub(super) fn set_block_shutdown(reason: Option<&'static str>) {
+    let prev = SHUTDOWN_BLOCK.with(|slot| slot.replace(reason));
+    if prev.is_some() && reason.is_none() {
+        HWND_REGISTRY.with(|map| {
+            for &raw in map.borrow().keys() {
+                let _ = unsafe { ShutdownBlockReasonDestroy(HWND(raw as *mut _)) };
+            }
+        });
+    }
 }
 
 unsafe extern "system" fn overlay_wnd_proc(
@@ -479,7 +490,13 @@ fn queue_pending_event(event: PlatformEvent) {
                 *scale = *ns;
                 true
             }
-            (PlatformEvent::ThemeChanged, Some(PlatformEvent::ThemeChanged)) => true,
+            (
+                PlatformEvent::SettingsChanged(fresh),
+                Some(PlatformEvent::SettingsChanged(prev)),
+            ) => {
+                *prev = *fresh;
+                true
+            }
             _ => false,
         };
         if !coalesced {
@@ -701,7 +718,7 @@ impl NativeWindow {
         self.shared.chrome.borrow_mut().min_size = min_size;
     }
 
-    pub(crate) fn set_control_areas(&self, areas: Vec<(Rect, Option<WindowControlArea>)>) {
+    pub(crate) fn set_control_areas(&self, areas: Vec<(Rect, WindowControlArea)>) {
         self.shared.chrome.borrow_mut().control_areas = areas;
     }
 
@@ -762,13 +779,6 @@ impl NativeWindow {
             None => unsafe {
                 let _ = DestroyCaret();
             },
-        }
-    }
-
-    pub(crate) fn set_block_shutdown(&self, reason: Option<&'static str>) {
-        let prev = self.shared.block_shutdown.replace(reason);
-        if prev.is_some() && reason.is_none() {
-            let _ = unsafe { ShutdownBlockReasonDestroy(self.hwnd) };
         }
     }
 
@@ -1146,11 +1156,11 @@ fn window_wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
                 }
                 let local = screen_to_client_point(hwnd, lparam, s.scale());
                 match hit_test_control_areas(&s.chrome.borrow().control_areas, local) {
-                    Some(WindowControlArea::Close) => HTCLOSE,
-                    Some(WindowControlArea::Max) => HTMAXBUTTON,
-                    Some(WindowControlArea::Min) => HTMINBUTTON,
-                    Some(WindowControlArea::Drag) => HTCAPTION,
-                    None => HTCLIENT,
+                    WindowControlArea::Close => HTCLOSE,
+                    WindowControlArea::Max => HTMAXBUTTON,
+                    WindowControlArea::Min => HTMINBUTTON,
+                    WindowControlArea::Drag => HTCAPTION,
+                    WindowControlArea::Client => HTCLIENT,
                 }
             });
             LRESULT(hit.unwrap_or(HTCLIENT) as isize)
@@ -1339,7 +1349,7 @@ fn window_wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
             let horizontal = msg == WM_MOUSEHWHEEL || modifiers.shift;
             let raw_delta = ((wparam.0 >> 16) & 0xFFFF) as i16 as f32;
             let notches = raw_delta / 120.0;
-            let raw_amount = system_settings().wheel_scroll_amount(horizontal);
+            let raw_amount = super::cached_settings().wheel_scroll_amount(horizontal);
             // WHEEL_PAGESCROLL is u32::MAX.
             let page_scroll = !horizontal && raw_amount == u32::MAX;
             let amount = if page_scroll { 1.0 } else { raw_amount.max(1) as f32 };
@@ -1538,8 +1548,9 @@ fn window_wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
             if lookup(hwnd).is_some()
                 && (msg == WM_THEMECHANGED || is_relevant_setting_change(lparam))
             {
-                refresh_system_settings();
-                dispatch(PlatformEvent::ThemeChanged);
+                let fresh = SystemSettings::query();
+                super::set_cached_settings(fresh);
+                dispatch(PlatformEvent::SettingsChanged(fresh));
             }
             LRESULT(0)
         }
@@ -1581,12 +1592,7 @@ fn window_wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
         }
 
         WM_QUERYENDSESSION => {
-            let block_reason = HWND_REGISTRY.with(|map| {
-                map.borrow()
-                    .values()
-                    .find_map(|s| s.block_shutdown.get())
-            });
-            if let Some(reason) = block_reason {
+            if let Some(reason) = SHUTDOWN_BLOCK.with(Cell::get) {
                 let wide = HSTRING::from(reason);
                 let _ = unsafe { ShutdownBlockReasonCreate(hwnd, &wide) };
                 if let Some(s) = lookup(hwnd) {

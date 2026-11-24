@@ -237,7 +237,6 @@ pub(super) struct Panel {
     pub(super) shortcuts: Vec<Option<SharedStr>>,
     pub(super) width: f32,
     pub(super) checks: bool,
-    pub(super) focused: Option<usize>,
 }
 
 impl Panel {
@@ -289,7 +288,6 @@ impl Panel {
             shortcuts,
             width: width.max(min_width),
             checks,
-            focused: None,
         }
     }
 
@@ -303,19 +301,17 @@ impl Panel {
             .position(|entry| entry.access_key() == Some(key))
     }
 
-    pub(super) fn step(&mut self, delta: isize) {
-        if let Some(ix) = cycle(self.focused, self.entries.len(), delta, true, |ix| {
+    pub(super) fn step(&self, current: Option<usize>, delta: isize) -> Option<usize> {
+        cycle(current, self.entries.len(), delta, true, |ix| {
             self.entries[ix].selectable()
-        }) {
-            self.focused = Some(ix);
-        }
+        })
     }
 
-    pub(super) fn focus_edge(&mut self, last: bool) {
-        self.focused = if last {
+    pub(super) fn edge(&self, last: bool) -> Option<usize> {
+        if last {
             self.entries.iter().rposition(Entry::selectable)
         } else {
             self.entries.iter().position(Entry::selectable)
-        };
+        }
     }
 }

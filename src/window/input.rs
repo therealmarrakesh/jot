@@ -4,9 +4,9 @@ use crate::files::FileRequest;
 use crate::find::FindKey;
 use crate::geom::{Point, point};
 use crate::ids::{EditorSlot, Focus, HitId};
-use crate::menu::Entry;
+use crate::menu::{Entry, RowPath};
 use crate::platform::{KeyEvent, Modifiers, MouseButton};
-use crate::shell::{AppEvent, Cx, Effect};
+use crate::shell::{Cx, Effect, WindowTimer};
 use crate::tabs::{SCROLL_REPEAT_DELAY, SCROLL_REPEAT_INTERVAL, SCROLL_STEP, WHEEL_SHARE};
 
 use super::chrome::STRIP_TOP;
@@ -28,9 +28,10 @@ impl MainWindow {
         let mode = self.mode();
         if mode != InputMode::Dialog {
             let state = self.menu_state(cx.shell);
-            let menu_out = self
-                .menu_bar
-                .on_hover_change(top, state, cx.ts(), &mut self.ui);
+            let timers = cx.timers(self.id());
+            let menu_out =
+                self.menu_bar
+                    .on_hover_change(top, state, cx.ts(), &mut self.ui, timers);
             let _ = self.apply_menu_outcome(menu_out, cx);
         }
 
@@ -181,28 +182,20 @@ impl MainWindow {
                 }
                 Some(HitId::TabScrollLeft) => {
                     if self.scroll_tabs(-SCROLL_STEP) {
-                        let wid = self.id();
-                        self.tabs.set_scroll_repeat(cx.jobs().every(
+                        self.tabs.set_scroll_repeat(cx.timers(self.id()).every(
                             SCROLL_REPEAT_DELAY,
                             SCROLL_REPEAT_INTERVAL,
-                            move || AppEvent::TabScrollRepeat {
-                                window: wid,
-                                step: -SCROLL_STEP,
-                            },
+                            WindowTimer::TabScrollRepeat(-SCROLL_STEP),
                         ));
                     }
                     return;
                 }
                 Some(HitId::TabScrollRight) => {
                     if self.scroll_tabs(SCROLL_STEP) {
-                        let wid = self.id();
-                        self.tabs.set_scroll_repeat(cx.jobs().every(
+                        self.tabs.set_scroll_repeat(cx.timers(self.id()).every(
                             SCROLL_REPEAT_DELAY,
                             SCROLL_REPEAT_INTERVAL,
-                            move || AppEvent::TabScrollRepeat {
-                                window: wid,
-                                step: SCROLL_STEP,
-                            },
+                            WindowTimer::TabScrollRepeat(SCROLL_STEP),
                         ));
                     }
                     return;
@@ -345,11 +338,11 @@ impl MainWindow {
             Some(HitId::FindReplace) => self.replace_next(cx.shell),
             Some(HitId::FindReplaceAll) => self.replace_all(cx.shell),
             Some(HitId::MenuItem { ix, .. }) => {
-                let out = self.menu_bar.activate((ix, None), false, cx.ts());
+                let out = self.menu_bar.activate(RowPath::Root(ix), false, cx.ts());
                 let _ = self.apply_menu_outcome(out, cx);
             }
             Some(HitId::SubmenuItem { ix: sub_ix, .. }) => {
-                let out = self.menu_bar.activate((0, Some(sub_ix)), false, cx.ts());
+                let out = self.menu_bar.activate(RowPath::Sub(sub_ix), false, cx.ts());
                 let _ = self.apply_menu_outcome(out, cx);
             }
             Some(HitId::MenuCommand { ix, .. }) => {

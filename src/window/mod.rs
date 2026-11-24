@@ -3,23 +3,19 @@ mod commands;
 mod input;
 mod paint;
 
-use std::time::Duration;
-
 use crate::APP_NAME;
 use crate::dialog::{DialogKind, Dialogs};
 use crate::document::{self, DocPath, Format};
-use crate::editor::{EditCommand, Editor, EditorTimer, EditorTimers, Rope, RopeExt as _};
+use crate::editor::{EditCommand, Editor, Rope, RopeExt as _};
 use crate::files::Prompt;
-use crate::find::{self, FindBar, FindOutcome};
+use crate::find::{FindBar, FindOutcome};
 use crate::geom::{Edges, Point, ScreenPoint, Size, point};
 use crate::gfx::Surface;
 use crate::ids::{EditorSlot, Focus, HitId, TabId, UiState};
 use crate::keytips::KeyTip;
-use crate::menu::{FocusRequest, MenuBar, MenuOutcome, MenuState, SubmenuTimer};
-use crate::platform::{
-    NativeWindow, TimerHandle, WindowAppearance, WindowHwnd, WindowId, clipboard,
-};
-use crate::shell::{AppEvent, Cx, Effect, Shell};
+use crate::menu::{FocusRequest, MenuBar, MenuOutcome, MenuState};
+use crate::platform::{NativeWindow, WindowAppearance, WindowHwnd, WindowId, clipboard};
+use crate::shell::{Cx, Effect, Shell, SlotTimers, WindowTimer};
 use crate::tabs::{self, Removal, TabData, TabSet};
 use crate::tooltip::TooltipProbe;
 
@@ -54,54 +50,6 @@ pub(crate) enum InputMode {
     Normal,
 }
 
-pub(crate) struct WindowEditorTimers<'a> {
-    shell: &'a Shell,
-    window: WindowId,
-    slot: EditorSlot,
-}
-
-impl<'a> WindowEditorTimers<'a> {
-    pub(crate) fn new(shell: &'a Shell, window: WindowId, slot: EditorSlot) -> Self {
-        Self {
-            shell,
-            window,
-            slot,
-        }
-    }
-}
-
-impl EditorTimers for WindowEditorTimers<'_> {
-    fn after(&mut self, delay: Duration, kind: EditorTimer) -> TimerHandle {
-        self.shell.jobs.after(
-            delay,
-            AppEvent::EditorTimer {
-                window: self.window,
-                slot: self.slot,
-                kind,
-            },
-        )
-    }
-
-    fn every(&mut self, delay: Duration, interval: Duration, kind: EditorTimer) -> TimerHandle {
-        let window = self.window;
-        let slot = self.slot;
-        self.shell
-            .jobs
-            .every(delay, interval, move || AppEvent::EditorTimer {
-                window,
-                slot,
-                kind,
-            })
-    }
-
-    fn blink_timing(&self) -> (Option<Duration>, Option<Duration>) {
-        (
-            self.shell.settings.caret_blink_interval,
-            self.shell.settings.caret_blink_timeout,
-        )
-    }
-}
-
 pub(crate) struct MainWindow {
     // Declared before native so swapchain/DComp target drop before DestroyWindow.
     pub(super) surface: Surface,
@@ -115,7 +63,6 @@ pub(crate) struct MainWindow {
     dirty: bool,
     has_painted: bool,
     pending_close: bool,
-    menu_submenu_timer: TimerHandle,
     middle_pressed_tab: Option<TabId>,
     min_size_cache: Option<MinSizeCache>,
 }
@@ -144,7 +91,6 @@ impl MainWindow {
             dirty: true,
             has_painted: false,
             pending_close: false,
-            menu_submenu_timer: TimerHandle::default(),
             middle_pressed_tab: None,
             min_size_cache: None,
         };
@@ -240,10 +186,6 @@ impl MainWindow {
     pub(crate) fn apply_theme(&mut self, appearance: WindowAppearance) {
         self.native.set_appearance(appearance);
         self.dirty = true;
-    }
-
-    pub(crate) fn set_block_shutdown(&self, reason: Option<&'static str>) {
-        self.native.set_block_shutdown(reason);
     }
 
     pub(crate) fn accepts_tab_drop(&self) -> bool {
@@ -502,11 +444,11 @@ impl MainWindow {
         &mut self,
         slot: EditorSlot,
         shell: &Shell,
-        f: impl FnOnce(&mut Editor, &mut WindowEditorTimers<'_>) -> R,
+        f: impl FnOnce(&mut Editor, &mut SlotTimers<'_>) -> R,
     ) -> Option<R> {
         let wid = self.id();
         let ed = self.editor_by_slot_mut(slot)?;
-        let mut timers = WindowEditorTimers::new(shell, wid, slot);
+        let mut timers = shell.window_timers(wid).for_editor(slot);
         Some(f(ed, &mut timers))
     }
 
@@ -674,12 +616,6 @@ impl MainWindow {
         let moved = self.tabs.scroll_by(delta);
         self.dirty = true;
         moved
-    }
-
-    pub(crate) fn on_tab_scroll_repeat(&mut self, step: f32) {
-        if !self.scroll_tabs(step) {
-            self.tabs.stop_scroll_repeat();
-        }
     }
 
     pub(super) fn next_tab(&mut self, shell: &Shell) {
@@ -862,21 +798,12 @@ impl MainWindow {
         self.dirty = true;
     }
 
-    fn apply_find_outcome(&mut self, out: FindOutcome, shell: &Shell) {
-        if out.arm_notice {
-            let window = self.id();
-            self.find.set_notice_timer(
-                shell
-                    .jobs
-                    .after(find::NOTICE_DURATION, AppEvent::FindNoticeDismiss { window }),
-            );
-        }
-    }
-
     pub(super) fn find_step(&mut self, forward: bool, shell: &Shell) {
-        let out = self.find.step(&mut self.tabs.active_mut().editor, forward);
-        self.apply_find_outcome(out, shell);
-        if !out.searched {
+        let timers = shell.window_timers(self.id());
+        let out = self
+            .find
+            .step(&mut self.tabs.active_mut().editor, forward, timers);
+        if matches!(out, FindOutcome::EmptyQuery) {
             self.open_find(false, shell);
             return;
         }
@@ -887,27 +814,25 @@ impl MainWindow {
     }
 
     pub(super) fn replace_next(&mut self, shell: &Shell) {
-        let out = self
-            .find
-            .replace_next(&mut self.tabs.active_mut().editor, &shell.text_system);
-        self.apply_find_outcome(out, shell);
+        let timers = shell.window_timers(self.id());
+        self.find.replace_next(
+            &mut self.tabs.active_mut().editor,
+            &shell.text_system,
+            timers,
+        );
         self.dirty = true;
     }
 
     pub(super) fn replace_all(&mut self, shell: &Shell) {
-        let out = self
-            .find
-            .replace_all(&mut self.tabs.active_mut().editor, &shell.text_system);
-        self.apply_find_outcome(out, shell);
-        if out.replaced {
+        let timers = shell.window_timers(self.id());
+        let out = self.find.replace_all(
+            &mut self.tabs.active_mut().editor,
+            &shell.text_system,
+            timers,
+        );
+        if matches!(out, FindOutcome::Replaced(_)) {
             self.refocus_find(shell);
         } else {
-            self.dirty = true;
-        }
-    }
-
-    pub(crate) fn on_find_notice_dismiss(&mut self) {
-        if self.find.on_notice_dismiss() {
             self.dirty = true;
         }
     }
@@ -932,16 +857,7 @@ impl MainWindow {
     pub(crate) fn cancel_menu(&mut self, shell: &Shell) {
         let out = self.menu_bar.cancel(self.focus);
         self.dirty |= out.dirty;
-        if matches!(out.submenu_timer, SubmenuTimer::Cancel) {
-            self.menu_submenu_timer.cancel();
-        }
         self.apply_focus_request(out.focus, shell);
-    }
-
-    pub(crate) fn on_menu_submenu_timer(&mut self, target: Option<usize>, shell: &Shell) {
-        if self.menu_bar.on_submenu_timer(target, &shell.text_system) {
-            self.dirty = true;
-        }
     }
 
     fn apply_focus_request(&mut self, req: FocusRequest, shell: &Shell) {
@@ -957,17 +873,6 @@ impl MainWindow {
 
     pub(super) fn apply_menu_outcome(&mut self, out: MenuOutcome, cx: &mut Cx<'_>) -> bool {
         self.dirty |= out.dirty;
-        match out.submenu_timer {
-            SubmenuTimer::Keep => {}
-            SubmenuTimer::Cancel => self.menu_submenu_timer.cancel(),
-            SubmenuTimer::Arm(target) => {
-                let delay = Duration::from_millis(u64::from(cx.shell.settings.menu_show_delay_ms));
-                let window = self.id();
-                self.menu_submenu_timer = cx
-                    .jobs()
-                    .after(delay, AppEvent::MenuSubmenuTimer { window, target });
-            }
-        }
         self.apply_focus_request(out.focus, cx.shell);
         if let Some(cmd) = out.command {
             self.dispatch_command(cmd, cx);
@@ -992,9 +897,28 @@ impl MainWindow {
         }
     }
 
-    pub(crate) fn on_editor_timer(&mut self, slot: EditorSlot, kind: EditorTimer, shell: &Shell) {
-        self.dirty |= self
-            .with_editor(slot, shell, |ed, timers| ed.on_timer(kind, timers))
-            .unwrap_or(false);
+    pub(crate) fn on_timer(&mut self, timer: WindowTimer, shell: &Shell) {
+        match timer {
+            WindowTimer::Editor { slot, kind } => {
+                self.dirty |= self
+                    .with_editor(slot, shell, |ed, timers| ed.on_timer(kind, timers))
+                    .unwrap_or(false);
+            }
+            WindowTimer::TabScrollRepeat(step) => {
+                if !self.scroll_tabs(step) {
+                    self.tabs.stop_scroll_repeat();
+                }
+            }
+            WindowTimer::Submenu(target) => {
+                if self.menu_bar.on_submenu_timer(target, &shell.text_system) {
+                    self.dirty = true;
+                }
+            }
+            WindowTimer::FindNotice => {
+                if self.find.on_notice_dismiss() {
+                    self.dirty = true;
+                }
+            }
+        }
     }
 }

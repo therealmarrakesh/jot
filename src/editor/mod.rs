@@ -69,8 +69,13 @@ pub(crate) enum EditorTimer {
 }
 
 pub(crate) trait EditorTimers {
-    fn after(&mut self, delay: Duration, kind: EditorTimer) -> TimerHandle;
-    fn every(&mut self, delay: Duration, interval: Duration, kind: EditorTimer) -> TimerHandle;
+    fn after(&mut self, delay: Duration, kind: EditorTimer) -> Option<TimerHandle>;
+    fn every(
+        &mut self,
+        delay: Duration,
+        interval: Duration,
+        kind: EditorTimer,
+    ) -> Option<TimerHandle>;
     fn blink_timing(&self) -> (Option<Duration>, Option<Duration>);
 }
 
@@ -79,12 +84,17 @@ pub(crate) struct NoopTimers;
 
 #[cfg(test)]
 impl EditorTimers for NoopTimers {
-    fn after(&mut self, _delay: Duration, _kind: EditorTimer) -> TimerHandle {
-        TimerHandle::default()
+    fn after(&mut self, _delay: Duration, _kind: EditorTimer) -> Option<TimerHandle> {
+        None
     }
 
-    fn every(&mut self, _delay: Duration, _interval: Duration, _kind: EditorTimer) -> TimerHandle {
-        TimerHandle::default()
+    fn every(
+        &mut self,
+        _delay: Duration,
+        _interval: Duration,
+        _kind: EditorTimer,
+    ) -> Option<TimerHandle> {
+        None
     }
 
     fn blink_timing(&self) -> (Option<Duration>, Option<Duration>) {

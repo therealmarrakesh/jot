@@ -6,7 +6,7 @@ use crate::ui::{Anchor, AnimStatus, Curve, Easing, Transition};
 
 use super::MENU_BAR_HEIGHT;
 use super::bar::FocusRequest;
-use super::model::{CommandButton, Entry, PADDING_Y, Panel, cycle};
+use super::model::{CommandButton, PADDING_Y, Panel, cycle};
 
 const OPEN_CURVE: Curve = Curve::new(Duration::from_millis(250), Easing::DECELERATE);
 const FADE_CURVE: Curve = Curve::new(Duration::from_millis(83), Easing::Linear);
@@ -115,6 +115,15 @@ impl Motion {
     }
 }
 
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub(super) enum PopupFocus {
+    #[default]
+    None,
+    Command(usize),
+    Row(usize),
+    SubRow(usize),
+}
+
 pub(super) struct OpenSubmenu {
     pub(super) ix: usize,
     pub(super) panel: Panel,
@@ -125,19 +134,21 @@ pub(super) struct OpenMenu {
     pub(super) kind: PopupKind,
     pub(super) panel: Panel,
     pub(super) submenu: Option<OpenSubmenu>,
+    leaving_submenu: Option<OpenSubmenu>,
     pub(super) motion: Motion,
-    pub(super) focused_command: Option<usize>,
+    pub(super) focus: PopupFocus,
 }
 
 impl OpenMenu {
-    pub(super) fn new(kind: PopupKind, panel: Panel) -> Self {
+    pub(super) fn new(kind: PopupKind, panel: Panel, focus: PopupFocus) -> Self {
         let fade_in = !kind.commands().is_empty();
         Self {
             kind,
             panel,
             submenu: None,
+            leaving_submenu: None,
             motion: Motion::new(fade_in),
-            focused_command: None,
+            focus,
         }
     }
 
@@ -145,28 +156,63 @@ impl OpenMenu {
         self.motion.is_closing()
     }
 
-    pub(super) fn live_submenu(&self) -> Option<&OpenSubmenu> {
-        self.submenu.as_ref().filter(|s| !s.motion.is_closing())
-    }
-
-    pub(super) fn live_submenu_mut(&mut self) -> Option<&mut OpenSubmenu> {
-        self.submenu.as_mut().filter(|s| !s.motion.is_closing())
+    pub(super) fn visible_submenu(&self) -> Option<&OpenSubmenu> {
+        self.submenu.as_ref().or(self.leaving_submenu.as_ref())
     }
 
     pub(super) fn focused_submenu(&self) -> Option<&OpenSubmenu> {
-        self.live_submenu().filter(|s| s.panel.focused.is_some())
+        matches!(self.focus, PopupFocus::SubRow(_))
+            .then_some(self.submenu.as_ref())
+            .flatten()
     }
 
     pub(super) fn in_submenu(&self) -> bool {
         self.focused_submenu().is_some()
     }
 
-    pub(super) fn step_linear(&mut self, delta: isize) {
+    pub(super) fn set_submenu(&mut self, sub: OpenSubmenu) {
+        self.submenu = Some(sub);
+        self.leaving_submenu = None;
+    }
+
+    pub(super) fn close_submenu(&mut self) -> bool {
+        let Some(mut sub) = self.submenu.take() else {
+            return false;
+        };
+        if matches!(self.focus, PopupFocus::SubRow(_)) {
+            self.focus = PopupFocus::Row(sub.ix);
+        }
+        sub.motion.close();
+        self.leaving_submenu = Some(sub);
+        true
+    }
+
+    pub(super) fn step(&mut self, delta: isize) {
+        if let PopupFocus::SubRow(ix) = self.focus
+            && let Some(sub) = &self.submenu
+        {
+            if let Some(next) = sub.panel.step(Some(ix), delta) {
+                self.focus = PopupFocus::SubRow(next);
+            }
+            return;
+        }
         let cmds = self.kind.commands();
+        if cmds.is_empty() {
+            let current = match self.focus {
+                PopupFocus::Row(ix) => Some(ix),
+                _ => None,
+            };
+            if let Some(next) = self.panel.step(current, delta) {
+                self.focus = PopupFocus::Row(next);
+            }
+            return;
+        }
         let commands = cmds.len();
-        let current = self
-            .focused_command
-            .or(self.panel.focused.map(|ix| commands + ix));
+        let current = match self.focus {
+            PopupFocus::Command(ix) => Some(ix),
+            PopupFocus::Row(ix) => Some(commands + ix),
+            PopupFocus::None | PopupFocus::SubRow(_) => None,
+        };
         let count = commands + self.panel.entries.len();
         if let Some(at) = cycle(current, count, delta, true, |at| {
             if at < commands {
@@ -175,52 +221,69 @@ impl OpenMenu {
                 self.panel.entries[at - commands].selectable()
             }
         }) {
-            self.focused_command = (at < commands).then_some(at);
-            self.panel.focused = at.checked_sub(commands);
+            self.focus = if at < commands {
+                PopupFocus::Command(at)
+            } else {
+                PopupFocus::Row(at - commands)
+            };
         }
     }
 
     pub(super) fn step_command(&mut self, delta: isize) {
-        let Some(ix) = self.focused_command else {
+        let PopupFocus::Command(ix) = self.focus else {
             return;
         };
         let cmds = self.kind.commands();
-        if let Some(ix) = cycle(Some(ix), cmds.len(), delta, false, |ix| {
-            cmds[ix].command.enabled
+        if let Some(next) = cycle(Some(ix), cmds.len(), delta, false, |i| {
+            cmds[i].command.enabled
         }) {
-            self.focused_command = Some(ix);
+            self.focus = PopupFocus::Command(next);
         }
     }
 
     pub(super) fn focus_edge(&mut self, last: bool) {
         if self.in_submenu() {
-            if let Some(sub) = self.live_submenu_mut() {
-                sub.panel.focus_edge(last);
+            if let Some(sub) = &self.submenu
+                && let Some(ix) = sub.panel.edge(last)
+            {
+                self.focus = PopupFocus::SubRow(ix);
             }
             return;
         }
         let cmds = self.kind.commands();
         if cmds.is_empty() {
-            self.panel.focus_edge(last);
+            self.focus = self.panel.edge(last).map_or(PopupFocus::None, PopupFocus::Row);
         } else if last {
-            self.focused_command = None;
-            self.panel.focus_edge(true);
-            if self.panel.focused.is_none() {
-                self.focused_command = cmds.iter().rposition(|b| b.command.enabled);
-            }
+            self.focus = self
+                .panel
+                .edge(true)
+                .map(PopupFocus::Row)
+                .or_else(|| {
+                    cmds.iter()
+                        .rposition(|b| b.command.enabled)
+                        .map(PopupFocus::Command)
+                })
+                .unwrap_or(PopupFocus::None);
         } else {
-            self.focused_command = cmds.iter().position(|b| b.command.enabled);
-            self.panel.focused = if self.focused_command.is_none() {
-                self.panel.entries.iter().position(Entry::selectable)
-            } else {
-                None
-            };
+            self.focus = cmds
+                .iter()
+                .position(|b| b.command.enabled)
+                .map(PopupFocus::Command)
+                .or_else(|| self.panel.edge(false).map(PopupFocus::Row))
+                .unwrap_or(PopupFocus::None);
         }
     }
 
     pub(super) fn sample(&mut self, ui: &mut UiState) -> bool {
-        if self.submenu.as_mut().is_some_and(|sub| sub.motion.sample(ui)) {
-            self.submenu = None;
+        if let Some(sub) = &mut self.submenu {
+            sub.motion.sample(ui);
+        }
+        if self
+            .leaving_submenu
+            .as_mut()
+            .is_some_and(|sub| sub.motion.sample(ui))
+        {
+            self.leaving_submenu = None;
         }
         self.motion.sample(ui)
     }

@@ -36,7 +36,7 @@ pub(crate) struct TabDrag {
     phase: Phase,
     source_index: usize,
     source_placement: Option<WindowPlacement>,
-    poll_timer: TimerHandle,
+    poll_timer: Option<TimerHandle>,
 }
 
 impl TabDrag {
@@ -61,7 +61,7 @@ impl TabDrag {
             phase: Phase::Pressed,
             source_index: index,
             source_placement: None,
-            poll_timer: TimerHandle::default(),
+            poll_timer: None,
         })
     }
 
@@ -190,7 +190,7 @@ impl TabDrag {
         shell: &Shell,
         closed: &mut Vec<ClosedWindow>,
     ) {
-        self.poll_timer.cancel();
+        self.poll_timer = None;
         release_mouse_capture();
         if matches!(self.phase, Phase::Pressed) {
             return;
@@ -277,7 +277,7 @@ impl TabDrag {
         shell: &Shell,
         closed: &mut Vec<ClosedWindow>,
     ) -> bool {
-        self.poll_timer.cancel();
+        self.poll_timer = None;
         let Some(hwnd) = windows.hwnd(self.owner) else {
             return true;
         };
@@ -330,7 +330,7 @@ impl TabDrag {
         }
         self.owner = target_id;
         self.phase = Phase::Dragging;
-        self.poll_timer.cancel();
+        self.poll_timer = None;
         target_hwnd.set_capture();
         windows.mark_dirty(target_id);
         windows.mark_dirty(prev_owner);
@@ -390,9 +390,11 @@ impl TabDrag {
         self.phase = Phase::Entering {
             since: Instant::now(),
         };
-        self.poll_timer = shell
-            .jobs
-            .every(MOVE_POLL, MOVE_POLL, || AppEvent::TabDragPoll);
+        self.poll_timer = Some(
+            shell
+                .jobs
+                .every(MOVE_POLL, MOVE_POLL, || AppEvent::TabDragPoll),
+        );
     }
 
     #[cfg(test)]

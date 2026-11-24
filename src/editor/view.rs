@@ -6,7 +6,7 @@ use ropey::Rope;
 
 use crate::color::Rgba;
 use crate::geom::{Axis, Edges, Point, Rect, Size, point, size};
-use crate::gfx::{D2DRenderer, TextStyle, TextSystem, fill};
+use crate::gfx::{Canvas, TextStyle, TextSystem, fill};
 use crate::ids::{EditorSlot, Node, UiState};
 use crate::platform::{Modifiers, MouseButton, TimerHandle};
 use crate::theme::Palette;
@@ -52,7 +52,7 @@ pub(crate) struct BlinkState {
     visible: bool,
     paused: bool,
     started_at: Option<Instant>,
-    timer: TimerHandle,
+    timer: Option<TimerHandle>,
 }
 
 impl Default for BlinkState {
@@ -68,7 +68,7 @@ impl BlinkState {
             visible: false,
             paused: false,
             started_at: None,
-            timer: TimerHandle::default(),
+            timer: None,
         }
     }
 
@@ -82,7 +82,7 @@ impl BlinkState {
         self.paused = false;
         self.visible = false;
         self.started_at = None;
-        self.timer.cancel();
+        self.timer = None;
     }
 
     pub(crate) fn start(&mut self, timers: &mut dyn EditorTimers) {
@@ -101,7 +101,7 @@ impl BlinkState {
         self.visible = true;
         self.started_at = Some(Instant::now());
         let Some(delay) = timers.blink_timing().0 else {
-            self.timer.cancel();
+            self.timer = None;
             return;
         };
         self.timer = timers.after(delay, EditorTimer::Blink);
@@ -124,7 +124,7 @@ impl BlinkState {
         let (interval, timeout) = timers.blink_timing();
         let Some(interval) = interval else {
             self.visible = true;
-            self.timer.cancel();
+            self.timer = None;
             return;
         };
         if let Some(timeout) = timeout
@@ -133,7 +133,7 @@ impl BlinkState {
                 .is_some_and(|start| start.elapsed() >= timeout)
         {
             self.visible = true;
-            self.timer.cancel();
+            self.timer = None;
             return;
         }
         self.visible = !self.visible;
@@ -144,7 +144,7 @@ impl BlinkState {
 #[derive(Default)]
 pub(crate) struct AutoScroll {
     delta: Option<f32>,
-    timer: TimerHandle,
+    timer: Option<TimerHandle>,
     pub(crate) last_drag_pos: Option<Point>,
 }
 
@@ -171,7 +171,7 @@ impl AutoScroll {
 
     pub(crate) fn stop(&mut self) {
         self.delta = None;
-        self.timer.cancel();
+        self.timer = None;
         self.last_drag_pos = None;
     }
 
@@ -179,7 +179,7 @@ impl AutoScroll {
         let was_active = self.delta.is_some();
         self.delta = delta;
         if delta.is_none() {
-            self.timer.cancel();
+            self.timer = None;
             return;
         }
         if !was_active {
@@ -293,33 +293,33 @@ impl FrameLayout {
         (text_len, false)
     }
 
-    pub(super) fn paint(&self, p: Palette, renderer: &mut D2DRenderer) {
-        renderer.push_clip(self.input_bounds);
-        for &rect in &self.selection_rects {
-            renderer.paint_quad(fill(rect, p.selection));
-        }
+    pub(super) fn paint(&self, p: Palette, canvas: &mut Canvas) {
+        canvas.with_clip(self.input_bounds, |canvas| {
+            for &rect in &self.selection_rects {
+                canvas.paint_quad(fill(rect, p.selection));
+            }
 
-        let origin = self.content_bounds.origin;
-        for line in &self.lines {
-            let line_base = line.byte_offset;
-            let line_marked = self.marked_range.as_ref().and_then(|m| {
-                (m.end > line_base).then(|| {
-                    m.start.saturating_sub(line_base)..m.end.saturating_sub(line_base)
-                })
-            });
-            line.layout.paint(
-                point(origin.x, origin.y + line.top),
-                self.line_height,
-                self.text_color,
-                line_marked,
-                renderer,
-            );
-        }
+            let origin = self.content_bounds.origin;
+            for line in &self.lines {
+                let line_base = line.byte_offset;
+                let line_marked = self.marked_range.as_ref().and_then(|m| {
+                    (m.end > line_base).then(|| {
+                        m.start.saturating_sub(line_base)..m.end.saturating_sub(line_base)
+                    })
+                });
+                line.layout.paint(
+                    point(origin.x, origin.y + line.top),
+                    self.line_height,
+                    self.text_color,
+                    line_marked,
+                    canvas,
+                );
+            }
 
-        if self.show_caret {
-            renderer.paint_quad(fill(self.caret_rect, p.caret));
-        }
-        renderer.pop_clip();
+            if self.show_caret {
+                canvas.paint_quad(fill(self.caret_rect, p.caret));
+            }
+        });
     }
 
     fn range_rects(&self, range: &Range<usize>) -> Vec<Rect> {
@@ -783,9 +783,9 @@ impl Editor {
         self.prepare_document(input_bounds, params, ts)
     }
 
-    pub(crate) fn paint(&self, p: Palette, renderer: &mut D2DRenderer) {
+    pub(crate) fn paint(&self, p: Palette, canvas: &mut Canvas) {
         if let Some(frame) = self.frame.as_ref() {
-            frame.paint(p, renderer);
+            frame.paint(p, canvas);
         }
     }
 

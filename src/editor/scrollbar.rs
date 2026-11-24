@@ -198,7 +198,7 @@ impl ScrollbarState {
         p: Palette,
         now: Instant,
         ui: &mut UiState,
-        schedule_idle: impl FnOnce(Duration) -> TimerHandle,
+        schedule_idle: impl FnOnce(Duration) -> Option<TimerHandle>,
     ) -> Vec<Node> {
         let scroll_offset = vp.scroll_offset;
         if scroll_offset != self.last_offset {
@@ -232,7 +232,7 @@ impl ScrollbarState {
         {
             let elapsed = now.saturating_duration_since(last);
             if elapsed < IDLE_HOLD {
-                self.idle_timer = Some(schedule_idle(IDLE_HOLD - elapsed));
+                self.idle_timer = schedule_idle(IDLE_HOLD - elapsed);
             }
         }
 
@@ -409,7 +409,7 @@ impl ScrollbarState {
         dragging_primary: bool,
         track_rect: Option<Rect>,
         current_offset: Point,
-        schedule_drag: impl FnOnce(Duration) -> TimerHandle,
+        schedule_drag: impl FnOnce(Duration) -> Option<TimerHandle>,
     ) -> Option<(Option<Point>, bool)> {
         let drag = self.drag.filter(|_| dragging_primary)?;
         let active = self.axes[axis_ix(drag.axis)]?;
@@ -427,7 +427,7 @@ impl ScrollbarState {
                 return Some((Some(next), true));
             }
             if self.drag_timer.is_none() {
-                self.drag_timer = Some(schedule_drag(DRAG_NOTIFY_INTERVAL - elapsed));
+                self.drag_timer = schedule_drag(DRAG_NOTIFY_INTERVAL - elapsed);
             }
         }
         Some((moved.then_some(next), false))
@@ -496,7 +496,7 @@ mod tests {
 
         sb.on_wheel(point(0., -40.), t0);
         ui.begin_frame(t0, false);
-        let nodes = sb.render(slot, vp, p, t0, &mut ui, |_| TimerHandle::default());
+        let nodes = sb.render(slot, vp, p, t0, &mut ui, |_| None);
         assert_eq!(nodes.len(), 1);
         assert!(sb.is_interactive(Axis::Vertical));
         assert!(ui.finish_frame(crate::ids::Frame::default()));
@@ -508,15 +508,13 @@ mod tests {
             p,
             t0 + FADE_IN_DURATION,
             &mut ui,
-            |_| TimerHandle::default(),
+            |_| None,
         );
         assert!(!ui.finish_frame(crate::ids::Frame::default()));
 
         let after_idle = t0 + IDLE_HOLD + Duration::from_millis(10);
         ui.begin_frame(after_idle, true);
-        let _ = sb.render(slot, vp, p, after_idle, &mut ui, |_| {
-            TimerHandle::default()
-        });
+        let _ = sb.render(slot, vp, p, after_idle, &mut ui, |_| None);
         assert!(!sb.is_interactive(Axis::Vertical));
     }
 }

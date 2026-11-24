@@ -10,12 +10,12 @@ use crate::ui::controls::{
 };
 use crate::ui::{Anchor, box_, row, text};
 
-use super::bar::MenuBar;
+use super::bar::{MenuBar, MenuMode};
 use super::model::{
     BORDER, CHECK_COLUMN, CommandButton, Entry, LABEL_SIZE, PADDING_Y, Panel, ROW_INSET,
     ROW_PADDING, ROW_SEPARATOR, SHORTCUT_SIZE,
 };
-use super::popup::{COMMAND_ROW, OpenMenu, OpenSubmenu};
+use super::popup::{COMMAND_ROW, OpenMenu, OpenSubmenu, PopupFocus};
 
 const CLOSED_RATIO: f32 = 0.5;
 const MENU_Z: f32 = 32.;
@@ -107,8 +107,7 @@ impl MenuBar {
         let cmd_row = has_commands.then(|| render_command_row(open, p, ts, ui));
         let main_rows = render_panel_rows(open, None, bar, p, ui);
         let sub_node = open
-            .submenu
-            .as_ref()
+            .visible_submenu()
             .map(|sub| render_submenu_popup(open, sub, p, ui));
 
         let content = box_()
@@ -134,15 +133,19 @@ impl MenuBar {
         if !self.access_active(focus) {
             return Vec::new();
         }
-        let Some(open) = self.live_open() else {
-            return MenuKind::ALL
-                .into_iter()
-                .filter_map(|kind| {
-                    let key = kind.access_key()?;
-                    let anchor = frame.rect_of(HitId::MenuTrigger(kind))?;
-                    Some(keytips::layout_tip(ts, key, anchor, keytips::Placement::Below))
-                })
-                .collect();
+        let open = match self.mode() {
+            MenuMode::Open { menu, .. } => menu,
+            MenuMode::Bar { .. } => {
+                return MenuKind::ALL
+                    .into_iter()
+                    .filter_map(|kind| {
+                        let key = kind.access_key()?;
+                        let anchor = frame.rect_of(HitId::MenuTrigger(kind))?;
+                        Some(keytips::layout_tip(ts, key, anchor, keytips::Placement::Below))
+                    })
+                    .collect();
+            }
+            MenuMode::Idle => return Vec::new(),
         };
         if open.kind.bar_kind().is_none() {
             return Vec::new();
@@ -221,7 +224,7 @@ fn render_command_button(
 ) -> Node {
     let face_w = cell - 2. * (COMMAND_GAP + COMMAND_INSET);
     let CommandButton { command, glyph } = &open.kind.commands()[ix];
-    let focused = ui.last_input_was_keyboard() && open.focused_command == Some(ix);
+    let focused = ui.last_input_was_keyboard() && open.focus == PopupFocus::Command(ix);
     let enabled = command.enabled;
     let hit = HitId::MenuCommand {
         serial: open.motion.serial(),
@@ -333,8 +336,8 @@ fn render_panel_rows(
             !open.kind.commands().is_empty(),
         ),
     };
-    let focus_visible = ui.last_input_was_keyboard() && (is_sub || !open.in_submenu());
-    let expanded = open.live_submenu().filter(|_| !is_sub).map(|s| s.ix);
+    let focus_visible = ui.last_input_was_keyboard();
+    let expanded = open.submenu.as_ref().filter(|_| !is_sub).map(|s| s.ix);
 
     let rows: Vec<Node> = panel
         .entries
@@ -352,7 +355,12 @@ fn render_panel_rows(
             } else {
                 HitId::MenuItem { serial, ix }
             };
-            let ring = focus_visible && panel.focused == Some(ix);
+            let focused_here = if is_sub {
+                open.focus == PopupFocus::SubRow(ix)
+            } else {
+                open.focus == PopupFocus::Row(ix)
+            };
+            let ring = focus_visible && focused_here;
             let face = render_row_face(
                 p,
                 panel,
