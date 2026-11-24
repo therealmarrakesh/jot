@@ -8,7 +8,7 @@ use std::time::Duration;
 use crate::APP_NAME;
 use crate::dialog::{DialogKind, Dialogs};
 use crate::document::{self, DocPath, Format};
-use crate::editor::{Clipboard, Editor, EditorTimer, EditorTimers, Rope, RopeExt as _};
+use crate::editor::{EditCommand, Editor, EditorTimer, EditorTimers, Rope, RopeExt as _};
 use crate::files::Prompt;
 use crate::find::{self, FindBar, FindOutcome};
 use crate::geom::{Edges, Point, ScreenPoint, Size, point};
@@ -52,18 +52,6 @@ pub(crate) enum InputMode {
     Popup,
     MenuBar,
     Normal,
-}
-
-pub(super) struct SystemClipboard;
-
-impl Clipboard for SystemClipboard {
-    fn read(&mut self) -> Option<String> {
-        clipboard::read_clipboard_text()
-    }
-
-    fn write(&mut self, text: &str) -> bool {
-        clipboard::write_clipboard_text(text)
-    }
 }
 
 pub(crate) struct WindowEditorTimers<'a> {
@@ -316,7 +304,7 @@ impl MainWindow {
     pub(crate) fn begin_tab_save(&mut self, tab: TabId) -> Option<(u64, Rope)> {
         let ed = self.tabs.editor_mut(tab)?;
         let snapshot = ed.begin_save();
-        let text = ed.text().clone();
+        let text = ed.model().text().clone();
         Some((snapshot, text))
     }
 
@@ -438,7 +426,49 @@ impl MainWindow {
     }
 
     pub(crate) fn has_text(&self) -> bool {
-        self.active_editor().text().len() > 0
+        self.active_editor().model().text().len() > 0
+    }
+
+    pub(super) fn run_edit_command(
+        &mut self,
+        slot: EditorSlot,
+        cmd: EditCommand,
+        shell: &Shell,
+    ) -> bool {
+        match cmd {
+            EditCommand::Copy => {
+                if let Some(text) = self.editor_by_slot(slot).and_then(Editor::selected_string) {
+                    clipboard::write_clipboard_text(&text);
+                }
+                true
+            }
+            EditCommand::Cut => {
+                let text = self
+                    .editor_by_slot_mut(slot)
+                    .and_then(Editor::prepare_cut);
+                if let Some(text) = text
+                    && clipboard::write_clipboard_text(&text)
+                {
+                    self.with_editor(slot, shell, |ed, timers| {
+                        ed.delete_selection(&shell.text_system, timers);
+                    });
+                }
+                true
+            }
+            EditCommand::Paste => {
+                if let Some(raw) = clipboard::read_clipboard_text().filter(|s| !s.is_empty()) {
+                    self.with_editor(slot, shell, |ed, timers| {
+                        ed.paste(&raw, &shell.text_system, timers);
+                    });
+                }
+                true
+            }
+            other => self
+                .with_editor(slot, shell, |ed, timers| {
+                    ed.handle_command(other, &shell.text_system, timers)
+                })
+                .unwrap_or(false),
+        }
     }
 
     pub(crate) fn focused_editor_slot(&self) -> Option<EditorSlot> {
@@ -732,8 +762,8 @@ impl MainWindow {
     }
 
     pub(crate) fn open_go_to(&mut self, shell: &Shell) {
-        let ed = self.active_editor();
-        let row = ed.text().offset_to_point(ed.cursor()).row;
+        let m = self.active_editor().model();
+        let row = m.text().offset_to_point(m.cursor()).row;
         self.show_go_to(Some(row + 1), shell);
     }
 
@@ -750,8 +780,8 @@ impl MainWindow {
     }
 
     fn submit_go_to(&mut self, shell: &Shell) {
-        let value = self.dialogs.line.value();
-        let lines = self.active_editor().text().lines_len();
+        let value = self.dialogs.line.model().value();
+        let lines = self.active_editor().model().text().lines_len();
         match value.parse::<usize>() {
             Ok(line) if (1..=lines).contains(&line) => {
                 self.close_dialogs(shell);
@@ -782,7 +812,7 @@ impl MainWindow {
     }
 
     pub(super) fn open_find(&mut self, replace: bool, shell: &Shell) {
-        let selected = self.active_editor().selected_text().to_string();
+        let selected = self.active_editor().model().selected_text().to_string();
         self.find.open(replace, &selected, &shell.text_system);
         self.set_focus(Focus::Editor(EditorSlot::FindQuery), shell);
         self.dirty = true;
@@ -863,12 +893,12 @@ impl MainWindow {
     }
 
     pub(super) fn menu_state(&self, shell: &Shell) -> MenuState {
-        let ed = self.active_editor();
+        let m = self.active_editor().model();
         MenuState {
-            can_undo: ed.can_undo(),
-            can_redo: ed.can_redo(),
-            has_selection: !ed.selected_range().is_empty(),
-            has_text: ed.text().len() > 0,
+            can_undo: m.can_undo(),
+            can_redo: m.can_redo(),
+            has_selection: !m.selected_range().is_empty(),
+            has_text: m.text().len() > 0,
             clipboard_has_text: clipboard::clipboard_has_text(),
             status_bar: shell.view.status_bar,
             word_wrap: shell.view.word_wrap,

@@ -173,7 +173,7 @@ impl TabSet {
 
     pub(crate) fn is_blank(&self, ix: usize) -> bool {
         let tab = &self.tabs[ix];
-        tab.data.doc_path.is_none() && tab.data.editor.text().len() == 0
+        tab.data.doc_path.is_none() && tab.data.editor.model().text().len() == 0
     }
 
     pub(crate) fn has_dirty(&self) -> bool {

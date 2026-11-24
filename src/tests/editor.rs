@@ -93,22 +93,22 @@ fn editor_invariants_grapheme_ime_word_anchor_up_collapse_and_insert_keys() {
         pressed_button: Some(MouseButton::Left),
     });
     h.draw();
-    h.read(|w, _| assert_eq!(w.active_editor().text().len(), 0));
+    h.read(|w, _| assert_eq!(w.active_editor().model().text().len(), 0));
 
     h.type_text("a👨‍👩‍👧b");
     h.press_key("home");
     h.press_key("right");
     h.press_key("right");
     h.read(|w, _| {
-        let ed = w.active_editor();
+        let m = w.active_editor().model();
         assert_eq!(
-            ed.cursor(),
+            m.cursor(),
             "a👨‍👩‍👧".len(),
             "Right must step a full grapheme cluster"
         );
     });
     h.press_key("backspace");
-    h.read(|w, _| assert_eq!(w.active_editor().value().as_str(), "ab"));
+    h.read(|w, _| assert_eq!(w.active_editor().model().value(), "ab"));
 
     h.press_key("ctrl-a");
     h.press_key("backspace");
@@ -118,9 +118,9 @@ fn editor_invariants_grapheme_ime_word_anchor_up_collapse_and_insert_keys() {
     h.press_key("ctrl-a");
     h.press_key("up");
     h.read(|w, _| {
-        let ed = w.active_editor();
-        assert!(ed.selected_range().is_empty());
-        assert_eq!(ed.cursor(), 0, "Up on selection must collapse to selection start");
+        let m = w.active_editor().model();
+        assert!(m.selected_range().is_empty());
+        assert_eq!(m.cursor(), 0, "Up on selection must collapse to selection start");
     });
 
     h.app
@@ -131,11 +131,11 @@ fn editor_invariants_grapheme_ime_word_anchor_up_collapse_and_insert_keys() {
             cursor: 3,
         });
     h.draw();
-    h.read(|w, _| assert!(w.active_editor().value().starts_with("にほん")));
+    h.read(|w, _| assert!(w.active_editor().model().value().starts_with("にほん")));
     h.press_key("escape");
     h.read(|w, _| {
         assert!(
-            !w.active_editor().value().starts_with("にほん"),
+            !w.active_editor().model().value().starts_with("にほん"),
             "Escape must remove active IME preedit"
         );
     });
@@ -145,7 +145,7 @@ fn editor_invariants_grapheme_ime_word_anchor_up_collapse_and_insert_keys() {
     h.press_key("ctrl-backspace");
     h.read(|w, _| {
         assert_eq!(
-            w.active_editor().value().as_str(),
+            w.active_editor().model().value(),
             "line1\nline2",
             "Ctrl+Backspace at start of empty line must delete only the newline"
         );

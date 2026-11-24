@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use crate::command::AppCommand;
-use crate::editor::Editor;
+use crate::editor::{Editor, FieldOptions};
 use crate::geom::{Point, point};
 use crate::gfx::TextSystem;
 use crate::ids::{AnimKey, CustomDraw, EditorSlot, Focus, HitId, Node, UiState};
@@ -102,12 +102,16 @@ impl Default for FindBar {
 
 impl FindBar {
     pub(crate) fn new() -> Self {
-        let query = Editor::single_line()
-            .with_caret_height(FIELD_CARET)
-            .with_placeholder("Find");
-        let replacement = Editor::single_line()
-            .with_caret_height(FIELD_CARET)
-            .with_placeholder("Replace");
+        let query = Editor::field(FieldOptions {
+            placeholder: "Find".into(),
+            caret_height: FIELD_CARET,
+            validate: None,
+        });
+        let replacement = Editor::field(FieldOptions {
+            placeholder: "Replace".into(),
+            caret_height: FIELD_CARET,
+            validate: None,
+        });
         Self {
             transition: Transition::default(),
             replace: false,
@@ -224,7 +228,7 @@ impl FindBar {
     }
 
     fn prepare(&mut self) -> Option<String> {
-        let query = self.query.value().to_string();
+        let query = self.query.model().value();
         if query.is_empty() {
             return None;
         }
@@ -242,8 +246,8 @@ impl FindBar {
         let Some(query) = self.prepare() else {
             return FindOutcome::default();
         };
-        let text = editor.text().clone();
-        let selection = editor.selected_range();
+        let text = editor.model().text().clone();
+        let selection = editor.model().selected_range();
         let wrap = self.wrap_around;
         let found = self
             .matcher
@@ -277,15 +281,15 @@ impl FindBar {
         if self.prepare().is_none() {
             return FindOutcome::default();
         }
-        let sel_len = editor.selected_range().len();
+        let sel_len = editor.model().selected_range().len();
         let is_match = self.matcher.as_ref().is_some_and(|m| {
             sel_len > 0
                 && sel_len <= m.max_match_bytes()
-                && m.is_match(&editor.selected_text().to_string())
+                && m.is_match(&editor.model().selected_text().to_string())
         });
         if is_match {
-            let replacement = self.replacement.value();
-            editor.replace(replacement.as_str(), ts);
+            let replacement = self.replacement.model().value();
+            editor.replace(&replacement, ts);
         }
         let mut out = self.step(editor, true);
         out.replaced = is_match;
@@ -296,7 +300,7 @@ impl FindBar {
         let Some(query) = self.prepare() else {
             return FindOutcome::default();
         };
-        let text = editor.text().clone();
+        let text = editor.model().text().clone();
         let ranges = match self.matcher.as_ref() {
             Some(m) => m.all(&text, &mut self.buffer),
             None => return FindOutcome::default(),
@@ -309,8 +313,8 @@ impl FindBar {
                 arm_notice,
             };
         }
-        let replacement = self.replacement.value();
-        editor.replace_all(&ranges, replacement.as_str(), ts);
+        let replacement = self.replacement.model().value();
+        editor.replace_all(&ranges, &replacement, ts);
         FindOutcome {
             searched: true,
             replaced: true,
@@ -454,7 +458,7 @@ impl FindBar {
             TextFieldStyle {
                 surface: p.card_surface,
                 focused: focused_slot == Some(slot),
-                empty: editor.text().len() == 0,
+                empty: editor.model().text().len() == 0,
                 search_icon,
             },
             view,
@@ -638,40 +642,47 @@ fn find_icon_button(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::editor::Rope;
+    use crate::editor::{DocOptions, Rope};
+    use crate::geom::Edges;
 
     #[test]
     fn find_bar_step_wrap_replace_next_and_replace_all_return_outcomes() {
         let ts = TextSystem::new();
         let mut bar = FindBar::new();
-        let mut ed = Editor::multi_line().with_rope(Rope::from("foo bar foo baz"));
+        let mut ed = Editor::document(
+            Rope::from("foo bar foo baz"),
+            DocOptions {
+                soft_wrap: true,
+                paddings: Edges::ZERO,
+            },
+        );
 
         bar.open(true, "foo", &ts);
         assert!(bar.is_open());
-        assert_eq!(bar.query.value().as_str(), "foo");
+        assert_eq!(bar.query.model().value(), "foo");
 
         let s1 = bar.step(&mut ed, true);
         assert_eq!(s1, FindOutcome { searched: true, replaced: false, arm_notice: false });
-        assert_eq!(ed.selected_range(), 0..3);
+        assert_eq!(ed.model().selected_range(), 0..3);
 
         let s2 = bar.step(&mut ed, true);
         assert_eq!(s2, FindOutcome { searched: true, replaced: false, arm_notice: false });
-        assert_eq!(ed.selected_range(), 8..11);
+        assert_eq!(ed.model().selected_range(), 8..11);
 
         let s3 = bar.step(&mut ed, true);
         assert_eq!(s3, FindOutcome { searched: true, replaced: false, arm_notice: true });
-        assert_eq!(ed.selected_range(), 0..3);
+        assert_eq!(ed.model().selected_range(), 0..3);
 
         bar.replacement.set_value("qux", &ts);
         let r1 = bar.replace_next(&mut ed, &ts);
         assert!(r1.replaced);
-        assert_eq!(ed.value().as_str(), "qux bar foo baz");
-        assert_eq!(ed.selected_range(), 8..11);
+        assert_eq!(ed.model().value(), "qux bar foo baz");
+        assert_eq!(ed.model().selected_range(), 8..11);
 
         bar.query.set_value("o", &ts);
         let ra = bar.replace_all(&mut ed, &ts);
         assert_eq!(ra, FindOutcome { searched: true, replaced: true, arm_notice: false });
-        assert_eq!(ed.value().as_str(), "qux bar fquxqux baz");
+        assert_eq!(ed.model().value(), "qux bar fquxqux baz");
 
         bar.query.set_value("missing", &ts);
         let miss = bar.step(&mut ed, true);

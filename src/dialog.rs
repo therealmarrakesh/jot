@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 use std::time::Duration;
 
-use crate::editor::Editor;
+use crate::editor::{Editor, FieldOptions};
 use crate::files::Prompt;
 use crate::ids::{AnimKey, CustomDraw, EditorSlot, Focus, HitId, Node, TabId, UiState};
 use crate::platform::{CursorStyle, Key, KeyEvent};
@@ -108,9 +108,11 @@ pub(crate) struct Dialogs {
 
 impl Dialogs {
     pub(crate) fn new() -> Self {
-        let line = Editor::single_line()
-            .with_caret_height(FIELD_CARET)
-            .with_validate(|t| t.chars().all(|c| c.is_ascii_digit()));
+        let line = Editor::field(FieldOptions {
+            caret_height: FIELD_CARET,
+            validate: Some(|t| t.chars().all(|c| c.is_ascii_digit())),
+            ..Default::default()
+        });
         Self {
             open: Vec::new(),
             pending: VecDeque::new(),
@@ -330,7 +332,7 @@ impl Dialogs {
             TextFieldStyle {
                 surface: p.content_surface,
                 focused: focus == Focus::Editor(slot),
-                empty: self.line.text().len() == 0,
+                empty: self.line.model().text().len() == 0,
                 search_icon: false,
             },
             line_editor,

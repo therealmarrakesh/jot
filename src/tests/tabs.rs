@@ -93,13 +93,13 @@ fn dirty_window_close_file_drop_and_multi_window() {
     });
     for _ in 0..200 {
         h.draw();
-        if h.read(|w, _| w.active_editor().value().as_str() == "dropped content 123") {
+        if h.read(|w, _| w.active_editor().model().value() == "dropped content 123") {
             break;
         }
         std::thread::sleep(Duration::from_millis(10));
     }
     h.read(|w, _| {
-        assert_eq!(w.active_editor().value().as_str(), "dropped content 123");
+        assert_eq!(w.active_editor().model().value(), "dropped content 123");
         assert!(w.tabs()[0].data.doc_path.is_some());
     });
     let _ = std::fs::remove_file(&tmp);

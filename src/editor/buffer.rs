@@ -25,12 +25,11 @@ impl TextPoint {
     }
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Default)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Default)]
 pub(crate) struct Selection {
     pub(crate) anchor: usize,
     pub(crate) head: usize,
     pub(crate) end_affinity: bool,
-    pub(crate) goal: Option<(f32, usize)>,
 }
 
 impl Selection {
@@ -40,7 +39,6 @@ impl Selection {
             anchor: offset,
             head: offset,
             end_affinity: false,
-            goal: None,
         }
     }
 
@@ -50,7 +48,6 @@ impl Selection {
             anchor: range.start,
             head: range.end,
             end_affinity: false,
-            goal: None,
         }
     }
 
@@ -80,11 +77,10 @@ impl Selection {
     }
 
     #[inline]
-    pub(crate) fn place(&mut self, offset: usize, end_affinity: bool, goal: Option<(f32, usize)>) {
+    pub(crate) fn place(&mut self, offset: usize, end_affinity: bool) {
         self.anchor = offset;
         self.head = offset;
         self.end_affinity = end_affinity;
-        self.goal = goal;
     }
 
     pub(crate) fn extend_to(
@@ -475,10 +471,9 @@ mod tests {
         assert_eq!(sel.range(), 2..5);
         assert_eq!(sel.head, 2);
 
-        sel.place(7, true, Some((12., 3)));
+        sel.place(7, true);
         assert!(sel.is_empty());
         assert!(sel.end_affinity);
-        assert_eq!(sel.goal, Some((12., 3)));
 
         sel.extend_to(3, false, Some(5..8), 20);
         assert_eq!(sel.range(), 3..8);

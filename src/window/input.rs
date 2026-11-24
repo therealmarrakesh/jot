@@ -10,7 +10,7 @@ use crate::shell::{AppEvent, Cx, Effect};
 use crate::tabs::{SCROLL_REPEAT_DELAY, SCROLL_REPEAT_INTERVAL, SCROLL_STEP, WHEEL_SHARE};
 
 use super::chrome::STRIP_TOP;
-use super::{InputMode, MainWindow, SystemClipboard, ZOOM_STEP};
+use super::{InputMode, MainWindow, ZOOM_STEP};
 
 impl MainWindow {
     pub(crate) fn on_mouse_move(
@@ -428,12 +428,7 @@ impl MainWindow {
                     true
                 }
                 DialogKey::EditGoToLine => edit_shortcut(ev)
-                    .and_then(|cmd| {
-                        self.with_editor(EditorSlot::GoToLine, cx.shell, |ed, timers| {
-                            ed.handle_command(cmd, &mut SystemClipboard, cx.ts(), timers)
-                        })
-                    })
-                    .unwrap_or(false),
+                    .is_some_and(|cmd| self.run_edit_command(EditorSlot::GoToLine, cmd, cx.shell)),
                 DialogKey::Consumed => true,
             };
         }
@@ -464,11 +459,7 @@ impl MainWindow {
 
         if let Some(slot) = self.focused_editor_slot()
             && let Some(cmd) = edit_shortcut(ev)
-            && self
-                .with_editor(slot, cx.shell, |ed, timers| {
-                    ed.handle_command(cmd, &mut SystemClipboard, cx.ts(), timers)
-                })
-                .unwrap_or(false)
+            && self.run_edit_command(slot, cmd, cx.shell)
         {
             return true;
         }

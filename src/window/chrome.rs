@@ -2,7 +2,7 @@ use std::time::Instant;
 
 use crate::color::transparent_black;
 use crate::document::Format;
-use crate::geom::{Size, size};
+use crate::geom::{Rect, Size, point, size};
 use crate::gfx::TextSystem;
 use crate::ids::{CustomDraw, Frame, HitId, Node, UiState};
 use crate::menu::MENU_BAR_HEIGHT;
@@ -13,7 +13,7 @@ use crate::theme::Palette;
 use crate::ui::controls::{CONTROL_RADIUS, ICON_FONT, IconButtonStyle, SMALL_FONT, icon_button};
 use crate::ui::{AvailSize, Brushes, box_, custom, row, text};
 
-use super::{EDITOR_FONT_SIZE, MainWindow, WindowEditorTimers};
+use super::{EDITOR_FONT_SIZE, EDITOR_PADDINGS, MainWindow, WindowEditorTimers};
 
 pub(super) const HEADER_WIDTH: f32 = 5.;
 pub(super) const STRIP_TOP: f32 = 10.;
@@ -63,11 +63,28 @@ pub(super) struct MinSizeCache {
 }
 
 impl MainWindow {
+    pub(super) fn estimated_editor_rect(&self, logical: Size, show_status_bar: bool) -> Rect {
+        let top_chrome = STRIP_TOP + TAB_HEIGHT + MENU_BAR_HEIGHT + SEPARATOR_HEIGHT;
+        let bottom_chrome = if show_status_bar {
+            SEPARATOR_HEIGHT + STATUS_BAR_HEIGHT
+        } else {
+            0.
+        };
+        let area_h = (logical.height - top_chrome - bottom_chrome).max(self.editor_min_height());
+        Rect::new(
+            point(EDITOR_PADDINGS.left, top_chrome + EDITOR_PADDINGS.top),
+            size(
+                (logical.width - EDITOR_PADDINGS.left - EDITOR_PADDINGS.right).max(0.),
+                (area_h - EDITOR_PADDINGS.top - EDITOR_PADDINGS.bottom).max(0.),
+            ),
+        )
+    }
+
     pub(super) fn status_metrics(&self) -> StatusMetrics {
-        let editor = self.active_editor();
-        let text = editor.text();
-        let (line, column) = editor.caret_line_col();
-        let selection = editor.selected_range();
+        let model = self.active_editor().model();
+        let text = model.text();
+        let (line, column) = model.caret_line_col();
+        let selection = model.selected_range();
         let selected = text
             .byte_to_char_idx(selection.end)
             .saturating_sub(text.byte_to_char_idx(selection.start));
@@ -208,7 +225,7 @@ impl MainWindow {
             .tabs
             .active_mut()
             .editor
-            .render_scrollbars(slot, lh, p, now, &mut self.ui, &mut timers);
+            .render_scrollbars(slot, p, now, &mut self.ui, &mut timers);
         let editor_view = self.tabs.active().editor.view_with_scrollbars(
             HitId::Editor(slot),
             CustomDraw::Editor(slot),

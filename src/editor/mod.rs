@@ -7,24 +7,36 @@ mod view;
 pub(crate) mod wrap;
 
 pub(crate) use buffer::RopeExt;
+pub(crate) use model::TextModel;
 pub(crate) use ropey::Rope;
 pub(crate) use view::{EditorPaintParams, EditorPaintStyle};
 
 use std::ops::Range;
 use std::time::Duration;
 
-use ropey::RopeSlice;
-
-use crate::geom::{Axis, Edges, Point, Rect};
+use crate::geom::{Axis, Edges, Point, Rect, point};
 use crate::gfx::{TextStyle, TextSystem};
 use crate::platform::TimerHandle;
 use crate::types::SharedStr;
 use crate::ui::{Node, box_, custom, row};
 
-use model::{EditPolicy, LineChange, TextModel, ValidateFn};
+use model::{EditPolicy, LineChange, ValidateFn};
 use scrollbar::ScrollbarState;
 use view::{AutoScroll, BlinkState, FrameLayout, LongestLineCache};
 use wrap::WrapIndex;
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct DocOptions {
+    pub(crate) soft_wrap: bool,
+    pub(crate) paddings: Edges<f32>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct FieldOptions {
+    pub(crate) placeholder: SharedStr,
+    pub(crate) caret_height: f32,
+    pub(crate) validate: Option<ValidateFn>,
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum MoveDirection {
@@ -40,6 +52,14 @@ pub(super) struct RevealRequest {
     pub(super) with_margin: bool,
 }
 
+#[derive(Copy, Clone, Debug, Default)]
+pub(super) struct Scroll {
+    pub(super) x: f32,
+    pub(super) y: f64,
+    pub(super) content_w: f32,
+    pub(super) content_h: f64,
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub(crate) enum EditorTimer {
     Blink,
@@ -52,11 +72,6 @@ pub(crate) trait EditorTimers {
     fn after(&mut self, delay: Duration, kind: EditorTimer) -> TimerHandle;
     fn every(&mut self, delay: Duration, interval: Duration, kind: EditorTimer) -> TimerHandle;
     fn blink_timing(&self) -> (Option<Duration>, Option<Duration>);
-}
-
-pub(crate) trait Clipboard {
-    fn read(&mut self) -> Option<String>;
-    fn write(&mut self, text: &str) -> bool;
 }
 
 #[cfg(test)]
@@ -74,22 +89,6 @@ impl EditorTimers for NoopTimers {
 
     fn blink_timing(&self) -> (Option<Duration>, Option<Duration>) {
         (None, None)
-    }
-}
-
-#[cfg(test)]
-#[derive(Default)]
-pub(crate) struct MemoryClipboard(pub(crate) Option<String>);
-
-#[cfg(test)]
-impl Clipboard for MemoryClipboard {
-    fn read(&mut self) -> Option<String> {
-        self.0.clone()
-    }
-
-    fn write(&mut self, text: &str) -> bool {
-        self.0 = Some(text.to_string());
-        true
     }
 }
 
@@ -132,8 +131,6 @@ pub(crate) enum EditCommand {
 struct DocumentView {
     wrap: WrapIndex,
     soft_wrap: bool,
-    scroll_y: f64,
-    content_height_f64: f64,
     last_line_height: f32,
     paddings: Edges<f32>,
     scrollbar: ScrollbarState,
@@ -143,14 +140,12 @@ struct DocumentView {
 }
 
 impl DocumentView {
-    fn new() -> Self {
+    fn new(opts: DocOptions) -> Self {
         Self {
             wrap: WrapIndex::new(TextStyle::default(), None),
-            soft_wrap: true,
-            scroll_y: 0.0,
-            content_height_f64: 0.0,
+            soft_wrap: opts.soft_wrap,
             last_line_height: 20.0,
-            paddings: Edges::ZERO,
+            paddings: opts.paddings,
             scrollbar: ScrollbarState::new(),
             auto_scroll: AutoScroll::default(),
             longest_line_cache: None,
@@ -159,20 +154,15 @@ impl DocumentView {
     }
 }
 
-enum ViewKind {
-    Document(Box<DocumentView>),
-    Field,
-}
-
 pub(crate) struct Editor {
     model: TextModel,
-    view: ViewKind,
+    doc: Option<Box<DocumentView>>,
     blink: BlinkState,
+    goal: Option<(f32, usize)>,
     word_anchor: Option<Range<usize>>,
     selecting: bool,
-    scroll_x: f32,
+    scroll: Scroll,
     reveal: Option<RevealRequest>,
-    content_width: f32,
     input_bounds: Rect,
     frame: Option<FrameLayout>,
     caret_height: f32,
@@ -181,31 +171,20 @@ pub(crate) struct Editor {
 }
 
 impl Editor {
-    pub(crate) fn single_line() -> Self {
-        Self::new_inner(false)
-    }
-
-    pub(crate) fn multi_line() -> Self {
-        Self::new_inner(true)
-    }
-
-    fn new_inner(multi_line: bool) -> Self {
+    pub(crate) fn document(rope: Rope, opts: DocOptions) -> Self {
         Self {
             model: TextModel::new(EditPolicy {
-                multi_line,
+                multi_line: true,
                 validate: None,
-            }),
-            view: if multi_line {
-                ViewKind::Document(Box::new(DocumentView::new()))
-            } else {
-                ViewKind::Field
-            },
+            })
+            .with_rope(rope),
+            doc: Some(Box::new(DocumentView::new(opts))),
             blink: BlinkState::new(),
+            goal: None,
             word_anchor: None,
             selecting: false,
-            scroll_x: 0.0,
+            scroll: Scroll::default(),
             reveal: None,
-            content_width: 0.0,
             input_bounds: Rect::ZERO,
             frame: None,
             caret_height: 0.0,
@@ -214,57 +193,42 @@ impl Editor {
         }
     }
 
-    pub(crate) fn with_caret_height(mut self, height: f32) -> Self {
-        self.caret_height = height;
-        self
-    }
-
-    pub(crate) fn with_placeholder(mut self, placeholder: impl Into<SharedStr>) -> Self {
-        self.placeholder = placeholder.into();
-        self
-    }
-
-    pub(crate) fn with_validate(mut self, f: ValidateFn) -> Self {
-        self.model = self.model.with_validate(f);
-        self
-    }
-
-    pub(crate) fn with_soft_wrap(mut self, wrap: bool) -> Self {
-        if let ViewKind::Document(doc) = &mut self.view {
-            doc.soft_wrap = wrap;
+    pub(crate) fn field(opts: FieldOptions) -> Self {
+        Self {
+            model: TextModel::new(EditPolicy {
+                multi_line: false,
+                validate: opts.validate,
+            }),
+            doc: None,
+            blink: BlinkState::new(),
+            goal: None,
+            word_anchor: None,
+            selecting: false,
+            scroll: Scroll::default(),
+            reveal: None,
+            input_bounds: Rect::ZERO,
+            frame: None,
+            caret_height: opts.caret_height,
+            caret_hidden: false,
+            placeholder: opts.placeholder,
         }
-        self
-    }
-
-    pub(crate) fn with_rope(mut self, rope: Rope) -> Self {
-        self.model = self.model.with_rope(rope);
-        self
-    }
-
-    pub(crate) fn with_paddings(mut self, paddings: Edges<f32>) -> Self {
-        if let ViewKind::Document(doc) = &mut self.view {
-            doc.paddings = paddings;
-        }
-        self
     }
 
     #[inline]
-    pub(crate) fn text(&self) -> &Rope {
-        self.model.text()
+    pub(crate) fn model(&self) -> &TextModel {
+        &self.model
     }
 
     #[inline]
-    pub(crate) fn revision(&self) -> u64 {
-        self.model.revision()
-    }
-
-    pub(crate) fn value(&self) -> SharedStr {
-        self.model.value().into()
+    fn fresh_frame(&self) -> Option<&FrameLayout> {
+        self.frame
+            .as_ref()
+            .filter(|f| f.revision == self.model.revision())
     }
 
     #[inline]
     pub(crate) fn caret_bounds(&self) -> Option<Rect> {
-        self.frame.as_ref().map(|f| f.caret_rect)
+        self.fresh_frame().map(|f| f.caret_rect)
     }
 
     pub(crate) fn set_caret_height(&mut self, height: f32) {
@@ -278,19 +242,12 @@ impl Editor {
     #[cfg(test)]
     #[inline]
     pub(crate) fn soft_wrap_enabled(&self) -> bool {
-        match &self.view {
-            ViewKind::Document(doc) => doc.soft_wrap,
-            ViewKind::Field => false,
-        }
+        self.doc.as_deref().is_some_and(|d| d.soft_wrap)
     }
 
     #[inline]
     pub(crate) fn scroll_offset(&self) -> Point {
-        let y = match &self.view {
-            ViewKind::Document(doc) => doc.scroll_y as f32,
-            ViewKind::Field => 0.0,
-        };
-        crate::geom::point(self.scroll_x, y)
+        point(self.scroll.x, self.scroll.y as f32)
     }
 
     #[inline]
@@ -313,7 +270,7 @@ impl Editor {
     pub(super) fn reset_pointer_selection_state(&mut self) {
         self.word_anchor = None;
         self.selecting = false;
-        if let ViewKind::Document(doc) = &mut self.view {
+        if let Some(doc) = &mut self.doc {
             doc.auto_scroll.stop();
         }
     }
@@ -322,13 +279,13 @@ impl Editor {
         let Some(lines) = change else {
             return;
         };
+        self.goal = None;
         self.reset_pointer_selection_state();
-        if let ViewKind::Document(doc) = &mut self.view {
+        if let Some(doc) = &mut self.doc {
             doc.wrap.apply_line_change(self.model.text(), &lines, ts);
         }
         let aff = self.model.selection().end_affinity;
-        self.request_reveal(self.cursor(), aff, None, true);
-        self.update_preferred_x();
+        self.request_reveal(self.model.cursor(), aff, None, true);
     }
 
     #[inline]
@@ -338,28 +295,24 @@ impl Editor {
 
     #[inline]
     pub(crate) fn scrollbar_drag_axis(&self) -> Option<Axis> {
-        match &self.view {
-            ViewKind::Document(doc) => doc.scrollbar.drag_axis(),
-            ViewKind::Field => None,
-        }
+        self.doc.as_deref().and_then(|d| d.scrollbar.drag_axis())
     }
 
     #[inline]
     pub(crate) fn scrollbar_interactive(&self, axis: Axis) -> bool {
-        match &self.view {
-            ViewKind::Document(doc) => doc.scrollbar.is_interactive(axis),
-            ViewKind::Field => false,
-        }
+        self.doc
+            .as_deref()
+            .is_some_and(|d| d.scrollbar.is_interactive(axis))
     }
 
     pub(crate) fn set_soft_wrap(&mut self, wrap: bool, ts: &TextSystem) {
-        let ViewKind::Document(doc) = &mut self.view else {
+        let Some(doc) = &mut self.doc else {
             return;
         };
         if doc.soft_wrap == wrap {
             return;
         }
-        let anchor = doc.capture_scroll_anchor(doc.last_line_height);
+        let anchor = doc.capture_scroll_anchor(self.scroll.y, doc.last_line_height);
         doc.soft_wrap = wrap;
         let text = self.model.text();
         if wrap {
@@ -372,37 +325,13 @@ impl Editor {
                         .then_some(self.input_bounds.size.width - view::RIGHT_MARGIN)
                 });
             doc.wrap.set_wrap_width(text, width, ts);
-            self.scroll_x = 0.0;
+            self.scroll.x = 0.0;
         } else {
             doc.wrap.set_wrap_width(text, None, ts);
         }
         if let Some(anchor) = anchor {
-            doc.restore_scroll_anchor(text, anchor, doc.last_line_height);
+            self.scroll.y = doc.restore_scroll_anchor(text, anchor, doc.last_line_height);
         }
-    }
-
-    pub(crate) fn cursor(&self) -> usize {
-        self.model.cursor()
-    }
-
-    pub(crate) fn caret_line_col(&self) -> (usize, usize) {
-        self.model.caret_line_col()
-    }
-
-    pub(crate) fn selected_range(&self) -> Range<usize> {
-        self.model.selected_range()
-    }
-
-    pub(crate) fn selected_text(&self) -> RopeSlice<'_> {
-        self.model.selected_text()
-    }
-
-    pub(crate) fn can_undo(&self) -> bool {
-        self.model.can_undo()
-    }
-
-    pub(crate) fn can_redo(&self) -> bool {
-        self.model.can_redo()
     }
 
     pub(crate) fn begin_save(&mut self) -> u64 {
@@ -411,10 +340,6 @@ impl Editor {
 
     pub(crate) fn mark_saved_version(&mut self, version: u64) {
         self.model.mark_saved_version(version);
-    }
-
-    pub(crate) fn is_clean(&self) -> bool {
-        self.model.is_clean()
     }
 
     pub(crate) fn start_blink(&mut self, timers: &mut dyn EditorTimers) {
@@ -448,30 +373,29 @@ impl Editor {
         scrollbars: Vec<Node<H, C>>,
     ) -> Node<H, C> {
         let cursor = crate::platform::CursorStyle::IBeam;
-        match &self.view {
-            ViewKind::Document(doc) => {
-                let text_leaf = custom(editor_draw)
-                    .w_full()
-                    .h_full()
-                    .flex_1()
-                    .min_h(2.0 * line_height);
-                box_()
-                    .hit(hit)
-                    .cursor(cursor)
-                    .flex_1()
-                    .overflow_x_hidden()
-                    .h_full()
-                    .child(box_().size_full().padding(doc.paddings).child(text_leaf))
-                    .children(scrollbars)
-            }
-            ViewKind::Field => row()
+        if let Some(doc) = &self.doc {
+            let text_leaf = custom(editor_draw)
+                .w_full()
+                .h_full()
+                .flex_1()
+                .min_h(2.0 * line_height);
+            box_()
+                .hit(hit)
+                .cursor(cursor)
+                .flex_1()
+                .overflow_x_hidden()
+                .h_full()
+                .child(box_().size_full().padding(doc.paddings).child(text_leaf))
+                .children(scrollbars)
+        } else {
+            row()
                 .hit(hit)
                 .cursor(cursor)
                 .flex_1()
                 .overflow_x_hidden()
                 .min_h_full()
                 .items_center()
-                .child(custom(editor_draw).w_full().h(line_height)),
+                .child(custom(editor_draw).w_full().h(line_height))
         }
     }
 }
@@ -484,47 +408,52 @@ mod tests {
     fn editor_direct_typing_undo_redo_and_word_navigation() {
         let ts = TextSystem::new();
         let mut timers = NoopTimers;
-        let mut clip = MemoryClipboard::default();
-        let mut ed = Editor::multi_line();
+        let mut ed = Editor::document(
+            Rope::new(),
+            DocOptions {
+                soft_wrap: true,
+                paddings: Edges::ZERO,
+            },
+        );
 
         ed.handle_text_input("hello", &ts, &mut timers);
         ed.handle_text_input(" world", &ts, &mut timers);
-        assert_eq!(ed.text().to_string(), "hello world");
-        assert!(!ed.is_clean());
+        assert_eq!(ed.model().text().to_string(), "hello world");
+        assert!(!ed.model().is_clean());
 
-        assert!(ed.handle_command(EditCommand::Undo, &mut clip, &ts, &mut timers));
-        assert_eq!(ed.text().to_string(), "");
-        assert!(ed.is_clean());
+        assert!(ed.handle_command(EditCommand::Undo, &ts, &mut timers));
+        assert_eq!(ed.model().text().to_string(), "");
+        assert!(ed.model().is_clean());
 
-        assert!(ed.handle_command(EditCommand::Redo, &mut clip, &ts, &mut timers));
-        assert_eq!(ed.text().to_string(), "hello world");
+        assert!(ed.handle_command(EditCommand::Redo, &ts, &mut timers));
+        assert_eq!(ed.model().text().to_string(), "hello world");
 
         assert!(ed.handle_command(
             EditCommand::Move {
                 motion: Motion::PrevWord,
                 extend: false,
             },
-            &mut clip,
             &ts,
             &mut timers,
         ));
-        assert_eq!(ed.cursor(), 6);
+        assert_eq!(ed.model().cursor(), 6);
         assert!(ed.handle_command(
             EditCommand::Move {
                 motion: Motion::NextWord,
                 extend: true,
             },
-            &mut clip,
             &ts,
             &mut timers,
         ));
-        assert_eq!(ed.selected_text().to_string(), "world");
+        assert_eq!(ed.model().selected_text().to_string(), "world");
 
-        assert!(ed.handle_command(EditCommand::Copy, &mut clip, &ts, &mut timers));
-        assert_eq!(clip.0.as_deref(), Some("world"));
-        assert!(ed.handle_command(EditCommand::Cut, &mut clip, &ts, &mut timers));
-        assert_eq!(ed.text().to_string(), "hello ");
-        assert!(ed.handle_command(EditCommand::Paste, &mut clip, &ts, &mut timers));
-        assert_eq!(ed.text().to_string(), "hello world");
+        let copied = ed.selected_string();
+        assert_eq!(copied.as_deref(), Some("world"));
+        let cut = ed.prepare_cut();
+        assert_eq!(cut.as_deref(), Some("world"));
+        ed.delete_selection(&ts, &mut timers);
+        assert_eq!(ed.model().text().to_string(), "hello ");
+        ed.paste("world", &ts, &mut timers);
+        assert_eq!(ed.model().text().to_string(), "hello world");
     }
 }

@@ -31,6 +31,39 @@ impl MainWindow {
             .sample(tab_strip_column(logical.width), &mut self.ui);
         self.menu_bar.sample(&mut self.ui);
 
+        let editor_style = EditorPaintStyle {
+            text: TextStyle::regular("Consolas", EDITOR_FONT_SIZE * self.zoom()),
+            line_height: self.line_height(),
+            color: p.text_primary,
+        };
+        let field_style = EditorPaintStyle {
+            text: TextStyle::regular(TEXT_FONT, BODY_SIZE),
+            line_height: BODY_LINE + 2.,
+            color: p.text_primary,
+        };
+        let caret_height = self.caret_height();
+        let active_slot = self.active_slot();
+        let editor_focused = self.focus == Focus::Editor(active_slot);
+        let show_selection = editor_focused || self.menu_bar.is_open() || self.find.is_open();
+        let caret_hidden = self.key_tips_active();
+
+        // Prepare the active document before building scrollbars so thumb metrics never lag a frame.
+        let estimated_editor_rect = self.estimated_editor_rect(logical, view.status_bar);
+        let active_params = EditorPaintParams {
+            style: &editor_style,
+            palette: p,
+            window_active,
+            focused: editor_focused,
+            show_selection,
+            scale,
+            caret_width_px,
+        };
+        self.active_editor_mut().set_caret_height(caret_height);
+        self.active_editor_mut().set_caret_hidden(caret_hidden);
+        let mut editor_needs_redraw =
+            self.active_editor_mut()
+                .prepare(estimated_editor_rect, active_params, ts);
+
         let title_bar = self.title_bar(&strip, window_active, maximized, p);
         let menu_bar = self.menu_bar_row(p);
         let find_node = self
@@ -62,26 +95,6 @@ impl MainWindow {
         self.native.set_control_areas(frame.control_areas());
         self.update_min_size(status_metrics, &frame, p, ts);
 
-        let editor_style = EditorPaintStyle {
-            text: TextStyle::regular("Consolas", EDITOR_FONT_SIZE * self.zoom()),
-            line_height: self.line_height(),
-            color: p.text_primary,
-        };
-        let field_style = EditorPaintStyle {
-            text: TextStyle::regular(TEXT_FONT, BODY_SIZE),
-            line_height: BODY_LINE + 2.,
-            color: p.text_primary,
-        };
-        let caret_height = self.caret_height();
-        let active_slot = self.active_slot();
-        let editor_focused = self.focus == Focus::Editor(active_slot);
-        let show_selection = editor_focused || self.menu_bar.is_open() || self.find.is_open();
-        let caret_hidden = self.key_tips_active();
-        let mut editor_needs_redraw = false;
-
-        self.active_editor_mut().set_caret_height(caret_height);
-        self.active_editor_mut().set_caret_hidden(caret_hidden);
-
         let editor_rects: Vec<(EditorSlot, Rect)> = frame
             .custom_rects()
             .filter_map(|(token, rect)| match token {
@@ -91,28 +104,31 @@ impl MainWindow {
             .collect();
         let focus = self.focus;
         for (slot, rect) in editor_rects {
-            let (style, focused, show_sel) = match slot {
-                EditorSlot::Tab(_) => (&editor_style, editor_focused, show_selection),
-                _ => {
-                    let f = focus == Focus::Editor(slot);
-                    (&field_style, f, f)
+            if slot == active_slot {
+                if rect != estimated_editor_rect {
+                    editor_needs_redraw |=
+                        self.active_editor_mut().prepare(rect, active_params, ts);
+                    let size_diff = (rect.size.width - estimated_editor_rect.size.width).abs() > 1.0
+                        || (rect.size.height - estimated_editor_rect.size.height).abs() > 1.0;
+                    editor_needs_redraw |= size_diff;
                 }
-            };
+                continue;
+            }
+            let focused = focus == Focus::Editor(slot);
             if let Some(ed) = self.editor_by_slot_mut(slot) {
-                let outcome = ed.prepare(
+                editor_needs_redraw |= ed.prepare(
                     rect,
                     EditorPaintParams {
-                        style,
+                        style: &field_style,
                         palette: p,
                         window_active,
                         focused,
-                        show_selection: show_sel,
+                        show_selection: focused,
                         scale,
                         caret_width_px,
                     },
                     ts,
                 );
-                editor_needs_redraw |= outcome.needs_redraw;
             }
         }
 

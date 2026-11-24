@@ -8,9 +8,7 @@ use super::buffer::{
     prev_word_start,
 };
 use super::model::LineChange;
-use super::{
-    Clipboard, DocumentView, EditCommand, Editor, EditorTimers, Motion, MoveDirection, ViewKind,
-};
+use super::{DocumentView, EditCommand, Editor, EditorTimers, Motion, MoveDirection};
 
 impl Editor {
     fn commit_edit(
@@ -23,10 +21,35 @@ impl Editor {
         self.apply_change(change, ts);
     }
 
+    pub(crate) fn selected_string(&self) -> Option<String> {
+        (!self.model.selection().is_empty()).then(|| self.model.selected_text().to_string())
+    }
+
+    pub(crate) fn prepare_cut(&mut self) -> Option<String> {
+        self.model.commit_composition();
+        self.selected_string()
+    }
+
+    pub(crate) fn delete_selection(&mut self, ts: &TextSystem, timers: &mut dyn EditorTimers) {
+        let change = self.model.replace_selection("");
+        self.commit_edit(change, ts, timers);
+    }
+
+    pub(crate) fn paste(&mut self, raw: &str, ts: &TextSystem, timers: &mut dyn EditorTimers) {
+        let text = if self.model.is_multi_line() {
+            raw
+        } else {
+            raw.split(['\r', '\n']).next().unwrap_or("")
+        };
+        if !text.is_empty() {
+            let change = self.model.replace_selection(text);
+            self.commit_edit(change, ts, timers);
+        }
+    }
+
     pub(crate) fn handle_command(
         &mut self,
         command: EditCommand,
-        clipboard: &mut dyn Clipboard,
         ts: &TextSystem,
         timers: &mut dyn EditorTimers,
     ) -> bool {
@@ -61,33 +84,7 @@ impl Editor {
                 };
                 self.apply_change(Some(change), ts);
             }
-            EditCommand::Copy => {
-                if !self.model.selection().is_empty() {
-                    clipboard.write(&self.selected_text().to_string());
-                }
-            }
-            EditCommand::Cut => {
-                self.model.commit_composition();
-                if !self.model.selection().is_empty()
-                    && clipboard.write(&self.selected_text().to_string())
-                {
-                    let change = self.model.replace_selection("");
-                    self.commit_edit(change, ts, timers);
-                }
-            }
-            EditCommand::Paste => {
-                if let Some(raw) = clipboard.read().filter(|s| !s.is_empty()) {
-                    let text = if self.model.is_multi_line() {
-                        raw.as_str()
-                    } else {
-                        raw.split(['\r', '\n']).next().unwrap_or("")
-                    };
-                    if !text.is_empty() {
-                        let change = self.model.replace_selection(text);
-                        self.commit_edit(change, ts, timers);
-                    }
-                }
-            }
+            EditCommand::Copy | EditCommand::Cut | EditCommand::Paste => return false,
             EditCommand::Undo => {
                 if let Some(change) = self.model.undo() {
                     self.commit_edit(Some(change), ts, timers);
@@ -137,9 +134,9 @@ impl Editor {
     }
 
     pub(crate) fn ime_caret_bounds(&self) -> Option<Rect> {
-        let frame = self.frame.as_ref()?;
+        let frame = self.fresh_frame()?;
         frame
-            .bounds_for_range(self.model.text(), self.selected_range())
+            .bounds_for_range(self.model.text(), self.model.selected_range())
             .or(Some(frame.caret_rect))
     }
 
@@ -147,10 +144,8 @@ impl Editor {
         self.reset_pointer_selection_state();
         let change = self.model.set_value(value);
         self.apply_change(change, ts);
-        self.scroll_x = 0.0;
-        if let ViewKind::Document(doc) = &mut self.view {
-            doc.scroll_y = 0.0;
-        }
+        self.scroll.x = 0.0;
+        self.scroll.y = 0.0;
         self.reveal = None;
     }
 
@@ -165,24 +160,25 @@ impl Editor {
     }
 
     pub(crate) fn select_all(&mut self) {
+        self.goal = None;
         self.model.select_all();
     }
 
     pub(crate) fn set_selected_range(&mut self, range: Range<usize>) {
+        self.goal = None;
         self.word_anchor = None;
         self.model.set_selected_range(range);
-        self.request_reveal(self.cursor(), false, None, true);
-        self.update_preferred_x();
+        self.request_reveal(self.model.cursor(), false, None, true);
     }
 
     pub(crate) fn go_to_line(&mut self, line: usize) {
+        self.goal = None;
         self.model.go_to_line(line);
-        self.request_reveal(self.cursor(), false, None, true);
-        self.update_preferred_x();
+        self.request_reveal(self.model.cursor(), false, None, true);
     }
 
     fn visual_line_start_for(&self, offset: usize, end_affinity: bool) -> usize {
-        let ViewKind::Document(doc) = &self.view else {
+        let Some(doc) = &self.doc else {
             return 0;
         };
         let text = self.model.text();
@@ -199,7 +195,7 @@ impl Editor {
 
     fn visual_line_end_for(&self, offset: usize, end_affinity: bool) -> (usize, bool) {
         let text = self.model.text();
-        let ViewKind::Document(doc) = &self.view else {
+        let Some(doc) = &self.doc else {
             return (text.len(), false);
         };
         let pt = text.offset_to_point(offset);
@@ -218,17 +214,12 @@ impl Editor {
         offset: usize,
         end_affinity: bool,
     ) -> Option<(f32, usize)> {
-        let frame = self.frame.as_ref()?;
+        let frame = self.fresh_frame()?;
         let text = self.model.text();
         let pt = text.offset_to_point(offset);
         let row_layout = frame.row_layout(pt.row)?;
         let pos = row_layout.position_for_index(pt.column, frame.line_height, end_affinity)?;
         Some((pos.x, pt.column))
-    }
-
-    pub(super) fn update_preferred_x(&mut self) {
-        let goal = self.preferred_x_for(self.cursor(), self.model.selection().end_affinity);
-        self.model.selection_mut().goal = goal;
     }
 
     pub(super) fn move_to_with_affinity(
@@ -239,12 +230,12 @@ impl Editor {
         with_margin: bool,
         timers: Option<&mut dyn EditorTimers>,
     ) {
-        self.model.place_caret(offset, end_affinity, None);
-        self.request_reveal(self.cursor(), end_affinity, direction, with_margin);
+        self.goal = None;
+        self.model.place_caret(offset, end_affinity);
+        self.request_reveal(self.model.cursor(), end_affinity, direction, with_margin);
         if let Some(timers) = timers {
             self.pause_blink(timers);
         }
-        self.update_preferred_x();
     }
 
     fn page_rows(&self, doc: &DocumentView) -> isize {
@@ -264,9 +255,9 @@ impl Editor {
         end_affinity: bool,
         delta_rows: isize,
     ) -> (usize, bool) {
-        let Some(frame) = self.frame.as_ref() else {
+        if doc.wrap.visual_row_count() == 0 {
             return (offset, end_affinity);
-        };
+        }
         let text = self.model.text();
         let mut display = doc.wrap.offset_to_display(text, offset, end_affinity);
         let max_row = doc.wrap.visual_row_count().saturating_sub(1);
@@ -274,7 +265,6 @@ impl Editor {
         display.col = 0;
 
         let mut target_offset = doc.wrap.display_to_offset(text, display);
-        let goal = goal.or_else(|| self.preferred_x_for(offset, end_affinity));
         let mut target_affinity = false;
 
         if let Some((pref_x, byte_col)) = goal {
@@ -282,7 +272,9 @@ impl Editor {
             next_disp.col = 0;
             let next_pt = doc.wrap.display_to_point(text, next_disp);
             let line_start = text.line_start_offset(next_pt.row);
-            if let Some(row_layout) = frame.row_layout(next_pt.row) {
+            if let Some(frame) = self.fresh_frame()
+                && let Some(row_layout) = frame.row_layout(next_pt.row)
+            {
                 if let Some((local_ix, affinity)) = row_layout.closest_index_for_position(
                     point(pref_x, next_disp.sub_row as f32 * frame.line_height),
                     frame.line_height,
@@ -315,7 +307,7 @@ impl Editor {
             motion,
             Motion::Up | Motion::Down | Motion::PageUp | Motion::PageDown
         );
-        if is_vertical && matches!(self.view, ViewKind::Field) {
+        if is_vertical && self.doc.is_none() {
             return false;
         }
         self.model.commit_composition();
@@ -323,22 +315,22 @@ impl Editor {
         let sel = self.model.selection();
         let len = self.model.text().len();
         if !extend {
-            if matches!(motion, Motion::Left) && sel.is_empty() && self.cursor() == 0 {
+            if matches!(motion, Motion::Left) && sel.is_empty() && self.model.cursor() == 0 {
                 return false;
             }
-            if matches!(motion, Motion::Right) && sel.is_empty() && self.cursor() == len {
+            if matches!(motion, Motion::Right) && sel.is_empty() && self.model.cursor() == len {
                 return false;
             }
         }
 
-        let (target, target_aff, goal, direction, keep_col) = match motion {
+        let (target, target_aff, next_goal, direction) = match motion {
             Motion::Left => {
                 let t = if !extend && !sel.is_empty() {
                     sel.start()
                 } else {
                     prev_grapheme_boundary(self.model.text(), sel.head)
                 };
-                (t, false, self.preferred_x_for(t, false), None, false)
+                (t, false, None, None)
             }
             Motion::Right => {
                 let t = if !extend && !sel.is_empty() {
@@ -346,28 +338,24 @@ impl Editor {
                 } else {
                     next_grapheme_boundary(self.model.text(), sel.head)
                 };
-                (t, false, self.preferred_x_for(t, false), None, false)
+                (t, false, None, None)
             }
-            Motion::PrevWord => {
-                let t = prev_word_start(self.model.text(), sel.head);
-                (t, false, self.preferred_x_for(t, false), None, false)
-            }
-            Motion::NextWord => {
-                let t = next_word_end(self.model.text(), sel.head);
-                (t, false, self.preferred_x_for(t, false), None, false)
-            }
-            Motion::LineStart => {
-                let t = self.visual_line_start_for(sel.head, sel.end_affinity);
-                (t, false, self.preferred_x_for(t, false), Some(MoveDirection::Up), false)
-            }
+            Motion::PrevWord => (prev_word_start(self.model.text(), sel.head), false, None, None),
+            Motion::NextWord => (next_word_end(self.model.text(), sel.head), false, None, None),
+            Motion::LineStart => (
+                self.visual_line_start_for(sel.head, sel.end_affinity),
+                false,
+                None,
+                Some(MoveDirection::Up),
+            ),
             Motion::LineEnd => {
                 let (t, aff) = self.visual_line_end_for(sel.head, sel.end_affinity);
-                (t, aff, self.preferred_x_for(t, aff), Some(MoveDirection::Down), false)
+                (t, aff, None, Some(MoveDirection::Down))
             }
-            Motion::DocStart => (0, false, None, None, false),
-            Motion::DocEnd => (len, false, None, None, false),
+            Motion::DocStart => (0, false, None, None),
+            Motion::DocEnd => (len, false, None, None),
             Motion::Up | Motion::Down | Motion::PageUp | Motion::PageDown => {
-                let ViewKind::Document(doc) = &self.view else {
+                let Some(doc) = &self.doc else {
                     return false;
                 };
                 let delta = match motion {
@@ -383,9 +371,12 @@ impl Editor {
                     MoveDirection::Down
                 };
                 if extend {
+                    let goal = self
+                        .goal
+                        .or_else(|| self.preferred_x_for(sel.head, sel.end_affinity));
                     let mut target =
-                        self.vertical_target(doc, sel.head, sel.goal, sel.end_affinity, delta);
-                    if self.frame.is_some() {
+                        self.vertical_target(doc, sel.head, goal, sel.end_affinity, delta);
+                    if doc.wrap.visual_row_count() > 0 {
                         let text = self.model.text();
                         let before_row = doc
                             .wrap
@@ -396,62 +387,57 @@ impl Editor {
                             target = (if delta < 0 { 0 } else { len }, false);
                         }
                     }
-                    (target.0, target.1, sel.goal, Some(dir), true)
+                    (target.0, target.1, goal, Some(dir))
                 } else {
                     let collapse = matches!(motion, Motion::Up | Motion::Down);
-                    let (base, anchor, aff) = if sel.is_empty() || !collapse {
-                        (sel.head, sel.goal, sel.end_affinity)
+                    let (base, goal, aff) = if sel.is_empty() || !collapse {
+                        (
+                            sel.head,
+                            self.goal
+                                .or_else(|| self.preferred_x_for(sel.head, sel.end_affinity)),
+                            sel.end_affinity,
+                        )
                     } else if delta < 0 {
                         (sel.start(), self.preferred_x_for(sel.start(), false), false)
                     } else {
-                        let a = sel.end() == self.cursor() && sel.end_affinity;
+                        let a = sel.end() == self.model.cursor() && sel.end_affinity;
                         (sel.end(), self.preferred_x_for(sel.end(), a), a)
                     };
-                    let anchor = anchor.or_else(|| self.preferred_x_for(base, aff));
-                    let (t, t_aff) = self.vertical_target(doc, base, anchor, aff, delta);
-                    (t, t_aff, anchor, Some(dir), true)
+                    let (t, t_aff) = self.vertical_target(doc, base, goal, aff, delta);
+                    (t, t_aff, goal, Some(dir))
                 }
             }
         };
 
+        self.goal = next_goal;
         if extend {
-            let prev_head = sel.head;
-            let prev_aff = sel.end_affinity;
             self.pause_blink(timers);
             self.model.break_coalescing();
             self.model.extend_selection(target, target_aff, None);
-            if !keep_col {
-                self.update_preferred_x();
-            } else if self.model.selection().goal.is_none() {
-                self.model.selection_mut().goal = self.preferred_x_for(prev_head, prev_aff);
-            }
-            self.request_reveal(self.cursor(), target_aff, None, true);
+            self.request_reveal(self.model.cursor(), target_aff, None, true);
         } else {
-            self.model.place_caret(target, target_aff, goal);
-            if matches!(motion, Motion::DocStart | Motion::DocEnd) {
-                self.update_preferred_x();
-            }
-            self.request_reveal(self.cursor(), target_aff, direction, true);
+            self.model.place_caret(target, target_aff);
+            self.request_reveal(self.model.cursor(), target_aff, direction, true);
             self.pause_blink(timers);
         }
         true
     }
 
     pub(super) fn select_to_with_affinity(&mut self, offset: usize, end_affinity: bool) {
+        self.goal = None;
         self.model
             .extend_selection(offset, end_affinity, self.word_anchor.clone());
-        if self.model.selection().is_empty() {
-            self.update_preferred_x();
-        }
     }
 
     pub(super) fn select_word_at(&mut self, offset: usize) {
+        self.goal = None;
         if let Some(range) = self.model.select_word_at(offset) {
             self.word_anchor = Some(range);
         }
     }
 
     pub(super) fn select_line_at(&mut self, offset: usize) {
+        self.goal = None;
         self.model.select_line_at(offset);
         self.word_anchor = None;
     }

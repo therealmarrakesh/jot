@@ -97,11 +97,6 @@ impl TextModel {
         self
     }
 
-    pub(crate) fn with_validate(mut self, f: ValidateFn) -> Self {
-        self.policy.validate = Some(f);
-        self
-    }
-
     #[inline]
     pub(crate) fn is_multi_line(&self) -> bool {
         self.policy.multi_line
@@ -120,11 +115,6 @@ impl TextModel {
     #[inline]
     pub(crate) fn selection(&self) -> Selection {
         self.selection
-    }
-
-    #[inline]
-    pub(crate) fn selection_mut(&mut self) -> &mut Selection {
-        &mut self.selection
     }
 
     #[inline]
@@ -305,7 +295,6 @@ impl TextModel {
                         anchor: changes.remap_offset(sel_before.anchor),
                         head: changes.remap_offset(sel_before.head),
                         end_affinity: false,
-                        goal: None,
                     },
                     SelectionAfter::Explicit(sel) => sel,
                 };
@@ -740,15 +729,10 @@ impl TextModel {
         self.debug_assert_invariants();
     }
 
-    pub(crate) fn place_caret(
-        &mut self,
-        offset: usize,
-        end_affinity: bool,
-        goal: Option<(f32, usize)>,
-    ) {
+    pub(crate) fn place_caret(&mut self, offset: usize, end_affinity: bool) {
         self.commit_composition();
         let offset = self.snap_boundary(offset, Bias::Left);
-        self.selection.place(offset, end_affinity, goal);
+        self.selection.place(offset, end_affinity);
         self.debug_assert_invariants();
     }
 
@@ -910,7 +894,7 @@ mod tests {
             validate: None,
         })
         .with_rope(Rope::from("aa bb cc aa dd aa"));
-        doc.place_caret(10, false, None);
+        doc.place_caret(10, false);
         doc.replace_all(&[0..2, 9..11, 15..17], "XYZ");
         assert_eq!(doc.value(), "XYZ bb cc XYZ dd XYZ");
         assert_eq!(doc.cursor(), 11);

@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use crate::document::{self, DocPath, Format, PathKey};
-use crate::editor::{Editor, Rope};
+use crate::editor::{DocOptions, Editor, Rope};
 use crate::geom::Edges;
 use crate::ids::TabId;
 
@@ -28,10 +28,11 @@ impl TabData {
     }
 
     pub(crate) fn is_dirty(&self) -> bool {
+        let m = self.editor.model();
         if self.doc_path.is_some() {
-            !self.editor.is_clean()
+            !m.is_clean()
         } else {
-            !self.editor.is_clean() && self.editor.text().len() > 0
+            !m.is_clean() && m.text().len() > 0
         }
     }
 
@@ -44,10 +45,13 @@ impl TabData {
             Some(loaded) => (Some(loaded.doc_path), loaded.text, loaded.format),
             None => (None, Rope::new(), Format::default()),
         };
-        let editor = Editor::multi_line()
-            .with_soft_wrap(word_wrap)
-            .with_rope(text)
-            .with_paddings(paddings);
+        let editor = Editor::document(
+            text,
+            DocOptions {
+                soft_wrap: word_wrap,
+                paddings,
+            },
+        );
         Self {
             id: TabId::next(),
             editor,

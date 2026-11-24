@@ -344,7 +344,7 @@ impl DocHost for WindowsHost<'_> {
             path: data.path().map(PathBuf::from),
             format: data.format,
             dirty: data.is_dirty(),
-            revision: data.editor.revision(),
+            revision: data.editor.model().revision(),
         })
     }
 

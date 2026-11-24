@@ -5,17 +5,15 @@ use crate::ids::Focus;
 use crate::platform::format_local_time_date;
 use crate::shell::{Cx, Effect};
 
-use super::{MainWindow, SystemClipboard, ZOOM_STEP};
+use super::{MainWindow, ZOOM_STEP};
 
 impl MainWindow {
     pub(crate) fn dispatch_command(&mut self, cmd: Command, cx: &mut Cx<'_>) -> bool {
         match cmd {
             Command::App(app_cmd) => self.dispatch_app_command(app_cmd, cx),
-            Command::Edit(edit_cmd) => self
-                .with_editor(self.active_slot(), cx.shell, |ed, timers| {
-                    ed.handle_command(edit_cmd, &mut SystemClipboard, cx.ts(), timers)
-                })
-                .unwrap_or(false),
+            Command::Edit(edit_cmd) => {
+                self.run_edit_command(self.active_slot(), edit_cmd, cx.shell)
+            }
         }
     }
 
