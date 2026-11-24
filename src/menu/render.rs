@@ -223,7 +223,7 @@ fn render_command_button(
 ) -> Node {
     let face_w = cell - 2. * (COMMAND_GAP + COMMAND_INSET);
     let CommandButton { command, glyph } = &open.kind.commands()[ix];
-    let focused = open.focus_visible && open.focused_command == Some(ix);
+    let focused = ui.last_input_was_keyboard() && open.focused_command == Some(ix);
     let enabled = command.enabled;
     let hit = HitId::MenuCommand {
         serial: open.motion.serial,
@@ -336,7 +336,7 @@ fn render_panel_rows(
             !open.kind.commands().is_empty(),
         ),
     };
-    let focus_visible = open.focus_visible && (is_sub || !open.in_submenu());
+    let focus_visible = ui.last_input_was_keyboard() && (is_sub || !open.in_submenu());
     let expanded = open.live_submenu().filter(|_| !is_sub).map(|s| s.ix);
 
     let rows: Vec<Node> = panel

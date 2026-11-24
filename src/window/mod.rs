@@ -745,6 +745,9 @@ impl MainWindow {
 
     pub(super) fn apply_menu_outcome(&mut self, out: MenuOutcome, cx: &mut Cx<'_>) -> bool {
         self.dirty |= out.dirty;
+        if out.clear_keyboard_focus {
+            self.ui.mark_pointer_input();
+        }
         match out.submenu_timer {
             SubmenuTimer::Keep => {}
             SubmenuTimer::Cancel => self.menu_submenu_timer.cancel(),

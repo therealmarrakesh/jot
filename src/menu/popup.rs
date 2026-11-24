@@ -131,7 +131,6 @@ pub(super) struct OpenMenu {
     pub(super) submenu: Option<OpenSubmenu>,
     pub(super) motion: Motion,
     pub(super) focused_command: Option<usize>,
-    pub(super) focus_visible: bool,
 }
 
 impl OpenMenu {
@@ -143,7 +142,6 @@ impl OpenMenu {
             submenu: None,
             motion: Motion::new(serial, fade_in),
             focused_command: None,
-            focus_visible: false,
         }
     }
 
@@ -199,7 +197,6 @@ impl OpenMenu {
     }
 
     pub(super) fn focus_edge(&mut self, last: bool) {
-        self.focus_visible = true;
         if self.in_submenu() {
             if let Some(sub) = self.live_submenu_mut() {
                 sub.panel.focus_edge(last);

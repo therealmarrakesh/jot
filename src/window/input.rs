@@ -293,7 +293,7 @@ impl MainWindow {
             .flatten();
         if let Some(anchor) = open_ctx {
             let state = self.menu_state(cx.view);
-            let out = self.menu_bar.open_context_menu(anchor, state, false, cx.ts);
+            let out = self.menu_bar.open_context_menu(anchor, state, cx.ts);
             let _ = self.apply_menu_outcome(out, cx);
             return;
         }

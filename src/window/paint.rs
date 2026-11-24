@@ -60,7 +60,7 @@ impl MainWindow {
             ts,
         );
         self.native.set_control_areas(frame.control_areas());
-        self.update_min_size(view.status_bar, &frame, p, ts);
+        self.update_min_size(status_metrics, &frame, p, ts);
 
         let editor_style = EditorPaintStyle {
             font: font("Consolas"),

@@ -34,6 +34,7 @@ pub(crate) struct MenuOutcome {
     pub(crate) command: Option<Command>,
     pub(crate) focus: FocusRequest,
     pub(crate) submenu_timer: SubmenuTimer,
+    pub(crate) clear_keyboard_focus: bool,
     pub(crate) dirty: bool,
 }
 
@@ -90,13 +91,20 @@ enum BarMode {
     PopupKeyTips,
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum HoveredTarget {
+    Item(usize),
+    SubmenuItem(usize, usize),
+    Command(usize),
+}
+
 #[derive(Default)]
 pub(crate) struct MenuBar {
     open: Option<OpenMenu>,
     serial: usize,
     mode: BarMode,
     alt_armed: bool,
-    hovered_row: Option<(usize, Option<usize>)>,
+    hovered_target: Option<HoveredTarget>,
 }
 
 impl MenuBar {
@@ -191,7 +199,7 @@ impl MenuBar {
     pub(crate) fn close(&mut self) -> MenuOutcome {
         self.alt_armed = false;
         self.mode = BarMode::Idle;
-        self.hovered_row = None;
+        self.hovered_target = None;
         let focus = self
             .live_open_mut()
             .map(|open| {
@@ -204,6 +212,7 @@ impl MenuBar {
             command: None,
             focus,
             submenu_timer: SubmenuTimer::Cancel,
+            clear_keyboard_focus: false,
             dirty: true,
         }
     }
@@ -244,8 +253,7 @@ impl MenuBar {
         let mut panel = Panel::new(entries, MIN_WIDTH, true, ts);
         panel.step(1);
         let serial = self.next_serial();
-        let mut open = OpenMenu::new(PopupKind::Bar(kind), panel, serial);
-        open.focus_visible = true;
+        let open = OpenMenu::new(PopupKind::Bar(kind), panel, serial);
         self.show(open, key_tips)
     }
 
@@ -253,7 +261,6 @@ impl MenuBar {
         &mut self,
         anchor: Point,
         state: MenuState,
-        keyboard: bool,
         ts: &TextSystem,
     ) -> MenuOutcome {
         let (commands, entries) = context_menu_items(state);
@@ -262,7 +269,6 @@ impl MenuBar {
         let serial = self.next_serial();
         let mut open = OpenMenu::new(PopupKind::Context { anchor, commands }, panel, serial);
         open.focused_command = focused_command;
-        open.focus_visible = keyboard;
         self.show(open, false)
     }
 
@@ -294,13 +300,14 @@ impl MenuBar {
         } else {
             BarMode::Idle
         };
-        self.hovered_row = None;
+        self.hovered_target = None;
         self.open = Some(open);
         MenuOutcome {
             handled: true,
             command: None,
             focus: FocusRequest::MenuBar,
             submenu_timer: SubmenuTimer::Cancel,
+            clear_keyboard_focus: false,
             dirty: true,
         }
     }
@@ -313,7 +320,7 @@ impl MenuBar {
             return self.close();
         };
         open.motion.closing = true;
-        self.hovered_row = None;
+        self.hovered_target = None;
         self.mode = BarMode::Focused {
             kind,
             key_tips: self.mode == BarMode::PopupKeyTips,
@@ -323,6 +330,7 @@ impl MenuBar {
             command: None,
             focus: FocusRequest::MenuBar,
             submenu_timer: SubmenuTimer::Cancel,
+            clear_keyboard_focus: false,
             dirty: true,
         }
     }
@@ -336,33 +344,36 @@ impl MenuBar {
         if let Some(HitId::MenuTrigger(kind)) = top
             && self.open_kind().is_some_and(|open| open != kind)
         {
-            return self.open_kind_menu(kind, state, ts);
+            let mut out = self.open_kind_menu(kind, state, ts);
+            out.clear_keyboard_focus = true;
+            return out;
         }
 
         let Some(open) = self.live_open() else {
-            self.hovered_row = None;
+            self.hovered_target = None;
             return MenuOutcome::default();
         };
-        let row_path = match top {
-            Some(HitId::MenuItem { ix, .. }) => Some((ix, None)),
-            Some(HitId::SubmenuItem { ix: sub_ix, .. }) => {
-                open.live_submenu().map(|s| (s.ix, Some(sub_ix)))
-            }
+        let hovered = match top {
+            Some(HitId::MenuItem { ix, .. }) => Some(HoveredTarget::Item(ix)),
+            Some(HitId::SubmenuItem { ix: sub_ix, .. }) => open
+                .live_submenu()
+                .map(|s| HoveredTarget::SubmenuItem(s.ix, sub_ix)),
+            Some(HitId::MenuCommand { ix, .. }) => Some(HoveredTarget::Command(ix)),
             _ => None,
         };
-        if row_path == self.hovered_row {
+        if hovered == self.hovered_target {
             return MenuOutcome::default();
         }
-        let Some(path) = row_path else {
-            self.hovered_row = None;
+        let Some(target) = hovered else {
+            self.hovered_target = None;
             return MenuOutcome {
                 submenu_timer: SubmenuTimer::Cancel,
                 ..Default::default()
             };
         };
 
-        let target = match path {
-            (ix, None) => {
+        let timer_target = match target {
+            HoveredTarget::Item(ix) => {
                 let current = open.live_submenu().map(|s| s.ix);
                 match (open.panel.entries.get(ix), current) {
                     (Some(Entry::Submenu(..)), Some(open_ix)) if open_ix == ix => None,
@@ -371,33 +382,44 @@ impl MenuBar {
                     (_, None) => None,
                 }
             }
-            (_, Some(_)) => None,
+            HoveredTarget::SubmenuItem(..) | HoveredTarget::Command(_) => None,
         };
         if let Some(open) = self.live_open_mut() {
-            open.focus_visible = false;
-            match path {
-                (ix, None) => {
+            match target {
+                HoveredTarget::Item(ix) => {
                     if open.panel.entries.get(ix).is_some_and(Entry::selectable) {
                         open.panel.focused = Some(ix);
                         open.focused_command = None;
                     }
                 }
-                (_, Some(sub_ix)) => {
+                HoveredTarget::SubmenuItem(_, sub_ix) => {
                     if let Some(sub) = open.live_submenu_mut()
                         && sub.panel.entries.get(sub_ix).is_some_and(Entry::selectable)
                     {
                         sub.panel.focused = Some(sub_ix);
                     }
                 }
+                HoveredTarget::Command(ix) => {
+                    if open
+                        .kind
+                        .commands()
+                        .get(ix)
+                        .is_some_and(|b| b.command.enabled)
+                    {
+                        open.focused_command = Some(ix);
+                        open.panel.focused = None;
+                    }
+                }
             }
         }
-        self.hovered_row = row_path;
-        let submenu_timer = match target {
+        self.hovered_target = hovered;
+        let submenu_timer = match timer_target {
             Some(t) => SubmenuTimer::Arm(t),
             None => SubmenuTimer::Cancel,
         };
         MenuOutcome {
             submenu_timer,
+            clear_keyboard_focus: true,
             dirty: true,
             ..Default::default()
         }
@@ -411,7 +433,7 @@ impl MenuBar {
     }
 
     pub(crate) fn click_item(&mut self, path: (usize, Option<usize>), ts: &TextSystem) -> MenuOutcome {
-        self.activate(path, ts)
+        self.activate(path, false, ts)
     }
 
     pub(crate) fn click_command(&mut self, ix: usize) -> MenuOutcome {
@@ -428,7 +450,12 @@ impl MenuBar {
         out
     }
 
-    fn activate(&mut self, path: (usize, Option<usize>), ts: &TextSystem) -> MenuOutcome {
+    fn activate(
+        &mut self,
+        path: (usize, Option<usize>),
+        focus_first: bool,
+        ts: &TextSystem,
+    ) -> MenuOutcome {
         let Some(open) = self.live_open() else {
             return MenuOutcome::default();
         };
@@ -443,7 +470,7 @@ impl MenuBar {
         };
         match entry {
             Entry::Submenu(..) => {
-                self.open_submenu(path.0, true, ts);
+                self.open_submenu(path.0, focus_first, ts);
                 MenuOutcome {
                     submenu_timer: SubmenuTimer::Cancel,
                     dirty: true,
@@ -459,7 +486,7 @@ impl MenuBar {
         }
     }
 
-    fn open_submenu(&mut self, ix: usize, highlight_first: bool, ts: &TextSystem) -> bool {
+    fn open_submenu(&mut self, ix: usize, focus_first: bool, ts: &TextSystem) -> bool {
         let serial = self.next_serial();
         let Some(open) = self.live_open_mut() else {
             return false;
@@ -467,6 +494,7 @@ impl MenuBar {
         let Some(Entry::Submenu(_, entries)) = open.panel.entries.get(ix) else {
             return false;
         };
+        open.panel.focused = Some(ix);
         if open.live_submenu().is_none_or(|sub| sub.ix != ix) {
             open.submenu = Some(OpenSubmenu {
                 ix,
@@ -474,10 +502,11 @@ impl MenuBar {
                 motion: Motion::new(serial, false),
             });
         }
-        open.focus_visible |= highlight_first;
-        if highlight_first && let Some(sub) = open.live_submenu_mut() {
+        if let Some(sub) = open.live_submenu_mut() {
             sub.panel.focused = None;
-            sub.panel.step(1);
+            if focus_first {
+                sub.panel.step(1);
+            }
         }
         true
     }
@@ -680,7 +709,7 @@ impl MenuBar {
             };
             let parent = sub.ix;
             self.mode = BarMode::Idle;
-            return self.activate((parent, Some(sub_ix)), ts);
+            return self.activate((parent, Some(sub_ix)), true, ts);
         }
         let Some(ix) = open.panel.find_key(key) else {
             return MenuOutcome::default();
@@ -696,7 +725,7 @@ impl MenuBar {
             MenuOutcome::cancel_submenu()
         } else {
             self.mode = BarMode::Idle;
-            self.activate((ix, None), ts)
+            self.activate((ix, None), true, ts)
         }
     }
 
@@ -746,7 +775,6 @@ impl MenuBar {
             }
             return MenuOutcome::handled();
         };
-        open.focus_visible = true;
         if open.in_submenu() {
             if let Some(sub) = open.live_submenu_mut() {
                 sub.panel.step(delta);
@@ -776,7 +804,7 @@ impl MenuBar {
         }
         let sub = open.live_submenu().and_then(|s| s.panel.focused);
         if let Some(ix) = open.panel.focused {
-            return self.activate((ix, sub), ts);
+            return self.activate((ix, sub), true, ts);
         }
         MenuOutcome::handled()
     }
@@ -810,7 +838,6 @@ impl MenuBar {
         let Some(open) = self.live_open_mut() else {
             return self.cycle_bar(-1);
         };
-        open.focus_visible = true;
         if !open.kind.commands().is_empty() {
             open.step_command(-1);
             MenuOutcome::handled_dirty()
@@ -828,7 +855,6 @@ impl MenuBar {
         let Some(open) = self.live_open_mut() else {
             return self.cycle_bar(1);
         };
-        open.focus_visible = true;
         if !open.kind.commands().is_empty() {
             open.step_command(1);
             return MenuOutcome::handled_dirty();
@@ -940,12 +966,21 @@ mod tests {
             ..Default::default()
         };
 
-        bar.open_context_menu(point(10., 10.), state, true, &ts);
+        bar.open_context_menu(point(10., 10.), state, &ts);
         assert!(bar.is_open());
+        // Hovering a context menu command clears keyboard focus modality.
+        let hover_cmd = bar.on_hover_change(Some(HitId::MenuCommand { serial: 1, ix: 2 }), state, &ts);
+        assert!(hover_cmd.clear_keyboard_focus);
         // Cut(0) and Copy(1) disabled; Paste(2) enabled -> focused command must be 2.
         let act = bar.on_key_down(key(Key::Enter), true, state, &ts);
         assert_eq!(act.command, Some(EditCommand::Paste.into()));
         assert_eq!(act.focus, FocusRequest::RestoreEditor);
+
+        // Mouse-clicking a submenu item opens the submenu without pre-selecting its first child.
+        bar.open_kind_menu(MenuKind::View, state, &ts);
+        let click = bar.click_item((0, None), &ts);
+        assert_eq!(click.submenu_timer, SubmenuTimer::Cancel);
+        assert!(bar.open_popup().is_some_and(|o| o.live_submenu().is_some() && !o.in_submenu()));
 
         bar.open_flyout(
             vec![Entry::toggle("Match case", false, AppCommand::ToggleMatchCase)],

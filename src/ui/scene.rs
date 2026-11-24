@@ -699,10 +699,12 @@ impl<H: Copy + Eq, C: Copy> Frame<H, C> {
             } else if self.nodes[idx].hit.is_some() {
                 self.control_areas.push((clipped, None));
             }
-            self.hits.push(HitEntry {
-                node_idx: idx,
-                clipped_rect: clipped,
-            });
+            if self.nodes[idx].hit.is_some() {
+                self.hits.push(HitEntry {
+                    node_idx: idx,
+                    clipped_rect: clipped,
+                });
+            }
         }
 
         if let FlatKind::Box {
@@ -912,6 +914,11 @@ impl<H: Copy + Eq + Hash, C: Copy, K: Copy + Eq + Hash> UiState<H, C, K> {
     #[inline]
     pub(crate) fn mark_keyboard_input(&mut self) {
         self.last_input_was_keyboard = true;
+    }
+
+    #[inline]
+    pub(crate) fn mark_pointer_input(&mut self) {
+        self.last_input_was_keyboard = false;
     }
 
     pub(crate) fn begin_frame(&mut self, now: Instant, reduce_motion: bool) {
@@ -1127,6 +1134,17 @@ mod tests {
         assert_eq!(
             modal_frame.hit_chain(point(95., 10.)),
             vec![TestHit::Backdrop]
+        );
+
+        let passthrough: Node<TestHit, ()> = box_()
+            .relative()
+            .size_full()
+            .child(box_().w(100.).h(40.).hit(TestHit::NewTab))
+            .child(box_().absolute().inset_0());
+        let pass_frame = Frame::layout(passthrough, AvailSize::definite(200., 100.), 1.0, &ts);
+        assert_eq!(
+            pass_frame.hit_chain(point(10., 10.)),
+            vec![TestHit::NewTab]
         );
     }
 

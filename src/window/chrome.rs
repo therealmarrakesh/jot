@@ -38,9 +38,8 @@ pub(super) struct StatusMetrics {
 
 #[derive(Clone, Copy, PartialEq)]
 struct MinSizeKey {
-    status_bar: bool,
+    status: Option<StatusMetrics>,
     zoom_pct: u32,
-    format: Format,
     menu_width: f32,
     scale: f32,
 }
@@ -72,21 +71,19 @@ impl MainWindow {
 
     pub(super) fn update_min_size(
         &mut self,
-        status_bar: bool,
+        metrics: Option<StatusMetrics>,
         frame: &Frame,
         p: Palette,
         ts: &TextSystem,
     ) {
-        let zoom_pct = (self.zoom() * 100.).round() as u32;
-        let format = self.tabs.active().format;
+        let zoom_pct = metrics.map_or((self.zoom() * 100.).round() as u32, |m| m.zoom_pct);
         let scale = self.native.scale_factor();
         let menu_width = frame
             .rect_of(HitId::MenuBar)
             .map_or(0.0, |r| r.size.width);
         let key = MinSizeKey {
-            status_bar,
+            status: metrics,
             zoom_pct,
-            format,
             menu_width,
             scale,
         };
@@ -96,17 +93,7 @@ impl MainWindow {
         {
             return;
         }
-        let status_sz = status_bar.then(|| {
-            let reference = StatusMetrics {
-                line: 9999,
-                column: 999,
-                selected: 0,
-                total: 999_999,
-                zoom_pct,
-                format,
-            };
-            Frame::measure_min_size(self.status_bar(reference, p), scale, ts)
-        });
+        let status_sz = metrics.map(|m| Frame::measure_min_size(self.status_bar(m, p), scale, ts));
         let menu_row = MENU_BAR_LEFT + menu_width + THEME_BUTTON_WIDTH + THEME_BUTTON_RIGHT;
         let width = status_sz
             .map_or(0., |s| s.width)
@@ -240,6 +227,11 @@ impl MainWindow {
                     ),
             )
             .when_some(find, |this, f| this.child(f))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn status_bar_for_test(&self, p: Palette) -> crate::ids::Node {
+        self.status_bar(self.status_metrics(), p)
     }
 
     pub(super) fn status_bar(&self, metrics: StatusMetrics, p: Palette) -> Node {

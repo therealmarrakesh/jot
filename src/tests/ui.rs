@@ -25,6 +25,12 @@ fn menus_shortcuts_toggles_submenus_and_context_menu() {
 
     h.click_hit(HitId::MenuTrigger(MenuKind::View));
     h.click_menu_item(0);
+    h.read(|w, _| {
+        assert!(
+            !w.ui.last_input_was_keyboard(),
+            "clicking submenu item must not activate keyboard focus rings"
+        );
+    });
     h.click_submenu_item(0);
     h.read(|w, _| {
         assert_eq!(
@@ -154,14 +160,26 @@ fn find_replace_bar_clear_button_and_key_contexts() {
     });
 
     let ed_bounds = h.hit_rect(HitId::EditorArea).unwrap();
-    let ed_click = point(ed_bounds.right() - 40.0, ed_bounds.bottom() - 40.0);
-    h.click_point(ed_click, MouseButton::Left);
+    let find_card = h.hit_rect(HitId::FindCard).unwrap();
+    let beside_find = point(ed_bounds.right() - 30.0, find_card.center().y);
+    h.read(|w, _| {
+        let chain = w.ui.frame().hit_chain(beside_find);
+        assert!(
+            chain.contains(&HitId::Editor(w.active_slot())),
+            "invisible Find bar row wrapper must not occlude editor hits beside FindCard: {chain:?}"
+        );
+        assert_eq!(
+            w.ui.frame().cursor_at(beside_find),
+            crate::platform::CursorStyle::IBeam
+        );
+    });
+    h.click_point(beside_find, MouseButton::Left);
     h.type_text("!");
     h.read(|w, _| {
         assert_eq!(
             w.active_editor().value().as_str(),
             "OMEGA beta OMEGA gamma!",
-            "clicking main editor while Find bar is open must focus main editor"
+            "clicking main editor beside Find card must focus main editor"
         );
     });
 
@@ -369,6 +387,19 @@ fn status_bar_min_width_and_no_vertical_char_wrapping() {
     let app = h.app.borrow();
     let ts = &app.shell.text_system;
     let p = app.shell.palette;
+    let live_bar = app.windows[0].status_bar_for_test(p);
+    let live_frame = Frame::layout(live_bar, AvailSize::definite(min_size.width, 32.), scale, ts);
+    let spacer_w = live_frame
+        .custom_rects()
+        .find_map(|(tok, rect)| {
+            (tok == crate::ids::CustomDraw::StatusSpacer).then_some(rect.size.width)
+        })
+        .expect("StatusSpacer missing");
+    assert!(
+        spacer_w < 1.5,
+        "status bar spacer must collapse fully to divider width at min_size.width ({}), got {spacer_w}",
+        min_size.width
+    );
     for test_width in [min_size.width, 220.0] {
         let bar = row()
             .w(test_width)

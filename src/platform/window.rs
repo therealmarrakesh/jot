@@ -325,6 +325,7 @@ struct HwndEntry {
     last_modifiers: Modifiers,
     clicks: ClickTracker,
     buttons: MouseButtons,
+    releasing_capture: bool,
     tracking_leave: bool,
     tracking_nc_leave: bool,
 }
@@ -364,6 +365,24 @@ fn with_entry_mut<R>(hwnd: HWND, f: impl FnOnce(&mut HwndEntry) -> R) -> Option<
 #[cfg(test)]
 pub(crate) fn has_hwnd_entry(hwnd: WindowHwnd) -> bool {
     with_entry(hwnd.raw(), |_| ()).is_some()
+}
+
+fn release_capture_suppressed(hwnd: HWND, release: impl FnOnce()) {
+    with_entry_mut(hwnd, |e| e.releasing_capture = true);
+    release();
+    with_entry_mut(hwnd, |e| e.releasing_capture = false);
+}
+
+#[cfg(test)]
+pub(crate) fn simulate_release_capture_callback(hwnd: WindowHwnd) {
+    release_capture_suppressed(hwnd.raw(), || unsafe {
+        let _ = windows::Win32::UI::WindowsAndMessaging::SendMessageW(
+            hwnd.raw(),
+            WM_CAPTURECHANGED,
+            Some(WPARAM(0)),
+            Some(LPARAM(0)),
+        );
+    });
 }
 
 fn queue_pending_event(event: PlatformEvent) {
@@ -598,6 +617,7 @@ impl NativeWindow {
                     last_modifiers: current_modifiers(),
                     clicks: ClickTracker::default(),
                     buttons: MouseButtons::default(),
+                    releasing_capture: false,
                     tracking_leave: false,
                     tracking_nc_leave: false,
                 },
@@ -1231,9 +1251,13 @@ fn window_wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
 
         WM_CAPTURECHANGED => {
             let window_id = with_entry_mut(hwnd, |e| {
+                if e.releasing_capture {
+                    return None;
+                }
                 e.buttons.clear();
-                e.window_id
-            });
+                Some(e.window_id)
+            })
+            .flatten();
             if let Some(window_id) = window_id {
                 dispatch(PlatformEvent::CaptureLost { window_id });
             }
@@ -1287,7 +1311,9 @@ fn window_wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
             })
             .map_or((true, None), |(rel, ev)| (rel, Some(ev)));
             if release_cap {
-                let _ = unsafe { ReleaseCapture() };
+                release_capture_suppressed(hwnd, || {
+                    let _ = unsafe { ReleaseCapture() };
+                });
             }
             if let Some(ev) = ev {
                 dispatch(ev);
