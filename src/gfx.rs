@@ -2276,6 +2276,50 @@ fn analyze_break_opportunities(
 mod tests {
     use super::*;
 
+    /// A scope's clip stays in the caller's coordinates while its translate moves the content,
+    /// so a sliding reveal (the menu unroll) never draws above the card it's clipped to.
+    #[test]
+    fn scope_clip_stays_put_while_the_translate_moves_content() {
+        use windows::Win32::Graphics::Direct2D::{D2D1_BITMAP_OPTIONS_CPU_READ, D2D1_MAP_OPTIONS_READ};
+        let mut canvas = Canvas::new(Direct2DDevices::new().unwrap(), 1.0).unwrap();
+        let props = |bitmap_options| D2D1_BITMAP_PROPERTIES1 {
+            pixelFormat: D2D1_PIXEL_FORMAT {
+                format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+            },
+            dpiX: 96.0,
+            dpiY: 96.0,
+            bitmapOptions: bitmap_options,
+            ..Default::default()
+        };
+        let one_by_eight = D2D_SIZE_U { width: 1, height: 8 };
+        let painted_rows = unsafe {
+            let target = canvas
+                .context
+                .CreateBitmap(one_by_eight, None, 0, &props(D2D1_BITMAP_OPTIONS_TARGET))
+                .unwrap();
+            canvas.context.SetTarget(&target);
+            canvas.context.BeginDraw();
+            canvas.context.Clear(None);
+            let scope = Scope {
+                clip: Some(Rect::new(point(0., 4.), size(1., 4.))),
+                translate: Some(point(0., -4.)),
+                ..Default::default()
+            };
+            canvas.scoped(scope, |c| c.paint_quad(fill(Rect::new(point(0., 4.), size(1., 8.)), black())));
+            canvas.context.EndDraw(None, None).unwrap();
+            let cpu = D2D1_BITMAP_OPTIONS_CPU_READ | D2D1_BITMAP_OPTIONS_CANNOT_DRAW;
+            let readback = canvas.context.CreateBitmap(one_by_eight, None, 0, &props(cpu)).unwrap();
+            readback.CopyFromBitmap(None, &target, None).unwrap();
+            let map = readback.Map(D2D1_MAP_OPTIONS_READ).unwrap();
+            let alpha = |row: usize| *map.bits.add(row * map.pitch as usize + 3);
+            let rows: Vec<bool> = (0..8).map(|row| alpha(row) != 0).collect();
+            readback.Unmap().unwrap();
+            rows
+        };
+        assert_eq!(painted_rows, [false, false, false, false, true, true, true, true]);
+    }
+
     #[test]
     fn utf8_utf16_roundtrip_handles_ascii_cjk_and_surrogate_emoji() {
         let sample = "hi 日本語 🎉 end";
