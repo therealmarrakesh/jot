@@ -9,7 +9,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::Duration;
 
-use crate::app::{App, WindowLaunch};
+use crate::{App, WindowLaunch};
 use crate::command::Command;
 use crate::document;
 use crate::geom::{Point, Rect, size};
