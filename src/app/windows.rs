@@ -10,7 +10,7 @@ use crate::gfx::WindowSurface;
 use crate::ids::TabId;
 use crate::platform::{
     MainWindowConfig, NativeWindow, WindowAppearance, WindowHandle, WindowId, WindowsDisplay,
-    cursor_screen_pos, diag,
+    cursor_screen_pos, debug_log,
 };
 use crate::shell::Shell;
 use crate::tabs::TabData;
@@ -281,7 +281,7 @@ impl Windows {
             Ok(created) => created,
             Err(err) => {
                 let message = err.to_string();
-                diag::debug_log(&format!("window/surface create failed: {message}"));
+                debug_log(&format!("window/surface create failed: {message}"));
                 return Err(Box::new(OpenWindowError {
                     tab: initial,
                     message,

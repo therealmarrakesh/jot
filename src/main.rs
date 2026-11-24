@@ -32,7 +32,9 @@ use std::rc::Rc;
 
 use app::App;
 use gfx::{Gpu, TextSystem};
-use platform::{Arbitration, Platform, arbitrate_instance, diag};
+use platform::{
+    Arbitration, Platform, arbitrate_instance, debug_log, install_panic_hook, show_error_dialog,
+};
 
 pub(crate) const APP_NAME: &str = "Jot";
 const NOTICES_FLAG: &str = "--notices";
@@ -48,7 +50,7 @@ fn write_notices() -> std::io::Result<PathBuf> {
 }
 
 fn main() {
-    diag::install_panic_hook();
+    install_panic_hook();
 
     let (flags, mut paths): (Vec<_>, Vec<_>) = std::env::args_os()
         .skip(1)
@@ -57,7 +59,7 @@ fn main() {
     if !flags.is_empty() {
         match write_notices() {
             Ok(path) => paths.push(path),
-            Err(err) => diag::debug_log(&format!("Failed to write notices file: {err}")),
+            Err(err) => debug_log(&format!("Failed to write notices file: {err}")),
         }
     }
 
@@ -69,21 +71,21 @@ fn main() {
     let platform = match Platform::new(lock) {
         Ok(p) => Rc::new(p),
         Err(err) => {
-            diag::show_error_dialog(APP_NAME, &format!("Jot couldn't start.\n\n{err}"));
+            show_error_dialog(APP_NAME, &format!("Jot couldn't start.\n\n{err}"));
             return;
         }
     };
     let gpu = match Gpu::new() {
         Ok(g) => g,
         Err(err) => {
-            diag::show_error_dialog(APP_NAME, &format!("Jot couldn't start.\n\n{err}"));
+            show_error_dialog(APP_NAME, &format!("Jot couldn't start.\n\n{err}"));
             return;
         }
     };
     let text_system = match TextSystem::new() {
         Ok(ts) => ts,
         Err(err) => {
-            diag::show_error_dialog(APP_NAME, &format!("Jot couldn't start.\n\n{err}"));
+            show_error_dialog(APP_NAME, &format!("Jot couldn't start.\n\n{err}"));
             return;
         }
     };
@@ -91,7 +93,7 @@ fn main() {
 
     Platform::run(app, move |app| {
         if let Err(message) = app.launch(paths, false) {
-            diag::show_error_dialog(APP_NAME, &format!("Jot couldn't open a window.\n\n{message}"));
+            show_error_dialog(APP_NAME, &format!("Jot couldn't open a window.\n\n{message}"));
             app.request_quit();
         }
     });

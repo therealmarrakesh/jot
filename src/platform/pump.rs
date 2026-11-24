@@ -27,8 +27,8 @@ use windows::core::{HSTRING, PCWSTR, w};
 
 use crate::types::Result;
 
-use super::diag;
-use super::event::{PlatformEvent, PlatformHandler};
+use super::ffi_guard;
+use super::{PlatformEvent, PlatformHandler};
 use super::instance::{self, InstanceLock};
 use super::settings::SystemSettings;
 use super::window::{self, WindowShared};
@@ -425,7 +425,7 @@ unsafe extern "system" fn wake_wnd_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
-    diag::ffi_guard("wake_wnd_proc", LRESULT(0), || {
+    ffi_guard("wake_wnd_proc", LRESULT(0), || {
         wake_wnd_proc_inner(hwnd, msg, wparam, lparam)
     })
 }
@@ -469,7 +469,7 @@ mod tests {
         SendMessageW, WM_ACTIVATE, WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE, WM_TIMER,
     };
 
-    use crate::platform::event::{MainWindowConfig, WindowAppearance};
+    use crate::platform::{MainWindowConfig, WindowAppearance};
     use crate::platform::jobs::Jobs;
     use crate::platform::window::NativeWindow;
 

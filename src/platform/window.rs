@@ -32,12 +32,12 @@ use windows::core::{BOOL, HSTRING, PCWSTR, w};
 use crate::geom::{Rect, Size, size};
 use crate::types::Result;
 
-use super::display::WindowsDisplay;
-use super::event::{
+use super::WindowsDisplay;
+use super::{
     CursorStyle, MainWindowConfig, WindowAppearance, WindowControlArea, WindowId,
 };
 use super::handle::WindowHandle;
-use super::input::{ClickTracker, Modifiers, MouseButton, current_modifiers};
+use super::{ClickTracker, Modifiers, MouseButton, current_modifiers};
 use super::pump;
 use super::wndproc::window_wnd_proc;
 

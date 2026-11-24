@@ -42,9 +42,9 @@ use windows::core::{HSTRING, PCWSTR};
 
 use crate::geom::{Point, point};
 
-use super::diag;
-use super::event::{PlatformEvent, WindowControlArea, hit_test_control_areas};
-use super::input::{
+use super::ffi_guard;
+use super::{PlatformEvent, WindowControlArea, hit_test_control_areas};
+use super::{
     Key, KeyEvent, MouseButton, current_modifiers, is_syskey_passthrough, read_ime_string,
     set_ime_candidate_pos, translate_vk,
 };
@@ -253,7 +253,7 @@ pub(super) unsafe extern "system" fn window_wnd_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
-    diag::ffi_guard("window_wnd_proc", LRESULT(0), || {
+    ffi_guard("window_wnd_proc", LRESULT(0), || {
         window_wnd_proc_inner(hwnd, msg, wparam, lparam)
     })
 }
@@ -832,7 +832,7 @@ mod tests {
     use windows::Win32::UI::WindowsAndMessaging::SendMessageW;
 
     use super::*;
-    use crate::platform::event::{MainWindowConfig, PlatformHandler, WindowAppearance};
+    use crate::platform::{MainWindowConfig, PlatformHandler, WindowAppearance};
     use crate::platform::pump::Platform;
     use crate::platform::window::NativeWindow;
 

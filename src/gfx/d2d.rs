@@ -310,14 +310,14 @@ impl Target {
         } {
             let lost = is_device_lost_hr(err.code());
             if lost {
-                crate::platform::diag::debug_log(&format!("surface resize lost device: {err}"));
+                crate::platform::debug_log(&format!("surface resize lost device: {err}"));
             }
             return Err(lost);
         }
         if let Err(err) = self.attach_backbuffer(scale) {
             let lost = err.hresult().is_some_and(|hr| is_device_lost_hr(HRESULT(hr)));
             if lost {
-                crate::platform::diag::debug_log(&format!("surface resize lost device: {err}"));
+                crate::platform::debug_log(&format!("surface resize lost device: {err}"));
             }
             return Err(lost);
         }
@@ -354,7 +354,7 @@ impl Target {
             if is_device_lost_hr(err.code()) || removed {
                 return FrameOutcome::DeviceLost;
             }
-            crate::platform::diag::debug_log(&format!("D2D end_frame failed: {err}"));
+            crate::platform::debug_log(&format!("D2D end_frame failed: {err}"));
             return FrameOutcome::Failed;
         }
         let hr = unsafe { self.swap_chain.Present(0, DXGI_PRESENT(0)) };
@@ -367,7 +367,7 @@ impl Target {
             return FrameOutcome::DeviceLost;
         }
         if let Err(err) = hr.ok() {
-            crate::platform::diag::debug_log(&format!("DXGI present failed: {err}"));
+            crate::platform::debug_log(&format!("DXGI present failed: {err}"));
             return FrameOutcome::Failed;
         }
         FrameOutcome::Presented
@@ -440,7 +440,7 @@ impl Surface {
             match Target::new(devices, generation, self.hwnd, self.width, self.height, self.scale) {
                 Ok(target) => self.target = Some(target),
                 Err(err) => {
-                    crate::platform::diag::debug_log(&format!("surface recreate failed: {err}"));
+                    crate::platform::debug_log(&format!("surface recreate failed: {err}"));
                     return false;
                 }
             }
@@ -473,7 +473,7 @@ impl Surface {
                         .ok();
                     }
                     Err(err) => {
-                        crate::platform::diag::debug_log(&format!("GPU recovery failed: {err}"));
+                        crate::platform::debug_log(&format!("GPU recovery failed: {err}"));
                     }
                 }
                 true

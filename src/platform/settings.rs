@@ -23,7 +23,7 @@ use windows::Win32::{
 };
 use windows::core::w;
 
-use super::event::WindowAppearance;
+use super::WindowAppearance;
 
 const DEFAULT_WHEEL_LINES: u32 = 3;
 const DEFAULT_WHEEL_CHARS: u32 = 3;

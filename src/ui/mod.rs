@@ -996,7 +996,7 @@ impl OverlaySurface {
                 Ok(live) => self.live = Some(live),
                 Err(err) => {
                     self.create_failed = true;
-                    crate::platform::diag::debug_log(&format!("overlay create failed: {err}"));
+                    crate::platform::debug_log(&format!("overlay create failed: {err}"));
                     return;
                 }
             }
