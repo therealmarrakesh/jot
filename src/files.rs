@@ -860,7 +860,7 @@ pub(crate) fn spawn_file_io<E: Send + 'static>(
                 multiple: true,
                 directory: Some(default_directory(current.as_deref())),
                 file_types: [TEXT_FILE_TYPE, ALL_FILE_TYPE]
-                    .map(|(name, spec)| (SharedStr::new_static(name), SharedStr::new_static(spec)))
+                    .map(|(name, spec)| (SharedStr::Static(name), SharedStr::Static(spec)))
                     .into(),
             };
             jobs.spawn(
@@ -920,13 +920,13 @@ pub(crate) fn spawn_file_io<E: Send + 'static>(
                 directory: default_directory(current.as_deref()),
                 file_name: Some(suggested),
                 file_types: [TEXT_FILE_TYPE, ALL_FILE_TYPE]
-                    .map(|(name, spec)| (SharedStr::new_static(name), SharedStr::new_static(spec)))
+                    .map(|(name, spec)| (SharedStr::Static(name), SharedStr::Static(spec)))
                     .into(),
                 default_extension: Some(TEXT_EXTENSION.into()),
                 choice: Some(SaveChoice {
                     label: ENCODING_LABEL.into(),
                     items: Encoding::SAVE_ORDER
-                        .map(|encoding| SharedStr::new_static(encoding.label()))
+                        .map(|encoding| SharedStr::Static(encoding.label()))
                         .into(),
                     selected: Encoding::SAVE_ORDER
                         .iter()
@@ -1057,13 +1057,13 @@ fn save_error_prompt(path: &Path, error: &SaveError) -> Prompt {
 }
 
 fn dialog_error_prompt(title: &'static str, message: String) -> Prompt {
-    info_prompt(SharedStr::new_static(title), message.into())
+    info_prompt(SharedStr::Static(title), message.into())
 }
 
 fn already_open_save_prompt(path: &Path) -> Prompt {
     info_prompt(
         format!("Can't save {}", display_name(Some(path))).into(),
-        SharedStr::new_static(
+        SharedStr::Static(
             "This file is already open in another tab. Close that tab before saving over it.",
         ),
     )

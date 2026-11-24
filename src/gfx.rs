@@ -1194,7 +1194,7 @@ pub(crate) struct Font {
 impl Default for Font {
     fn default() -> Self {
         Self {
-            family: SharedStr::new_static("Segoe UI Variable Text"),
+            family: SharedStr::Static("Segoe UI Variable Text"),
             weight: FontWeight::Normal,
         }
     }
@@ -2373,7 +2373,7 @@ mod tests {
     fn directwrite_line_breaks_and_shaping_work() {
         let ts = TextSystem::new().unwrap();
         let style = TextStyle::regular("Segoe UI Variable Text", 14.0);
-        let shaped = ts.shape_row(SharedStr::new_static("Hello 🎉 world"), &style);
+        let shaped = ts.shape_row(SharedStr::Static("Hello 🎉 world"), &style);
         assert!(shaped.width > 0.0);
         let mid_x = shaped.x_for_index(6);
         assert!(mid_x > 0.0 && mid_x < shaped.width);
@@ -2409,8 +2409,8 @@ mod tests {
             ..single
         };
 
-        let a = ts.shape_label(SharedStr::new_static("Ln 1, Col 1"), &style, single);
-        let b = ts.shape_label(SharedStr::new_static("Ln 1, Col 1"), &style, wrapped);
+        let a = ts.shape_label(SharedStr::Static("Ln 1, Col 1"), &style, single);
+        let b = ts.shape_label(SharedStr::Static("Ln 1, Col 1"), &style, wrapped);
         assert_ne!(
             a.layout.as_ref().unwrap().as_raw(),
             b.layout.as_ref().unwrap().as_raw()
@@ -2419,7 +2419,7 @@ mod tests {
 
         ts.finish_frame();
         assert_eq!(ts.label_cache_counts(), (0, 2));
-        let a2 = ts.shape_label(SharedStr::new_static("Ln 1, Col 1"), &style, single);
+        let a2 = ts.shape_label(SharedStr::Static("Ln 1, Col 1"), &style, single);
         assert_eq!(
             a.layout.as_ref().unwrap().as_raw(),
             a2.layout.as_ref().unwrap().as_raw()

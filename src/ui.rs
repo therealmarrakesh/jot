@@ -2797,7 +2797,7 @@ mod tests {
         );
         assert_eq!(
             frame.tooltip_at(point(80., 16.)).map(|(_, tip, _)| tip),
-            Some(SharedStr::new_static("Close tab"))
+            Some(SharedStr::Static("Close tab"))
         );
 
         assert_eq!(frame.hit_chain(point(130., 16.)), vec![TestHit::NewTab]);
@@ -3395,7 +3395,7 @@ mod tests {
                     _ => None,
                 });
                 ts.shape_label(
-                    SharedStr::new_static(labels[ix]),
+                    SharedStr::Static(labels[ix]),
                     style,
                     LabelLayout { line_height: 16.0, wrap_width, line_clamp: None },
                 )

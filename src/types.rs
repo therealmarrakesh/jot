@@ -21,11 +21,6 @@ impl Default for SharedStr {
 
 impl SharedStr {
     #[inline]
-    pub(crate) const fn new_static(s: &'static str) -> Self {
-        Self::Static(s)
-    }
-
-    #[inline]
     pub(crate) fn as_str(&self) -> &str {
         match self {
             Self::Static(s) => s,
@@ -47,13 +42,6 @@ impl PartialOrd for SharedStr {
     #[inline]
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
-    }
-}
-
-impl Ord for SharedStr {
-    #[inline]
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.as_str().cmp(other.as_str())
     }
 }
 
@@ -110,45 +98,6 @@ impl From<String> for SharedStr {
     #[inline]
     fn from(s: String) -> Self {
         Self::Owned(s.into())
-    }
-}
-
-impl From<&String> for SharedStr {
-    #[inline]
-    fn from(s: &String) -> Self {
-        Self::Owned(s.as_str().into())
-    }
-}
-
-impl From<Arc<str>> for SharedStr {
-    #[inline]
-    fn from(s: Arc<str>) -> Self {
-        Self::Owned(s)
-    }
-}
-
-impl From<SharedStr> for String {
-    #[inline]
-    fn from(s: SharedStr) -> Self {
-        s.as_str().to_owned()
-    }
-}
-
-impl PartialEq<str> for SharedStr {
-    fn eq(&self, other: &str) -> bool {
-        self.as_str() == other
-    }
-}
-
-impl PartialEq<&str> for SharedStr {
-    fn eq(&self, other: &&str) -> bool {
-        self.as_str() == *other
-    }
-}
-
-impl PartialEq<String> for SharedStr {
-    fn eq(&self, other: &String) -> bool {
-        self.as_str() == other.as_str()
     }
 }
 

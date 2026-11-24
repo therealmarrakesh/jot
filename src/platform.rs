@@ -212,7 +212,7 @@ impl Default for MainWindowConfig {
     fn default() -> Self {
         Self {
             bounds: None,
-            title: SharedStr::new_static("Jot"),
+            title: SharedStr::Static("Jot"),
             display_id: None,
             focus: true,
             show: true,

@@ -315,12 +315,12 @@ impl Dialogs {
         let (fixed_width, title, body) = match &dialog.kind {
             DialogKind::GoTo => (
                 Some(GO_TO_WIDTH + 2. * PADDING + 2. * BORDER),
-                SharedStr::new_static(GO_TO_TITLE),
+                SharedStr::Static(GO_TO_TITLE),
                 self.render_go_to_body(focus, p, ui),
             ),
             DialogKind::LineOutOfRange => (
                 None,
-                SharedStr::new_static(GO_TO_TITLE),
+                SharedStr::Static(GO_TO_TITLE),
                 message_body(OUT_OF_RANGE_MESSAGE.into()),
             ),
             DialogKind::Prompt(prompt) => (
