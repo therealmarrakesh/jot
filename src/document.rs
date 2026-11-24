@@ -6,8 +6,7 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
 
-use ropey::Rope;
-use ropey::RopeBuilder;
+use ropey::{Rope, RopeBuilder};
 
 use crate::platform::{
     AnsiCodePage, HIDDEN_FILE_ATTRIBUTE, ReplaceFileError, documents_dir, file_hard_link_count,
@@ -163,12 +162,10 @@ impl DocPath {
         Self { path, key }
     }
 
-    #[inline]
     pub(crate) fn as_path(&self) -> &Path {
         &self.path
     }
 
-    #[inline]
     pub(crate) fn key(&self) -> &PathKey {
         &self.key
     }
@@ -204,6 +201,7 @@ struct Decoded {
     format: Format,
 }
 
+#[derive(Default)]
 struct LineNormalizer {
     builder: RopeBuilder,
     line_ending: Option<LineEnding>,
@@ -213,17 +211,6 @@ struct LineNormalizer {
 }
 
 impl LineNormalizer {
-    fn new() -> Self {
-        Self {
-            builder: RopeBuilder::new(),
-            line_ending: None,
-            mixed: false,
-            pending_cr: false,
-            scratch: String::new(),
-        }
-    }
-
-    #[inline]
     fn record_ending(&mut self, ending: LineEnding) {
         match self.line_ending {
             None => self.line_ending = Some(ending),
@@ -307,28 +294,14 @@ impl LineNormalizer {
     }
 }
 
-#[derive(Copy, Clone)]
-enum BomKind {
-    Utf8,
-    Utf16Le,
-    Utf16Be,
-}
-
 fn sniff_bomless_utf16(sample: &[u8]) -> Option<Encoding> {
     if sample.len() < 4 || !sample.len().is_multiple_of(2) {
         return None;
     }
-    let mut even_nul = 0usize;
-    let mut odd_nul = 0usize;
-    let pairs = sample.len() / 2;
-    for pair in sample.as_chunks::<2>().0 {
-        if pair[0] == 0 {
-            even_nul += 1;
-        }
-        if pair[1] == 0 {
-            odd_nul += 1;
-        }
-    }
+    let chunks = sample.as_chunks::<2>().0;
+    let pairs = chunks.len();
+    let even_nul = chunks.iter().filter(|p| p[0] == 0).count();
+    let odd_nul = chunks.iter().filter(|p| p[1] == 0).count();
     if odd_nul >= (pairs * 3) / 4 && even_nul == 0 {
         Some(Encoding::Utf16Le)
     } else if even_nul >= (pairs * 3) / 4 && odd_nul == 0 {
@@ -358,60 +331,48 @@ fn load_reader_with_page<R: Read + Seek>(
         return Err(LoadError::Undecodable);
     }
 
-    let (bom, initial) = if head_slice.starts_with(UTF8_BOM) {
-        (Some(BomKind::Utf8), &head_slice[UTF8_BOM.len()..])
-    } else if head_slice.starts_with(UTF16_LE_BOM) {
-        (Some(BomKind::Utf16Le), &head_slice[UTF16_LE_BOM.len()..])
-    } else if head_slice.starts_with(UTF16_BE_BOM) {
-        (Some(BomKind::Utf16Be), &head_slice[UTF16_BE_BOM.len()..])
-    } else {
-        (None, head_slice)
-    };
+    if let Some(rest) = head_slice.strip_prefix(UTF8_BOM) {
+        return stream_utf8(reader, rest, chunk_size, true);
+    }
+    if let Some(rest) = head_slice.strip_prefix(UTF16_LE_BOM) {
+        return stream_utf16(reader, rest, chunk_size, u16::from_le_bytes, Encoding::Utf16Le);
+    }
+    if let Some(rest) = head_slice.strip_prefix(UTF16_BE_BOM) {
+        return stream_utf16(reader, rest, chunk_size, u16::from_be_bytes, Encoding::Utf16Be);
+    }
 
-    match bom {
-        Some(BomKind::Utf16Le) => {
-            stream_utf16(reader, initial, chunk_size, u16::from_le_bytes, Encoding::Utf16Le)
+    let mut probe = Vec::with_capacity(64);
+    probe.extend_from_slice(head_slice);
+    let mut extra = [0u8; 60];
+    let extra_read = reader.read(&mut extra).map_err(LoadError::Io)?;
+    probe.extend_from_slice(&extra[..extra_read]);
+    if let Some(enc) = sniff_bomless_utf16(&probe) {
+        reader.seek(SeekFrom::Start(0)).map_err(LoadError::Io)?;
+        let unit = if enc == Encoding::Utf16Le {
+            u16::from_le_bytes
+        } else {
+            u16::from_be_bytes
+        };
+        if let Ok(decoded) = stream_utf16(reader, &[], chunk_size, unit, enc) {
+            return Ok(decoded);
         }
-        Some(BomKind::Utf16Be) => {
-            stream_utf16(reader, initial, chunk_size, u16::from_be_bytes, Encoding::Utf16Be)
-        }
-        Some(BomKind::Utf8) => stream_utf8(reader, initial, chunk_size, true),
-        None => {
-            let mut probe = Vec::with_capacity(64);
-            probe.extend_from_slice(initial);
-            let mut extra = [0u8; 60];
-            let extra_read = reader.read(&mut extra).map_err(LoadError::Io)?;
-            probe.extend_from_slice(&extra[..extra_read]);
-            if let Some(enc) = sniff_bomless_utf16(&probe) {
-                reader.seek(SeekFrom::Start(0)).map_err(LoadError::Io)?;
-                let unit = if enc == Encoding::Utf16Le {
-                    u16::from_le_bytes
-                } else {
-                    u16::from_be_bytes
-                };
-                if let Ok(decoded) = stream_utf16(reader, &[], chunk_size, unit, enc) {
-                    return Ok(decoded);
-                }
-                reader.seek(SeekFrom::Start(0)).map_err(LoadError::Io)?;
-                probe.clear();
-            }
+        reader.seek(SeekFrom::Start(0)).map_err(LoadError::Io)?;
+        probe.clear();
+    }
 
-            match stream_utf8(reader, &probe, chunk_size, false) {
-                Ok(decoded) => Ok(decoded),
-                Err(LoadError::Undecodable) => {
-                    reader.seek(SeekFrom::Start(0)).map_err(LoadError::Io)?;
-                    if page.is_utf8() {
-                        // ACP 65001 failed strict UTF-8; fall back to CP 1252 and flag lossy_decode so save warns.
-                        let mut decoded = stream_ansi(reader, chunk_size, AnsiCodePage::CP_1252)?;
-                        decoded.format.lossy_decode = true;
-                        Ok(decoded)
-                    } else {
-                        stream_ansi(reader, chunk_size, page)
-                    }
-                }
-                Err(error) => Err(error),
+    match stream_utf8(reader, &probe, chunk_size, false) {
+        Err(LoadError::Undecodable) => {
+            reader.seek(SeekFrom::Start(0)).map_err(LoadError::Io)?;
+            if page.is_utf8() {
+                // ACP 65001 failed strict UTF-8; fall back to CP 1252 and flag lossy_decode so save warns.
+                let mut decoded = stream_ansi(reader, chunk_size, AnsiCodePage::CP_1252)?;
+                decoded.format.lossy_decode = true;
+                Ok(decoded)
+            } else {
+                stream_ansi(reader, chunk_size, page)
             }
         }
+        result => result,
     }
 }
 
@@ -422,7 +383,7 @@ fn stream_decode<R: Read>(
     encoding: Encoding,
     mut step: impl FnMut(&[u8], bool, &mut LineNormalizer) -> Result<usize, LoadError>,
 ) -> Result<Decoded, LoadError> {
-    let mut normalizer = LineNormalizer::new();
+    let mut normalizer = LineNormalizer::default();
     let mut buf = vec![0u8; chunk_size.max(initial.len()) + 4];
     let mut carry = initial.len();
     buf[..carry].copy_from_slice(initial);
@@ -495,11 +456,7 @@ fn stream_utf8<R: Read>(
     chunk_size: usize,
     has_bom: bool,
 ) -> Result<Decoded, LoadError> {
-    let encoding = if has_bom {
-        Encoding::Utf8Bom
-    } else {
-        Encoding::Utf8
-    };
+    let encoding = if has_bom { Encoding::Utf8Bom } else { Encoding::Utf8 };
     stream_decode(reader, initial, chunk_size, encoding, |bytes, eof, norm| {
         match std::str::from_utf8(bytes) {
             Ok(valid) => {
@@ -623,21 +580,6 @@ fn stream_encode_with_page<W: Write>(
     out: &mut W,
 ) -> io::Result<()> {
     match format.encoding {
-        Encoding::Utf8 => {
-            for chunk in rope.chunks() {
-                write_with_line_ending(chunk, format.line_ending, |part| {
-                    out.write_all(part.as_bytes())
-                })?;
-            }
-        }
-        Encoding::Utf8Bom => {
-            out.write_all(UTF8_BOM)?;
-            for chunk in rope.chunks() {
-                write_with_line_ending(chunk, format.line_ending, |part| {
-                    out.write_all(part.as_bytes())
-                })?;
-            }
-        }
         Encoding::Utf16Le => stream_encode_utf16(
             rope,
             format.line_ending,
@@ -652,7 +594,19 @@ fn stream_encode_with_page<W: Write>(
             u16::to_be_bytes,
             out,
         )?,
-        Encoding::Ansi => stream_encode_ansi(rope, format.line_ending, page, out)?,
+        Encoding::Ansi if !page.is_utf8() => {
+            stream_encode_ansi(rope, format.line_ending, page, out)?;
+        }
+        encoding => {
+            if encoding == Encoding::Utf8Bom {
+                out.write_all(UTF8_BOM)?;
+            }
+            for chunk in rope.chunks() {
+                write_with_line_ending(chunk, format.line_ending, |part| {
+                    out.write_all(part.as_bytes())
+                })?;
+            }
+        }
     }
     Ok(())
 }
@@ -690,12 +644,6 @@ fn stream_encode_ansi<W: Write>(
     page: AnsiCodePage,
     out: &mut W,
 ) -> io::Result<()> {
-    if page.is_utf8() {
-        for chunk in rope.chunks() {
-            write_with_line_ending(chunk, line_ending, |part| out.write_all(part.as_bytes()))?;
-        }
-        return Ok(());
-    }
     let mut wide = Vec::with_capacity(ANSI_WIDE_CHUNK);
     let mut bytes = Vec::new();
     for chunk in rope.chunks() {
@@ -885,16 +833,7 @@ fn sibling(path: &Path, attempt: usize, suffix: &str) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use ropey::RopeBuilder;
-
     use super::*;
-    use super::BACKUP_SUFFIX;
-    use super::Decoded;
-    use super::is_lossy_with_page;
-    use super::normalize_path_key;
-    use super::sibling;
-    use super::stream_encode;
-    use super::stream_encode_with_page;
 
     fn load_bytes(bytes: &[u8], chunk_size: usize) -> Result<Decoded, LoadError> {
         let mut cursor = io::Cursor::new(bytes);
