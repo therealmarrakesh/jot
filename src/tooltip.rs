@@ -120,6 +120,7 @@ struct Shown {
     owner: ScreenRect,
 }
 
+#[derive(Default)]
 pub(crate) struct Tooltips {
     overlay: OverlaySurface,
     fade: AnimTracks<()>,
@@ -131,29 +132,10 @@ pub(crate) struct Tooltips {
     closed_at: Option<Instant>,
     control_only: bool,
     opening: Option<(TooltipTarget, TimerHandle)>,
-    hover_time: Duration,
+    pub(crate) hover_time: Duration,
 }
 
 impl Tooltips {
-    pub(crate) fn new(hover_time: Duration) -> Self {
-        Self {
-            overlay: OverlaySurface::default(),
-            fade: AnimTracks::default(),
-            text: SharedStr::default(),
-            dirty: false,
-            state: State::default(),
-            pressed: false,
-            shown: None,
-            closed_at: None,
-            control_only: false,
-            opening: None,
-            hover_time,
-        }
-    }
-
-    pub(crate) fn set_hover_time(&mut self, hover_time: Duration) {
-        self.hover_time = hover_time;
-    }
     pub(crate) fn on_mouse_down(&mut self, window: WindowId, jobs: &Jobs<AppEvent>) {
         self.pressed = true;
         self.apply_report(Report::Suppress(window), jobs);
@@ -297,7 +279,8 @@ impl Tooltips {
                 let reshow = self
                     .closed_at
                     .is_some_and(|closed| closed.elapsed() < RESHOW_WINDOW);
-                let delay = show_delay(self.hover_time, reshow);
+                let factor = if reshow { RESHOW_DELAY_FACTOR } else { SHOW_DELAY_FACTOR };
+                let delay = self.hover_time.mul_f32(factor);
                 let timer = jobs.after(
                     delay,
                     AppEvent::TooltipShowTimer {
@@ -396,20 +379,9 @@ impl Tooltips {
         if !visible && !animating && !needs_retry {
             self.overlay.hide();
         }
-        if animating || needs_retry {
-            self.dirty = true;
-        }
-        animating || needs_retry
+        self.dirty = animating || needs_retry;
+        self.dirty
     }
-}
-
-fn show_delay(hover_time: Duration, reshow: bool) -> Duration {
-    let factor = if reshow {
-        RESHOW_DELAY_FACTOR
-    } else {
-        SHOW_DELAY_FACTOR
-    };
-    hover_time.mul_f32(factor)
 }
 
 fn tooltip_card(p: Palette, content: SharedStr) -> Node<(), ()> {
@@ -537,11 +509,8 @@ impl KeyTips {
             return false;
         }
         let tips = &self.tips;
-        let needs_retry = self.overlay.paint_scene(ts, |_| render_tips(tips, p));
-        if needs_retry {
-            self.dirty = true;
-        }
-        needs_retry
+        self.dirty = self.overlay.paint_scene(ts, |_| render_tips(tips, p));
+        self.dirty
     }
 }
 

@@ -133,7 +133,8 @@ impl App {
         launch: WindowLaunch,
     ) -> Self {
         let shell = Shell::new(&platform, gpu, text_system);
-        let tooltips = Tooltips::new(shell.settings.mouse_hover_time);
+        let mut tooltips = Tooltips::default();
+        tooltips.hover_time = shell.settings.mouse_hover_time;
         Self {
             windows: Windows::new(launch),
             tab_drag: None,
@@ -478,7 +479,7 @@ impl PlatformHandler for App {
             }
             PlatformEvent::SettingsChanged(settings) => {
                 self.shell.apply_settings(settings);
-                self.tooltips.set_hover_time(settings.mouse_hover_time);
+                self.tooltips.hover_time = settings.mouse_hover_time;
                 self.windows.apply_theme(self.shell.appearance());
             }
             PlatformEvent::MouseMove {
