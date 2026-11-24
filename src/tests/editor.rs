@@ -154,7 +154,7 @@ fn editor_invariants_grapheme_ime_word_anchor_up_collapse_and_insert_keys() {
 
 #[test]
 fn wrap_handles_tabs_emoji_combining_marks_and_u2028_single_line() {
-    use crate::editor::wrap::WrapIndex;
+    use crate::editor::WrapIndex;
     use crate::gfx::TextSystem;
 
     let ts = TextSystem::new().unwrap();
