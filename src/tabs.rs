@@ -76,7 +76,7 @@ pub(crate) struct TabSet {
     ghosts: Vec<Ghost>,
     drag: Option<Drag>,
     lifted: Option<TabId>,
-    repeat: Option<TimerHandle>,
+    pub(crate) repeat: Option<TimerHandle>,
 }
 
 impl Index<usize> for TabSet {
@@ -109,7 +109,7 @@ impl TabSet {
             repeat: None,
         };
         let slot = set.next_slot();
-        set.tabs.push(Tab::new(initial, slot));
+        set.tabs.push(Tab { data: initial, slot });
         set
     }
 
@@ -204,10 +204,6 @@ impl TabSet {
         self.snap_scroll = true;
     }
 
-    fn measure(&mut self) {
-        self.measure_for(self.tabs.len());
-    }
-
     fn measure_for(&mut self, count: usize) {
         let alone = count <= 1;
         let count = count.max(1) as f32;
@@ -228,7 +224,7 @@ impl TabSet {
     }
 
     fn layout(&mut self) {
-        self.measure();
+        self.measure_for(self.tabs.len());
         self.extent = self.tabs.len() as f32 * self.width;
         self.scroll_to(self.scroll);
     }
@@ -327,14 +323,14 @@ impl TabSet {
 
     pub(crate) fn push(&mut self, data: TabData) -> usize {
         let slot = self.next_slot();
-        self.tabs.push(Tab::new(data, slot));
+        self.tabs.push(Tab { data, slot });
         self.layout();
         self.tabs.len() - 1
     }
 
     pub(crate) fn replace(&mut self, ix: usize, data: TabData) {
         let slot = self.tabs[ix].slot;
-        let replaced = std::mem::replace(&mut self.tabs[ix], Tab::new(data, slot));
+        let replaced = std::mem::replace(&mut self.tabs[ix], Tab { data, slot });
         self.depart(replaced.data.id);
     }
 
@@ -405,7 +401,7 @@ impl TabSet {
         });
         self.lifted = Some(id);
         self.snap();
-        self.tabs.insert(ix, Tab::new(data, slot));
+        self.tabs.insert(ix, Tab { data, slot });
         self.layout();
         ix
     }
@@ -413,7 +409,7 @@ impl TabSet {
     pub(crate) fn restore(&mut self, data: TabData, ix: usize) -> usize {
         let slot = self.next_slot();
         let ix = ix.min(self.tabs.len());
-        self.tabs.insert(ix, Tab::new(data, slot));
+        self.tabs.insert(ix, Tab { data, slot });
         self.layout();
         ix
     }
@@ -484,14 +480,6 @@ impl TabSet {
         true
     }
 
-    pub(crate) fn set_scroll_repeat(&mut self, handle: TimerHandle) {
-        self.repeat = Some(handle);
-    }
-
-    pub(crate) fn stop_scroll_repeat(&mut self) {
-        self.repeat = None;
-    }
-
     #[inline]
     pub(crate) fn overflow(&self) -> bool {
         self.overflow
@@ -540,11 +528,7 @@ impl TabData {
 
     pub(crate) fn is_dirty(&self) -> bool {
         let m = self.editor.model();
-        if self.doc_path.is_some() {
-            !m.is_clean()
-        } else {
-            !m.is_clean() && m.text().len() > 0
-        }
+        !m.is_clean() && (self.doc_path.is_some() || m.text().len() > 0)
     }
 
     pub(crate) fn create(
@@ -576,12 +560,6 @@ impl TabData {
 pub(crate) struct Tab {
     pub(crate) data: TabData,
     pub(crate) slot: SlotKey,
-}
-
-impl Tab {
-    pub(crate) fn new(data: TabData, slot: SlotKey) -> Self {
-        Self { data, slot }
-    }
 }
 
 const TAB_LABEL_INSET: f32 = 8.;
@@ -761,24 +739,14 @@ impl TabSet {
         } else {
             target > 0.1
         };
-        let (hit, tip, glyph) = if forward {
-            (
-                HitId::Tab(TabHit::ScrollRight),
-                "Scroll tab list forward",
-                CARET_RIGHT,
-            )
+        let (hit, tip, glyph, left, right) = if forward {
+            let tip = "Scroll tab list forward";
+            (TabHit::ScrollRight, tip, CARET_RIGHT, SCROLL_INNER_PAD, SCROLL_OUTER_PAD)
         } else {
-            (
-                HitId::Tab(TabHit::ScrollLeft),
-                "Scroll tab list backward",
-                CARET_LEFT,
-            )
+            let tip = "Scroll tab list backward";
+            (TabHit::ScrollLeft, tip, CARET_LEFT, SCROLL_OUTER_PAD, SCROLL_INNER_PAD)
         };
-        let (left, right) = if forward {
-            (SCROLL_INNER_PAD, SCROLL_OUTER_PAD)
-        } else {
-            (SCROLL_OUTER_PAD, SCROLL_INNER_PAD)
-        };
+        let hit = HitId::Tab(hit);
         let button = icon_button(
             p,
             hit,

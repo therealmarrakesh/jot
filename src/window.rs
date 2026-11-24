@@ -489,7 +489,7 @@ impl MainWindow {
             }
             WindowTimer::TabScrollRepeat(step) => {
                 if !self.scroll_tabs(step) {
-                    self.tabs.stop_scroll_repeat();
+                    self.tabs.repeat = None;
                 }
             }
             WindowTimer::Submenu(target) => {
@@ -1029,7 +1029,7 @@ impl MainWindow {
 
         let top = self.ui.top_hit();
         if !matches!(top, Some(HitId::Tab(TabHit::ScrollLeft | TabHit::ScrollRight))) {
-            self.tabs.stop_scroll_repeat();
+            self.tabs.repeat = None;
         }
         let mode = self.mode();
         if mode != InputMode::Dialog {
@@ -1090,7 +1090,7 @@ impl MainWindow {
 
     pub(crate) fn on_mouse_leave(&mut self) {
         self.dirty |= self.ui.on_mouse_leave();
-        self.tabs.stop_scroll_repeat();
+        self.tabs.repeat = None;
         if self.tabs.is_frozen() {
             self.dirty |= self.tabs.thaw_if_frozen();
         }
@@ -1098,7 +1098,7 @@ impl MainWindow {
 
     pub(crate) fn on_capture_lost(&mut self) {
         self.middle_pressed_tab = None;
-        self.tabs.stop_scroll_repeat();
+        self.tabs.repeat = None;
         self.dirty |= self.ui.on_capture_lost();
     }
 
@@ -1176,7 +1176,7 @@ impl MainWindow {
                 }
                 Some(HitId::Tab(TabHit::ScrollLeft)) => {
                     if self.scroll_tabs(-SCROLL_STEP) {
-                        self.tabs.set_scroll_repeat(cx.timers(self.id()).every(
+                        self.tabs.repeat = Some(cx.timers(self.id()).every(
                             SCROLL_REPEAT_DELAY,
                             SCROLL_REPEAT_INTERVAL,
                             WindowTimer::TabScrollRepeat(-SCROLL_STEP),
@@ -1186,7 +1186,7 @@ impl MainWindow {
                 }
                 Some(HitId::Tab(TabHit::ScrollRight)) => {
                     if self.scroll_tabs(SCROLL_STEP) {
-                        self.tabs.set_scroll_repeat(cx.timers(self.id()).every(
+                        self.tabs.repeat = Some(cx.timers(self.id()).every(
                             SCROLL_REPEAT_DELAY,
                             SCROLL_REPEAT_INTERVAL,
                             WindowTimer::TabScrollRepeat(SCROLL_STEP),
@@ -1250,7 +1250,7 @@ impl MainWindow {
             None
         };
         let activated = clicked.or(menu_release);
-        self.tabs.stop_scroll_repeat();
+        self.tabs.repeat = None;
 
         if button == MouseButton::Middle {
             let pressed = self.middle_pressed_tab.take();
