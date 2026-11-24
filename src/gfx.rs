@@ -63,7 +63,9 @@ use windows::Win32::{
 use windows::core::{BOOL, HRESULT, HSTRING, Interface, implement};
 use windows_numerics::{Matrix3x2, Vector2};
 
-use crate::geom::{Corners, Edges, Point, Rect, Rgba, Shadows, Size, point, size};
+use crate::geom::{
+    Corners, Edges, Point, Rect, Rgba, Shadows, Size, black, point, size, transparent_black, white,
+};
 use crate::platform::NativeWindow;
 use crate::types::{Error, Result, SharedStr};
 
@@ -201,9 +203,9 @@ impl Direct2DDevices {
             unsafe { CreateDXGIFactory2(DXGI_CREATE_FACTORY_FLAGS(0))? };
         let feature_levels = [D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0];
         let mut d3d_device: Option<ID3D11Device> = None;
-        let mut last_err = None;
+        let mut created = Ok(());
         for driver in [D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP] {
-            match unsafe {
+            created = unsafe {
                 D3D11CreateDevice(
                     None,
                     driver,
@@ -215,17 +217,12 @@ impl Direct2DDevices {
                     None,
                     None,
                 )
-            } {
-                Ok(()) => {
-                    last_err = None;
-                    break;
-                }
-                Err(err) => last_err = Some(err),
+            };
+            if created.is_ok() {
+                break;
             }
         }
-        if let Some(err) = last_err {
-            return Err(err.into());
-        }
+        created?;
         let d3d_device =
             d3d_device.ok_or_else(|| Error::new("D3D11CreateDevice returned null device"))?;
         let dxgi_device: IDXGIDevice = d3d_device.cast()?;
@@ -399,7 +396,7 @@ impl Target {
             self.canvas.context.SetTarget(None);
         }
         self.target_bitmap = None;
-        if let Err(err) = unsafe {
+        let resized = unsafe {
             self.swap_chain.ResizeBuffers(
                 SWAPCHAIN_BUFFERS,
                 width,
@@ -407,14 +404,8 @@ impl Target {
                 DXGI_FORMAT_B8G8R8A8_UNORM,
                 DXGI_SWAP_CHAIN_FLAG(0),
             )
-        } {
-            let lost = is_device_lost_hr(err.code());
-            if lost {
-                crate::platform::debug_log(&format!("surface resize lost device: {err}"));
-            }
-            return Err(lost);
-        }
-        if let Err(err) = self.attach_backbuffer(scale) {
+        };
+        if let Err(err) = resized.map_err(Error::from).and_then(|()| self.attach_backbuffer(scale)) {
             let lost = err.hresult().is_some_and(|hr| is_device_lost_hr(HRESULT(hr)));
             if lost {
                 crate::platform::debug_log(&format!("surface resize lost device: {err}"));
@@ -458,11 +449,8 @@ impl Target {
             return FrameOutcome::Failed;
         }
         let hr = unsafe { self.swap_chain.Present(0, DXGI_PRESENT(0)) };
-        let removed = if hr.is_err() {
-            unsafe { self.canvas.devices.d3d_device.GetDeviceRemovedReason() }.is_err()
-        } else {
-            false
-        };
+        let removed =
+            hr.is_err() && unsafe { self.canvas.devices.d3d_device.GetDeviceRemovedReason() }.is_err();
         if is_device_lost_hr(hr) || removed {
             return FrameOutcome::DeviceLost;
         }
@@ -491,7 +479,7 @@ impl Surface {
         let width = pw.max(1);
         let height = ph.max(1);
         let scale_factor = window.scale_factor();
-        let hwnd = HWND(window.hwnd().raw_isize() as *mut _);
+        let hwnd = window.hwnd().raw();
         let (generation, devices) = gpu.snapshot();
         let target = Target::new(devices, generation, hwnd, width, height, scale_factor)?;
         Ok(Self {
@@ -631,7 +619,7 @@ impl ShadowPipeline {
         let context =
             unsafe { d2d_device.CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE) }.ok()?;
         let white_brush = unsafe {
-            context.CreateSolidColorBrush(&to_d2d_color(Rgba::new(1.0, 1.0, 1.0, 1.0)), None)
+            context.CreateSolidColorBrush(&to_d2d_color(white()), None)
         }
         .ok()?;
         let effect = unsafe { context.CreateEffect(&CLSID_D2D1Shadow) }.ok()?;
@@ -688,7 +676,7 @@ impl Canvas {
             context.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
             context.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
             let solid_brush =
-                context.CreateSolidColorBrush(&to_d2d_color(Rgba::new(0.0, 0.0, 0.0, 1.0)), None)?;
+                context.CreateSolidColorBrush(&to_d2d_color(black()), None)?;
             (context, solid_brush)
         };
         let shadow_pipeline = ShadowPipeline::new(&devices.d2d_device);
@@ -1023,12 +1011,7 @@ impl Canvas {
             height_px,
             radius_tenths: (radius * 10.0).round() as u32,
             blur_tenths: (blur_radius * 10.0).round() as u32,
-            color_bits: [
-                color.r.to_bits(),
-                color.g.to_bits(),
-                color.b.to_bits(),
-                color.a.to_bits(),
-            ],
+            color_bits: [color.r, color.g, color.b, color.a].map(f32::to_bits),
         };
 
         if let Some(entry) = self.shadow_cache.get(&key) {
@@ -1073,9 +1056,7 @@ impl Canvas {
             pipeline.context.SetDpi(dpi, dpi);
             pipeline.context.SetTarget(&shape_bmp);
             pipeline.context.BeginDraw();
-            pipeline
-                .context
-                .Clear(Some(&to_d2d_color(Rgba::new(0.0, 0.0, 0.0, 0.0))));
+            pipeline.context.Clear(Some(&to_d2d_color(transparent_black())));
             let rr = D2D1_ROUNDED_RECT {
                 rect: D2D_RECT_F {
                     left: pad_dip,
@@ -1092,11 +1073,7 @@ impl Canvas {
             pipeline.context.EndDraw(None, None).ok()?;
         }
 
-        let mut color_bytes = [0u8; 16];
-        color_bytes[0..4].copy_from_slice(&color.r.to_le_bytes());
-        color_bytes[4..8].copy_from_slice(&color.g.to_le_bytes());
-        color_bytes[8..12].copy_from_slice(&color.b.to_le_bytes());
-        color_bytes[12..16].copy_from_slice(&color.a.to_le_bytes());
+        let color_bytes = [color.r, color.g, color.b, color.a].map(f32::to_le_bytes);
         unsafe {
             pipeline.effect.SetInput(0, &shape_bmp, true);
             let _ = pipeline.effect.SetValue(
@@ -1107,13 +1084,11 @@ impl Canvas {
             let _ = pipeline.effect.SetValue(
                 D2D1_SHADOW_PROP_COLOR.0 as u32,
                 D2D1_PROPERTY_TYPE_UNKNOWN,
-                &color_bytes,
+                color_bytes.as_flattened(),
             );
             pipeline.context.SetTarget(&blurred_bmp);
             pipeline.context.BeginDraw();
-            pipeline
-                .context
-                .Clear(Some(&to_d2d_color(Rgba::new(0.0, 0.0, 0.0, 0.0))));
+            pipeline.context.Clear(Some(&to_d2d_color(transparent_black())));
             let output = pipeline.effect.GetOutput().ok()?;
             pipeline.context.DrawImage(
                 &output,
@@ -1200,13 +1175,6 @@ impl Default for Font {
     }
 }
 
-pub(crate) fn font(family: impl Into<SharedStr>) -> Font {
-    Font {
-        family: family.into(),
-        weight: FontWeight::Normal,
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct TextStyle {
     pub(crate) font: Font,
@@ -1238,7 +1206,7 @@ impl TextStyle {
     }
 
     pub(crate) fn regular(family: impl Into<SharedStr>, size: f32) -> Self {
-        Self::new(font(family), size)
+        Self::new(Font { family: family.into(), weight: FontWeight::Normal }, size)
     }
 
     #[inline]
@@ -1489,7 +1457,7 @@ impl FontFace {
     }
 
     pub(crate) fn max_printable_ascii(&self) -> f32 {
-        self.with_advances(|adv| adv.max_printable_ascii())
+        self.with_advances(|adv| adv.max_ascii)
     }
 
     pub(crate) fn hanging_indent(&self, line: &str, max_chars: u32, max_width: f32) -> f32 {
@@ -1677,14 +1645,7 @@ impl TextSystem {
             };
         }
 
-        let width = layout.as_ref().map_or(0.0, |l| {
-            let mut metrics = DWRITE_TEXT_METRICS::default();
-            if unsafe { l.GetMetrics(&mut metrics) }.is_ok() {
-                metrics.widthIncludingTrailingWhitespace
-            } else {
-                0.0
-            }
-        });
+        let width = layout.as_ref().map_or(0.0, layout_width);
 
         let shaped = ShapedRow {
             len: text.len(),
@@ -1800,55 +1761,43 @@ fn create_font_face(
     style: &TextStyle,
 ) -> FontFace {
     let safe_size = style.size();
-    let family = HSTRING::from(style.font.family.as_str());
     let locale = HSTRING::from("");
-    let dw_weight = style.font.weight.to_dwrite();
-    let format = unsafe {
-        factory
-            .CreateTextFormat(
-                &family,
-                None,
-                dw_weight,
-                DWRITE_FONT_STYLE_NORMAL,
-                DWRITE_FONT_STRETCH_NORMAL,
-                safe_size,
-                &locale,
-            )
-            .or_else(|_| {
-                let fallback = HSTRING::from("Segoe UI");
-                factory.CreateTextFormat(
-                    &fallback,
+    let candidates = [
+        (style.font.family.as_str(), style.font.weight.to_dwrite()),
+        ("Segoe UI", DWRITE_FONT_WEIGHT(400)),
+    ];
+    let format = candidates
+        .into_iter()
+        .find_map(|(family, weight)| unsafe {
+            factory
+                .CreateTextFormat(
+                    &HSTRING::from(family),
                     None,
-                    DWRITE_FONT_WEIGHT(400),
+                    weight,
                     DWRITE_FONT_STYLE_NORMAL,
                     DWRITE_FONT_STRETCH_NORMAL,
                     safe_size,
                     &locale,
                 )
-            })
-    }
-    .expect("CreateTextFormat fallback failed");
+                .ok()
+        })
+        .expect("CreateTextFormat fallback failed");
     let _ = unsafe { format.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP) };
     let space_width = measure_utf16(factory, &[b' ' as u16], &format);
     if space_width > 0.0 {
         let _ = unsafe { format.SetIncrementalTabStop(space_width * TAB_STOP_COLUMNS) };
     }
     let sample = [b'H' as u16, b'g' as u16];
-    let (ascent, descent) =
-        unsafe { factory.CreateTextLayout(&sample, &format, f32::MAX, f32::MAX) }
-            .ok()
-            .map_or((safe_size * 0.8, safe_size * 0.2), |l| {
-                let mut line_metrics = [DWRITE_LINE_METRICS::default(); 2];
-                let mut count = 0u32;
-                if unsafe { l.GetLineMetrics(Some(&mut line_metrics), &mut count) }.is_ok()
-                    && count > 0
-                {
-                    let lm = line_metrics[0];
-                    (lm.baseline, (lm.height - lm.baseline).max(0.0))
-                } else {
-                    (safe_size * 0.8, safe_size * 0.2)
-                }
-            });
+    let (ascent, descent) = unsafe { factory.CreateTextLayout(&sample, &format, f32::MAX, f32::MAX) }
+        .ok()
+        .and_then(|l| {
+            let mut line_metrics = [DWRITE_LINE_METRICS::default(); 2];
+            let mut count = 0u32;
+            let ok = unsafe { l.GetLineMetrics(Some(&mut line_metrics), &mut count) }.is_ok();
+            let lm = line_metrics[0];
+            (ok && count > 0).then(|| (lm.baseline, (lm.height - lm.baseline).max(0.0)))
+        })
+        .unwrap_or((safe_size * 0.8, safe_size * 0.2));
     FontFace {
         factory: factory.clone(),
         analyzer: analyzer.clone(),
@@ -1868,10 +1817,11 @@ fn measure_utf16(
     if utf16.is_empty() {
         return 0.0;
     }
-    let Ok(layout) = (unsafe { factory.CreateTextLayout(utf16, format, f32::MAX, f32::MAX) })
-    else {
-        return 0.0;
-    };
+    unsafe { factory.CreateTextLayout(utf16, format, f32::MAX, f32::MAX) }
+        .map_or(0.0, |layout| layout_width(&layout))
+}
+
+fn layout_width(layout: &IDWriteTextLayout) -> f32 {
     let mut metrics = DWRITE_TEXT_METRICS::default();
     if unsafe { layout.GetMetrics(&mut metrics) }.is_ok() {
         metrics.widthIncludingTrailingWhitespace
@@ -1962,14 +1912,9 @@ impl AdvanceTable {
     fn new(factory: IDWriteFactory5, format: IDWriteTextFormat) -> Self {
         let mut ascii = [0.0f32; 95];
         let mut max_ascii = 0.0f32;
-        let mut buf = [0u16; 1];
         for (i, byte) in (0x20u8..=0x7Eu8).enumerate() {
-            buf[0] = u16::from(byte);
-            let w = measure_utf16(&factory, &buf, &format);
-            ascii[i] = w;
-            if w > max_ascii {
-                max_ascii = w;
-            }
+            ascii[i] = measure_utf16(&factory, &[u16::from(byte)], &format);
+            max_ascii = max_ascii.max(ascii[i]);
         }
         Self {
             factory,
@@ -1981,19 +1926,9 @@ impl AdvanceTable {
     }
 
     #[inline]
-    fn max_printable_ascii(&self) -> f32 {
-        self.max_ascii
-    }
-
-    #[inline]
-    fn tab_stop_width(&self) -> f32 {
-        (self.ascii[0] * TAB_STOP_COLUMNS).max(1.0)
-    }
-
-    #[inline]
     fn advance(&mut self, ch: char, current_x: f32) -> f32 {
         if ch == '\t' {
-            let stop = self.tab_stop_width();
+            let stop = (self.ascii[0] * TAB_STOP_COLUMNS).max(1.0);
             let next = ((current_x / stop).floor() + 1.0) * stop;
             return (next - current_x).max(self.ascii[0].max(1.0));
         }
@@ -2340,14 +2275,8 @@ fn analyze_break_opportunities(
         if next_byte < text.len() && next_u16 < bp.len() {
             let after = (bp[last_u16]._bitfield >> 2) & 0b11;
             let before = bp[next_u16]._bitfield & 0b11;
-            let allowed = if after == must_break || before == must_break {
-                true
-            } else if after == may_not_break || before == may_not_break {
-                false
-            } else {
-                after == can_break || before == can_break
-            };
-            if allowed {
+            let any = |cond| after == cond || before == cond;
+            if any(must_break) || (!any(may_not_break) && any(can_break)) {
                 out.push(next_byte);
             }
         }
@@ -2395,8 +2324,6 @@ mod tests {
 
     #[test]
     fn wrapped_text_two_frame_cache_promotes_and_evicts() {
-        use windows::core::Interface;
-
         let ts = TextSystem::new().unwrap();
         let style = TextStyle::regular("Segoe UI Variable Small", 12.0);
         let single = LabelLayout {

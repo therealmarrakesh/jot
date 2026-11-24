@@ -2955,10 +2955,6 @@ impl WindowHandle {
         HWND(self.0 as *mut _)
     }
 
-    pub(crate) fn raw_isize(self) -> isize {
-        self.0
-    }
-
     pub(crate) fn is_null(self) -> bool {
         self.0 == 0
     }
