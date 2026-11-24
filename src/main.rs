@@ -22,7 +22,7 @@ mod window;
 mod tests;
 
 use std::cell::RefCell;
-use std::ops::{Index, IndexMut};
+use std::ops::{Deref, DerefMut};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -85,15 +85,8 @@ fn main() {
             return;
         }
     };
-    let gpu = match Gpu::new() {
-        Ok(g) => g,
-        Err(err) => {
-            show_error_dialog(APP_NAME, &format!("Jot couldn't start.\n\n{err}"));
-            return;
-        }
-    };
-    let text_system = match TextSystem::new() {
-        Ok(ts) => ts,
+    let (gpu, text_system) = match Gpu::new().and_then(|g| Ok((g, TextSystem::new()?))) {
+        Ok(devices) => devices,
         Err(err) => {
             show_error_dialog(APP_NAME, &format!("Jot couldn't start.\n\n{err}"));
             return;
@@ -256,9 +249,9 @@ impl App {
 
     fn end_tab_drag(&mut self) {
         if let Some(drag) = self.tab_drag.take() {
-            self.windows.mark_dirty(drag.owner());
-            if drag.source() != drag.owner() {
-                self.windows.mark_dirty(drag.source());
+            self.windows.mark_dirty(drag.owner);
+            if drag.source != drag.owner {
+                self.windows.mark_dirty(drag.source);
             }
         }
     }
@@ -304,9 +297,9 @@ impl App {
         };
         let mut closed = Vec::new();
         drag.cancel(&mut self.windows, &self.shell, &mut closed);
-        self.windows.mark_dirty(drag.owner());
-        if drag.source() != drag.owner() {
-            self.windows.mark_dirty(drag.source());
+        self.windows.mark_dirty(drag.owner);
+        if drag.source != drag.owner {
+            self.windows.mark_dirty(drag.source);
         }
         self.notify_closed(closed);
     }
@@ -316,7 +309,7 @@ impl App {
         initial: Option<TabData>,
         window_size: Option<Size>,
     ) -> std::result::Result<(WindowId, WindowHandle), Box<OpenWindowError>> {
-        self.windows.open(initial, window_size, &self.shell)
+        self.windows.open_at(initial, window_size, None, &self.shell)
     }
 
     pub(crate) fn request_quit(&mut self) {
@@ -749,27 +742,6 @@ impl Windows {
     }
 
     #[inline]
-    pub(crate) fn len(&self) -> usize {
-        self.list.len()
-    }
-
-    #[inline]
-    pub(crate) fn is_empty(&self) -> bool {
-        self.list.is_empty()
-    }
-
-    #[inline]
-    pub(crate) fn iter(&self) -> std::slice::Iter<'_, MainWindow> {
-        self.list.iter()
-    }
-
-    #[cfg(test)]
-    #[inline]
-    pub(crate) fn iter_mut(&mut self) -> std::slice::IterMut<'_, MainWindow> {
-        self.list.iter_mut()
-    }
-
-    #[inline]
     pub(crate) fn set_active(&mut self, id: WindowId) {
         self.active = Some(id);
     }
@@ -885,19 +857,11 @@ impl Windows {
         window_size: Option<Size>,
         target_point: Option<ScreenPoint>,
     ) -> MainWindowConfig {
-        let display = if let Some(pt) = target_point {
-            WindowsDisplay::from_point(pt).or_else(WindowsDisplay::primary)
-        } else if let Some(origin) = self
-            .active
-            .and_then(|id| self.get(id))
-            .map(|w| w.hwnd().client_origin())
-        {
-            WindowsDisplay::from_point(origin).or_else(WindowsDisplay::primary)
-        } else if self.launch.use_cursor_display {
-            WindowsDisplay::from_point(cursor_screen_pos()).or_else(WindowsDisplay::primary)
-        } else {
-            WindowsDisplay::primary()
-        };
+        let display = target_point
+            .or_else(|| self.active.and_then(|id| self.get(id)).map(|w| w.hwnd().client_origin()))
+            .or_else(|| self.launch.use_cursor_display.then(cursor_screen_pos))
+            .and_then(WindowsDisplay::from_point)
+            .or_else(WindowsDisplay::primary);
         let visible = display.map(|d| d.visible_bounds());
         let screen = visible.map_or(size(WINDOW_WIDTH, WINDOW_HEIGHT), |v| v.size);
         let target_size = window_size.unwrap_or_else(|| {
@@ -931,15 +895,6 @@ impl Windows {
             focus: self.launch.focus,
             show: self.launch.show,
         }
-    }
-
-    pub(crate) fn open(
-        &mut self,
-        initial: Option<TabData>,
-        window_size: Option<Size>,
-        shell: &Shell,
-    ) -> std::result::Result<(WindowId, WindowHandle), Box<OpenWindowError>> {
-        self.open_at(initial, window_size, None, shell)
     }
 
     pub(crate) fn open_at(
@@ -979,19 +934,17 @@ impl Windows {
     }
 }
 
-impl Index<usize> for Windows {
-    type Output = MainWindow;
+impl Deref for Windows {
+    type Target = [MainWindow];
 
-    #[inline]
-    fn index(&self, index: usize) -> &Self::Output {
-        &self.list[index]
+    fn deref(&self) -> &[MainWindow] {
+        &self.list
     }
 }
 
-impl IndexMut<usize> for Windows {
-    #[inline]
-    fn index_mut(&mut self, index: usize) -> &mut Self::Output {
-        &mut self.list[index]
+impl DerefMut for Windows {
+    fn deref_mut(&mut self) -> &mut [MainWindow] {
+        &mut self.list
     }
 }
 
@@ -1152,14 +1105,6 @@ impl TabDrag {
         matches!(self.phase, Phase::Entering { .. } | Phase::Moving { .. })
     }
 
-    pub(crate) fn owner(&self) -> WindowId {
-        self.owner
-    }
-
-    pub(crate) fn source(&self) -> WindowId {
-        self.source
-    }
-
     pub(crate) fn is_alive(&self, windows: &Windows) -> bool {
         windows
             .get(self.owner)
@@ -1302,7 +1247,7 @@ impl TabDrag {
             src.restore_tab(data, index, shell);
             src_hwnd.set_foreground();
         } else {
-            match windows.open(Some(data), None, shell) {
+            match windows.open_at(Some(data), None, None, shell) {
                 Ok((_, hwnd)) => {
                     if let Some(placement) = self.source_placement {
                         hwnd.restore_placement(placement);
