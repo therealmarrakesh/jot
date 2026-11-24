@@ -17,8 +17,8 @@ use crate::ids::{CustomDraw, EditorSlot, Frame, HitId, Node, UiState};
 use crate::keytips::KeyTip;
 use crate::menu::{MenuBar, MenuOutcome};
 use crate::platform::{
-    CursorStyle, Jobs, Key, KeyEvent, Modifiers, MouseButton, NativeWindow, TimerHandle,
-    WindowControlArea, WindowId, clipboard, format_local_time_date,
+    CursorStyle, Jobs, Key, KeyEvent, Modifiers, MouseButton, NativeWindow, SystemSettings,
+    TimerHandle, WindowControlArea, WindowId, clipboard, format_local_time_date,
 };
 
 struct SystemClipboard;
@@ -113,11 +113,22 @@ pub(crate) struct WindowEditorTimers<'a> {
     jobs: &'a Jobs<AppEvent>,
     window: WindowId,
     slot: EditorSlot,
+    blink_timing: (Option<Duration>, Option<Duration>),
 }
 
 impl<'a> WindowEditorTimers<'a> {
-    pub(crate) fn new(jobs: &'a Jobs<AppEvent>, window: WindowId, slot: EditorSlot) -> Self {
-        Self { jobs, window, slot }
+    pub(crate) fn new(
+        jobs: &'a Jobs<AppEvent>,
+        window: WindowId,
+        slot: EditorSlot,
+        blink_timing: (Option<Duration>, Option<Duration>),
+    ) -> Self {
+        Self {
+            jobs,
+            window,
+            slot,
+            blink_timing,
+        }
     }
 }
 
@@ -142,6 +153,10 @@ impl EditorTimers for WindowEditorTimers<'_> {
             kind,
         })
     }
+
+    fn blink_timing(&self) -> (Option<Duration>, Option<Duration>) {
+        self.blink_timing
+    }
 }
 
 pub(crate) struct MainWindow {
@@ -159,6 +174,7 @@ pub(crate) struct MainWindow {
     pub(crate) dirty: bool,
     pub(crate) has_painted: bool,
     pub(crate) pending_close: bool,
+    blink_timing: (Option<Duration>, Option<Duration>),
     middle_pressed_tab: Option<TabId>,
     min_size_cache: Option<MinSizeCache>,
 }
@@ -169,6 +185,7 @@ impl MainWindow {
         surface: Surface,
         initial: Option<TabData>,
         word_wrap: bool,
+        settings: SystemSettings,
         jobs: &Jobs<AppEvent>,
     ) -> Self {
         let mut strip = TabStrip::new();
@@ -191,11 +208,20 @@ impl MainWindow {
             dirty: true,
             has_painted: false,
             pending_close: false,
+            blink_timing: (settings.caret_blink_interval, settings.caret_blink_timeout),
             middle_pressed_tab: None,
             min_size_cache: None,
         };
         win.activate_tab(0, jobs);
         win
+    }
+
+    pub(crate) fn set_blink_timing(
+        &mut self,
+        interval: Option<Duration>,
+        timeout: Option<Duration>,
+    ) {
+        self.blink_timing = (interval, timeout);
     }
 
     #[inline]
@@ -316,8 +342,9 @@ impl MainWindow {
         f: impl FnOnce(&mut Editor, &mut WindowEditorTimers<'_>) -> R,
     ) -> Option<R> {
         let wid = self.id();
+        let blink_timing = self.blink_timing;
         let ed = self.editor_by_slot_mut(slot)?;
-        let mut timers = WindowEditorTimers::new(jobs, wid, slot);
+        let mut timers = WindowEditorTimers::new(jobs, wid, slot, blink_timing);
         Some(f(ed, &mut timers))
     }
 
@@ -1550,7 +1577,8 @@ impl MainWindow {
     pub(crate) fn render_frame(&mut self, now: Instant, cx: &Cx<'_>) -> bool {
         let p = cx.palette;
         let view = cx.view;
-        let reduce_motion = cx.reduce_motion;
+        let reduce_motion = cx.settings.reduce_motion;
+        let caret_width_px = cx.settings.caret_width_px;
         let ts = cx.ts;
         let jobs = cx.jobs;
         self.dirty = false;
@@ -1615,73 +1643,83 @@ impl MainWindow {
         let editor_focused = self.focus == Focus::Editor(active_slot);
         let show_selection = editor_focused || self.menu_bar.is_open() || self.find.is_open();
         let caret_hidden = self.menu_bar.access_active();
-        let wid = self.id();
         let mut editor_needs_redraw = false;
         let mut editor_needs_vsync = false;
 
         self.active_editor_mut().set_caret_height(caret_height);
         self.active_editor_mut().set_caret_hidden(caret_hidden);
 
+        let editor_rects: Vec<(EditorSlot, Rect)> = frame
+            .custom_rects()
+            .filter_map(|(token, rect)| match token {
+                CustomDraw::Editor(slot) => Some((slot, rect)),
+                _ => None,
+            })
+            .collect();
         let focus = self.focus;
+        for (slot, rect) in editor_rects {
+            let (style, focused, show_sel) = match slot {
+                EditorSlot::Tab(_) => (&editor_style, editor_focused, show_selection),
+                _ => {
+                    let f = focus == Focus::Editor(slot);
+                    (&field_style, f, f)
+                }
+            };
+            if let Some(outcome) = self.with_editor(slot, jobs, |ed, timers| {
+                ed.prepare(
+                    rect,
+                    EditorPaintParams {
+                        style,
+                        palette: p,
+                        window_active,
+                        focused,
+                        show_selection: show_sel,
+                        scale,
+                        reduce_motion,
+                        caret_width_px,
+                        now,
+                    },
+                    ts,
+                    timers,
+                )
+            }) {
+                editor_needs_redraw |= outcome.needs_redraw;
+                editor_needs_vsync |= outcome.needs_vsync;
+            }
+        }
+
         let active = self.active;
-        let tabs = &mut self.tabs;
-        let find = &mut self.find;
-        let dialogs = &mut self.dialogs;
+        let tabs = &self.tabs;
+        let find = &self.find;
+        let dialogs = &self.dialogs;
         let needs_retry = self.surface.draw(p.window_clear, |renderer| {
-            frame.paint(renderer, &mut |token, rect, renderer| {
-                match token {
-                    CustomDraw::Editor(slot) => {
-                        let (style, focused, show_sel) = match slot {
-                            EditorSlot::Tab(_) => (&editor_style, editor_focused, show_selection),
-                            _ => {
-                                let f = focus == Focus::Editor(slot);
-                                (&field_style, f, f)
-                            }
-                        };
-                        let ed = match slot {
-                            EditorSlot::Tab(id) => tabs
-                                .iter_mut()
-                                .find(|t| t.data.id == id)
-                                .map(|t| &mut t.data.editor),
-                            EditorSlot::FindQuery => Some(&mut find.query),
-                            EditorSlot::FindReplace => Some(&mut find.replacement),
-                            EditorSlot::GoToLine => Some(&mut dialogs.line),
-                        };
-                        if let Some(ed) = ed {
-                            let mut timers = WindowEditorTimers::new(jobs, wid, slot);
-                            let outcome = ed.paint(
-                                rect,
-                                EditorPaintParams {
-                                    style,
-                                    palette: p,
-                                    window_active,
-                                    focused,
-                                    show_selection: show_sel,
-                                    scale,
-                                    reduce_motion,
-                                    now,
-                                },
-                                ts,
-                                renderer,
-                                &mut timers,
-                            );
-                            editor_needs_redraw |= outcome.needs_redraw;
-                            editor_needs_vsync |= outcome.needs_vsync;
-                        }
+            frame.paint(renderer, &mut |token, rect, renderer| match token {
+                CustomDraw::Editor(slot) => {
+                    let ed = match slot {
+                        EditorSlot::Tab(id) => tabs
+                            .iter()
+                            .find(|t| t.data.id == id)
+                            .map(|t| &t.data.editor),
+                        EditorSlot::FindQuery => Some(&find.query),
+                        EditorSlot::FindReplace => Some(&find.replacement),
+                        EditorSlot::GoToLine => Some(&dialogs.line),
+                    };
+                    if let Some(ed) = ed {
+                        ed.paint(p, renderer);
                     }
-                    CustomDraw::Scrollbar => {
-                        tabs[active].data.editor.paint_scrollbar(renderer);
-                    }
-                    CustomDraw::StatusSpacer => {
-                        let width = rect.size.width;
-                        if width < STATUS_DIVIDER_WIDTH + 0.5 {
-                            let x = rect.origin.x + ((width - STATUS_DIVIDER_WIDTH) / 2.).round();
-                            let line = Rect::new(
-                                point(x, rect.origin.y),
-                                size(STATUS_DIVIDER_WIDTH, rect.size.height),
-                            );
-                            renderer.paint_quad(fill(line, p.stroke));
-                        }
+                }
+                CustomDraw::Scrollbar => {
+                    tabs[active].data.editor.paint_scrollbar(renderer);
+                }
+                CustomDraw::StatusSpacer => {
+                    let width = rect.size.width;
+                    if width < STATUS_DIVIDER_WIDTH + 0.5 {
+                        let x = rect.origin.x + ((width - STATUS_DIVIDER_WIDTH) / 2.).round();
+                        let line = Rect::new(
+                            point(x, rect.origin.y),
+                            size(STATUS_DIVIDER_WIDTH, rect.size.height),
+                        );
+                        renderer.paint_quad(fill(line, p.stroke));
                     }
                 }
             });

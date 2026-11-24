@@ -458,6 +458,12 @@ impl<H, C> Default for Frame<H, C> {
 }
 
 impl<H: Copy + Eq, C: Copy> Frame<H, C> {
+    pub(crate) fn custom_rects(&self) -> impl Iterator<Item = (C, Rect)> + '_ {
+        self.nodes.iter().filter_map(|n| match n.kind {
+            FlatKind::Custom(token) => Some((token, n.rect)),
+            _ => None,
+        })
+    }
     pub(crate) fn layout(
         root_node: Node<H, C>,
         available: AvailSize,

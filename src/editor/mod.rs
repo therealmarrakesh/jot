@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use ropey::RopeSlice;
 
-use crate::geom::{Edges, Point, Rect, Size};
+use crate::geom::{Edges, Point, Rect};
 use crate::gfx::{Font, TextSystem};
 use crate::platform::TimerHandle;
 use crate::scrollbar::ScrollbarState;
@@ -22,7 +22,7 @@ use crate::types::SharedStr;
 use crate::ui::{Node, box_, custom};
 
 use model::{EditEffects, EditPolicy, LineChange, TextModel, ValidateFn};
-use view::{AutoScroll, BlinkState, LongestLineCache, ViewLayout};
+use view::{AutoScroll, BlinkState, FrameLayout, LongestLineCache};
 use wrap::WrapIndex;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -50,6 +50,7 @@ pub(crate) enum EditorTimer {
 pub(crate) trait EditorTimers {
     fn after(&mut self, delay: Duration, kind: EditorTimer) -> TimerHandle;
     fn every(&mut self, delay: Duration, interval: Duration, kind: EditorTimer) -> TimerHandle;
+    fn blink_timing(&self) -> (Option<Duration>, Option<Duration>);
 }
 
 pub(crate) trait Clipboard {
@@ -68,6 +69,10 @@ impl EditorTimers for NoopTimers {
 
     fn every(&mut self, _delay: Duration, _interval: Duration, _kind: EditorTimer) -> TimerHandle {
         TimerHandle::default()
+    }
+
+    fn blink_timing(&self) -> (Option<Duration>, Option<Duration>) {
+        (None, None)
     }
 }
 
@@ -124,32 +129,55 @@ pub(crate) enum EditCommand {
     Escape,
 }
 
-pub(crate) struct Editor {
-    model: TextModel,
+struct DocumentView {
     wrap: WrapIndex,
     soft_wrap: bool,
-    blink: BlinkState,
-    auto_scroll: AutoScroll,
-    scrollbar: ScrollbarState,
-    word_anchor: Option<Range<usize>>,
-    layout: Option<ViewLayout>,
-    caret_bounds: Option<Rect>,
-    caret_height: f32,
-    caret_hidden: bool,
-    last_cursor: Option<usize>,
+    scroll_y: f64,
+    content_height_f64: f64,
     last_line_height: f32,
-    input_bounds: Rect,
-    content_bounds: Option<Rect>,
+    paddings: Edges<f32>,
+    scrollbar: ScrollbarState,
+    auto_scroll: AutoScroll,
+    longest_line_cache: Option<(LongestLineCache, f32)>,
+    pending_context_menu: Option<(Point, usize)>,
+}
+
+impl DocumentView {
+    fn new() -> Self {
+        Self {
+            wrap: WrapIndex::new(Font::default(), 14.0, None),
+            soft_wrap: true,
+            scroll_y: 0.0,
+            content_height_f64: 0.0,
+            last_line_height: 20.0,
+            paddings: Edges::ZERO,
+            scrollbar: ScrollbarState::new(),
+            auto_scroll: AutoScroll::default(),
+            longest_line_cache: None,
+            pending_context_menu: None,
+        }
+    }
+}
+
+enum ViewKind {
+    Document(Box<DocumentView>),
+    Field,
+}
+
+pub(crate) struct Editor {
+    model: TextModel,
+    view: ViewKind,
+    blink: BlinkState,
+    word_anchor: Option<Range<usize>>,
     selecting: bool,
     scroll_x: f32,
-    scroll_y: f64,
     reveal: Option<RevealRequest>,
-    content_size: Size,
-    content_height_f64: f64,
-    longest_line_cache: Option<(LongestLineCache, f32)>,
-    paddings: Edges<f32>,
+    content_width: f32,
+    input_bounds: Rect,
+    frame: Option<FrameLayout>,
+    caret_height: f32,
+    caret_hidden: bool,
     placeholder: SharedStr,
-    pending_context_menu: Option<(Point, usize)>,
 }
 
 impl Editor {
@@ -167,30 +195,22 @@ impl Editor {
                 multi_line,
                 validate: None,
             }),
-            wrap: WrapIndex::new(Font::default(), 14.0, None),
-            soft_wrap: true,
+            view: if multi_line {
+                ViewKind::Document(Box::new(DocumentView::new()))
+            } else {
+                ViewKind::Field
+            },
             blink: BlinkState::new(),
-            auto_scroll: AutoScroll::default(),
-            scrollbar: ScrollbarState::new(),
             word_anchor: None,
-            layout: None,
-            caret_bounds: None,
-            caret_height: 0.0,
-            caret_hidden: false,
-            last_cursor: None,
-            last_line_height: 20.0,
-            input_bounds: Rect::ZERO,
-            content_bounds: None,
             selecting: false,
             scroll_x: 0.0,
-            scroll_y: 0.0,
             reveal: None,
-            content_size: Size::ZERO,
-            content_height_f64: 0.0,
-            longest_line_cache: None,
-            paddings: Edges::ZERO,
+            content_width: 0.0,
+            input_bounds: Rect::ZERO,
+            frame: None,
+            caret_height: 0.0,
+            caret_hidden: false,
             placeholder: SharedStr::default(),
-            pending_context_menu: None,
         }
     }
 
@@ -210,7 +230,9 @@ impl Editor {
     }
 
     pub(crate) fn with_soft_wrap(mut self, wrap: bool) -> Self {
-        self.soft_wrap = wrap;
+        if let ViewKind::Document(doc) = &mut self.view {
+            doc.soft_wrap = wrap;
+        }
         self
     }
 
@@ -220,7 +242,9 @@ impl Editor {
     }
 
     pub(crate) fn with_paddings(mut self, paddings: Edges<f32>) -> Self {
-        self.paddings = paddings;
+        if let ViewKind::Document(doc) = &mut self.view {
+            doc.paddings = paddings;
+        }
         self
     }
 
@@ -240,7 +264,7 @@ impl Editor {
 
     #[inline]
     pub(crate) fn caret_bounds(&self) -> Option<Rect> {
-        self.caret_bounds
+        self.frame.as_ref().map(|f| f.caret_rect)
     }
 
     pub(crate) fn set_caret_height(&mut self, height: f32) {
@@ -254,12 +278,19 @@ impl Editor {
     #[cfg(test)]
     #[inline]
     pub(crate) fn soft_wrap_enabled(&self) -> bool {
-        self.soft_wrap
+        match &self.view {
+            ViewKind::Document(doc) => doc.soft_wrap,
+            ViewKind::Field => false,
+        }
     }
 
     #[inline]
     pub(crate) fn scroll_offset(&self) -> Point {
-        crate::geom::point(self.scroll_x, self.scroll_y as f32)
+        let y = match &self.view {
+            ViewKind::Document(doc) => doc.scroll_y as f32,
+            ViewKind::Field => 0.0,
+        };
+        crate::geom::point(self.scroll_x, y)
     }
 
     #[inline]
@@ -282,14 +313,18 @@ impl Editor {
     pub(super) fn reset_pointer_selection_state(&mut self) {
         self.word_anchor = None;
         self.selecting = false;
-        self.auto_scroll.stop();
+        if let ViewKind::Document(doc) = &mut self.view {
+            doc.auto_scroll.stop();
+        }
     }
 
     pub(super) fn apply_effects(&mut self, fx: EditEffects, ts: &TextSystem) {
         if fx.changed {
             self.reset_pointer_selection_state();
-            if fx.lines != LineChange::None {
-                self.wrap.apply_line_change(self.model.text(), &fx.lines, ts);
+            if fx.lines != LineChange::None
+                && let ViewKind::Document(doc) = &mut self.view
+            {
+                doc.wrap.apply_line_change(self.model.text(), &fx.lines, ts);
             }
         }
         if fx.caret_moved {
@@ -306,36 +341,46 @@ impl Editor {
 
     #[inline]
     pub(crate) fn is_scrollbar_dragging(&self) -> bool {
-        self.scrollbar.is_dragging()
+        match &self.view {
+            ViewKind::Document(doc) => doc.scrollbar.is_dragging(),
+            ViewKind::Field => false,
+        }
     }
 
     #[inline]
     pub(crate) fn hits_scrollbar_track(&self, pos: Point) -> bool {
-        self.model.is_multi_line() && self.scrollbar.hits_track(pos)
+        match &self.view {
+            ViewKind::Document(doc) => doc.scrollbar.hits_track(pos),
+            ViewKind::Field => false,
+        }
     }
 
     pub(crate) fn set_soft_wrap(&mut self, wrap: bool, ts: &TextSystem) {
-        if self.soft_wrap == wrap {
+        let ViewKind::Document(doc) = &mut self.view else {
+            return;
+        };
+        if doc.soft_wrap == wrap {
             return;
         }
-        let anchor = self.capture_scroll_anchor(self.last_line_height);
-        self.soft_wrap = wrap;
+        let anchor = doc.capture_scroll_anchor(doc.last_line_height);
+        doc.soft_wrap = wrap;
+        let text = self.model.text();
         if wrap {
             let width = self
-                .layout
+                .frame
                 .as_ref()
-                .and_then(|l| l.wrap_width)
+                .and_then(|f| f.wrap_width)
                 .or_else(|| {
                     (self.input_bounds.size.width > view::RIGHT_MARGIN)
                         .then_some(self.input_bounds.size.width - view::RIGHT_MARGIN)
                 });
-            self.wrap.set_wrap_width(width, ts);
+            doc.wrap.set_wrap_width(text, width, ts);
             self.scroll_x = 0.0;
         } else {
-            self.wrap.set_wrap_width(None, ts);
+            doc.wrap.set_wrap_width(text, None, ts);
         }
         if let Some(anchor) = anchor {
-            self.restore_scroll_anchor(anchor, self.last_line_height);
+            doc.restore_scroll_anchor(text, anchor, doc.last_line_height);
         }
     }
 
@@ -401,29 +446,36 @@ impl Editor {
         scrollbar_draw: Option<C>,
         line_height: f32,
     ) -> Node<H, C> {
-        let multi = self.model.is_multi_line();
         let cursor = crate::platform::CursorStyle::IBeam;
-        let text_leaf = if multi {
-            custom(editor_draw)
-                .w_full()
-                .h_full()
+        match &self.view {
+            ViewKind::Document(doc) => {
+                let text_leaf = custom(editor_draw)
+                    .w_full()
+                    .h_full()
+                    .flex_1()
+                    .min_h(2.0 * line_height);
+                box_()
+                    .hit(hit)
+                    .cursor(cursor)
+                    .flex_1()
+                    .overflow_x_hidden()
+                    .h_full()
+                    .padding(doc.paddings)
+                    .child(text_leaf)
+                    .when_some(scrollbar_draw, |b, sb| {
+                        b.child(custom(sb).absolute().size_full())
+                    })
+            }
+            ViewKind::Field => box_()
+                .hit(hit)
+                .cursor(cursor)
                 .flex_1()
-                .min_h(2.0 * line_height)
-        } else {
-            custom(editor_draw).w_full().h(line_height)
-        };
-
-        box_()
-            .hit(hit)
-            .cursor(cursor)
-            .flex_1()
-            .overflow_x_hidden()
-            .when(multi, |b| b.h_full().padding(self.paddings))
-            .when(!multi, |b| b.row().min_h_full().items_center())
-            .child(text_leaf)
-            .when_some(scrollbar_draw.filter(|_| multi), |b, sb| {
-                b.child(custom(sb).absolute().size_full())
-            })
+                .overflow_x_hidden()
+                .row()
+                .min_h_full()
+                .items_center()
+                .child(custom(editor_draw).w_full().h(line_height)),
+        }
     }
 }
 

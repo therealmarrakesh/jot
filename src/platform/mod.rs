@@ -26,7 +26,9 @@ pub(crate) use os::{
     WindowHwnd, WindowPlacement, cursor_screen_pos, monitor_work_area_and_scale,
     primary_mouse_button_down, release_mouse_capture, top_visible_window_at,
 };
-pub(crate) use settings::{HighContrastColors, format_local_time_date, system_settings};
+pub(crate) use settings::{
+    HighContrastColors, SystemSettings, format_local_time_date, system_settings,
+};
 pub(crate) use window::{
     CursorStyle, NativeWindow, PlatformEvent, PlatformHandler, WindowAppearance, WindowBackdrop,
     WindowControlArea, WindowId, WindowKind, WindowOptions,

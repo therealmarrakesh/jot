@@ -15,8 +15,8 @@ use crate::ids::{EditorSlot, HitId};
 use crate::keytips::KeyTips;
 use crate::platform::{
     HandoffCommand, Jobs, Key, MouseButton, NativeWindow, Platform, PlatformEvent, PlatformHandler,
-    WindowAppearance, WindowBackdrop, WindowHwnd, WindowId, WindowKind, WindowOptions,
-    WindowsDisplay, cursor_screen_pos, system_settings,
+    SystemSettings, WindowAppearance, WindowBackdrop, WindowHwnd, WindowId, WindowKind,
+    WindowOptions, WindowsDisplay, cursor_screen_pos, system_settings,
 };
 use crate::tab_drag::TabDragState;
 use crate::tabs::{TabData, TabId};
@@ -108,7 +108,7 @@ pub(crate) struct Cx<'a> {
     pub(crate) jobs: &'a Jobs<AppEvent>,
     pub(crate) view: ViewSettings,
     pub(crate) palette: Palette,
-    pub(crate) reduce_motion: bool,
+    pub(crate) settings: SystemSettings,
     fx: &'a mut Vec<Effect>,
 }
 
@@ -125,7 +125,7 @@ pub(crate) struct Shell {
     appearance_override: Option<WindowAppearance>,
     appearance: WindowAppearance,
     pub(crate) palette: Palette,
-    pub(crate) reduce_motion: bool,
+    pub(crate) settings: SystemSettings,
     pub(crate) view: ViewSettings,
     pub(crate) gpu: Rc<Gpu>,
 }
@@ -137,7 +137,7 @@ impl Shell {
             jobs: &self.jobs,
             view: self.view,
             palette: self.palette,
-            reduce_motion: self.reduce_motion,
+            settings: self.settings,
             fx,
         }
     }
@@ -284,7 +284,6 @@ impl App {
         let appearance = settings.appearance;
         let dark = matches!(appearance, WindowAppearance::Dark);
         let palette = Palette::resolve(dark, settings.accent(dark), settings.high_contrast);
-        let reduce_motion = settings.reduce_motion;
 
         Self {
             windows: Vec::new(),
@@ -303,7 +302,7 @@ impl App {
                 appearance_override: None,
                 appearance,
                 palette,
-                reduce_motion,
+                settings,
                 view: ViewSettings::default(),
                 gpu,
             },
@@ -561,6 +560,7 @@ impl App {
             surface,
             initial,
             self.shell.view.word_wrap,
+            self.shell.settings,
             &self.shell.jobs,
         );
         self.windows.push(win);
@@ -613,7 +613,7 @@ impl App {
 
     fn sync_theme(&mut self) {
         let settings = system_settings();
-        self.shell.reduce_motion = settings.reduce_motion;
+        self.shell.settings = settings;
         let next = self
             .shell
             .appearance_override
@@ -623,6 +623,7 @@ impl App {
         self.shell.palette = Palette::resolve(dark, settings.accent(dark), settings.high_contrast);
         for w in &mut self.windows {
             w.native.set_appearance(next);
+            w.set_blink_timing(settings.caret_blink_interval, settings.caret_blink_timeout);
             w.dirty = true;
         }
     }
@@ -965,7 +966,7 @@ impl PlatformHandler for App {
             .paint(self.shell.palette, &self.shell.text_system);
         any_vsync |= self.tooltips.paint(
             self.shell.palette,
-            self.shell.reduce_motion,
+            self.shell.settings.reduce_motion,
             now,
             &self.shell.text_system,
         );

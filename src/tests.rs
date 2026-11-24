@@ -82,7 +82,7 @@ impl TestHarness {
         let platform = Rc::new(Platform::new().expect("Platform::new failed"));
         let gpu = Gpu::new().expect("Gpu::new failed");
         let mut app = App::new(platform, gpu);
-        app.shell.reduce_motion = true;
+        app.shell.settings.reduce_motion = true;
         app.headless = true;
         let (window_id, _) = app
             .open_window(None, Some(size(1024., 700.)))
@@ -1548,8 +1548,8 @@ mod large_file_smoke {
         let t0 = Instant::now();
         for i in 0..1000 {
             let r = (i * (total_rows / 1000)).min(total_rows.saturating_sub(1));
-            let off = wrap_900.display_to_offset(DisplayPos::new(r, 0, 0));
-            let _ = wrap_900.offset_to_display(off, false);
+            let off = wrap_900.display_to_offset(&loaded.text, DisplayPos::new(r, 0, 0));
+            let _ = wrap_900.offset_to_display(&loaded.text, off, false);
         }
         println!("1000 scroll queries:  {:8.2} ms", t0.elapsed().as_secs_f64() * 1000.0);
 
