@@ -1,15 +1,15 @@
 use std::time::{Duration, Instant};
 
-use crate::geom::{Point, ScreenPoint, point};
+use crate::files::FileOps;
+use crate::geom::{Point, ScreenPoint};
 use crate::ids::TabId;
 use crate::platform::{
     TimerHandle, WindowHwnd, WindowId, WindowPlacement, cursor_screen_pos,
     primary_mouse_button_down, release_mouse_capture, top_visible_window_at,
 };
-use crate::shell::AppEvent;
-use crate::tabs::{CAPTION_WIDTH, STRIP_LEFT, STRIP_TOP, TAB_HEIGHT};
+use crate::shell::{AppEvent, Shell};
 
-use super::App;
+use super::windows::Windows;
 
 const DRAG_THRESHOLD: f32 = 10.;
 const DETACH_MAGNETISM: f32 = 15.;
@@ -24,7 +24,7 @@ enum Phase {
     Moving { attaching: bool },
 }
 
-pub(crate) struct TabDragState {
+pub(crate) struct TabDrag {
     owner: WindowId,
     source: WindowId,
     tab: TabId,
@@ -37,7 +37,32 @@ pub(crate) struct TabDragState {
     poll_timer: TimerHandle,
 }
 
-impl TabDragState {
+impl TabDrag {
+    pub(crate) fn start(
+        window_id: WindowId,
+        tab: TabId,
+        index: usize,
+        grab: Point,
+        position: Point,
+        windows: &mut Windows,
+    ) -> Option<Self> {
+        let win = windows.get_mut(window_id)?;
+        let press = win.local_to_screen(position);
+        win.mark_dirty();
+        Some(Self {
+            owner: window_id,
+            source: window_id,
+            tab,
+            grab,
+            start: position.x,
+            press,
+            phase: Phase::Pressed,
+            source_index: index,
+            source_placement: None,
+            poll_timer: TimerHandle::default(),
+        })
+    }
+
     pub(crate) fn is_dragging(&self) -> bool {
         matches!(self.phase, Phase::Dragging)
     }
@@ -50,448 +75,356 @@ impl TabDragState {
         self.owner
     }
 
-    pub(crate) fn tab(&self) -> TabId {
-        self.tab
-    }
-}
-
-impl App {
-    pub(crate) fn is_tab_dragging(&self) -> bool {
-        self.tab_drag
-            .as_ref()
-            .is_some_and(TabDragState::is_dragging)
+    pub(crate) fn source(&self) -> WindowId {
+        self.source
     }
 
-    pub(crate) fn sync_tab_drag(&mut self) {
-        if let Some(drag) = &self.tab_drag
-            && self
-                .window(drag.owner())
-                .is_none_or(|w| w.tab_index(drag.tab()).is_none())
-        {
-            self.tab_drag_end();
-        }
+    pub(crate) fn is_alive(&self, windows: &Windows) -> bool {
+        windows
+            .get(self.owner)
+            .is_some_and(|w| w.tabs().index_of(self.tab).is_some())
     }
 
-    fn mark_window_dirty(&mut self, id: WindowId) {
-        if let Some(w) = self.window_mut(id) {
-            w.mark_dirty();
-        }
-    }
-
-    pub(crate) fn tab_drag_press(
+    pub(crate) fn on_size_move_changed(
         &mut self,
         window_id: WindowId,
-        tab: TabId,
-        index: usize,
-        grab: Point,
-        position: Point,
-    ) {
-        let Some(hwnd) = self.window_hwnd(window_id) else {
-            return;
-        };
-        self.tab_drag = Some(TabDragState {
-            owner: window_id,
-            source: window_id,
-            tab,
-            grab,
-            start: position.x,
-            press: to_screen(hwnd, position),
-            phase: Phase::Pressed,
-            source_index: index,
-            source_placement: None,
-            poll_timer: TimerHandle::default(),
-        });
-        self.mark_window_dirty(window_id);
-    }
-
-    fn tab_drag_end(&mut self) -> Option<TabDragState> {
-        let drag = self.tab_drag.take();
-        if let Some(d) = &drag {
-            self.mark_window_dirty(d.owner);
-            if d.source != d.owner {
-                self.mark_window_dirty(d.source);
-            }
-        }
-        drag
-    }
-
-    pub(crate) fn tab_drag_size_move_changed(&mut self, window_id: WindowId, entering: bool) {
-        self.sync_tab_drag();
-        let Some(drag) = self.tab_drag.as_mut() else {
-            return;
-        };
-        if drag.owner != window_id {
-            return;
+        entering: bool,
+        windows: &mut Windows,
+        file_ops: &FileOps,
+        shell: &Shell,
+        closed: &mut Vec<WindowId>,
+    ) -> bool {
+        if self.owner != window_id {
+            return false;
         }
         if entering {
-            if matches!(drag.phase, Phase::Entering { .. }) {
-                drag.phase = Phase::Moving { attaching: false };
+            if matches!(self.phase, Phase::Entering { .. }) {
+                self.phase = Phase::Moving { attaching: false };
             }
-        } else if matches!(drag.phase, Phase::Entering { .. } | Phase::Moving { .. }) {
-            self.finish_move_loop();
+            false
+        } else if self.is_in_move_loop() {
+            self.finish_move_loop(windows, file_ops, shell, closed)
+        } else {
+            false
         }
     }
 
-    pub(crate) fn tab_drag_moved(&mut self, pressed_left: bool) {
-        self.sync_tab_drag();
+    pub(crate) fn on_mouse_move(
+        &mut self,
+        pressed_left: bool,
+        windows: &mut Windows,
+        file_ops: &FileOps,
+        shell: &Shell,
+        closed: &mut Vec<WindowId>,
+    ) -> bool {
         if !pressed_left {
-            self.tab_drag_released();
-            return;
+            return self.on_release(windows);
         }
-        let Some(mut drag) = self.tab_drag.take() else {
-            return;
-        };
-        let Some(owner_hwnd) = self.window_hwnd(drag.owner) else {
-            return;
+        let Some(scale) = windows.get(self.owner).map(|w| w.scale_factor()) else {
+            return true;
         };
         let pt = cursor_screen_pos();
-        match drag.phase {
+        match self.phase {
             Phase::Pressed => {
-                let distance = ((pt.x - drag.press.x) as f32).hypot((pt.y - drag.press.y) as f32);
-                if distance / owner_hwnd.dpi_scale() <= DRAG_THRESHOLD {
-                    self.tab_drag = Some(drag);
-                    return;
+                let distance = ((pt.x - self.press.x) as f32).hypot((pt.y - self.press.y) as f32);
+                if distance / scale <= DRAG_THRESHOLD {
+                    return false;
                 }
-                drag.phase = Phase::Dragging;
+                self.phase = Phase::Dragging;
             }
             Phase::Dragging => {}
-            Phase::Entering { .. } | Phase::Moving { .. } => {
-                self.tab_drag = Some(drag);
-                return;
-            }
+            Phase::Entering { .. } | Phase::Moving { .. } => return false,
         }
 
-        let alone = self
-            .window(drag.owner)
-            .is_none_or(|w| w.tabs.len() == 1);
-        if !alone && in_strip(owner_hwnd, pt) {
-            let x = to_local(owner_hwnd, pt).x;
-            let (tab, grab, start) = (drag.tab, drag.grab.x, drag.start);
-            if let Some(win) = self.window_mut(drag.owner) {
-                win.drag_tab(tab, x, grab, start);
+        let (alone, in_owner_strip) = windows
+            .get(self.owner)
+            .map_or((true, false), |w| {
+                (w.tabs().len() == 1, w.strip_hit(pt, DETACH_MAGNETISM))
+            });
+        if !alone && in_owner_strip {
+            if let Some(win) = windows.get_mut(self.owner) {
+                let x = win.screen_to_local(pt).x;
+                win.drag_tab(self.tab, x, self.grab.x, self.start);
             }
-        } else if !alone && let Some(target_id) = self.strip_window(pt, None) {
-            self.tab_drag_attach(&mut drag, target_id, pt);
+        } else if !alone
+            && let Some(target_id) = strip_window(windows, file_ops, pt, None)
+        {
+            self.attach(target_id, pt, windows, shell, closed);
         } else {
-            self.tab_drag_detach(&mut drag, alone, pt);
+            self.detach(alone, pt, windows, shell, closed);
         }
-        let owner = drag.owner;
-        self.tab_drag = Some(drag);
-        self.mark_window_dirty(owner);
+        windows.mark_dirty(self.owner);
+        false
     }
 
-    pub(crate) fn tab_drag_released(&mut self) {
-        self.sync_tab_drag();
-        if self
-            .tab_drag
-            .as_ref()
-            .is_none_or(TabDragState::is_in_move_loop)
-        {
-            return;
+    pub(crate) fn on_release(&mut self, windows: &mut Windows) -> bool {
+        if self.is_in_move_loop() {
+            return false;
         }
-        let Some(drag) = self.tab_drag_end() else {
-            return;
-        };
-        if drag.is_dragging() {
-            if let Some(win) = self.window_mut(drag.owner) {
+        if self.is_dragging() {
+            if let Some(win) = windows.get_mut(self.owner) {
                 win.release_tab();
             }
-            if drag.owner != drag.source
-                && let Some(hwnd) = self.window_hwnd(drag.owner)
+            if self.owner != self.source
+                && let Some(hwnd) = windows.hwnd(self.owner)
             {
                 hwnd.set_foreground();
             }
         }
+        true
     }
 
-    pub(crate) fn tab_drag_cancel(&mut self) {
-        self.sync_tab_drag();
-        let Some(drag) = self.tab_drag_end() else {
-            return;
-        };
+    pub(crate) fn on_capture_lost(&mut self, window_id: WindowId, windows: &mut Windows) -> bool {
+        if self.owner == window_id && self.is_dragging() {
+            self.on_release(windows)
+        } else {
+            false
+        }
+    }
+
+    pub(crate) fn cancel(
+        &mut self,
+        windows: &mut Windows,
+        shell: &Shell,
+        closed: &mut Vec<WindowId>,
+    ) {
+        self.poll_timer.cancel();
         release_mouse_capture();
-        if matches!(drag.phase, Phase::Pressed) {
+        if matches!(self.phase, Phase::Pressed) {
             return;
         }
-        let tab = drag.tab;
-        let index = drag.source_index;
-        if drag.owner == drag.source {
-            if drag.is_dragging() {
-                if let Some(ix) = self.window_ix(drag.source) {
-                    self.windows[ix].return_tab(tab, index, &self.shell);
+        let tab = self.tab;
+        let index = self.source_index;
+        if self.owner == self.source {
+            if self.is_dragging() {
+                if let Some(win) = windows.get_mut(self.source) {
+                    win.return_tab(tab, index, shell);
                 }
-            } else if let Some(placement) = drag.source_placement
-                && let Some(hwnd) = self.window_hwnd(drag.source)
+            } else if let Some(placement) = self.source_placement
+                && let Some(hwnd) = windows.hwnd(self.source)
             {
                 hwnd.restore_placement(placement);
             }
             return;
         }
 
-        let Some(data) = self
-            .window_ix(drag.owner)
-            .and_then(|ix| self.windows[ix].take_tab(tab, &self.shell))
+        let Some(data) = windows
+            .get_mut(self.owner)
+            .and_then(|w| w.take_tab(tab, shell))
         else {
             return;
         };
-        self.sweep_closed_windows();
+        closed.extend(windows.sweep_closed());
 
-        if let Some(ix) = self.window_ix(drag.source) {
-            let src_hwnd = self.windows[ix].native.hwnd();
-            self.windows[ix].restore_tab(data, index, &self.shell);
+        if let Some(src) = windows.get_mut(self.source) {
+            let src_hwnd = src.hwnd();
+            src.restore_tab(data, index, shell);
             src_hwnd.set_foreground();
         } else {
-            match self.open_window(Some(data), None) {
+            match windows.open(Some(data), None, shell) {
                 Ok((_, hwnd)) => {
-                    if let Some(placement) = drag.source_placement {
+                    if let Some(placement) = self.source_placement {
                         hwnd.restore_placement(placement);
                     }
                 }
                 Err(err) => {
-                    if let Some(tab_data) = err.tab
-                        && let Some(win) = self.windows.last_mut()
-                    {
-                        let ix = win.tabs.len();
-                        win.restore_tab(tab_data, ix, &self.shell);
+                    if let Some(tab_data) = err.tab {
+                        windows.rescue_tab(None, 0, tab_data, shell);
                     }
                 }
             }
         }
     }
 
-    fn tab_drag_attach(&mut self, drag: &mut TabDragState, target_id: WindowId, pt: ScreenPoint) {
-        let Some(target_hwnd) = self.window_hwnd(target_id) else {
+    pub(crate) fn on_poll(
+        &mut self,
+        windows: &mut Windows,
+        file_ops: &FileOps,
+        shell: &Shell,
+        closed: &mut Vec<WindowId>,
+    ) -> bool {
+        let Some(hwnd) = windows.hwnd(self.owner) else {
+            return true;
+        };
+        let attaching = match self.phase {
+            Phase::Entering { .. } => false,
+            Phase::Moving { attaching } => attaching,
+            Phase::Pressed | Phase::Dragging => return false,
+        };
+        let pt = cursor_screen_pos();
+        if hwnd.in_move_loop() {
+            let attaching = attaching || strip_window(windows, file_ops, pt, Some(self.owner)).is_some();
+            if attaching && !matches!(self.phase, Phase::Moving { attaching: true }) {
+                hwnd.cancel_mode();
+            }
+            self.phase = Phase::Moving { attaching };
+            return false;
+        }
+        if let Phase::Entering { since } = self.phase
+            && since.elapsed() < MOVE_LOOP_START_TIMEOUT
+        {
+            return false;
+        }
+        self.finish_move_loop(windows, file_ops, shell, closed)
+    }
+
+    fn finish_move_loop(
+        &mut self,
+        windows: &mut Windows,
+        file_ops: &FileOps,
+        shell: &Shell,
+        closed: &mut Vec<WindowId>,
+    ) -> bool {
+        self.poll_timer.cancel();
+        let Some(hwnd) = windows.hwnd(self.owner) else {
+            return true;
+        };
+        let attaching = matches!(self.phase, Phase::Moving { attaching: true });
+        let pt = cursor_screen_pos();
+        let pressed = primary_mouse_button_down();
+        if let Some(target_id) = strip_window(windows, file_ops, pt, Some(self.owner)) {
+            self.attach(target_id, pt, windows, shell, closed);
+            if !pressed {
+                return self.on_release(windows);
+            }
+            false
+        } else if pressed && attaching {
+            self.run_move_loop(pt, windows, shell);
+            windows.mark_dirty(self.owner);
+            false
+        } else if pressed {
+            self.cancel(windows, shell, closed);
+            true
+        } else {
+            windows.mark_dirty(self.owner);
+            hwnd.set_foreground();
+            true
+        }
+    }
+
+    fn attach(
+        &mut self,
+        target_id: WindowId,
+        pt: ScreenPoint,
+        windows: &mut Windows,
+        shell: &Shell,
+        closed: &mut Vec<WindowId>,
+    ) {
+        let Some(target_hwnd) = windows.hwnd(target_id) else {
             return;
         };
-        let tab = drag.tab;
-        let prev_owner = drag.owner;
-        let Some(data) = self
-            .window_ix(prev_owner)
-            .and_then(|ix| self.windows[ix].take_tab(tab, &self.shell))
+        let prev_owner = self.owner;
+        let Some(data) = windows
+            .get_mut(prev_owner)
+            .and_then(|w| w.take_tab(self.tab, shell))
         else {
             return;
         };
-        self.sweep_closed_windows();
+        closed.extend(windows.sweep_closed());
 
-        let x = to_local(target_hwnd, pt).x;
-        let grab = drag.grab.x;
-        if let Some(ix) = self.window_ix(target_id) {
-            self.windows[ix].insert_dragged_tab(data, x, grab, &self.shell);
+        if let Some(target) = windows.get_mut(target_id) {
+            let x = target.screen_to_local(pt).x;
+            target.insert_dragged_tab(data, x, self.grab.x, shell);
         }
-        drag.owner = target_id;
-        drag.phase = Phase::Dragging;
-        drag.poll_timer.cancel();
+        self.owner = target_id;
+        self.phase = Phase::Dragging;
+        self.poll_timer.cancel();
         target_hwnd.set_capture();
-        self.mark_window_dirty(target_id);
-        self.mark_window_dirty(prev_owner);
+        windows.mark_dirty(target_id);
+        windows.mark_dirty(prev_owner);
     }
 
-    fn tab_drag_detach(&mut self, drag: &mut TabDragState, alone: bool, pt: ScreenPoint) {
-        let tab = drag.tab;
+    fn detach(
+        &mut self,
+        alone: bool,
+        pt: ScreenPoint,
+        windows: &mut Windows,
+        shell: &Shell,
+        closed: &mut Vec<WindowId>,
+    ) {
         if !alone {
-            let source_win = drag.owner;
-            let taken = self.window_ix(source_win).and_then(|ix| {
-                let native = &self.windows[ix].native;
-                let sz = if native.is_maximized() {
-                    native
-                        .hwnd()
-                        .restored_logical_size()
-                        .unwrap_or_else(|| native.logical_size())
-                } else {
-                    native.logical_size()
-                };
-                self.windows[ix]
-                    .take_tab(tab, &self.shell)
-                    .map(|data| (data, sz))
+            let source_win = self.owner;
+            let taken = windows.get_mut(source_win).and_then(|w| {
+                let sz = w.restored_logical_size();
+                w.take_tab(self.tab, shell).map(|data| (data, sz))
             });
             let Some((data, sz)) = taken else {
                 return;
             };
-            self.sweep_closed_windows();
-            let (window, _hwnd) = match self.open_window_at(Some(data), Some(sz), Some(pt)) {
+            closed.extend(windows.sweep_closed());
+            let (window, _) = match windows.open_at(Some(data), Some(sz), Some(pt), shell) {
                 Ok(created) => created,
                 Err(err) => {
                     if let Some(tab_data) = err.tab {
-                        if let Some(ix) = self.window_ix(source_win) {
-                            self.windows[ix].restore_tab(tab_data, drag.source_index, &self.shell);
-                        } else if let Some(win) = self.windows.last_mut() {
-                            let ix = win.tabs.len();
-                            win.restore_tab(tab_data, ix, &self.shell);
-                        }
+                        windows.rescue_tab(Some(source_win), self.source_index, tab_data, shell);
                     }
                     return;
                 }
             };
-            self.mark_window_dirty(source_win);
-            drag.owner = window;
-        } else if let Some(hwnd) = self.window_hwnd(drag.owner) {
-            if drag.owner == drag.source && drag.source_placement.is_none() {
-                drag.source_placement = hwnd.saved_placement();
+            windows.mark_dirty(source_win);
+            self.owner = window;
+        } else if let Some(win) = windows.get_mut(self.owner) {
+            let hwnd = win.hwnd();
+            if self.owner == self.source && self.source_placement.is_none() {
+                self.source_placement = hwnd.saved_placement();
             }
             if hwnd.is_maximized() {
                 hwnd.restore();
             }
-            if let Some(win) = self.window_mut(drag.owner) {
-                win.release_tab();
-            }
+            win.release_tab();
         } else {
             return;
         }
-        self.run_move_loop(drag, pt);
+        self.run_move_loop(pt, windows, shell);
     }
 
-    fn run_move_loop(&self, drag: &mut TabDragState, pt: ScreenPoint) {
-        let Some(hwnd) = self.window_hwnd(drag.owner) else {
+    fn run_move_loop(&mut self, pt: ScreenPoint, windows: &Windows, shell: &Shell) {
+        let Some(win) = windows.get(self.owner) else {
             return;
         };
-        place_window(
-            hwnd,
-            pt,
-            point(STRIP_LEFT + drag.grab.x, STRIP_TOP + drag.grab.y),
-        );
-        self.start_move_loop(drag, pt);
-    }
-
-    fn start_move_loop(&self, drag: &mut TabDragState, pt: ScreenPoint) {
-        let Some(hwnd) = self.window_hwnd(drag.owner) else {
-            return;
-        };
+        let hwnd = win.hwnd();
+        place_window(hwnd, pt, win.strip_grab_offset(self.grab));
         hwnd.begin_system_move(pt);
-        drag.phase = Phase::Entering {
+        self.phase = Phase::Entering {
             since: Instant::now(),
         };
-        drag.poll_timer = self
-            .shell
+        self.poll_timer = shell
             .jobs
             .every(MOVE_POLL, MOVE_POLL, || AppEvent::TabDragPoll);
     }
 
-    pub(crate) fn tab_drag_poll(&mut self) {
-        self.sync_tab_drag();
-        let Some(mut drag) = self.tab_drag.take() else {
-            return;
-        };
-        let Some(hwnd) = self.window_hwnd(drag.owner) else {
-            return;
-        };
-        let attaching = match drag.phase {
-            Phase::Entering { .. } => false,
-            Phase::Moving { attaching } => attaching,
-            Phase::Pressed | Phase::Dragging => {
-                self.tab_drag = Some(drag);
-                return;
-            }
-        };
-        let pt = cursor_screen_pos();
-        if hwnd.in_move_loop() {
-            let attaching = attaching || self.strip_window(pt, Some(drag.owner)).is_some();
-            if attaching && !matches!(drag.phase, Phase::Moving { attaching: true }) {
-                hwnd.cancel_mode();
-            }
-            drag.phase = Phase::Moving { attaching };
-            self.tab_drag = Some(drag);
-            return;
-        }
-        if let Phase::Entering { since } = drag.phase
-            && since.elapsed() < MOVE_LOOP_START_TIMEOUT
-        {
-            self.tab_drag = Some(drag);
-            return;
-        }
-        self.tab_drag = Some(drag);
-        self.finish_move_loop();
-    }
-
-    fn finish_move_loop(&mut self) {
-        let Some(mut drag) = self.tab_drag.take() else {
-            return;
-        };
-        drag.poll_timer.cancel();
-        let Some(hwnd) = self.window_hwnd(drag.owner) else {
-            return;
-        };
-        let attaching = matches!(drag.phase, Phase::Moving { attaching: true });
-        let pt = cursor_screen_pos();
-        let pressed = primary_mouse_button_down();
-        if let Some(target_id) = self.strip_window(pt, Some(drag.owner)) {
-            self.tab_drag_attach(&mut drag, target_id, pt);
-            self.tab_drag = Some(drag);
-            if !pressed {
-                self.tab_drag_released();
-            }
-        } else if pressed && attaching {
-            self.run_move_loop(&mut drag, pt);
-            let owner = drag.owner;
-            self.tab_drag = Some(drag);
-            self.mark_window_dirty(owner);
-        } else if pressed {
-            self.tab_drag = Some(drag);
-            self.tab_drag_cancel();
-        } else {
-            let owner = drag.owner;
-            self.mark_window_dirty(owner);
-            hwnd.set_foreground();
-        }
-    }
-
-    fn strip_window(&self, pt: ScreenPoint, exclude: Option<WindowId>) -> Option<WindowId> {
-        let exclude_hwnd = exclude.and_then(|id| self.window_hwnd(id));
-        let hwnd = top_visible_window_at(pt, exclude_hwnd)?;
-        if !in_strip(hwnd, pt) {
-            return None;
-        }
-        self.windows.iter().find_map(|w| {
-            let w_hwnd = w.native.hwnd();
-            let accepts_attach = !w.dialogs.is_open()
-                && !self.file_ops.has_active_workflow_for(w.id())
-                && !w.is_pending_close()
-                && w_hwnd.is_enabled();
-            (w_hwnd == hwnd && accepts_attach).then_some(w.native.id)
-        })
-    }
-
     #[cfg(test)]
-    pub(crate) fn tab_drag_detach_for_test(&mut self) {
-        let Some(mut drag) = self.tab_drag.take() else {
-            return;
-        };
-        drag.phase = Phase::Dragging;
+    pub(crate) fn detach_for_test(
+        &mut self,
+        windows: &mut Windows,
+        shell: &Shell,
+        closed: &mut Vec<WindowId>,
+    ) {
+        self.phase = Phase::Dragging;
         let pt = ScreenPoint {
-            x: drag.press.x + 120,
-            y: drag.press.y + 200,
+            x: self.press.x + 120,
+            y: self.press.y + 200,
         };
-        self.tab_drag_detach(&mut drag, false, pt);
-        let owner = drag.owner;
-        self.tab_drag = Some(drag);
-        self.mark_window_dirty(owner);
+        self.detach(false, pt, windows, shell, closed);
+        windows.mark_dirty(self.owner);
     }
 }
 
-fn to_local(hwnd: WindowHwnd, pt: ScreenPoint) -> Point {
-    let origin = hwnd.client_origin();
-    let scale = hwnd.dpi_scale();
-    point(
-        (pt.x - origin.x) as f32 / scale,
-        (pt.y - origin.y) as f32 / scale,
-    )
-}
-
-fn to_screen(hwnd: WindowHwnd, pos: Point) -> ScreenPoint {
-    let origin = hwnd.client_origin();
-    let scale = hwnd.dpi_scale();
-    ScreenPoint {
-        x: origin.x + (pos.x * scale).round() as i32,
-        y: origin.y + (pos.y * scale).round() as i32,
-    }
-}
-
-fn in_strip(hwnd: WindowHwnd, pt: ScreenPoint) -> bool {
-    let client = hwnd.client_rect();
-    let width = client.right as f32 / hwnd.dpi_scale();
-    let pos = to_local(hwnd, pt);
-    (STRIP_LEFT..width - CAPTION_WIDTH).contains(&pos.x)
-        && (STRIP_TOP - DETACH_MAGNETISM..STRIP_TOP + TAB_HEIGHT + DETACH_MAGNETISM)
-            .contains(&pos.y)
+fn strip_window(
+    windows: &Windows,
+    file_ops: &FileOps,
+    pt: ScreenPoint,
+    exclude: Option<WindowId>,
+) -> Option<WindowId> {
+    let exclude_hwnd = exclude.and_then(|id| windows.hwnd(id));
+    let hwnd = top_visible_window_at(pt, exclude_hwnd)?;
+    windows.iter().find_map(|w| {
+        let accepts = w.hwnd() == hwnd
+            && w.accepts_tab_drop()
+            && !file_ops.has_active_workflow_for(w.id())
+            && w.strip_hit(pt, DETACH_MAGNETISM);
+        accepts.then_some(w.id())
+    })
 }
 
 fn place_window(hwnd: WindowHwnd, pt: ScreenPoint, offset: Point) {

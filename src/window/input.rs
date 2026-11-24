@@ -7,10 +7,9 @@ use crate::ids::{EditorSlot, Focus, HitId};
 use crate::menu::Entry;
 use crate::platform::{KeyEvent, Modifiers, MouseButton};
 use crate::shell::{AppEvent, Cx, Effect};
-use crate::tabs::{
-    SCROLL_REPEAT_DELAY, SCROLL_REPEAT_INTERVAL, SCROLL_STEP, STRIP_TOP, WHEEL_SHARE,
-};
+use crate::tabs::{SCROLL_REPEAT_DELAY, SCROLL_REPEAT_INTERVAL, SCROLL_STEP, WHEEL_SHARE};
 
+use super::chrome::STRIP_TOP;
 use super::{InputMode, MainWindow, SystemClipboard, ZOOM_STEP};
 
 impl MainWindow {
@@ -35,7 +34,7 @@ impl MainWindow {
             let _ = self.apply_menu_outcome(menu_out, cx);
         }
 
-        if self.tabs.strip_is_frozen()
+        if self.tabs.is_frozen()
             && !self
                 .ui
                 .frame()
@@ -84,7 +83,7 @@ impl MainWindow {
     pub(crate) fn on_mouse_leave(&mut self) {
         self.dirty |= self.ui.on_mouse_leave();
         self.tabs.stop_scroll_repeat();
-        if self.tabs.strip_is_frozen() {
+        if self.tabs.is_frozen() {
             self.dirty |= self.tabs.thaw_if_frozen();
         }
     }
@@ -162,7 +161,7 @@ impl MainWindow {
                     return;
                 }
                 Some(HitId::Tab(id)) => {
-                    if let Some(ix) = self.tab_index(id) {
+                    if let Some(ix) = self.tabs.index_of(id) {
                         self.activate_tab(ix, cx.shell);
                         let left = self
                             .ui
@@ -272,7 +271,7 @@ impl MainWindow {
             let pressed = self.middle_pressed_tab.take();
             if let Some(id) = pressed
                 && pressed == tab_over
-                && self.tab_index(id).is_some()
+                && self.tabs.index_of(id).is_some()
             {
                 cx.emit(Effect::File(FileRequest::CloseTab {
                     window: self.id(),
@@ -358,7 +357,7 @@ impl MainWindow {
                 let _ = self.apply_menu_outcome(out, cx);
             }
             Some(HitId::TabClose(id)) => {
-                if self.tab_index(id).is_some() {
+                if self.tabs.index_of(id).is_some() {
                     cx.emit(Effect::File(FileRequest::CloseTab {
                         window: self.id(),
                         tab: id,
@@ -382,8 +381,8 @@ impl MainWindow {
             return;
         }
         let chain = self.ui.frame().hit_chain(pos);
-        if self.tabs.strip_overflow() && chain.contains(&HitId::TabList) {
-            let viewport = self.tabs.strip_scroll_viewport();
+        if self.tabs.overflow() && chain.contains(&HitId::TabList) {
+            let viewport = self.tabs.scroll_viewport();
             let notches = if delta_lines.y != 0. {
                 delta_lines.y
             } else {

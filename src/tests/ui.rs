@@ -15,18 +15,18 @@ fn menus_shortcuts_toggles_submenus_and_context_menu() {
     let mut h = TestHarness::new();
 
     h.click_hit(HitId::MenuTrigger(MenuKind::File));
-    h.read(|w, _| assert!(w.menu_bar.is_open()));
+    h.read(|w, _| assert!(w.is_menu_open()));
     h.click_menu_item(0);
     h.read(|w, _| {
-        assert_eq!(w.tabs.len(), 2, "File -> New tab must add a tab");
-        assert!(!w.menu_bar.is_open(), "menu must close after activation");
+        assert_eq!(w.tabs().len(), 2, "File -> New tab must add a tab");
+        assert!(!w.is_menu_open(), "menu must close after activation");
     });
 
     h.click_hit(HitId::MenuTrigger(MenuKind::View));
     h.click_menu_item(0);
     h.read(|w, _| {
         assert!(
-            !w.ui.last_input_was_keyboard(),
+            !w.ui_state().last_input_was_keyboard(),
             "clicking submenu item must not activate keyboard focus rings"
         );
     });
@@ -50,13 +50,13 @@ fn menus_shortcuts_toggles_submenus_and_context_menu() {
     h.click_hit(HitId::MenuTrigger(MenuKind::File));
     h.hover_hit(HitId::MenuTrigger(MenuKind::Edit));
     h.read(|w, _| {
-        assert_eq!(w.menu_bar.open_kind(), Some(MenuKind::Edit));
+        assert_eq!(w.open_menu_kind(), Some(MenuKind::Edit));
     });
     let editor_bounds = h.hit_rect(HitId::EditorArea).unwrap();
     h.click_point(editor_bounds.center(), MouseButton::Left);
     h.read(|w, _| {
         assert!(
-            !w.menu_bar.is_open(),
+            !w.is_menu_open(),
             "clicking outside menu must close it"
         )
     });
@@ -64,12 +64,12 @@ fn menus_shortcuts_toggles_submenus_and_context_menu() {
     h.press_key("alt");
     h.read(|w, _| assert!(w.key_tips_active()));
     h.press_key("f");
-    h.read(|w, _| assert!(w.menu_bar.is_open(), "Alt then F must open File menu"));
+    h.read(|w, _| assert!(w.is_menu_open(), "Alt then F must open File menu"));
     h.press_key("down");
     h.press_key("escape");
     h.press_key("escape");
     h.read(|w, _| {
-        assert!(!w.menu_bar.is_open());
+        assert!(!w.is_menu_open());
         assert!(!w.key_tips_active());
     });
 
@@ -82,13 +82,13 @@ fn menus_shortcuts_toggles_submenus_and_context_menu() {
     h.click_point(on_text, MouseButton::Right);
     h.read(|w, _| {
         assert!(
-            w.menu_bar.is_open(),
+            w.is_menu_open(),
             "right-click must open context menu"
         )
     });
     h.click_menu_command(4);
     h.read(|w, _| {
-        assert!(!w.menu_bar.is_open());
+        assert!(!w.is_menu_open());
         assert_eq!(
             w.active_editor().text().len(),
             0,
@@ -103,7 +103,7 @@ fn find_replace_bar_clear_button_and_key_contexts() {
     h.type_text("alpha beta alpha gamma");
 
     h.press_key("ctrl-f");
-    h.read(|w, _| assert!(w.find.is_open()));
+    h.read(|w, _| assert!(w.is_find_open()));
 
     h.type_text("alpha");
     h.press_key("enter");
@@ -127,12 +127,12 @@ fn find_replace_bar_clear_button_and_key_contexts() {
 
     h.type_text("ALPHA");
     h.click_hit(HitId::FindOptions);
-    h.read(|w, _| assert!(w.menu_bar.is_open(), "find-options must open flyout"));
+    h.read(|w, _| assert!(w.is_menu_open(), "find-options must open flyout"));
     h.click_menu_item(0);
-    h.read(|w, _| assert!(w.find.match_case()));
+    h.read(|w, _| assert!(w.find_match_case()));
     h.click_hit(HitId::FindOptions);
     h.click_menu_item(0);
-    h.read(|w, _| assert!(!w.find.match_case()));
+    h.read(|w, _| assert!(!w.find_match_case()));
 
     h.click_hit(HitId::FindToggleReplace);
     h.click_hit(HitId::Editor(EditorSlot::FindReplace));
@@ -162,13 +162,13 @@ fn find_replace_bar_clear_button_and_key_contexts() {
     let find_card = h.hit_rect(HitId::FindCard).unwrap();
     let beside_find = point(ed_bounds.right() - 30.0, find_card.center().y);
     h.read(|w, _| {
-        let chain = w.ui.frame().hit_chain(beside_find);
+        let chain = w.frame().hit_chain(beside_find);
         assert!(
             chain.contains(&HitId::Editor(w.active_slot())),
             "invisible Find bar row wrapper must not occlude editor hits beside FindCard: {chain:?}"
         );
         assert_eq!(
-            w.ui.frame().cursor_at(beside_find),
+            w.frame().cursor_at(beside_find),
             crate::platform::CursorStyle::IBeam
         );
     });
@@ -183,7 +183,7 @@ fn find_replace_bar_clear_button_and_key_contexts() {
     });
 
     h.click_hit(HitId::FindClose);
-    h.read(|w, _| assert!(!w.find.is_open(), "find-close 'x' must close Find bar"));
+    h.read(|w, _| assert!(!w.is_find_open(), "find-close 'x' must close Find bar"));
 }
 
 #[test]
@@ -198,11 +198,11 @@ fn go_to_dialog_navigation_and_out_of_range_flow() {
     h.type_text("four");
 
     h.press_key("ctrl-g");
-    h.read(|w, _| assert!(w.dialogs.is_open()));
+    h.read(|w, _| assert!(w.is_dialog_open()));
     h.type_text("2");
     h.press_key("enter");
     h.read(|w, _| {
-        assert!(!w.dialogs.is_open());
+        assert!(!w.is_dialog_open());
         let ed = w.active_editor();
         assert_eq!(ed.text().offset_to_point(ed.cursor()).row, 1);
     });
@@ -210,18 +210,18 @@ fn go_to_dialog_navigation_and_out_of_range_flow() {
     h.press_key("ctrl-g");
     h.type_text("999");
     h.press_key("enter");
-    h.read(|w, _| assert!(w.dialogs.is_open()));
+    h.read(|w, _| assert!(w.is_dialog_open()));
     h.click_hit(HitId::DialogButton(0));
     h.read(|w, _| {
-        assert!(w.dialogs.is_open());
-        assert_eq!(w.focus, Focus::Editor(EditorSlot::GoToLine));
+        assert!(w.is_dialog_open());
+        assert_eq!(w.focus(), Focus::Editor(EditorSlot::GoToLine));
     });
     h.press_key("tab");
-    h.read(|w, _| assert_eq!(w.focus, Focus::DialogButton(0)));
+    h.read(|w, _| assert_eq!(w.focus(), Focus::DialogButton(0)));
     h.press_key("shift-tab");
-    h.read(|w, _| assert_eq!(w.focus, Focus::Editor(EditorSlot::GoToLine)));
+    h.read(|w, _| assert_eq!(w.focus(), Focus::Editor(EditorSlot::GoToLine)));
     h.press_key("escape");
-    h.read(|w, _| assert!(!w.dialogs.is_open()));
+    h.read(|w, _| assert!(!w.is_dialog_open()));
 }
 
 #[test]
@@ -329,7 +329,7 @@ fn theme_zoom_editing_undo_scrollbar_and_caption_hit_tests() {
     let max_pt = h.hit_rect(HitId::CaptionMax).unwrap().center();
     let min_pt = h.hit_rect(HitId::CaptionMin).unwrap().center();
     h.read(|w, _| {
-        let areas = w.ui.frame().control_areas();
+        let areas = w.frame().control_areas();
         assert_eq!(
             hit_test_control_areas(&areas, close_pt),
             Some(WindowControlArea::Close)
@@ -359,7 +359,7 @@ fn status_bar_min_width_and_no_vertical_char_wrapping() {
         let cached = w
             .min_size_cached()
             .expect("min_size cache must populate on first draw");
-        (w.native.hwnd(), cached, w.native.scale_factor())
+        (w.hwnd(), cached, w.scale_factor())
     });
     assert!(
         min_size.width >= 420.0,
@@ -483,10 +483,10 @@ fn status_bar_min_width_and_no_vertical_char_wrapping() {
 #[test]
 fn window_anim_tracks_prune_unused_tracks_and_word_wrap_updates_tabs() {
     let mut h = TestHarness::new();
-    let baseline_tracks = h.read(|w, _| w.ui.track_count());
+    let baseline_tracks = h.read(|w, _| w.ui_state().track_count());
 
     h.press_key("ctrl-g");
-    let open_tracks = h.read(|w, _| w.ui.track_count());
+    let open_tracks = h.read(|w, _| w.ui_state().track_count());
     assert!(
         open_tracks > baseline_tracks,
         "dialog open must allocate anim tracks ({open_tracks} > {baseline_tracks})"
@@ -494,7 +494,7 @@ fn window_anim_tracks_prune_unused_tracks_and_word_wrap_updates_tabs() {
 
     h.press_key("escape");
     h.draw();
-    let closed_tracks = h.read(|w, _| w.ui.track_count());
+    let closed_tracks = h.read(|w, _| w.ui_state().track_count());
     assert_eq!(
         closed_tracks, baseline_tracks,
         "closing dialog must prune unused anim tracks back to baseline"
@@ -502,9 +502,9 @@ fn window_anim_tracks_prune_unused_tracks_and_word_wrap_updates_tabs() {
 
     h.press_key("ctrl-n");
     h.read(|w, app| {
-        assert_eq!(w.tabs.len(), 2);
+        assert_eq!(w.tabs().len(), 2);
         assert!(app.shell.view.word_wrap);
-        for tab in w.tabs.iter() {
+        for tab in w.tabs().iter() {
             assert!(tab.data.editor.soft_wrap_enabled());
         }
     });
@@ -512,7 +512,7 @@ fn window_anim_tracks_prune_unused_tracks_and_word_wrap_updates_tabs() {
     h.click_menu_item(2);
     h.read(|w, app| {
         assert!(!app.shell.view.word_wrap);
-        for tab in w.tabs.iter() {
+        for tab in w.tabs().iter() {
             assert!(!tab.data.editor.soft_wrap_enabled());
         }
     });
@@ -554,10 +554,10 @@ fn keyboard_system_chords_altgr_menu_gate_popup_occlusion_and_fractional_borders
     }));
 
     h.click_hit(HitId::MenuTrigger(MenuKind::File));
-    h.read(|w, _| assert!(w.menu_bar.is_open()));
+    h.read(|w, _| assert!(w.is_menu_open()));
     h.press_key("ctrl-w");
     h.read(|w, _| {
-        assert_eq!(w.tabs.len(), 2, "Ctrl+W must not fire behind an open menu");
+        assert_eq!(w.tabs().len(), 2, "Ctrl+W must not fire behind an open menu");
     });
     assert!(!h.app.borrow_mut().on_event(PlatformEvent::KeyDown {
         window_id: h.window_id,
@@ -579,7 +579,7 @@ fn keyboard_system_chords_altgr_menu_gate_popup_occlusion_and_fractional_borders
     );
 
     h.press_key("ctrl-g");
-    h.read(|w, _| assert!(w.dialogs.is_open()));
+    h.read(|w, _| assert!(w.is_dialog_open()));
     assert!(!h.app.borrow_mut().on_event(PlatformEvent::KeyDown {
         window_id: h.window_id,
         event: alt_f4,
@@ -587,7 +587,7 @@ fn keyboard_system_chords_altgr_menu_gate_popup_occlusion_and_fractional_borders
     let close_pt = h.hit_rect(HitId::CaptionClose).unwrap().center();
     h.read(|w, _| {
         assert_eq!(
-            hit_test_control_areas(&w.ui.frame().control_areas(), close_pt),
+            hit_test_control_areas(&w.frame().control_areas(), close_pt),
             None,
             "modal dialog backdrop must occlude caption buttons"
         );

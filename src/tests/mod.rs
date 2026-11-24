@@ -75,7 +75,7 @@ impl TestHarness {
         let gpu = Gpu::new().expect("Gpu::new failed");
         let mut app = App::new(platform, gpu);
         app.shell.settings.reduce_motion = true;
-        app.headless = true;
+        app.windows.set_headless(true);
         let (window_id, _) = app
             .open_window(None, Some(size(1024., 700.)))
             .expect("open_window failed");
@@ -89,35 +89,35 @@ impl TestHarness {
         for _ in 0..2 {
             let mut app = self.app.borrow_mut();
             app.on_wake();
-            if let Some(ix) = app.window_ix(self.window_id) {
-                app.windows[ix].mark_dirty();
-            }
+            app.windows.mark_dirty(self.window_id);
             app.drive_frames();
         }
     }
 
     fn window_open(&self) -> bool {
-        self.app.borrow().window(self.window_id).is_some()
+        self.app.borrow().windows.get(self.window_id).is_some()
     }
 
     fn read<R>(&self, f: impl FnOnce(&MainWindow, &App) -> R) -> R {
         let app = self.app.borrow();
         let win = app
-            .window(self.window_id)
+            .windows
+            .get(self.window_id)
             .expect("Jot window should be open");
         f(win, &app)
     }
 
     fn hit_rect(&self, hit: HitId) -> Option<Rect> {
         let app = self.app.borrow();
-        app.window(self.window_id)?.ui.frame().rect_of(hit)
+        app.windows.get(self.window_id)?.frame().rect_of(hit)
     }
 
     fn click_matching(&mut self, pred: impl Fn(HitId) -> bool, desc: &str) {
         let bounds = {
             let app = self.app.borrow();
-            app.window(self.window_id)
-                .and_then(|w| w.ui.frame().find_rect(&pred))
+            app.windows
+                .get(self.window_id)
+                .and_then(|w| w.frame().find_rect(&pred))
                 .unwrap_or_else(|| panic!("{desc} was not laid out"))
         };
         assert!(!bounds.is_empty(), "{desc} laid out with empty bounds {bounds:?}");
@@ -259,7 +259,7 @@ impl TestHarness {
 
     fn close_all(&mut self) {
         let mut app = self.app.borrow_mut();
-        for w in &mut app.windows {
+        for w in app.windows.iter_mut() {
             w.request_close();
         }
         app.sweep_closed_windows();

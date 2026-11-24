@@ -52,7 +52,7 @@ fn hwnd_registry_cleanup_reentrant_queue_and_modal_size_move_timer() {
     };
 
     let mut h = TestHarness::new();
-    let hwnd = h.read(|w, _| w.native.hwnd());
+    let hwnd = h.read(|w, _| w.hwnd());
     assert!(
         crate::platform::window::has_hwnd_entry(hwnd),
         "open window must be registered in HWND_REGISTRY"
@@ -76,10 +76,10 @@ fn hwnd_registry_cleanup_reentrant_queue_and_modal_size_move_timer() {
     h.app.borrow_mut().drive_frames();
     h.read(|w, app| {
         assert!(
-            w.native.is_active(),
+            w.is_active(),
             "queued re-entrant WM_ACTIVATE must apply once drained"
         );
-        assert_eq!(app.active_window, Some(h.window_id));
+        assert_eq!(app.windows.active_id(), Some(h.window_id));
     });
 
     let ran = Arc::new(AtomicBool::new(false));
@@ -97,7 +97,7 @@ fn hwnd_registry_cleanup_reentrant_queue_and_modal_size_move_timer() {
             Some(LPARAM(0)),
         );
     }
-    h.read(|w, _| assert!(w.native.in_size_move()));
+    h.read(|w, _| assert!(w.in_size_move()));
     unsafe {
         let _ = SendMessageW(hwnd.raw(), WM_TIMER, Some(WPARAM(1)), Some(LPARAM(0)));
     }
@@ -113,7 +113,7 @@ fn hwnd_registry_cleanup_reentrant_queue_and_modal_size_move_timer() {
             Some(LPARAM(0)),
         );
     }
-    h.read(|w, _| assert!(!w.native.in_size_move()));
+    h.read(|w, _| assert!(!w.in_size_move()));
 
     h.close_all();
     Platform::set_active_handler_for_test(None);
@@ -130,7 +130,7 @@ fn real_win32_message_loop_wakes_timers_and_quits_cleanly() {
     let app = Rc::new(RefCell::new(App::new(platform, gpu)));
     let mut _timer = None;
     Platform::run(app, |app| {
-        app.headless = true;
+        app.windows.set_headless(true);
         let (id, _) = app.open_window(None, None).expect("open_window failed");
         _timer = Some(
             app.shell
@@ -146,7 +146,7 @@ fn device_loss_recreates_devices_and_renders_new_windows_cleanly() {
     let gen0 = h.read(|_, app| app.shell.gpu.generation());
     {
         let mut app = h.app.borrow_mut();
-        app.windows[0].surface.mark_device_lost_for_test();
+        app.windows[0].mark_device_lost_for_test();
         app.windows[0].mark_dirty();
     }
     h.draw();
@@ -160,7 +160,7 @@ fn device_loss_recreates_devices_and_renders_new_windows_cleanly() {
     {
         let app = h.app.borrow();
         assert_eq!(app.windows.len(), 2);
-        assert!(app.windows[1].surface.is_ready());
+        assert!(app.windows[1].surface_is_ready());
     }
 }
 
@@ -180,7 +180,7 @@ fn win32_client_clicks_and_capture_loss_via_wnd_proc() {
     let dyn_handler: Rc<RefCell<dyn PlatformHandler>> = h.app.clone();
     Platform::set_active_handler_for_test(Some(dyn_handler));
 
-    let (hwnd, scale) = h.read(|w, _| (w.native.hwnd(), w.native.scale_factor()));
+    let (hwnd, scale) = h.read(|w, _| (w.hwnd(), w.scale_factor()));
     let pack_client = |pt: crate::geom::Point| -> LPARAM {
         let x = (pt.x * scale).round() as i32;
         let y = (pt.y * scale).round() as i32;
@@ -224,7 +224,7 @@ fn win32_client_clicks_and_capture_loss_via_wnd_proc() {
     }
     h.read(|w, _| {
         assert_eq!(
-            w.tabs.len(),
+            w.tabs().len(),
             2,
             "Win32 click on NewTab must open a new tab even when ReleaseCapture triggers WM_CAPTURECHANGED"
         );
@@ -248,7 +248,7 @@ fn win32_client_clicks_and_capture_loss_via_wnd_proc() {
     h.read(|_, app| assert_eq!(app.shell.palette.dark, !initial_dark));
 
     // Middle-clicking a tab through wnd_proc must preserve middle_pressed_tab across ReleaseCapture.
-    let second_id = h.read(|w, _| w.tabs[1].data.id);
+    let second_id = h.read(|w, _| w.tabs()[1].data.id);
     let tab_pt = h
         .hit_rect(HitId::Tab(second_id))
         .expect("second tab rect")
@@ -262,7 +262,7 @@ fn win32_client_clicks_and_capture_loss_via_wnd_proc() {
     unsafe {
         let _ = SendMessageW(hwnd.raw(), WM_MBUTTONUP, Some(WPARAM(0)), Some(tab_lp));
     }
-    h.read(|w, _| assert_eq!(w.tabs.len(), 1, "Win32 middle-click must close tab"));
+    h.read(|w, _| assert_eq!(w.tabs().len(), 1, "Win32 middle-click must close tab"));
 
     // Genuine external WM_CAPTURECHANGED (not from our own ReleaseCapture) must cancel the click.
     let new_tab_pt = h.hit_rect(HitId::NewTab).expect("NewTab rect").center();
@@ -275,7 +275,7 @@ fn win32_client_clicks_and_capture_loss_via_wnd_proc() {
     }
     h.read(|w, _| {
         assert_eq!(
-            w.tabs.len(),
+            w.tabs().len(),
             1,
             "external WM_CAPTURECHANGED must cancel an in-progress click"
         );

@@ -8,7 +8,7 @@ use crate::shell::Shell;
 use crate::ui::controls::{BODY_LINE, BODY_SIZE, TEXT_FONT};
 use crate::ui::{AvailSize, box_};
 
-use super::chrome::STATUS_DIVIDER_WIDTH;
+use super::chrome::{STATUS_DIVIDER_WIDTH, tab_strip_column};
 use super::{EDITOR_FONT_SIZE, MainWindow};
 
 impl MainWindow {
@@ -26,7 +26,9 @@ impl MainWindow {
         let status_metrics = view.status_bar.then(|| self.status_metrics());
 
         self.ui.begin_frame(now, reduce_motion);
-        let strip = self.tabs.sample(logical.width, &mut self.ui);
+        let strip = self
+            .tabs
+            .sample(tab_strip_column(logical.width), &mut self.ui);
         self.menu_bar.sample(&mut self.ui);
 
         let title_bar = self.title_bar(&strip, window_active, maximized, p);

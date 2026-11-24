@@ -8,12 +8,24 @@ use crate::ids::{CustomDraw, Frame, HitId, Node, UiState};
 use crate::menu::MENU_BAR_HEIGHT;
 use crate::platform::WindowControlArea;
 use crate::shell::Shell;
-use crate::tabs::{self, CAPTION_BUTTON_WIDTH, STRIP_TOP, StripFrame, TAB_HEIGHT};
+use crate::tabs::{self, StripFrame, TAB_HEIGHT};
 use crate::theme::Palette;
 use crate::ui::controls::{CONTROL_RADIUS, ICON_FONT, IconButtonStyle, SMALL_FONT, icon_button};
 use crate::ui::{AvailSize, Brushes, box_, custom, row, text};
 
 use super::{EDITOR_FONT_SIZE, MainWindow, WindowEditorTimers};
+
+pub(super) const HEADER_WIDTH: f32 = 5.;
+pub(super) const STRIP_TOP: f32 = 10.;
+const CAPTION_BUTTON_WIDTH: f32 = 46.;
+pub(super) const CAPTION_WIDTH: f32 = 3. * CAPTION_BUTTON_WIDTH;
+const DRAG_RESERVE: f32 = 43.;
+pub(super) const TITLE_BAR_MIN_WIDTH: f32 =
+    HEADER_WIDTH + CAPTION_WIDTH + DRAG_RESERVE + tabs::MIN_STRIP_WIDTH;
+
+pub(super) fn tab_strip_column(viewport_width: f32) -> f32 {
+    viewport_width - HEADER_WIDTH - CAPTION_WIDTH - DRAG_RESERVE - tabs::STRIP_END_RESERVE
+}
 
 const SEPARATOR_HEIGHT: f32 = 1.;
 const MENU_BAR_LEFT: f32 = 4.;
@@ -99,7 +111,7 @@ impl MainWindow {
         let width = status_sz
             .map_or(0., |s| s.width)
             .max(menu_row)
-            .max(tabs::TITLE_BAR_MIN_WIDTH);
+            .max(TITLE_BAR_MIN_WIDTH);
         let chrome_top = frame.rect_of(HitId::EditorArea).map_or(0., |r| r.top());
         let height = chrome_top + self.editor_min_height() + status_sz.map_or(0., |s| s.height);
         let next = size(width, height);
@@ -127,7 +139,7 @@ impl MainWindow {
             .child(
                 box_()
                     .flex_none()
-                    .w(tabs::HEADER_WIDTH)
+                    .w(HEADER_WIDTH)
                     .h_full()
                     .window_area(WindowControlArea::Drag),
             )

@@ -2,30 +2,28 @@ mod chrome;
 mod commands;
 mod input;
 mod paint;
-mod tab_set;
 
 use std::time::Duration;
 
 use crate::APP_NAME;
 use crate::dialog::{DialogKind, Dialogs};
-use crate::document::{self, DocPath, Format, PathKey};
-use crate::editor::{Clipboard, Editor, EditorTimer, EditorTimers, RopeExt as _};
+use crate::document::{self, DocPath, Format};
+use crate::editor::{Clipboard, Editor, EditorTimer, EditorTimers, Rope, RopeExt as _};
 use crate::files::Prompt;
 use crate::find::{self, FindBar, FindOutcome};
-use crate::geom::{Edges, Point};
+use crate::geom::{Edges, Point, ScreenPoint, Size, point};
 use crate::gfx::Surface;
 use crate::ids::{EditorSlot, Focus, HitId, TabId, UiState};
 use crate::keytips::KeyTip;
 use crate::menu::{FocusRequest, MenuBar, MenuOutcome, MenuState, SubmenuTimer};
-use crate::platform::{NativeWindow, TimerHandle, WindowId, clipboard};
+use crate::platform::{
+    NativeWindow, TimerHandle, WindowAppearance, WindowHwnd, WindowId, clipboard,
+};
 use crate::shell::{AppEvent, Cx, Effect, Shell};
-use crate::tabs::TabData;
+use crate::tabs::{self, Removal, TabData, TabSet};
 use crate::tooltip::TooltipProbe;
 
-use chrome::MinSizeCache;
-use tab_set::{RemoveOutcome, TakeOutcome};
-
-pub(crate) use tab_set::TabSet;
+use chrome::{CAPTION_WIDTH, HEADER_WIDTH, MinSizeCache, STRIP_TOP};
 
 pub(crate) const WINDOW_WIDTH: f32 = 2213.;
 pub(crate) const WINDOW_HEIGHT: f32 = 1107.;
@@ -118,14 +116,14 @@ impl EditorTimers for WindowEditorTimers<'_> {
 
 pub(crate) struct MainWindow {
     // Declared before native so swapchain/DComp target drop before DestroyWindow.
-    pub(crate) surface: Surface,
-    pub(crate) native: NativeWindow,
-    pub(crate) ui: UiState,
-    pub(crate) tabs: TabSet,
-    pub(crate) menu_bar: MenuBar,
-    pub(crate) find: FindBar,
-    pub(crate) dialogs: Dialogs,
-    pub(crate) focus: Focus,
+    pub(super) surface: Surface,
+    pub(super) native: NativeWindow,
+    pub(super) ui: UiState,
+    pub(super) tabs: TabSet,
+    pub(super) menu_bar: MenuBar,
+    pub(super) find: FindBar,
+    pub(super) dialogs: Dialogs,
+    pub(super) focus: Focus,
     dirty: bool,
     has_painted: bool,
     pending_close: bool,
@@ -209,6 +207,119 @@ impl MainWindow {
         self.native.id
     }
 
+    #[inline]
+    pub(crate) fn hwnd(&self) -> WindowHwnd {
+        self.native.hwnd()
+    }
+
+    #[inline]
+    pub(crate) fn scale_factor(&self) -> f32 {
+        self.native.scale_factor()
+    }
+
+    pub(crate) fn restored_logical_size(&self) -> Size {
+        if self.native.is_maximized() {
+            self.native
+                .hwnd()
+                .restored_logical_size()
+                .unwrap_or_else(|| self.native.logical_size())
+        } else {
+            self.native.logical_size()
+        }
+    }
+
+    #[inline]
+    pub(crate) fn tabs(&self) -> &TabSet {
+        &self.tabs
+    }
+
+    #[inline]
+    pub(crate) fn has_pointer(&self) -> bool {
+        self.ui.pointer().is_some()
+    }
+
+    pub(crate) fn on_resized(
+        &mut self,
+        physical_width: u32,
+        physical_height: u32,
+        scale: f32,
+        shell: &Shell,
+    ) {
+        self.surface.resize(physical_width, physical_height, scale);
+        self.cancel_menu(shell);
+    }
+
+    pub(crate) fn apply_theme(&mut self, appearance: WindowAppearance) {
+        self.native.set_appearance(appearance);
+        self.dirty = true;
+    }
+
+    pub(crate) fn set_block_shutdown(&self, reason: Option<&'static str>) {
+        self.native.set_block_shutdown(reason);
+    }
+
+    pub(crate) fn accepts_tab_drop(&self) -> bool {
+        !self.dialogs.is_open() && !self.pending_close && self.native.hwnd().is_enabled()
+    }
+
+    pub(crate) fn screen_to_local(&self, pt: ScreenPoint) -> Point {
+        let hwnd = self.native.hwnd();
+        let origin = hwnd.client_origin();
+        let scale = hwnd.dpi_scale();
+        point(
+            (pt.x - origin.x) as f32 / scale,
+            (pt.y - origin.y) as f32 / scale,
+        )
+    }
+
+    pub(crate) fn local_to_screen(&self, pos: Point) -> ScreenPoint {
+        let hwnd = self.native.hwnd();
+        let origin = hwnd.client_origin();
+        let scale = hwnd.dpi_scale();
+        ScreenPoint {
+            x: origin.x + (pos.x * scale).round() as i32,
+            y: origin.y + (pos.y * scale).round() as i32,
+        }
+    }
+
+    pub(crate) fn strip_hit(&self, pt: ScreenPoint, magnetism: f32) -> bool {
+        let pos = self.screen_to_local(pt);
+        let right = self
+            .ui
+            .frame()
+            .rect_of(HitId::CaptionMin)
+            .map_or_else(|| self.native.logical_size().width - CAPTION_WIDTH, |r| r.left());
+        let (left, top, bottom) = self.ui.frame().rect_of(HitId::TabList).map_or(
+            (
+                HEADER_WIDTH + tabs::LIST_PAD,
+                STRIP_TOP,
+                STRIP_TOP + tabs::TAB_HEIGHT,
+            ),
+            |r| (r.left(), r.top(), r.bottom()),
+        );
+        (left..right).contains(&pos.x) && (top - magnetism..bottom + magnetism).contains(&pos.y)
+    }
+
+    pub(crate) fn strip_grab_offset(&self, grab: Point) -> Point {
+        point(HEADER_WIDTH + tabs::LIST_PAD + grab.x, STRIP_TOP + grab.y)
+    }
+
+    pub(crate) fn key_tip_request(&self, shell: &Shell) -> (ScreenPoint, f32, Vec<KeyTip>) {
+        (
+            self.native.hwnd().client_origin(),
+            self.native.scale_factor(),
+            self.menu_bar
+                .key_tips(self.focus, self.ui.frame(), &shell.text_system),
+        )
+    }
+
+    pub(crate) fn begin_tab_save(&mut self, tab: TabId) -> Option<(u64, Rope)> {
+        let ed = self.tabs.editor_mut(tab)?;
+        let snapshot = ed.begin_save();
+        let text = ed.text().clone();
+        Some((snapshot, text))
+    }
+
     pub(crate) fn tooltip_probe(&self) -> TooltipProbe<'_> {
         TooltipProbe {
             window: self.id(),
@@ -224,8 +335,68 @@ impl MainWindow {
     }
 
     #[cfg(test)]
-    pub(crate) fn min_size_cached(&self) -> Option<crate::geom::Size> {
+    pub(crate) fn min_size_cached(&self) -> Option<Size> {
         self.min_size_cache.map(|c| c.size)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn frame(&self) -> &crate::ids::Frame {
+        self.ui.frame()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn ui_state(&self) -> &UiState {
+        &self.ui
+    }
+
+    #[cfg(test)]
+    pub(crate) fn focus(&self) -> Focus {
+        self.focus
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_menu_open(&self) -> bool {
+        self.menu_bar.is_open()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn open_menu_kind(&self) -> Option<crate::ids::MenuKind> {
+        self.menu_bar.open_kind()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_find_open(&self) -> bool {
+        self.find.is_open()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn find_match_case(&self) -> bool {
+        self.find.match_case()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_dialog_open(&self) -> bool {
+        self.dialogs.is_open()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_active(&self) -> bool {
+        self.native.is_active()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn in_size_move(&self) -> bool {
+        self.native.in_size_move()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn surface_is_ready(&self) -> bool {
+        self.surface.is_ready()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn mark_device_lost_for_test(&mut self) {
+        self.surface.mark_device_lost_for_test();
     }
 
     #[inline]
@@ -246,14 +417,6 @@ impl MainWindow {
     #[inline]
     pub(crate) fn active_slot(&self) -> EditorSlot {
         self.tabs.active_slot()
-    }
-
-    pub(crate) fn tab_index(&self, id: TabId) -> Option<usize> {
-        self.tabs.index_of(id)
-    }
-
-    pub(crate) fn tab_name(&self, ix: usize) -> String {
-        self.tabs.tab_name(ix)
     }
 
     pub(crate) fn editor_by_slot(&self, slot: EditorSlot) -> Option<&Editor> {
@@ -335,7 +498,7 @@ impl MainWindow {
     pub(crate) fn refresh_title(&self) {
         self.native.set_title(&format!(
             "{} - {APP_NAME}",
-            self.tab_name(self.tabs.active_index())
+            self.tabs.tab_name(self.tabs.active_index())
         ));
     }
 
@@ -412,8 +575,8 @@ impl MainWindow {
                 .is_some_and(|r| r.contains(p.pos))
         });
         match self.tabs.remove(ix, pointer_in_strip) {
-            RemoveOutcome::LastTab => self.pending_close = true,
-            RemoveOutcome::Removed {
+            Removal::LastTab => self.pending_close = true,
+            Removal::Removed {
                 id,
                 closed_active,
                 next_active,
@@ -437,7 +600,7 @@ impl MainWindow {
     }
 
     pub(crate) fn drag_tab(&mut self, id: TabId, x: f32, grab: f32, start: f32) {
-        self.tabs.drag(id, x, grab, start);
+        self.tabs.drag(id, x - HEADER_WIDTH, grab, start - HEADER_WIDTH);
         self.dirty = true;
     }
 
@@ -450,17 +613,18 @@ impl MainWindow {
     pub(crate) fn take_tab(&mut self, id: TabId, shell: &Shell) -> Option<TabData> {
         let (data, outcome) = self.tabs.take(id)?;
         match outcome {
-            TakeOutcome::NowEmpty => self.pending_close = true,
-            TakeOutcome::Settled {
+            Removal::LastTab => self.pending_close = true,
+            Removal::Removed {
                 closed_active,
                 next_active,
+                ..
             } => self.finish_removal(closed_active, next_active, shell),
         }
         Some(data)
     }
 
     pub(crate) fn insert_dragged_tab(&mut self, data: TabData, x: f32, grab: f32, shell: &Shell) {
-        let ix = self.tabs.insert_dragged(data, x, grab);
+        let ix = self.tabs.insert_dragged(data, x - HEADER_WIDTH, grab);
         self.activate_tab(ix, shell);
     }
 
@@ -517,18 +681,6 @@ impl MainWindow {
             return;
         }
         self.activate_tab(last, shell);
-    }
-
-    pub(crate) fn find_open_tab_by_key(&self, key: &PathKey) -> Option<usize> {
-        self.tabs.find_by_key(key)
-    }
-
-    pub(crate) fn has_dirty_tabs(&self) -> bool {
-        self.tabs.has_dirty()
-    }
-
-    pub(crate) fn dirty_tabs(&self) -> Vec<TabId> {
-        self.tabs.dirty_tabs()
     }
 
     pub(crate) fn adopt_loaded_file(&mut self, loaded: document::Loaded, shell: &Shell) {
@@ -708,11 +860,6 @@ impl MainWindow {
 
     pub(crate) fn key_tips_active(&self) -> bool {
         self.menu_bar.access_active(self.focus)
-    }
-
-    pub(crate) fn key_tips(&self, shell: &Shell) -> Vec<KeyTip> {
-        self.menu_bar
-            .key_tips(self.focus, self.ui.frame(), &shell.text_system)
     }
 
     pub(super) fn menu_state(&self, shell: &Shell) -> MenuState {

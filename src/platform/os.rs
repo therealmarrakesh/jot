@@ -13,7 +13,7 @@ use windows::Win32::{
             GetAsyncKeyState, IsWindowEnabled, ReleaseCapture, SetCapture, VK_LBUTTON, VK_RBUTTON,
         },
         WindowsAndMessaging::{
-            EnumWindows, GUI_INMOVESIZE, GUITHREADINFO, GWL_EXSTYLE, GetClientRect, GetCursorPos,
+            EnumWindows, GUI_INMOVESIZE, GUITHREADINFO, GWL_EXSTYLE, GetCursorPos,
             GetGUIThreadInfo, GetSystemMetrics, GetWindowLongW, GetWindowPlacement, GetWindowRect,
             GetWindowThreadProcessId, HTCAPTION, HWND_TOPMOST, IsIconic, IsWindowVisible, IsZoomed,
             PostMessageW, SC_MOVE, SM_SWAPBUTTON, SW_HIDE, SW_RESTORE, SW_SHOWNOACTIVATE,
@@ -80,12 +80,6 @@ impl WindowHwnd {
             0 => 1.,
             dpi => dpi as f32 / USER_DEFAULT_SCREEN_DPI as f32,
         }
-    }
-
-    pub(crate) fn client_rect(self) -> ScreenRect {
-        let mut rect = RECT::default();
-        let _ = unsafe { GetClientRect(self.0, &mut rect) };
-        rect.into()
     }
 
     pub(crate) fn window_rect(self) -> ScreenRect {

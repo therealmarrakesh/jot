@@ -40,8 +40,8 @@ fn real_disk_save_routes_completion_to_migrated_tab() {
         h.draw();
         let clean = {
             let app = h.app.borrow();
-            let (wix, tix) = app.find_tab_owner(tab_id).expect("tab must exist in win2");
-            !app.windows[wix].tabs[tix].data.is_dirty()
+            let (wix, tix) = app.windows.owner_of(tab_id).expect("tab must exist in win2");
+            !app.windows[wix].tabs()[tix].data.is_dirty()
         };
         if clean {
             break;
@@ -50,10 +50,10 @@ fn real_disk_save_routes_completion_to_migrated_tab() {
     }
     {
         let app = h.app.borrow();
-        let (wix, tix) = app.find_tab_owner(tab_id).expect("tab must exist in win2");
+        let (wix, tix) = app.windows.owner_of(tab_id).expect("tab must exist in win2");
         assert_eq!(wix, 1);
         assert!(
-            !app.windows[wix].tabs[tix].data.is_dirty(),
+            !app.windows[wix].tabs()[tix].data.is_dirty(),
             "WriteDone must route by TabId to migrated tab"
         );
     }
