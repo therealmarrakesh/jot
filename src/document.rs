@@ -206,10 +206,54 @@ impl Format {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct PathKey(String);
+
+impl PathKey {
+    pub(crate) fn quick(path: &Path) -> Self {
+        let abs = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+        Self(normalize_path_key(&abs))
+    }
+
+    pub(crate) fn canonical(path: &Path) -> Self {
+        match fs::canonicalize(path) {
+            Ok(c) => Self(normalize_path_key(&c)),
+            Err(_) => Self::quick(path),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct DocPath {
+    pub(crate) path: PathBuf,
+    pub(crate) key: PathKey,
+}
+
+impl DocPath {
+    pub(crate) fn quick(path: PathBuf) -> Self {
+        let key = PathKey::quick(&path);
+        Self { path, key }
+    }
+
+    pub(crate) fn canonical(path: PathBuf) -> Self {
+        let key = PathKey::canonical(&path);
+        Self { path, key }
+    }
+
+    pub(crate) fn as_path(&self) -> &Path {
+        &self.path
+    }
+}
+
+struct Decoded {
+    text: Rope,
+    format: Format,
+}
+
 pub(crate) struct Loaded {
+    pub(crate) doc_path: DocPath,
     pub(crate) text: Rope,
     pub(crate) format: Format,
-    pub(crate) path_key: String,
 }
 
 #[derive(Debug)]
@@ -226,9 +270,12 @@ pub(crate) fn load(path: &Path) -> Result<Loaded, LoadError> {
     {
         return Err(LoadError::TooLarge(meta.len()));
     }
-    let mut loaded = load_reader_with_page(&mut file, IO_CHUNK, AnsiCodePage::current())?;
-    loaded.path_key = canonical_path_key(path);
-    Ok(loaded)
+    let decoded = load_reader_with_page(&mut file, IO_CHUNK, AnsiCodePage::current())?;
+    Ok(Loaded {
+        doc_path: DocPath::canonical(path.to_path_buf()),
+        text: decoded.text,
+        format: decoded.format,
+    })
 }
 
 #[derive(Copy, Clone)]
@@ -266,7 +313,7 @@ fn load_reader_with_page<R: Read + Seek>(
     reader: &mut R,
     chunk_size: usize,
     page: AnsiCodePage,
-) -> Result<Loaded, LoadError> {
+) -> Result<Decoded, LoadError> {
     let chunk_size = chunk_size.max(4);
     let mut head = [0u8; 4];
     let mut head_len = 0;
@@ -313,22 +360,22 @@ fn load_reader_with_page<R: Read + Seek>(
                 } else {
                     u16::from_be_bytes
                 };
-                if let Ok(loaded) = stream_utf16(reader, &[], chunk_size, unit, enc) {
-                    return Ok(loaded);
+                if let Ok(decoded) = stream_utf16(reader, &[], chunk_size, unit, enc) {
+                    return Ok(decoded);
                 }
                 reader.seek(SeekFrom::Start(0)).map_err(LoadError::Io)?;
                 probe.clear();
             }
 
             match stream_utf8(reader, &probe, chunk_size, false) {
-                Ok(loaded) => Ok(loaded),
+                Ok(decoded) => Ok(decoded),
                 Err(LoadError::Undecodable) => {
                     reader.seek(SeekFrom::Start(0)).map_err(LoadError::Io)?;
                     if page.is_utf8() {
                         // ACP 65001 failed strict UTF-8; fall back to CP 1252 and flag lossy_decode so save warns.
-                        let mut loaded = stream_ansi(reader, chunk_size, AnsiCodePage::CP_1252)?;
-                        loaded.format.lossy_decode = true;
-                        Ok(loaded)
+                        let mut decoded = stream_ansi(reader, chunk_size, AnsiCodePage::CP_1252)?;
+                        decoded.format.lossy_decode = true;
+                        Ok(decoded)
                     } else {
                         stream_ansi(reader, chunk_size, page)
                     }
@@ -339,76 +386,13 @@ fn load_reader_with_page<R: Read + Seek>(
     }
 }
 
-fn stream_ansi<R: Read>(
-    reader: &mut R,
-    chunk_size: usize,
-    page: AnsiCodePage,
-) -> Result<Loaded, LoadError> {
-    let mut normalizer = LineNormalizer::new();
-    let mut buf = vec![0u8; chunk_size + 4];
-    let mut wide = Vec::new();
-    let mut decoded = String::new();
-    let mut carry = 0usize;
-
-    loop {
-        let read = reader.read(&mut buf[carry..]).map_err(LoadError::Io)?;
-        let filled = carry + read;
-        let eof = read == 0;
-        if filled == 0 {
-            break;
-        }
-        let mut decode_end = filled;
-        if !eof && decode_end > 0 {
-            let mut trailing_leads = 0usize;
-            let mut idx = decode_end;
-            while idx > 0 && page.is_dbcs_lead_byte(buf[idx - 1]) {
-                trailing_leads += 1;
-                idx -= 1;
-            }
-            if trailing_leads % 2 == 1 {
-                decode_end -= 1;
-            }
-        }
-        if decode_end > 0 {
-            let valid = page
-                .decode_chunk(&buf[..decode_end], &mut wide, &mut decoded)
-                .map_err(LoadError::Io)?;
-            if !valid {
-                return Err(LoadError::Undecodable);
-            }
-            normalizer.push(&decoded);
-            let remaining = filled - decode_end;
-            buf.copy_within(decode_end..filled, 0);
-            carry = remaining;
-        } else if eof {
-            break;
-        } else {
-            carry = filled;
-        }
-        if eof {
-            break;
-        }
-    }
-
-    let (text, line_ending, mixed_line_endings) = normalizer.finish();
-    Ok(Loaded {
-        text,
-        format: Format {
-            line_ending,
-            encoding: Encoding::Ansi,
-            mixed_line_endings,
-            lossy_decode: false,
-        },
-        path_key: String::new(),
-    })
-}
-
-fn stream_utf8<R: Read>(
+fn stream_decode<R: Read>(
     reader: &mut R,
     initial: &[u8],
     chunk_size: usize,
-    has_bom: bool,
-) -> Result<Loaded, LoadError> {
+    encoding: Encoding,
+    mut step: impl FnMut(&[u8], bool, &mut LineNormalizer) -> Result<usize, LoadError>,
+) -> Result<Decoded, LoadError> {
     let mut normalizer = LineNormalizer::new();
     let mut buf = vec![0u8; chunk_size.max(initial.len()) + 4];
     let mut carry = initial.len();
@@ -421,44 +405,90 @@ fn stream_utf8<R: Read>(
         if filled == 0 {
             break;
         }
-        match std::str::from_utf8(&buf[..filled]) {
-            Ok(valid) => {
-                normalizer.push(valid);
-                carry = 0;
-            }
-            Err(error) => {
-                let valid = error.valid_up_to();
-                if valid > 0 {
-                    let prefix = std::str::from_utf8(&buf[..valid]).expect("valid UTF-8 prefix");
-                    normalizer.push(prefix);
-                }
-                if error.error_len().is_some() || eof {
-                    return Err(LoadError::Undecodable);
-                }
-                let remaining = filled - valid;
-                buf.copy_within(valid..filled, 0);
-                carry = remaining;
-            }
+        let consumed = step(&buf[..filled], eof, &mut normalizer)?;
+        let remaining = filled - consumed;
+        if remaining > 0 {
+            buf.copy_within(consumed..filled, 0);
         }
+        carry = remaining;
         if eof {
             break;
         }
     }
 
     let (text, line_ending, mixed_line_endings) = normalizer.finish();
-    Ok(Loaded {
+    Ok(Decoded {
         text,
         format: Format {
             line_ending,
-            encoding: if has_bom {
-                Encoding::Utf8Bom
-            } else {
-                Encoding::Utf8
-            },
+            encoding,
             mixed_line_endings,
             lossy_decode: false,
         },
-        path_key: String::new(),
+    })
+}
+
+fn stream_ansi<R: Read>(
+    reader: &mut R,
+    chunk_size: usize,
+    page: AnsiCodePage,
+) -> Result<Decoded, LoadError> {
+    let mut wide = Vec::new();
+    let mut decoded = String::new();
+    stream_decode(reader, &[], chunk_size, Encoding::Ansi, |bytes, eof, norm| {
+        let mut end = bytes.len();
+        if !eof && end > 0 {
+            let trailing_leads = bytes
+                .iter()
+                .rev()
+                .take_while(|&&b| page.is_dbcs_lead_byte(b))
+                .count();
+            if trailing_leads % 2 == 1 {
+                end -= 1;
+            }
+        }
+        if end > 0 {
+            if !page
+                .decode_chunk(&bytes[..end], &mut wide, &mut decoded)
+                .map_err(LoadError::Io)?
+            {
+                return Err(LoadError::Undecodable);
+            }
+            norm.push(&decoded);
+        }
+        Ok(end)
+    })
+}
+
+fn stream_utf8<R: Read>(
+    reader: &mut R,
+    initial: &[u8],
+    chunk_size: usize,
+    has_bom: bool,
+) -> Result<Decoded, LoadError> {
+    let encoding = if has_bom {
+        Encoding::Utf8Bom
+    } else {
+        Encoding::Utf8
+    };
+    stream_decode(reader, initial, chunk_size, encoding, |bytes, eof, norm| {
+        match std::str::from_utf8(bytes) {
+            Ok(valid) => {
+                norm.push(valid);
+                Ok(bytes.len())
+            }
+            Err(error) => {
+                let valid = error.valid_up_to();
+                if valid > 0 {
+                    let prefix = std::str::from_utf8(&bytes[..valid]).expect("valid UTF-8 prefix");
+                    norm.push(prefix);
+                }
+                if error.error_len().is_some() || eof {
+                    return Err(LoadError::Undecodable);
+                }
+                Ok(valid)
+            }
+        }
     })
 }
 
@@ -468,60 +498,28 @@ fn stream_utf16<R: Read>(
     chunk_size: usize,
     unit: fn([u8; 2]) -> u16,
     encoding: Encoding,
-) -> Result<Loaded, LoadError> {
-    let mut normalizer = LineNormalizer::new();
-    let mut buf = vec![0u8; chunk_size.max(initial.len()) + 4];
-    let mut carry = initial.len();
-    buf[..carry].copy_from_slice(initial);
+) -> Result<Decoded, LoadError> {
     let mut decoded = String::with_capacity(chunk_size);
-
-    loop {
-        let read = reader.read(&mut buf[carry..]).map_err(LoadError::Io)?;
-        let filled = carry + read;
-        let eof = read == 0;
-        if filled == 0 {
-            break;
-        }
-        if eof && !filled.is_multiple_of(2) {
+    stream_decode(reader, initial, chunk_size, encoding, |bytes, eof, norm| {
+        if eof && !bytes.len().is_multiple_of(2) {
             return Err(LoadError::Undecodable);
         }
-        let mut decode_end = filled & !1;
-        if !eof && decode_end >= 2 {
-            let last = unit([buf[decode_end - 2], buf[decode_end - 1]]);
+        let mut end = bytes.len() & !1;
+        if !eof && end >= 2 {
+            let last = unit([bytes[end - 2], bytes[end - 1]]);
             if (0xD800..=0xDBFF).contains(&last) {
-                decode_end -= 2;
+                end -= 2;
             }
         }
-        if decode_end > 0 {
+        if end > 0 {
             decoded.clear();
-            let (pairs, _) = buf[..decode_end].as_chunks::<2>();
+            let (pairs, _) = bytes[..end].as_chunks::<2>();
             for ch in char::decode_utf16(pairs.iter().map(|&pair| unit(pair))) {
                 decoded.push(ch.map_err(|_| LoadError::Undecodable)?);
             }
-            normalizer.push(&decoded);
-            let remaining = filled - decode_end;
-            buf.copy_within(decode_end..filled, 0);
-            carry = remaining;
-        } else if eof {
-            break;
-        } else {
-            carry = filled;
+            norm.push(&decoded);
         }
-        if eof {
-            break;
-        }
-    }
-
-    let (text, line_ending, mixed_line_endings) = normalizer.finish();
-    Ok(Loaded {
-        text,
-        format: Format {
-            line_ending,
-            encoding,
-            mixed_line_endings,
-            lossy_decode: false,
-        },
-        path_key: String::new(),
+        Ok(end)
     })
 }
 
@@ -844,24 +842,7 @@ pub(crate) fn write_notices() -> io::Result<PathBuf> {
     Ok(path)
 }
 
-pub(crate) fn quick_path_key(path: &Path) -> String {
-    let abs = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
-    path_key(&abs)
-}
-
-pub(crate) fn canonical_path_key(path: &Path) -> String {
-    match fs::canonicalize(path) {
-        Ok(c) => path_key(&c),
-        Err(_) => quick_path_key(path),
-    }
-}
-
-#[cfg(test)]
-pub(crate) fn same_path(a: &Path, b: &Path) -> bool {
-    canonical_path_key(a) == canonical_path_key(b)
-}
-
-fn path_key(path: &Path) -> String {
+fn normalize_path_key(path: &Path) -> String {
     let raw = path.to_string_lossy();
     let stripped = raw.strip_prefix(r"\\?\").unwrap_or(&raw);
     stripped.replace('/', "\\").to_lowercase()
@@ -902,7 +883,7 @@ fn sibling(path: &Path, attempt: usize, suffix: &str) -> PathBuf {
 mod tests {
     use super::*;
 
-    fn load_bytes(bytes: &[u8], chunk_size: usize) -> Result<Loaded, LoadError> {
+    fn load_bytes(bytes: &[u8], chunk_size: usize) -> Result<Decoded, LoadError> {
         let mut cursor = io::Cursor::new(bytes);
         load_reader_with_page(&mut cursor, chunk_size, AnsiCodePage::current())
     }
@@ -911,7 +892,7 @@ mod tests {
         bytes: &[u8],
         chunk_size: usize,
         page: AnsiCodePage,
-    ) -> Result<Loaded, LoadError> {
+    ) -> Result<Decoded, LoadError> {
         let mut cursor = io::Cursor::new(bytes);
         load_reader_with_page(&mut cursor, chunk_size, page)
     }
@@ -1069,18 +1050,18 @@ mod tests {
 
     #[test]
     fn same_path_ignores_windows_casing_and_separators() {
-        assert!(same_path(
-            Path::new(r"C:\Notes\Todo.txt"),
-            Path::new(r"c:/notes/todo.txt"),
-        ));
         assert_eq!(
-            path_key(Path::new(r"\\?\C:\Notes\Todo.txt")),
-            path_key(Path::new(r"c:\notes\todo.txt")),
+            PathKey::canonical(Path::new(r"C:\Notes\Todo.txt")),
+            PathKey::canonical(Path::new(r"c:/notes/todo.txt")),
         );
-        assert!(!same_path(
-            Path::new(r"C:\Notes\Todo.txt"),
-            Path::new(r"C:\Notes\Other.txt"),
-        ));
+        assert_eq!(
+            normalize_path_key(Path::new(r"\\?\C:\Notes\Todo.txt")),
+            normalize_path_key(Path::new(r"c:\notes\todo.txt")),
+        );
+        assert_ne!(
+            PathKey::canonical(Path::new(r"C:\Notes\Todo.txt")),
+            PathKey::canonical(Path::new(r"C:\Notes\Other.txt")),
+        );
     }
 
     #[test]

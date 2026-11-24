@@ -4,7 +4,7 @@ use std::rc::Rc;
 use std::time::Instant;
 
 use crate::APP_NAME;
-use crate::document::{self, Format};
+use crate::document::{self, DocPath, Format, PathKey};
 use crate::editor::{EditorTimer, Rope};
 use crate::files::{self, WorkflowGen};
 use crate::geom::{Point, Rect, ScreenPoint, Size, point, size};
@@ -66,7 +66,7 @@ pub(crate) enum AppEvent {
     },
     FilesLoaded {
         window: WindowId,
-        results: Vec<(PathBuf, String, Result<document::Loaded, document::LoadError>)>,
+        results: Vec<(DocPath, Result<document::Loaded, document::LoadError>)>,
     },
     SaveDialogDone {
         window: WindowId,
@@ -90,8 +90,7 @@ pub(crate) enum AppEvent {
         wf_gen: WorkflowGen,
         tab: TabId,
         snapshot: u64,
-        path: PathBuf,
-        path_key: String,
+        doc_path: DocPath,
         format: Format,
         result: std::io::Result<()>,
     },
@@ -176,7 +175,7 @@ pub(crate) struct App {
     pub(crate) tab_drag: Option<TabDragState>,
     pub(crate) keytips: KeyTips,
     pub(crate) tooltips: Tooltips,
-    in_flight_loads: HashSet<String>,
+    in_flight_loads: HashSet<PathKey>,
     cascade_step: u32,
     #[cfg(test)]
     pub(crate) headless: bool,
@@ -294,7 +293,7 @@ impl App {
             .find_map(|(wix, w)| w.tab_index(tab).map(|tix| (wix, tix)))
     }
 
-    pub(crate) fn find_open_tab_by_key(&self, key: &str) -> Option<(usize, usize)> {
+    pub(crate) fn find_open_tab_by_key(&self, key: &PathKey) -> Option<(usize, usize)> {
         self.windows
             .iter()
             .enumerate()
@@ -459,22 +458,22 @@ impl App {
         if paths.is_empty() {
             return;
         }
-        let mut to_load: Vec<(PathBuf, String)> = Vec::new();
+        let mut to_load: Vec<DocPath> = Vec::new();
         let mut last_existing: Option<(usize, usize)> = None;
         for raw in paths {
             let path = std::path::absolute(&raw).unwrap_or(raw);
-            let key = document::quick_path_key(&path);
-            if let Some(found) = self.find_open_tab_by_key(&key) {
+            let doc_path = DocPath::quick(path);
+            if let Some(found) = self.find_open_tab_by_key(&doc_path.key) {
                 last_existing = Some(found);
                 continue;
             }
-            if self.in_flight_loads.contains(&key)
-                || to_load.iter().any(|(_, queued_key)| queued_key == &key)
+            if self.in_flight_loads.contains(&doc_path.key)
+                || to_load.iter().any(|queued| queued.key == doc_path.key)
             {
                 continue;
             }
-            self.in_flight_loads.insert(key.clone());
-            to_load.push((path, key));
+            self.in_flight_loads.insert(doc_path.key.clone());
+            to_load.push(doc_path);
         }
         if to_load.is_empty() {
             if let Some((wix, tix)) = last_existing {
@@ -492,7 +491,7 @@ impl App {
             return;
         }
         if paths.len() == 1 {
-            let key = document::quick_path_key(&paths[0]);
+            let key = PathKey::quick(&paths[0]);
             if let Some((wix, tix)) = self.find_open_tab_by_key(&key) {
                 let hwnd = self.windows[wix].native.hwnd();
                 self.windows[wix].activate_tab(tix, &self.shell.jobs);
@@ -848,13 +847,13 @@ impl PlatformHandler for App {
                 }
                 AppEvent::FilesLoaded { window, results } => {
                     let wrap = self.shell.view.word_wrap;
-                    for (path, quick_key, res) in results {
-                        self.in_flight_loads.remove(&quick_key);
+                    for (doc_path, res) in results {
+                        self.in_flight_loads.remove(&doc_path.key);
                         let dup = res
                             .as_ref()
                             .ok()
-                            .and_then(|loaded| self.find_open_tab_by_key(&loaded.path_key))
-                            .or_else(|| self.find_open_tab_by_key(&quick_key));
+                            .and_then(|loaded| self.find_open_tab_by_key(&loaded.doc_path.key))
+                            .or_else(|| self.find_open_tab_by_key(&doc_path.key));
                         if let Some((wix, tix)) = dup {
                             let hwnd = self.windows[wix].native.hwnd();
                             self.windows[wix].activate_tab(tix, &self.shell.jobs);
@@ -862,7 +861,12 @@ impl PlatformHandler for App {
                             continue;
                         }
                         if let Some(ix) = self.fallback_window_ix(window) {
-                            self.windows[ix].adopt_loaded_file(path, res, wrap, &self.shell.jobs);
+                            self.windows[ix].adopt_loaded_file(
+                                doc_path.path,
+                                res,
+                                wrap,
+                                &self.shell.jobs,
+                            );
                         }
                     }
                 }
@@ -874,7 +878,7 @@ impl PlatformHandler for App {
                     result,
                 } => match files::resolve_save_dialog(format, result) {
                     Ok(Some((path, next_format))) => {
-                        let target_key = document::quick_path_key(&path);
+                        let target_key = PathKey::quick(&path);
                         let conflict = self
                             .find_open_tab_by_key(&target_key)
                             .is_some_and(|(wix, tix)| self.windows[wix].tabs[tix].data.id != tab);
@@ -991,8 +995,7 @@ impl PlatformHandler for App {
                     wf_gen,
                     tab,
                     snapshot,
-                    path,
-                    path_key,
+                    doc_path,
                     format,
                     result,
                 } => match result {
@@ -1002,8 +1005,7 @@ impl PlatformHandler for App {
                             retriggered_gen = self.windows[owner_wix].apply_tab_saved(
                                 tab,
                                 snapshot,
-                                path,
-                                path_key,
+                                doc_path,
                                 format,
                                 window,
                                 &self.shell.jobs,
@@ -1026,7 +1028,7 @@ impl PlatformHandler for App {
                             .or_else(|| self.fallback_window_ix(window));
                         if let Some(ix) = prompt_ix {
                             self.windows[ix].show_file_prompt(
-                                files::save_error_prompt(&path, &err),
+                                files::save_error_prompt(doc_path.as_path(), &err),
                                 &self.shell.jobs,
                             );
                         }

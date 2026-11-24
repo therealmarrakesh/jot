@@ -1,10 +1,10 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use crate::color::transparent_black;
 use crate::command::{AppCommand, shortcut_tooltip};
-use crate::document::{self, Format};
+use crate::document::{self, DocPath, Format, PathKey};
 use crate::editor::{Editor, Rope};
 use crate::geom::Edges;
 use crate::ids::{AnimKey, HitId, Node, UiState};
@@ -94,15 +94,24 @@ pub(crate) struct TabData {
     pub(crate) id: TabId,
     pub(crate) editor: Editor,
     pub(crate) zoom: f32,
-    pub(crate) path: Option<PathBuf>,
-    pub(crate) path_key: Option<String>,
+    pub(crate) doc_path: Option<DocPath>,
     pub(crate) format: Format,
     pub(crate) save_state: TabSaveState,
 }
 
 impl TabData {
+    #[inline]
+    pub(crate) fn path(&self) -> Option<&Path> {
+        self.doc_path.as_ref().map(DocPath::as_path)
+    }
+
+    #[inline]
+    pub(crate) fn path_key(&self) -> Option<&PathKey> {
+        self.doc_path.as_ref().map(|p| &p.key)
+    }
+
     pub(crate) fn is_dirty(&self) -> bool {
-        if self.path.is_some() {
+        if self.doc_path.is_some() {
             !self.editor.is_clean()
         } else {
             !self.editor.is_clean() && self.editor.text().len() > 0
@@ -110,20 +119,13 @@ impl TabData {
     }
 
     pub(crate) fn create(
-        content: Option<(PathBuf, document::Loaded)>,
+        content: Option<document::Loaded>,
         word_wrap: bool,
         paddings: Edges<f32>,
     ) -> Self {
-        let (path, path_key, text, format) = match content {
-            Some((path, loaded)) => {
-                let key = if loaded.path_key.is_empty() {
-                    document::quick_path_key(&path)
-                } else {
-                    loaded.path_key
-                };
-                (Some(path), Some(key), loaded.text, loaded.format)
-            }
-            None => (None, None, Rope::new(), Format::default()),
+        let (doc_path, text, format) = match content {
+            Some(loaded) => (Some(loaded.doc_path), loaded.text, loaded.format),
+            None => (None, Rope::new(), Format::default()),
         };
         let editor = Editor::multi_line()
             .with_soft_wrap(word_wrap)
@@ -133,8 +135,7 @@ impl TabData {
             id: TabId::next(),
             editor,
             zoom: 1.,
-            path,
-            path_key,
+            doc_path,
             format,
             save_state: TabSaveState::Idle,
         }
@@ -702,11 +703,10 @@ fn render_tab(
         TAB_LABEL_TRAILING_BARE
     };
     let inset = if active { 1. } else { 0. };
-    let name = document::display_name(tab.data.path.as_deref());
+    let name = document::display_name(tab.data.path());
     let tip: SharedStr = tab
         .data
-        .path
-        .as_ref()
+        .path()
         .map_or_else(|| name.clone(), |path| path.display().to_string())
         .into();
 

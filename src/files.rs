@@ -7,7 +7,9 @@ use std::time::{Duration, Instant};
 
 use crate::APP_NAME;
 use crate::app::AppEvent;
-use crate::document::{self, Encoding, Format, LoadError, default_directory, display_name, file_name};
+use crate::document::{
+    self, DocPath, Encoding, Format, LoadError, PathKey, default_directory, display_name, file_name,
+};
 use crate::editor::Rope;
 use crate::platform::{
     Jobs, OpenDialogOptions, SaveChoice, SaveDialogOptions, SaveDialogResult, WindowHwnd, WindowId,
@@ -202,18 +204,18 @@ pub(crate) fn spawn_open_dialog(
 
 pub(crate) fn spawn_load_files(
     window: WindowId,
-    paths: Vec<(PathBuf, String)>,
+    paths: Vec<DocPath>,
     jobs: &Jobs<AppEvent>,
 ) {
-    let fallback_paths: Vec<(PathBuf, String)> = paths.clone();
+    let fallback_paths = paths.clone();
     jobs.spawn(
         "jot-load-files",
         move || {
             paths
                 .into_iter()
-                .map(|(path, quick_key)| {
-                    let loaded = document::load(&path);
-                    (path, quick_key, loaded)
+                .map(|doc_path| {
+                    let loaded = document::load(doc_path.as_path());
+                    (doc_path, loaded)
                 })
                 .collect::<Vec<_>>()
         },
@@ -221,13 +223,7 @@ pub(crate) fn spawn_load_files(
             let results = res.unwrap_or_else(|msg| {
                 fallback_paths
                     .into_iter()
-                    .map(|(path, quick_key)| {
-                        (
-                            path,
-                            quick_key,
-                            Err(LoadError::Io(io::Error::other(msg.clone()))),
-                        )
-                    })
+                    .map(|doc_path| (doc_path, Err(LoadError::Io(io::Error::other(msg.clone())))))
                     .collect()
             });
             AppEvent::FilesLoaded { window, results }
@@ -326,17 +322,16 @@ pub(crate) fn spawn_write_file(
         move || {
             let _guard = guard;
             let result = document::write_rope(&write_path, &text, format);
-            let path_key = if result.is_ok() {
-                document::canonical_path_key(&write_path)
+            let key = if result.is_ok() {
+                PathKey::canonical(&write_path)
             } else {
-                document::quick_path_key(&write_path)
+                PathKey::quick(&write_path)
             };
-            (path_key, result)
+            (key, result)
         },
         move |res| {
-            let (path_key, result) = res.unwrap_or_else(|msg| {
-                (document::quick_path_key(&path), Err(io::Error::other(msg)))
-            });
+            let (key, result) =
+                res.unwrap_or_else(|msg| (PathKey::quick(&path), Err(io::Error::other(msg))));
             let saved_format = if result.is_ok() {
                 Format {
                     mixed_line_endings: false,
@@ -351,8 +346,7 @@ pub(crate) fn spawn_write_file(
                 wf_gen,
                 tab,
                 snapshot,
-                path,
-                path_key,
+                doc_path: DocPath { path, key },
                 format: saved_format,
                 result,
             }

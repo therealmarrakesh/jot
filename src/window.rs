@@ -7,7 +7,7 @@ use crate::app::{AppEvent, Cx, Effect};
 use crate::color::transparent_black;
 use crate::command::{AppCommand, Command, app_shortcut, edit_shortcut};
 use crate::dialog::{DialogKind, Dialogs};
-use crate::document::{self, Format};
+use crate::document::{self, DocPath, Format, PathKey};
 use crate::editor::{Editor, EditorPaintStyle, EditorTimer, EditorTimers, RopeExt as _};
 use crate::files::{
     self, FilePrompt, FileWorkflow, WorkflowFinish, WorkflowGen, WorkflowStep,
@@ -251,7 +251,7 @@ impl MainWindow {
     }
 
     pub(crate) fn tab_name(&self, ix: usize) -> String {
-        document::display_name(self.tabs[ix].data.path.as_deref())
+        document::display_name(self.tabs[ix].data.path())
     }
 
     pub(crate) fn editor_by_slot(&self, slot: EditorSlot) -> Option<&Editor> {
@@ -568,15 +568,15 @@ impl MainWindow {
         self.activate_tab(last, jobs);
     }
 
-    pub(crate) fn find_open_tab_by_key(&self, key: &str) -> Option<usize> {
+    pub(crate) fn find_open_tab_by_key(&self, key: &PathKey) -> Option<usize> {
         self.tabs
             .iter()
-            .position(|tab| tab.data.path_key.as_deref() == Some(key))
+            .position(|tab| tab.data.path_key() == Some(key))
     }
 
     fn is_blank(&self, ix: usize) -> bool {
         let tab = &self.tabs[ix];
-        tab.data.path.is_none() && tab.data.editor.text().len() == 0
+        tab.data.doc_path.is_none() && tab.data.editor.text().len() == 0
     }
 
     pub(crate) fn has_dirty_tabs(&self) -> bool {
@@ -600,11 +600,7 @@ impl MainWindow {
     ) {
         match result {
             Ok(loaded) => {
-                let tab = Tab::adopt(TabData::create(
-                    Some((path, loaded)),
-                    word_wrap,
-                    EDITOR_PADDINGS,
-                ));
+                let tab = Tab::adopt(TabData::create(Some(loaded), word_wrap, EDITOR_PADDINGS));
                 if self.is_blank(self.active) {
                     self.replace_tab(self.active, tab, jobs);
                 } else {
@@ -619,7 +615,7 @@ impl MainWindow {
 
     pub(crate) fn save(&mut self, jobs: &Jobs<AppEvent>) {
         let data = &self.tabs[self.active].data;
-        if data.path.is_some() && !data.is_dirty() && !data.format.lossy_decode {
+        if data.doc_path.is_some() && !data.is_dirty() && !data.format.lossy_decode {
             return;
         }
         let id = data.id;
@@ -789,7 +785,7 @@ impl MainWindow {
                     if activate {
                         self.activate_tab(ix, jobs);
                     }
-                    match self.tabs[ix].data.path.clone() {
+                    match self.tabs[ix].data.path().map(PathBuf::from) {
                         Some(path) => {
                             let format = self.tabs[ix].data.format;
                             let wid = self.id();
@@ -831,7 +827,7 @@ impl MainWindow {
             self.abort_file_workflow_if(wf_gen);
             return;
         };
-        let current = self.tabs[ix].data.path.clone();
+        let current = self.tabs[ix].data.path().map(PathBuf::from);
         let format = self.tabs[ix].data.format;
         files::spawn_save_dialog(self.id(), wf_gen, self.native.hwnd(), id, current, format, jobs);
     }
@@ -869,13 +865,11 @@ impl MainWindow {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn apply_tab_saved(
         &mut self,
         tab: TabId,
         snapshot: u64,
-        path: PathBuf,
-        path_key: String,
+        doc_path: DocPath,
         format: Format,
         origin_window: WindowId,
         jobs: &Jobs<AppEvent>,
@@ -884,8 +878,7 @@ impl MainWindow {
         let ix = self.tab_index(tab)?;
         let t = &mut self.tabs[ix];
         t.data.editor.mark_saved_version(snapshot);
-        t.data.path = Some(path);
-        t.data.path_key = Some(path_key);
+        t.data.doc_path = Some(doc_path);
         t.data.format = format;
         self.refresh_title();
         self.dirty = true;
@@ -1749,7 +1742,7 @@ impl MainWindow {
                     files::spawn_open_dialog(
                         self.id(),
                         self.native.hwnd(),
-                        self.tabs[self.active].data.path.clone(),
+                        self.tabs[self.active].data.path().map(PathBuf::from),
                         cx.jobs,
                     );
                 }

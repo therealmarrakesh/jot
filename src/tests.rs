@@ -686,7 +686,7 @@ fn dirty_window_close_file_drop_and_multi_window() {
     }
     h.read(|w, _| {
         assert_eq!(w.active_editor().value().as_str(), "dropped content 123");
-        assert!(w.tabs[0].data.path.is_some());
+        assert!(w.tabs[0].data.doc_path.is_some());
     });
     let _ = std::fs::remove_file(&tmp);
 
@@ -1128,8 +1128,7 @@ fn stale_file_events_do_not_advance_unrelated_discard_workflow() {
             wf_gen: stale_gen,
             tab: tab_a,
             snapshot: 0,
-            path: std::path::PathBuf::from(r"C:\Temp\stale.txt"),
-            path_key: "stale".into(),
+            doc_path: document::DocPath::quick(std::path::PathBuf::from(r"C:\Temp\stale.txt")),
             format: document::Format::default(),
             result: Ok(()),
         });
@@ -1155,7 +1154,7 @@ fn close_save_keeps_window_open_when_edited_mid_write_and_migrated_save_cleans_t
         let mut app_guard = h.app.borrow_mut();
         let app = &mut *app_guard;
         let tab = crate::tabs::Tab::adopt(crate::tabs::TabData::create(
-            Some((path.clone(), loaded)),
+            Some(loaded),
             true,
             EDITOR_PADDINGS,
         ));
@@ -1208,8 +1207,7 @@ fn close_save_keeps_window_open_when_edited_mid_write_and_migrated_save_cleans_t
             wf_gen: crate::files::WorkflowGen::next(),
             tab: tab_id,
             snapshot: snap,
-            path: path.clone(),
-            path_key: document::quick_path_key(&path),
+            doc_path: document::DocPath::quick(path.clone()),
             format: document::Format::default(),
             result: Ok(()),
         });
