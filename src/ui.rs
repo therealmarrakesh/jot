@@ -811,12 +811,10 @@ impl<H: Copy + Eq + Hash, C: Copy, K: Copy + Eq + Hash> Default for UiState<H, C
 }
 
 impl<H: Copy + Eq + Hash, C: Copy, K: Copy + Eq + Hash> UiState<H, C, K> {
-    #[inline]
     pub(crate) fn frame(&self) -> &Frame<H, C> {
         &self.frame
     }
 
-    #[inline]
     pub(crate) fn pointer(&self) -> Option<PointerState> {
         self.pointer
     }
@@ -895,17 +893,14 @@ impl<H: Copy + Eq + Hash, C: Copy, K: Copy + Eq + Hash> UiState<H, C, K> {
         (clicked, &self.hovered_chain)
     }
 
-    #[inline]
     pub(crate) fn top_hit(&self) -> Option<H> {
         self.hovered_chain.first().copied()
     }
 
-    #[inline]
     pub(crate) fn is_hovered(&self, hit: H) -> bool {
         self.hovered_chain.contains(&hit)
     }
 
-    #[inline]
     pub(crate) fn is_pressed(&self, hit: H) -> bool {
         self.pressed == Some(hit) && self.hovered_chain.contains(&hit)
     }
@@ -1097,7 +1092,6 @@ impl Easing {
         y2: 1.0,
     };
 
-    #[inline]
     pub(crate) fn sample(self, t: f32) -> f32 {
         let t = t.clamp(0.0, 1.0);
         match self {
@@ -1114,14 +1108,12 @@ pub(crate) trait Lerp: Copy + PartialEq {
 }
 
 impl Lerp for f32 {
-    #[inline]
     fn lerp(self, target: Self, t: f32) -> Self {
         self + (target - self) * t
     }
 }
 
 impl Lerp for Rgba {
-    #[inline]
     fn lerp(self, target: Self, t: f32) -> Self {
         let a = self.a + (target.a - self.a) * t;
         let channel = |x: f32, y: f32| {
@@ -1199,22 +1191,18 @@ impl Transition {
         self.phase = Presence::Hidden;
     }
 
-    #[inline]
     pub(crate) fn serial(self) -> usize {
         self.serial
     }
 
-    #[inline]
     pub(crate) fn is_visible(self) -> bool {
         self.phase != Presence::Hidden
     }
 
-    #[inline]
     pub(crate) fn is_open(self) -> bool {
         self.phase == Presence::Open
     }
 
-    #[inline]
     pub(crate) fn is_closing(self) -> bool {
         self.phase == Presence::Closing
     }
@@ -1414,17 +1402,14 @@ impl<K: Copy + Eq + Hash> AnimTracks<K> {
     }
 }
 
-#[inline]
 fn round_half_toward_zero(value: f32) -> f32 {
     (value.abs() - 0.5).ceil().copysign(value)
 }
 
-#[inline]
 fn round_px(logical: f32, scale: f32) -> f32 {
     round_half_toward_zero(logical * scale)
 }
 
-#[inline]
 fn round_stroke(logical: f32, scale: f32) -> f32 {
     if logical == 0.0 {
         0.0
@@ -1433,7 +1418,6 @@ fn round_stroke(logical: f32, scale: f32) -> f32 {
     }
 }
 
-#[inline]
 pub(crate) fn snap_border_edges(border: Edges<f32>, scale: f32) -> Edges<f32> {
     let s = scale.max(0.5);
     border.map(|v| round_stroke(v, s) / s)
@@ -1443,7 +1427,6 @@ pub(crate) fn snap_border_edges(border: Edges<f32>, scale: f32) -> Edges<f32> {
 pub(crate) struct LayoutId(pub(crate) u32);
 
 impl LayoutId {
-    #[inline]
     fn idx(self) -> usize {
         self.0 as usize
     }
@@ -1458,7 +1441,6 @@ pub(crate) enum Space {
 }
 
 impl Space {
-    #[inline]
     fn scale(self, factor: f32) -> Self {
         match self {
             Self::Definite(v) => Self::Definite(v * factor),
@@ -1466,7 +1448,6 @@ impl Space {
         }
     }
 
-    #[inline]
     fn maybe_sub(self, delta: f32) -> Self {
         match self {
             Self::Definite(v) => Self::Definite((v - delta).max(0.0)),
@@ -1474,7 +1455,6 @@ impl Space {
         }
     }
 
-    #[inline]
     fn maybe_min(self, limit: Option<f32>) -> Self {
         match (self, limit) {
             (Self::Definite(a), Some(m)) => Self::Definite(a.min(m)),
@@ -1483,7 +1463,6 @@ impl Space {
         }
     }
 
-    #[inline]
     fn maybe_max(self, floor: Option<f32>) -> Self {
         match (self, floor) {
             (Self::Definite(a), Some(m)) => Self::Definite(a.max(m)),
@@ -1491,12 +1470,10 @@ impl Space {
         }
     }
 
-    #[inline]
     fn maybe_set(self, known: Option<f32>) -> Self {
         known.map_or(self, Self::Definite)
     }
 
-    #[inline]
     fn key(self) -> (u8, u32) {
         match self {
             Self::Definite(v) => (0, v.to_bits()),
@@ -1523,7 +1500,6 @@ impl AvailSize {
         height: Space::MaxContent,
     };
 
-    #[inline]
     pub(crate) const fn definite(width: f32, height: f32) -> Self {
         Self {
             width: Space::Definite(width),
@@ -1533,7 +1509,6 @@ impl AvailSize {
 }
 
 impl From<Size> for AvailSize {
-    #[inline]
     fn from(s: Size) -> Self {
         Self::definite(s.width, s.height)
     }
@@ -1548,7 +1523,6 @@ pub(crate) enum Dim {
 }
 
 impl Dim {
-    #[inline]
     fn snap(self, scale: f32) -> Self {
         match self {
             Self::Px(v) => Self::Px(round_px(v, scale)),
@@ -1556,7 +1530,6 @@ impl Dim {
         }
     }
 
-    #[inline]
     fn resolve(self, base: Option<f32>) -> Option<f32> {
         match self {
             Self::Auto => None,
@@ -1575,12 +1548,10 @@ pub(crate) enum Flex {
 }
 
 impl Flex {
-    #[inline]
     fn can_grow(self) -> bool {
         matches!(self, Self::Fill)
     }
 
-    #[inline]
     fn can_shrink(self) -> bool {
         !matches!(self, Self::Fixed)
     }
@@ -1642,22 +1613,18 @@ impl FlexStyle {
     }
 }
 
-#[inline]
 fn edge_start(e: Edges<f32>, axis: usize) -> f32 {
     if axis == 0 { e.left } else { e.top }
 }
 
-#[inline]
 fn edge_end(e: Edges<f32>, axis: usize) -> f32 {
     if axis == 0 { e.right } else { e.bottom }
 }
 
-#[inline]
 fn edge_sum(e: Edges<f32>, axis: usize) -> f32 {
     if axis == 0 { e.horiz() } else { e.vert() }
 }
 
-#[inline]
 fn pair<T>(main_axis: usize, main: T, cross: T) -> [T; 2] {
     if main_axis == 0 {
         [main, cross]
@@ -1702,7 +1669,6 @@ struct AxisBounds {
 }
 
 impl AxisBounds {
-    #[inline]
     fn resolve(
         size: Dim,
         min: Dim,
@@ -1729,13 +1695,11 @@ impl AxisBounds {
         clamp_dim(v, Some(self.floor), self.max)
     }
 
-    #[inline]
     fn definite(self, known: Option<f32>) -> Option<f32> {
         known.or(self.size).map(|v| self.clamp(v))
     }
 }
 
-#[inline]
 fn resolve_item_cross(
     cs: &FlexStyle,
     c: usize,
@@ -1766,7 +1730,6 @@ struct SizeCacheKey {
     sizing_mode: SizingMode,
 }
 
-#[inline]
 fn opt_bits(v: Option<f32>) -> u32 {
     v.map_or(u32::MAX, f32::to_bits)
 }
@@ -2601,7 +2564,6 @@ pub(crate) enum MenuHit {
 }
 
 impl MenuHit {
-    #[inline]
     pub(crate) fn is_popup(self) -> bool {
         !matches!(self, Self::Bar | Self::Trigger(_))
     }
@@ -2654,7 +2616,6 @@ pub(crate) enum AnimKey {
 }
 
 impl From<HitId> for AnimKey {
-    #[inline]
     fn from(hit: HitId) -> Self {
         Self::Hit(hit)
     }
