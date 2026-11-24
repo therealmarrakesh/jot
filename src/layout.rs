@@ -411,51 +411,36 @@ impl<'a, F: FnMut(usize, Option<f32>, Option<f32>, AvailSize) -> Size> Solver<'a
         s
     }
 
+    /// Sizes `id` under `req`; the layout pass also positions its children.
     fn solve(&mut self, id: usize, req: Req) -> Size {
-        let n = &self.nodes[id];
-        if n.kids.is_empty() || n.measured { self.leaf(id, req) } else { self.flex(id, req) }
-    }
-
-    fn kids_of(&self, id: usize) -> &'a [usize] {
-        &self.kids[self.nodes[id].kids.clone()]
-    }
-
-    fn leaf(&mut self, id: usize, req: Req) -> Size {
-        let (style, measured) = (self.nodes[id].style, self.nodes[id].measured);
-        let b = [0, 1].map(|a| style.bounds(a, req.parent[a], req.pass != Pass::Content));
-        let pb = [0, 1].map(|a| style.pb(a));
-        let known = [0, 1].map(|a| b[a].definite(req.known[a]));
-        let content = (measured && (known.contains(&None) || req.pass == Pass::Layout)).then(|| {
-            let inv = 1.0 / self.scale;
-            let [kw, kh] = [0, 1].map(|a| known[a].map(|v| (v - pb[a]).max(0.0) * inv));
-            let [width, height] = [0, 1].map(|a| {
-                let space = req.avail[a].maybe_set(known[a]).maybe_min(b[a].max);
-                space.maybe_max(b[a].min).maybe_sub(pb[a]).scale(inv)
-            });
-            let s = (self.measure)(id, kw, kh, AvailSize { width, height });
-            [s.width, s.height].map(|v| (v.max(0.0) * self.scale).ceil())
-        });
-        let [w, h] = [0, 1].map(|a| {
-            known[a].unwrap_or_else(|| b[a].clamp(content.map_or(pb[a], |c| c[a] + pb[a])))
-        });
-        size(w, h)
-    }
-
-    fn flex(&mut self, id: usize, req: Req) -> Size {
-        let style = self.nodes[id].style;
-        let (m, c) = if style.row { (0, 1) } else { (1, 0) };
+        let (n, all_kids) = (&self.nodes[id], self.kids);
+        let (style, measured, kids) = (n.style, n.measured, &all_kids[n.kids.clone()]);
         let b = [0, 1].map(|a| style.bounds(a, req.parent[a], req.pass != Pass::Content));
         let pb = [0, 1].map(|a| style.pb(a));
         let outer = [0, 1].map(|a| b[a].definite(req.known[a]));
-        let kids = self.kids_of(id);
-        if kids.iter().all(|&k| self.nodes[k].style.absolute) {
-            let [w, h] = [0, 1].map(|a| outer[a].unwrap_or_else(|| b[a].clamp(pb[a])));
+
+        // Text leaves size to their measured content; boxes with nothing in flow to their padding.
+        if measured || kids.iter().all(|&k| self.nodes[k].style.absolute) {
+            let content = (measured && (outer.contains(&None) || req.pass == Pass::Layout)).then(|| {
+                let inv = 1.0 / self.scale;
+                let [kw, kh] = [0, 1].map(|a| outer[a].map(|v| (v - pb[a]).max(0.0) * inv));
+                let [width, height] = [0, 1].map(|a| {
+                    let space = req.avail[a].maybe_set(outer[a]).maybe_min(b[a].max);
+                    space.maybe_max(b[a].min).maybe_sub(pb[a]).scale(inv)
+                });
+                let s = (self.measure)(id, kw, kh, AvailSize { width, height });
+                [s.width, s.height].map(|v| (v.max(0.0) * self.scale).ceil())
+            });
+            let [w, h] = [0, 1].map(|a| {
+                outer[a].unwrap_or_else(|| b[a].clamp(content.map_or(pb[a], |c| c[a] + pb[a])))
+            });
             if req.pass == Pass::Layout {
                 self.place_absolute(kids, size(w, h), &style);
             }
             return size(w, h);
         }
 
+        let (m, c) = if style.row { (0, 1) } else { (1, 0) };
         let inner = [0, 1].map(|a| outer[a].map(|v| (v - pb[a]).max(0.0)));
         let avail = [0, 1].map(|a| {
             req.avail[a].maybe_set(outer[a]).maybe_min(b[a].max).maybe_sub(pb[a])
