@@ -13,8 +13,7 @@ use crate::keytips::KeyTips;
 use crate::platform::{
     HandoffCommand, Jobs, MouseButton, NativeWindow, Platform, PlatformEvent, PlatformHandler,
     SaveDialogResult, WindowAppearance, WindowBackdrop, WindowHwnd, WindowId, WindowKind,
-    WindowOptions, WindowsDisplay, client_area_animations_enabled, cursor_screen_pos,
-    high_contrast_colors, system_accent_color,
+    WindowOptions, WindowsDisplay, cursor_screen_pos, system_settings,
 };
 use crate::tab_drag::TabDragState;
 use crate::tabs::{TabData, TabId};
@@ -144,14 +143,15 @@ impl App {
     pub(crate) fn new(platform: Rc<Platform>) -> Self {
         let jobs = Jobs::new();
         jobs.set_wake_callback(platform.wake_callback());
-        let appearance = platform.system_appearance();
+        let settings = system_settings();
+        let appearance = settings.appearance;
         let dark = matches!(appearance, WindowAppearance::Dark);
-        let palette = if let Some(hc) = high_contrast_colors() {
+        let palette = if let Some(hc) = settings.high_contrast {
             Palette::from_high_contrast(hc)
         } else {
-            Palette::for_appearance(dark, system_accent_color(dark))
+            Palette::for_appearance(dark, settings.accent(dark))
         };
-        let reduce_motion = client_area_animations_enabled().is_some_and(|enabled| !enabled);
+        let reduce_motion = settings.reduce_motion;
 
         Self {
             text_system: TextSystem::new(),
@@ -391,16 +391,15 @@ impl App {
     }
 
     fn sync_theme(&mut self) {
-        self.reduce_motion = client_area_animations_enabled().is_some_and(|enabled| !enabled);
-        let next = self
-            .appearance_override
-            .unwrap_or_else(|| self.platform.system_appearance());
+        let settings = system_settings();
+        self.reduce_motion = settings.reduce_motion;
+        let next = self.appearance_override.unwrap_or(settings.appearance);
         let dark = matches!(next, WindowAppearance::Dark);
         self.appearance = next;
-        self.palette = if let Some(hc) = high_contrast_colors() {
+        self.palette = if let Some(hc) = settings.high_contrast {
             Palette::from_high_contrast(hc)
         } else {
-            Palette::for_appearance(dark, system_accent_color(dark))
+            Palette::for_appearance(dark, settings.accent(dark))
         };
         for w in &mut self.windows {
             w.native.set_appearance(next);
@@ -476,10 +475,10 @@ impl App {
                 self.active_window = self.windows.last().map(MainWindow::id);
             }
         }
-        if !self.has_dirty_tabs() {
-            for w in &self.windows {
-                w.native.clear_shutdown_block();
-            }
+        let dirty_any = self.windows.iter().any(MainWindow::has_dirty_tabs);
+        let block = dirty_any.then_some("You have unsaved changes.");
+        for w in &self.windows {
+            w.native.set_block_shutdown(block);
         }
         if self.windows.is_empty() && !self.quit && crate::files::in_flight_writes() == 0 {
             self.request_quit();
@@ -514,7 +513,7 @@ impl App {
         let hovered = w.pointer_hovered;
         let pos = w.last_mouse_pos;
         let origin = w.native.hwnd().client_origin();
-        let scale = w.native.scale_factor;
+        let scale = w.native.scale_factor();
         let devices = self.platform.devices();
         self.tooltips.evaluate(
             wid,
@@ -553,7 +552,7 @@ impl App {
         if self.windows[ix].menu_bar.access_active() || self.keytips.is_owner(wid) {
             let tips = self.windows[ix].key_tips(&self.text_system);
             let origin = self.windows[ix].native.hwnd().client_origin();
-            let scale = self.windows[ix].native.scale_factor;
+            let scale = self.windows[ix].native.scale_factor();
             let devices = self.platform.devices();
             self.keytips
                 .sync(wid, origin, scale, tips, &devices, self.appearance);
@@ -575,12 +574,6 @@ impl PlatformHandler for App {
                 physical_width,
                 physical_height,
                 scale,
-            }
-            | PlatformEvent::DpiChanged {
-                window_id,
-                physical_width,
-                physical_height,
-                scale,
             } => {
                 if let Some(ix) = self.window_ix(window_id) {
                     self.windows[ix]
@@ -591,11 +584,8 @@ impl PlatformHandler for App {
                 }
                 self.keytips.hide_owner(window_id);
             }
-            PlatformEvent::Moved { window_id, origin } => {
-                if let Some(ix) = self.window_ix(window_id)
-                    && self.windows[ix].native.origin != origin
-                {
-                    self.windows[ix].native.origin = origin;
+            PlatformEvent::Moved { window_id } => {
+                if let Some(ix) = self.window_ix(window_id) {
                     self.windows[ix].cancel_menu(&self.jobs);
                     self.keytips.hide_owner(window_id);
                 }
@@ -609,6 +599,13 @@ impl PlatformHandler for App {
                 }
                 if let Some(ix) = self.window_ix(window_id) {
                     self.windows[ix].on_activated(active, &self.jobs);
+                }
+            }
+            PlatformEvent::PaintRequested { window_id } => {
+                if let Some(ix) = self.window_ix(window_id)
+                    && !self.windows[ix].has_painted
+                {
+                    self.windows[ix].dirty = true;
                 }
             }
             PlatformEvent::ThemeChanged => {
@@ -783,9 +780,6 @@ impl PlatformHandler for App {
                 window_id,
                 entering,
             } => {
-                if let Some(ix) = self.window_ix(window_id) {
-                    self.windows[ix].native.in_size_move = entering;
-                }
                 self.tab_drag_size_move_changed(window_id, entering);
             }
             PlatformEvent::CloseRequested { window_id } => {
@@ -793,13 +787,14 @@ impl PlatformHandler for App {
                     self.windows[ix].request_close_window(&self.jobs);
                 }
             }
+            PlatformEvent::SessionEnding { ending } => {
+                if ending {
+                    crate::files::wait_for_in_flight_writes(std::time::Duration::from_secs(5));
+                }
+            }
         }
         self.sweep_closed_windows();
         handled
-    }
-
-    fn query_ime_caret(&self, window_id: WindowId) -> Option<(Rect, f32)> {
-        self.window(window_id)?.ime_caret_bounds()
     }
 
     fn on_wake(&mut self) {
@@ -839,7 +834,7 @@ impl PlatformHandler for App {
                             w.pointer_hovered,
                             w.last_mouse_pos,
                             w.native.hwnd().client_origin(),
-                            w.native.scale_factor,
+                            w.native.scale_factor(),
                             &w.ui.frame,
                         )
                     });
@@ -1082,21 +1077,6 @@ impl PlatformHandler for App {
         }
     }
 
-    fn on_paint(&mut self, window_id: WindowId) {
-        if let Some(ix) = self.windows.iter().position(|w| w.id() == window_id) {
-            if !self.windows[ix].dirty && self.windows[ix].has_painted {
-                return;
-            }
-            let (needs_vsync, lost) = self.paint_window_ix(ix, Instant::now());
-            if lost {
-                self.recover_device_loss();
-            }
-            if needs_vsync {
-                self.platform.request_frame_tick();
-            }
-        }
-    }
-
     fn drive_frames(&mut self) {
         self.sweep_closed_windows();
         if self.quit {
@@ -1128,20 +1108,6 @@ impl PlatformHandler for App {
         }
         if any_vsync {
             self.platform.request_frame_tick();
-        }
-    }
-
-    fn should_quit(&self) -> bool {
-        self.quit
-    }
-
-    fn has_dirty_tabs(&self) -> bool {
-        self.windows.iter().any(MainWindow::has_dirty_tabs)
-    }
-
-    fn on_end_session(&mut self, ending: bool) {
-        if ending {
-            crate::files::wait_for_in_flight_writes(std::time::Duration::from_secs(5));
         }
     }
 }

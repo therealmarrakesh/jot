@@ -175,8 +175,8 @@ impl KeyTips {
         if !overlay.sync_live_metrics() {
             return false;
         }
-        let logical = overlay.logical_size;
-        let scale = overlay.scale_factor;
+        let logical = overlay.logical_size();
+        let scale = overlay.scale_factor();
         let tree = render_tips(&self.tips, p);
         let frame = Frame::layout(
             tree,

@@ -6,7 +6,7 @@ use crate::geom::{Rect, ScreenPoint, ScreenRect, Size, point, size};
 use crate::gfx::{Direct2DDevices, TextAlign, TextSystem, font};
 use crate::platform::{
     Jobs, Modifiers, NativeWindow, TimerHandle, WindowAppearance, WindowBackdrop, WindowId,
-    WindowKind, WindowOptions, cursor_screen_pos, monitor_work_area_and_scale, mouse_hover_time_ms,
+    WindowKind, WindowOptions, cursor_screen_pos, monitor_work_area_and_scale, system_settings,
 };
 use crate::theme::{Palette, theme_shadow};
 use crate::types::SharedStr;
@@ -26,7 +26,6 @@ const SHADOW_SIDE: f32 = ELEVATION;
 const SHADOW_TOP: f32 = ELEVATION / 2.;
 const SHADOW_BOTTOM: f32 = ELEVATION * 1.5;
 const POINTER_OFFSET: f32 = 20.;
-const DEFAULT_HOVER_TIME: u32 = 400;
 const SHOW_DELAY_FACTOR: f32 = 2.;
 const RESHOW_DELAY_FACTOR: f32 = 1.5;
 const RESHOW_WINDOW: Duration = Duration::from_millis(200);
@@ -447,8 +446,8 @@ impl Tooltips {
         if !popup.sync_live_metrics() {
             return (false, false);
         }
-        let logical = popup.logical_size;
-        let scale = popup.scale_factor;
+        let logical = popup.logical_size();
+        let scale = popup.scale_factor();
 
         self.ui.begin_frame(now, reduce_motion);
         let opacity = self.ui.animate_f32(
@@ -496,7 +495,7 @@ impl Tooltips {
 }
 
 fn show_delay(reshow: bool) -> Duration {
-    let hover = mouse_hover_time_ms().unwrap_or(DEFAULT_HOVER_TIME) as f32;
+    let hover = system_settings().mouse_hover_time_ms as f32;
     let factor = if reshow {
         RESHOW_DELAY_FACTOR
     } else {

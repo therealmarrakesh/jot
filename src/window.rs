@@ -285,12 +285,6 @@ impl MainWindow {
         }
     }
 
-    pub(crate) fn ime_caret_bounds(&self) -> Option<(Rect, f32)> {
-        let slot = self.focused_editor_slot()?;
-        let rect = self.editor_by_slot(slot)?.ime_caret_bounds()?;
-        Some((rect, self.native.scale_factor))
-    }
-
     pub(crate) fn set_focus(&mut self, next: Focus, jobs: &Jobs<AppEvent>) {
         if self.focus == next {
             if let Focus::Editor(slot) = next {
@@ -1182,7 +1176,6 @@ impl MainWindow {
     }
 
     pub(crate) fn on_activated(&mut self, active: bool, jobs: &Jobs<AppEvent>) {
-        self.native.active = active;
         if !active {
             self.native.hwnd().complete_ime_composition();
             if let Some(slot) = self.focused_editor_slot()
@@ -1192,7 +1185,7 @@ impl MainWindow {
             }
             self.cancel_menu(jobs);
             self.stop_all_editor_blinks();
-            self.native.hwnd().sync_system_caret(None);
+            self.native.set_text_caret(None, false);
         } else if let Some(slot) = self.focused_editor_slot() {
             self.start_editor_blink(slot, jobs);
         }
@@ -2004,7 +1997,7 @@ impl MainWindow {
     ) {
         let zoom_pct = (self.zoom() * 100.).round() as u32;
         let format = self.tabs[self.active].data.format;
-        let scale = self.native.scale_factor;
+        let scale = self.native.scale_factor();
         let menu_width = frame
             .rect_of(HitId::MenuBar)
             .map_or(0.0, |r| r.size.width);
@@ -2063,9 +2056,9 @@ impl MainWindow {
         jobs: &Jobs<AppEvent>,
     ) -> Result<FrameResult> {
         self.dirty = false;
-        let logical = self.native.logical_size;
-        let scale = self.native.scale_factor;
-        let window_active = self.native.active;
+        let logical = self.native.logical_size();
+        let scale = self.native.scale_factor();
+        let window_active = self.native.is_active();
         let maximized = self.native.is_maximized();
         let status_metrics = view.status_bar.then(|| self.status_metrics());
 
@@ -2259,22 +2252,12 @@ impl MainWindow {
             true
         };
 
-        let sys_caret_px = if window_active && !caret_hidden {
-            self.focused_editor_slot()
-                .and_then(|slot| self.editor_by_slot(slot))
-                .and_then(|ed| ed.caret_bounds())
-                .map(|r| {
-                    (
-                        (r.origin.x * scale).round() as i32,
-                        (r.origin.y * scale).round() as i32,
-                        (r.size.width * scale).round().max(1.0) as i32,
-                        (r.size.height * scale).round().max(1.0) as i32,
-                    )
-                })
-        } else {
-            None
-        };
-        self.native.hwnd().sync_system_caret(sys_caret_px);
+        let ime_caret = self
+            .focused_editor_slot()
+            .and_then(|slot| self.editor_by_slot(slot))
+            .and_then(|ed| ed.ime_caret_bounds());
+        self.native
+            .set_text_caret(ime_caret, window_active && !caret_hidden);
 
         self.has_painted = true;
         let ui_animating = self.ui.finish_frame(frame);

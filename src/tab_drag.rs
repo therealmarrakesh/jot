@@ -287,9 +287,9 @@ impl App {
                     native
                         .hwnd()
                         .restored_logical_size()
-                        .unwrap_or(native.logical_size)
+                        .unwrap_or_else(|| native.logical_size())
                 } else {
-                    native.logical_size
+                    native.logical_size()
                 };
                 self.windows[ix]
                     .take_tab(tab, &self.jobs)

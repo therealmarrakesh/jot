@@ -1,26 +1,30 @@
 pub(crate) mod clipboard;
+mod codepage;
 pub(crate) mod dialogs;
+mod fs;
 pub(crate) mod input;
 mod instance;
 pub(crate) mod jobs;
 pub(crate) mod os;
+mod settings;
 pub(crate) mod window;
 
+pub(crate) use codepage::AnsiCodePage;
 pub(crate) use dialogs::{
     OpenDialogOptions, SaveChoice, SaveDialogOptions, SaveDialogResult, run_open_dialog,
     run_save_dialog,
+};
+pub(crate) use fs::{
+    HIDDEN_FILE_ATTRIBUTE, ReplaceFileError, documents_dir, file_hard_link_count, replace_file,
 };
 pub(crate) use input::{Key, KeyEvent, Modifiers, MouseButton};
 pub(crate) use instance::{Arbitration, HandoffCommand, arbitrate as arbitrate_instance};
 pub(crate) use jobs::{Jobs, TimerHandle};
 pub(crate) use os::{
-    AnsiCodePage, HIDDEN_FILE_ATTRIBUTE, HighContrastColors, ReplaceFileError, WindowHwnd,
-    WindowPlacement, caret_blink_interval, caret_blink_timeout, caret_width_px,
-    client_area_animations_enabled, cursor_screen_pos, documents_dir, file_hard_link_count,
-    format_local_time_date, high_contrast_colors, menu_show_delay_ms, monitor_work_area_and_scale,
-    mouse_hover_time_ms, primary_mouse_button_down, release_mouse_capture, replace_file,
-    system_accent_color, top_visible_window_at,
+    WindowHwnd, WindowPlacement, cursor_screen_pos, monitor_work_area_and_scale,
+    primary_mouse_button_down, release_mouse_capture, top_visible_window_at,
 };
+pub(crate) use settings::{HighContrastColors, format_local_time_date, system_settings};
 pub(crate) use window::{
     CursorStyle, NativeWindow, PlatformEvent, PlatformHandler, WindowAppearance, WindowBackdrop,
     WindowControlArea, WindowId, WindowKind, WindowOptions,
@@ -45,7 +49,6 @@ use windows::Win32::{
         DataExchange::COPYDATASTRUCT,
         Diagnostics::Debug::OutputDebugStringW,
         LibraryLoader::GetModuleHandleW,
-        Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW},
     },
     UI::{
         HiDpi::{
@@ -160,6 +163,10 @@ thread_local! {
         const { RefCell::new(None) };
     static WAKE_PENDING: Cell<bool> = const { Cell::new(false) };
     static HANDOFF_ACCEPTING: Cell<bool> = const { Cell::new(false) };
+}
+
+pub(super) fn mark_wake_pending() {
+    WAKE_PENDING.with(|flag| flag.set(true));
 }
 
 pub(super) fn take_wake_pending() -> bool {
@@ -325,27 +332,6 @@ impl Platform {
         self.vsync.arm();
     }
 
-    pub(crate) fn system_appearance(&self) -> WindowAppearance {
-        let mut value = 1u32;
-        let mut size = std::mem::size_of::<u32>() as u32;
-        let status = unsafe {
-            RegGetValueW(
-                HKEY_CURRENT_USER,
-                w!(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"),
-                w!("AppsUseLightTheme"),
-                RRF_RT_REG_DWORD,
-                None,
-                Some((&raw mut value).cast()),
-                Some(&mut size),
-            )
-        };
-        if status.is_ok() && value == 0 {
-            WindowAppearance::Dark
-        } else {
-            WindowAppearance::Light
-        }
-    }
-
     pub(crate) fn post_quit(&self) {
         self.disable_handoff();
         unsafe { PostQuitMessage(0) };
@@ -358,7 +344,7 @@ impl Platform {
 
     #[cfg(test)]
     pub(crate) fn drain_pending_events_for_test() {
-        window::drain_pending_events();
+        window::service();
     }
 
     pub(crate) fn run<H: PlatformHandler + 'static>(
@@ -373,22 +359,15 @@ impl Platform {
             let mut h = handler.borrow_mut();
             on_ready(&mut h);
         }
-        window::drain_pending_events();
-        handler.borrow_mut().drive_frames();
+        window::service();
 
         let mut msg = MSG::default();
-        loop {
-            if handler.borrow().should_quit() {
-                break;
-            }
-            if unsafe { GetMessageW(&mut msg, None, 0, 0) }.0 <= 0 {
-                break;
-            }
+        while unsafe { GetMessageW(&mut msg, None, 0, 0) }.0 > 0 {
             unsafe {
                 let _ = TranslateMessage(&msg);
                 DispatchMessageW(&msg);
             }
-            window::drain_pending_events();
+            window::service();
         }
     }
 }
@@ -419,31 +398,12 @@ unsafe extern "system" fn wake_wnd_proc(
 fn wake_wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match msg {
         WM_APP_WAKE => {
-            if let Some(handler_rc) = ACTIVE_HANDLER.with(|slot| slot.borrow().clone()) {
-                match handler_rc.try_borrow_mut() {
-                    Ok(mut handler) => {
-                        WAKE_PENDING.with(|flag| flag.set(false));
-                        handler.on_wake();
-                    }
-                    Err(_) => {
-                        WAKE_PENDING.with(|flag| flag.set(true));
-                        return LRESULT(0);
-                    }
-                }
-                window::drain_pending_events();
-                if let Ok(mut handler) = handler_rc.try_borrow_mut() {
-                    handler.drive_frames();
-                }
-            }
+            mark_wake_pending();
+            window::service();
             LRESULT(0)
         }
         WM_APP_VSYNC => {
-            if let Some(handler_rc) = ACTIVE_HANDLER.with(|slot| slot.borrow().clone()) {
-                window::drain_pending_events();
-                if let Ok(mut handler) = handler_rc.try_borrow_mut() {
-                    handler.drive_frames();
-                }
-            }
+            window::service();
             LRESULT(0)
         }
         WM_COPYDATA => {
@@ -454,7 +414,7 @@ fn wake_wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> 
             let Some(cmd) = instance::decode_copydata(cds) else {
                 return LRESULT(0);
             };
-            window::dispatch_or_queue_event(PlatformEvent::Handoff(cmd));
+            window::dispatch(PlatformEvent::Handoff(cmd));
             LRESULT(1)
         }
         _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
@@ -479,7 +439,6 @@ mod tests {
         events: Vec<PlatformEvent>,
         wakes: usize,
         paints: usize,
-        quit: bool,
         _timer: TimerHandle,
     }
 
@@ -499,22 +458,13 @@ mod tests {
             false
         }
 
-        fn query_ime_caret(&self, _window_id: WindowId) -> Option<(Rect, f32)> {
-            None
-        }
-
         fn on_wake(&mut self) {
             while let Some(v) = self.jobs.pop() {
                 self.wakes += 1;
                 if v == 99 {
-                    self.quit = true;
                     self.platform.post_quit();
                 }
             }
-        }
-
-        fn on_paint(&mut self, _window_id: WindowId) {
-            self.paints += 1;
         }
 
         fn drive_frames(&mut self) {
@@ -527,10 +477,6 @@ mod tests {
                 assert!(!lost);
                 self.paints += 1;
             }
-        }
-
-        fn should_quit(&self) -> bool {
-            self.quit
         }
     }
 
@@ -559,7 +505,6 @@ mod tests {
             events: Vec::new(),
             wakes: 0,
             paints: 0,
-            quit: false,
             _timer: TimerHandle::default(),
         }));
 

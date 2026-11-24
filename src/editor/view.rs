@@ -8,9 +8,7 @@ use ropey::Rope;
 use crate::color::{Rgba, rgb, rgba};
 use crate::geom::{Edges, Point, Rect, Size, point, size};
 use crate::gfx::{D2DRenderer, Font, TextRun, TextSystem, UnderlineStyle, fill};
-use crate::platform::{
-    Modifiers, MouseButton, TimerHandle, caret_blink_interval, caret_blink_timeout, caret_width_px,
-};
+use crate::platform::{Modifiers, MouseButton, TimerHandle, system_settings};
 use crate::scrollbar::ScrollbarViewport;
 use crate::theme::Palette;
 use crate::types::SharedStr;
@@ -109,7 +107,7 @@ impl BlinkState {
         self.visible = true;
         self.started_at = Some(Instant::now());
         let epoch = self.bump_epoch();
-        let Some(delay) = caret_blink_interval() else {
+        let Some(delay) = system_settings().caret_blink_interval else {
             self.timer.cancel();
             return;
         };
@@ -135,12 +133,13 @@ impl BlinkState {
             self.visible = true;
             return;
         }
-        let Some(interval) = caret_blink_interval() else {
+        let settings = system_settings();
+        let Some(interval) = settings.caret_blink_interval else {
             self.visible = true;
             self.timer.cancel();
             return;
         };
-        if let Some(timeout) = caret_blink_timeout()
+        if let Some(timeout) = settings.caret_blink_timeout
             && self
                 .started_at
                 .is_some_and(|start| start.elapsed() >= timeout)
@@ -816,7 +815,7 @@ impl Editor {
             ),
             scale,
         );
-        let caret_w = (caret_width_px().max(1) as f32 / scale).max(1.0 / scale);
+        let caret_w = (system_settings().caret_width_px.max(1) as f32 / scale).max(1.0 / scale);
         let caret_rect = Rect::new(caret_origin, size(caret_w, caret_h));
 
         let selection_rects = if window_active && show_selection {

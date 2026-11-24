@@ -714,7 +714,7 @@ fn overlay_window_resizes_from_1x1_and_renders() {
     });
     assert!(overlay.sync_live_metrics());
     assert!(
-        overlay.logical_size.width > 10.0 && overlay.logical_size.height > 10.0,
+        overlay.logical_size().width > 10.0 && overlay.logical_size().height > 10.0,
         "overlay must sync resized client rect before drawing"
     );
     let renderer = overlay.renderer_mut().expect("overlay renderer");
@@ -738,7 +738,7 @@ fn status_bar_min_width_and_no_vertical_char_wrapping() {
         let cached = w
             .min_size_cached()
             .expect("min_size cache must populate on first draw");
-        (w.native.hwnd(), cached, w.native.scale_factor)
+        (w.native.hwnd(), cached, w.native.scale_factor())
     });
     assert!(
         min_size.width >= 420.0,
@@ -862,11 +862,12 @@ fn hwnd_registry_cleanup_reentrant_queue_and_modal_size_move_timer() {
     }
     Platform::drain_pending_events_for_test();
     h.app.borrow_mut().drive_frames();
-    h.read(|w, _| {
+    h.read(|w, app| {
         assert!(
-            w.native.active,
+            w.native.is_active(),
             "queued re-entrant WM_ACTIVATE must apply once drained"
         );
+        assert_eq!(app.active_window, Some(h.window_id));
     });
 
     let ran = Arc::new(AtomicBool::new(false));
@@ -883,7 +884,7 @@ fn hwnd_registry_cleanup_reentrant_queue_and_modal_size_move_timer() {
             Some(LPARAM(0)),
         );
     }
-    h.read(|w, _| assert!(w.native.in_size_move));
+    h.read(|w, _| assert!(w.native.in_size_move()));
     unsafe {
         let _ = SendMessageW(hwnd.raw(), WM_TIMER, Some(WPARAM(1)), Some(LPARAM(0)));
     }
@@ -899,7 +900,7 @@ fn hwnd_registry_cleanup_reentrant_queue_and_modal_size_move_timer() {
             Some(LPARAM(0)),
         );
     }
-    h.read(|w, _| assert!(!w.native.in_size_move));
+    h.read(|w, _| assert!(!w.native.in_size_move()));
 
     h.close_all();
     Platform::set_active_handler_for_test(None);
@@ -982,7 +983,7 @@ fn tab_drag_pop_out_and_reattach_does_not_panic() {
     let (hwnd1, scale, tab_rect, tab_id) = h.read(|w, _| {
         let id = w.tabs[1].data.id;
         let rect = w.ui.frame.rect_of(HitId::Tab(id.0)).expect("tab 1 rect");
-        (w.native.hwnd(), w.native.scale_factor, rect, id)
+        (w.native.hwnd(), w.native.scale_factor(), rect, id)
     });
 
     let cx = (tab_rect.center().x * scale).round() as i32;

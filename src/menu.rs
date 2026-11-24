@@ -9,7 +9,7 @@ use crate::gfx::TextSystem;
 use crate::keytips::{self, KeyTip, round_half_up};
 use crate::platform::{
     CursorStyle, Jobs, Key, KeyEvent, TimerHandle, WindowId, clipboard::clipboard_has_text,
-    menu_show_delay_ms,
+    system_settings,
 };
 use crate::theme::{Palette, theme_shadow};
 use crate::types::SharedStr;
@@ -21,7 +21,6 @@ use crate::ui::{
 };
 use crate::window::{Focus, MENU_BAR_HEIGHT};
 
-const DEFAULT_MENU_SHOW_DELAY_MS: u64 = 400;
 const OPEN_DURATION: Duration = Duration::from_millis(250);
 const FADE_DURATION: Duration = Duration::from_millis(83);
 const CLOSED_RATIO: f32 = 0.5;
@@ -286,7 +285,7 @@ fn display_label(label: &str) -> SharedStr {
 }
 
 fn menu_show_delay() -> Duration {
-    Duration::from_millis(menu_show_delay_ms().map_or(DEFAULT_MENU_SHOW_DELAY_MS, u64::from))
+    Duration::from_millis(u64::from(system_settings().menu_show_delay_ms))
 }
 
 fn cycle(

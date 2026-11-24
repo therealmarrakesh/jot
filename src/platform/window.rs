@@ -1,8 +1,9 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
 use std::ffi::OsString;
 use std::os::windows::ffi::OsStringExt;
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use windows::Win32::{
@@ -35,26 +36,27 @@ use windows::Win32::{
         },
         Shell::{DragAcceptFiles, DragFinish, DragQueryFileW, HDROP},
         WindowsAndMessaging::{
-            CS_DBLCLKS, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW,
-            DestroyWindow, GetClientRect, GetCursorPos, GetWindowRect, HTCAPTION, HTCLIENT,
-            HTCLOSE, HTMAXBUTTON, HTMINBUTTON, HTTOP, HTTOPLEFT, HTTOPRIGHT, IDC_ARROW, IDC_IBEAM,
-            IsZoomed, KillTimer, LWA_ALPHA, LoadCursorW, LoadIconW, MINMAXINFO, NCCALCSIZE_PARAMS,
-            PostMessageW, RegisterClassW, SC_CLOSE, SC_MAXIMIZE, SC_MINIMIZE, SC_RESTORE,
-            SM_CXFRAME, SM_CXPADDEDBORDER, SM_CYFRAME, SW_SHOW, SW_SHOWNOACTIVATE,
-            SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOZORDER, SetCursor, SetLayeredWindowAttributes,
-            SetTimer, SetWindowPos, SetWindowTextW, ShowWindow, USER_DEFAULT_SCREEN_DPI,
-            USER_TIMER_MINIMUM, WM_ACTIVATE, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_DPICHANGED,
-            WM_DROPFILES, WM_ENDSESSION, WM_ENTERMENULOOP, WM_ENTERSIZEMOVE, WM_ERASEBKGND,
-            WM_EXITMENULOOP, WM_EXITSIZEMOVE, WM_GETMINMAXINFO, WM_IME_COMPOSITION,
-            WM_IME_ENDCOMPOSITION, WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDBLCLK,
-            WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL,
-            WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_MOVE, WM_NCCALCSIZE, WM_NCHITTEST, WM_NCLBUTTONDBLCLK,
-            WM_NCLBUTTONDOWN, WM_NCLBUTTONUP, WM_NCMOUSELEAVE, WM_NCMOUSEMOVE, WM_PAINT,
-            WM_QUERYENDSESSION, WM_RBUTTONDBLCLK, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR,
-            WM_SETTINGCHANGE, WM_SIZE, WM_SYSCHAR, WM_SYSCOMMAND, WM_SYSKEYDOWN, WM_SYSKEYUP,
-            WM_THEMECHANGED, WM_TIMER, WNDCLASSW, WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
-            WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT,
-            WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU, WS_THICKFRAME, WindowFromPoint,
+            CS_DBLCLKS, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CreateCaret, CreateWindowExW,
+            DefWindowProcW, DestroyCaret, DestroyWindow, GetClientRect, GetCursorPos,
+            GetWindowRect, HTCAPTION, HTCLIENT, HTCLOSE, HTMAXBUTTON, HTMINBUTTON, HTTOP,
+            HTTOPLEFT, HTTOPRIGHT, IDC_ARROW, IDC_IBEAM, IsZoomed, KillTimer, LWA_ALPHA,
+            LoadCursorW, LoadIconW, MINMAXINFO, NCCALCSIZE_PARAMS, PostMessageW, RegisterClassW,
+            SC_CLOSE, SC_MAXIMIZE, SC_MINIMIZE, SC_RESTORE, SM_CXFRAME, SM_CXPADDEDBORDER,
+            SM_CYFRAME, SW_SHOW, SW_SHOWNOACTIVATE, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOZORDER,
+            SetCaretPos, SetCursor, SetLayeredWindowAttributes, SetTimer, SetWindowPos,
+            SetWindowTextW, ShowWindow, USER_DEFAULT_SCREEN_DPI, USER_TIMER_MINIMUM, WM_ACTIVATE,
+            WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_DPICHANGED, WM_DROPFILES, WM_ENDSESSION,
+            WM_ENTERMENULOOP, WM_ENTERSIZEMOVE, WM_ERASEBKGND, WM_EXITMENULOOP, WM_EXITSIZEMOVE,
+            WM_GETMINMAXINFO, WM_IME_COMPOSITION, WM_IME_ENDCOMPOSITION, WM_IME_STARTCOMPOSITION,
+            WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN,
+            WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_MOVE, WM_NCCALCSIZE,
+            WM_NCHITTEST, WM_NCLBUTTONDBLCLK, WM_NCLBUTTONDOWN, WM_NCLBUTTONUP, WM_NCMOUSELEAVE,
+            WM_NCMOUSEMOVE, WM_PAINT, WM_QUERYENDSESSION, WM_RBUTTONDBLCLK, WM_RBUTTONDOWN,
+            WM_RBUTTONUP, WM_SETCURSOR, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCHAR, WM_SYSCOMMAND,
+            WM_SYSKEYDOWN, WM_SYSKEYUP, WM_THEMECHANGED, WM_TIMER, WNDCLASSW, WS_EX_APPWINDOW,
+            WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW,
+            WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU,
+            WS_THICKFRAME, WindowFromPoint,
         },
     },
 };
@@ -69,7 +71,8 @@ use super::input::{
     read_ime_string, set_ime_candidate_pos, translate_vk,
 };
 use super::instance::HandoffCommand;
-use super::os::{WindowHwnd, wheel_scroll_amount};
+use super::os::WindowHwnd;
+use super::settings::{refresh_system_settings, system_settings};
 use super::{ACTIVE_HANDLER, DisplayId, WindowsDisplay};
 
 const WINDOW_CLASS: PCWSTR = w!("JotWindow");
@@ -174,17 +177,13 @@ pub(crate) enum PlatformEvent {
     },
     Moved {
         window_id: WindowId,
-        origin: Point,
-    },
-    DpiChanged {
-        window_id: WindowId,
-        physical_width: u32,
-        physical_height: u32,
-        scale: f32,
     },
     Activated {
         window_id: WindowId,
         active: bool,
+    },
+    PaintRequested {
+        window_id: WindowId,
     },
     ThemeChanged,
     MouseMove {
@@ -249,38 +248,99 @@ pub(crate) enum PlatformEvent {
     CloseRequested {
         window_id: WindowId,
     },
+    SessionEnding {
+        ending: bool,
+    },
 }
 
 pub(crate) trait PlatformHandler {
     fn on_event(&mut self, event: PlatformEvent) -> bool;
-    fn query_ime_caret(&self, window_id: WindowId) -> Option<(Rect, f32)>;
     fn on_wake(&mut self);
-    fn on_paint(&mut self, window_id: WindowId);
     fn drive_frames(&mut self);
-    fn should_quit(&self) -> bool;
-    fn has_dirty_tabs(&self) -> bool {
-        false
+}
+
+#[derive(Default, Copy, Clone)]
+struct MouseButtons(u8);
+
+impl MouseButtons {
+    fn bit(button: MouseButton) -> u8 {
+        match button {
+            MouseButton::Left => 0x1,
+            MouseButton::Right => 0x2,
+            MouseButton::Middle => 0x4,
+        }
     }
-    fn on_end_session(&mut self, _ending: bool) {}
+
+    fn press(&mut self, button: MouseButton) {
+        self.0 |= Self::bit(button);
+    }
+
+    fn release(&mut self, button: MouseButton) {
+        self.0 &= !Self::bit(button);
+    }
+
+    fn clear(&mut self) {
+        self.0 = 0;
+    }
+
+    fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    fn from_wparam(wparam: WPARAM) -> Self {
+        let bits = wparam.0 as u32;
+        let mut mask = 0u8;
+        if (bits & 0x0001) != 0 {
+            mask |= 0x1;
+        }
+        if (bits & 0x0002) != 0 {
+            mask |= 0x2;
+        }
+        if (bits & 0x0010) != 0 {
+            mask |= 0x4;
+        }
+        Self(mask)
+    }
+
+    fn primary(self) -> Option<MouseButton> {
+        if (self.0 & 0x1) != 0 {
+            Some(MouseButton::Left)
+        } else if (self.0 & 0x2) != 0 {
+            Some(MouseButton::Right)
+        } else if (self.0 & 0x4) != 0 {
+            Some(MouseButton::Middle)
+        } else {
+            None
+        }
+    }
+}
+
+struct WindowState {
+    scale_factor: Cell<f32>,
+    logical_size: Cell<Size>,
+    origin: Cell<Point>,
+    active: Cell<bool>,
+    in_size_move: Cell<bool>,
+    ime_caret: Cell<Option<Rect>>,
+    sys_caret_px: Cell<Option<(i32, i32, i32, i32)>>,
+    block_shutdown: Cell<Option<&'static str>>,
 }
 
 struct HwndEntry {
     window_id: WindowId,
+    state: Rc<WindowState>,
     is_overlay: bool,
     is_resizable: bool,
-    scale_factor: f32,
     min_size: Option<Size>,
     cursor: CursorStyle,
     control_areas: Vec<(Rect, Option<WindowControlArea>)>,
-    in_size_move: bool,
     hovered: bool,
     nc_button_down: Option<u32>,
     pending_surrogate: Option<u16>,
     suppress_next_char: bool,
     last_modifiers: Modifiers,
     clicks: ClickTracker,
-    pressed_button: Option<MouseButton>,
-    pressed_buttons_mask: u8,
+    buttons: MouseButtons,
     tracking_leave: bool,
     tracking_nc_leave: bool,
 }
@@ -322,21 +382,13 @@ pub(crate) fn has_hwnd_entry(hwnd: WindowHwnd) -> bool {
     with_entry(hwnd.raw(), |_| ()).is_some()
 }
 
-pub(super) fn queue_pending_event(event: PlatformEvent) {
+fn queue_pending_event(event: PlatformEvent) {
     PENDING_EVENTS.with(|q| {
         let mut queue = q.borrow_mut();
         let coalesced = match (&event, queue.back_mut()) {
-            (
-                PlatformEvent::Moved {
-                    window_id: a,
-                    origin: new_origin,
-                },
-                Some(PlatformEvent::Moved {
-                    window_id: b,
-                    origin,
-                }),
-            ) if a == b => {
-                *origin = *new_origin;
+            (PlatformEvent::Moved { window_id: a }, Some(PlatformEvent::Moved { window_id: b }))
+                if a == b =>
+            {
                 true
             }
             (
@@ -367,7 +419,7 @@ pub(super) fn queue_pending_event(event: PlatformEvent) {
     });
 }
 
-pub(super) fn drain_pending_events() {
+fn drain_pending_only() {
     let Some(handler_rc) = ACTIVE_HANDLER.with(|slot| slot.borrow().clone()) else {
         return;
     };
@@ -375,7 +427,10 @@ pub(super) fn drain_pending_events() {
         if super::take_wake_pending() {
             match handler_rc.try_borrow_mut() {
                 Ok(mut handler) => handler.on_wake(),
-                Err(_) => return,
+                Err(_) => {
+                    super::mark_wake_pending();
+                    return;
+                }
             }
         }
         let next = PENDING_EVENTS.with(|q| q.borrow_mut().pop_front());
@@ -390,11 +445,22 @@ pub(super) fn drain_pending_events() {
     }
 }
 
-pub(super) fn dispatch_or_queue_event(event: PlatformEvent) -> bool {
+pub(super) fn service() {
+    let Some(handler_rc) = ACTIVE_HANDLER.with(|slot| slot.borrow().clone()) else {
+        return;
+    };
+    drain_pending_only();
+    if let Ok(mut handler) = handler_rc.try_borrow_mut() {
+        handler.drive_frames();
+    }
+    drain_pending_only();
+}
+
+pub(super) fn dispatch(event: PlatformEvent) -> bool {
     let Some(handler_rc) = ACTIVE_HANDLER.with(|slot| slot.borrow().clone()) else {
         return false;
     };
-    drain_pending_events();
+    drain_pending_only();
     let handled = match handler_rc.try_borrow_mut() {
         Ok(mut handler) => handler.on_event(event),
         Err(_) => {
@@ -402,26 +468,7 @@ pub(super) fn dispatch_or_queue_event(event: PlatformEvent) -> bool {
             return false;
         }
     };
-    drain_pending_events();
-    if let Ok(mut handler) = handler_rc.try_borrow_mut() {
-        handler.drive_frames();
-    }
-    handled
-}
-
-fn dispatch_if_free(event: PlatformEvent) -> bool {
-    let Some(handler_rc) = ACTIVE_HANDLER.with(|slot| slot.borrow().clone()) else {
-        return false;
-    };
-    drain_pending_events();
-    let handled = match handler_rc.try_borrow_mut() {
-        Ok(mut handler) => handler.on_event(event),
-        Err(_) => return false,
-    };
-    drain_pending_events();
-    if let Ok(mut handler) = handler_rc.try_borrow_mut() {
-        handler.drive_frames();
-    }
+    service();
     handled
 }
 
@@ -429,11 +476,7 @@ pub(crate) struct NativeWindow {
     pub(crate) id: WindowId,
     hwnd: HWND,
     pub(crate) kind: WindowKind,
-    pub(crate) scale_factor: f32,
-    pub(crate) logical_size: Size,
-    pub(crate) origin: Point,
-    pub(crate) active: bool,
-    pub(crate) in_size_move: bool,
+    state: Rc<WindowState>,
     renderer: Option<D2DRenderer>,
     destroyed: bool,
 }
@@ -494,26 +537,34 @@ impl NativeWindow {
 
         let dpi = unsafe { GetDpiForWindow(hwnd) }.max(USER_DEFAULT_SCREEN_DPI);
         let init_scale = dpi as f32 / USER_DEFAULT_SCREEN_DPI as f32;
+        let state = Rc::new(WindowState {
+            scale_factor: Cell::new(init_scale),
+            logical_size: Cell::new(Size::ZERO),
+            origin: Cell::new(Point::ZERO),
+            active: Cell::new(options.show && options.focus),
+            in_size_move: Cell::new(false),
+            ime_caret: Cell::new(None),
+            sys_caret_px: Cell::new(None),
+            block_shutdown: Cell::new(None),
+        });
         HWND_REGISTRY.with(|map| {
             map.borrow_mut().insert(
                 hwnd.0 as isize,
                 HwndEntry {
                     window_id: id,
+                    state: state.clone(),
                     is_overlay,
                     is_resizable: options.is_resizable && !is_overlay,
-                    scale_factor: init_scale,
                     min_size: if is_overlay { None } else { options.min_size },
                     cursor: CursorStyle::Arrow,
                     control_areas: Vec::new(),
-                    in_size_move: false,
                     hovered: false,
                     nc_button_down: None,
                     pending_surrogate: None,
                     suppress_next_char: false,
                     last_modifiers: current_modifiers(),
                     clicks: ClickTracker::default(),
-                    pressed_button: None,
-                    pressed_buttons_mask: 0,
+                    buttons: MouseButtons::default(),
                     tracking_leave: false,
                     tracking_nc_leave: false,
                 },
@@ -568,7 +619,7 @@ impl NativeWindow {
 
         let final_dpi = unsafe { GetDpiForWindow(hwnd) }.max(USER_DEFAULT_SCREEN_DPI);
         let scale_factor = final_dpi as f32 / USER_DEFAULT_SCREEN_DPI as f32;
-        with_entry_mut(hwnd, |e| e.scale_factor = scale_factor);
+        state.scale_factor.set(scale_factor);
 
         if !is_overlay {
             unsafe { DragAcceptFiles(hwnd, true) };
@@ -576,6 +627,8 @@ impl NativeWindow {
 
         let (phys_w, phys_h) = query_physical_size(hwnd);
         let (logical_size, origin) = query_client_metrics(hwnd, scale_factor);
+        state.logical_size.set(logical_size);
+        state.origin.set(origin);
         let renderer = match D2DRenderer::new(devices, hwnd, phys_w, phys_h, scale_factor) {
             Ok(r) => r,
             Err(err) => {
@@ -591,11 +644,7 @@ impl NativeWindow {
             id,
             hwnd,
             kind: options.kind,
-            scale_factor,
-            logical_size,
-            origin,
-            active: options.show && options.focus,
-            in_size_move: false,
+            state,
             renderer: Some(renderer),
             destroyed: false,
         };
@@ -652,8 +701,58 @@ impl NativeWindow {
         WindowHwnd::from_raw(self.hwnd)
     }
 
-    pub(crate) fn clear_shutdown_block(&self) {
-        let _ = unsafe { ShutdownBlockReasonDestroy(self.hwnd) };
+    #[inline]
+    pub(crate) fn scale_factor(&self) -> f32 {
+        self.state.scale_factor.get()
+    }
+
+    #[inline]
+    pub(crate) fn logical_size(&self) -> Size {
+        self.state.logical_size.get()
+    }
+
+    #[inline]
+    pub(crate) fn is_active(&self) -> bool {
+        self.state.active.get()
+    }
+
+    #[cfg(test)]
+    #[inline]
+    pub(crate) fn in_size_move(&self) -> bool {
+        self.state.in_size_move.get()
+    }
+
+    pub(crate) fn set_text_caret(&self, ime_rect: Option<Rect>, show_system_caret: bool) {
+        self.state.ime_caret.set(ime_rect);
+        let scale = self.state.scale_factor.get();
+        let next_px = show_system_caret.then_some(ime_rect).flatten().map(|r| {
+            (
+                (r.origin.x * scale).round() as i32,
+                (r.origin.y * scale).round() as i32,
+                (r.size.width * scale).round().max(1.0) as i32,
+                (r.size.height * scale).round().max(1.0) as i32,
+            )
+        });
+        if next_px == self.state.sys_caret_px.get() {
+            return;
+        }
+        self.state.sys_caret_px.set(next_px);
+        match next_px {
+            Some((x, y, w, h)) => unsafe {
+                let _ = CreateCaret(self.hwnd, None, w.max(1), h.max(1));
+                let _ = SetCaretPos(x, y);
+            },
+            None => unsafe {
+                let _ = DestroyCaret();
+            },
+        }
+    }
+
+    pub(crate) fn set_block_shutdown(&self, reason: Option<&'static str>) {
+        let prev = self.state.block_shutdown.replace(reason);
+        if prev.is_some() && reason.is_none() {
+            let _ = unsafe { ShutdownBlockReasonDestroy(self.hwnd) };
+        }
     }
 
     pub(crate) fn renderer_mut(&mut self) -> Option<&mut D2DRenderer> {
@@ -661,12 +760,11 @@ impl NativeWindow {
     }
 
     pub(crate) fn sync_size(&mut self, physical_width: u32, physical_height: u32, scale: f32) {
-        self.scale_factor = scale;
-        self.logical_size = size(
+        self.state.scale_factor.set(scale);
+        self.state.logical_size.set(size(
             physical_width as f32 / scale,
             physical_height as f32 / scale,
-        );
-        with_entry_mut(self.hwnd, |e| e.scale_factor = scale);
+        ));
         if let Some(renderer) = &mut self.renderer {
             let _ = renderer.resize(physical_width, physical_height, scale);
         }
@@ -692,7 +790,13 @@ impl NativeWindow {
         // Drop old swapchain and DComp target before creating the replacement.
         self.renderer = None;
         let (w, h) = query_physical_size(self.hwnd);
-        self.renderer = Some(D2DRenderer::new(devices, self.hwnd, w, h, self.scale_factor)?);
+        self.renderer = Some(D2DRenderer::new(
+            devices,
+            self.hwnd,
+            w,
+            h,
+            self.scale_factor(),
+        )?);
         Ok(())
     }
 
@@ -704,7 +808,7 @@ impl NativeWindow {
         let in_size_move = HWND_REGISTRY.with(|map| {
             map.borrow_mut()
                 .remove(&(self.hwnd.0 as isize))
-                .is_some_and(|e| e.in_size_move)
+                .is_some_and(|e| e.state.in_size_move.get())
         });
         if in_size_move {
             let _ = unsafe { KillTimer(Some(self.hwnd), SIZE_MOVE_TIMER_ID) };
@@ -842,15 +946,10 @@ fn is_relevant_setting_change(lparam: LPARAM) -> bool {
         || name.eq_ignore_ascii_case("HighContrast")
 }
 
-fn update_ime_pos(hwnd: HWND, window_id: WindowId) {
-    let Some(handler_rc) = ACTIVE_HANDLER.with(|s| s.borrow().clone()) else {
-        return;
-    };
-    let caret = handler_rc
-        .try_borrow()
-        .ok()
-        .and_then(|h| h.query_ime_caret(window_id));
-    if let Some((rect, scale)) = caret {
+fn update_ime_pos(hwnd: HWND) {
+    if let Some((Some(rect), scale)) =
+        with_entry(hwnd, |e| (e.state.ime_caret.get(), e.state.scale_factor.get()))
+    {
         set_ime_candidate_pos(hwnd, rect, scale);
     }
 }
@@ -872,11 +971,8 @@ fn window_wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
 
         WM_PAINT => {
             let _ = unsafe { ValidateRect(Some(hwnd), None) };
-            if let Some(window_id) = with_entry(hwnd, |e| e.window_id)
-                && let Some(handler_rc) = ACTIVE_HANDLER.with(|s| s.borrow().clone())
-                && let Ok(mut handler) = handler_rc.try_borrow_mut()
-            {
-                handler.on_paint(window_id);
+            if let Some(window_id) = with_entry(hwnd, |e| e.window_id) {
+                dispatch(PlatformEvent::PaintRequested { window_id });
             }
             LRESULT(0)
         }
@@ -936,7 +1032,7 @@ fn window_wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
                         return HTTOP;
                     }
                 }
-                let local = screen_to_client_point(hwnd, lparam, e.scale_factor);
+                let local = screen_to_client_point(hwnd, lparam, e.state.scale_factor.get());
                 match hit_test_control_areas(&e.control_areas, local) {
                     Some(WindowControlArea::Close) => HTCLOSE,
                     Some(WindowControlArea::Max) => HTMAXBUTTON,
@@ -957,18 +1053,18 @@ fn window_wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
 
         WM_NCMOUSEMOVE => {
             let info = with_entry_mut(hwnd, |e| {
-                if e.in_size_move {
+                if e.state.in_size_move.get() {
                     return None;
                 }
                 let need_track = !e.tracking_nc_leave;
                 e.hovered = true;
-                let position = screen_to_client_point(hwnd, lparam, e.scale_factor);
+                let position = screen_to_client_point(hwnd, lparam, e.state.scale_factor.get());
                 Some((
                     need_track,
                     PlatformEvent::MouseMove {
                         window_id: e.window_id,
                         position,
-                        pressed_button: e.pressed_button,
+                        pressed_button: e.buttons.primary(),
                     },
                 ))
             })
@@ -985,7 +1081,7 @@ fn window_wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
                         with_entry_mut(hwnd, |e| e.tracking_nc_leave = true);
                     }
                 }
-                dispatch_if_free(ev);
+                dispatch(ev);
             }
             unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
         }
@@ -1003,7 +1099,7 @@ fn window_wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
                     e.window_id
                 });
                 if let Some(window_id) = window_id {
-                    dispatch_or_queue_event(PlatformEvent::MouseLeave { window_id });
+                    dispatch(PlatformEvent::MouseLeave { window_id });
                 }
             }
             LRESULT(0)
@@ -1020,7 +1116,7 @@ fn window_wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
                         e.nc_button_down = Some(area);
                     }
                     e.hovered = true;
-                    let position = screen_to_client_point(hwnd, lparam, e.scale_factor);
+                    let position = screen_to_client_point(hwnd, lparam, e.state.scale_factor.get());
                     PlatformEvent::MouseDown {
                         window_id: e.window_id,
                         button: MouseButton::Left,
@@ -1030,7 +1126,7 @@ fn window_wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
                     }
                 });
                 if let Some(ev) = ev {
-                    dispatch_if_free(ev);
+                    dispatch(ev);
                 }
                 if area != HTCAPTION {
                     return LRESULT(0);
@@ -1044,7 +1140,7 @@ fn window_wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
             if matches!(area, HTMINBUTTON | HTMAXBUTTON | HTCLOSE) {
                 let info = with_entry_mut(hwnd, |e| {
                     let was = e.nc_button_down.take();
-                    let position = screen_to_client_point(hwnd, lparam, e.scale_factor);
+                    let position = screen_to_client_point(hwnd, lparam, e.state.scale_factor.get());
                     (
                         PlatformEvent::MouseUp {
                             window_id: e.window_id,
@@ -1055,7 +1151,7 @@ fn window_wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
                     )
                 });
                 if let Some((ev, matched)) = info {
-                    dispatch_if_free(ev);
+                    dispatch(ev);
                     if matched {
                         let cmd = match area {
                             HTMINBUTTON => SC_MINIMIZE,
@@ -1087,30 +1183,21 @@ fn window_wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
         }
 
         WM_MOUSEMOVE => {
-            let w_bits = wparam.0 as u32;
-            let live_button = if (w_bits & 0x0001) != 0 {
-                Some(MouseButton::Left)
-            } else if (w_bits & 0x0002) != 0 {
-                Some(MouseButton::Right)
-            } else if (w_bits & 0x0010) != 0 {
-                Some(MouseButton::Middle)
-            } else {
-                None
-            };
+            let live_buttons = MouseButtons::from_wparam(wparam);
             let info = with_entry_mut(hwnd, |e| {
-                if e.in_size_move {
+                if e.state.in_size_move.get() {
                     return None;
                 }
                 let need_track = !e.tracking_leave;
                 e.hovered = true;
-                e.pressed_button = live_button;
-                let (_, _, position) = client_point_from_lparam(lparam, e.scale_factor);
+                e.buttons = live_buttons;
+                let (_, _, position) = client_point_from_lparam(lparam, e.state.scale_factor.get());
                 Some((
                     need_track,
                     PlatformEvent::MouseMove {
                         window_id: e.window_id,
                         position,
-                        pressed_button: live_button,
+                        pressed_button: live_buttons.primary(),
                     },
                 ))
             })
@@ -1127,7 +1214,7 @@ fn window_wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
                         with_entry_mut(hwnd, |e| e.tracking_leave = true);
                     }
                 }
-                dispatch_if_free(ev);
+                dispatch(ev);
             }
             LRESULT(0)
         }
@@ -1144,7 +1231,7 @@ fn window_wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
                     e.window_id
                 });
                 if let Some(window_id) = window_id {
-                    dispatch_or_queue_event(PlatformEvent::MouseLeave { window_id });
+                    dispatch(PlatformEvent::MouseLeave { window_id });
                 }
             }
             LRESULT(0)
@@ -1152,29 +1239,27 @@ fn window_wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
 
         WM_CAPTURECHANGED => {
             let window_id = with_entry_mut(hwnd, |e| {
-                e.pressed_button = None;
-                e.pressed_buttons_mask = 0;
+                e.buttons.clear();
                 e.window_id
             });
             if let Some(window_id) = window_id {
-                dispatch_or_queue_event(PlatformEvent::CaptureLost { window_id });
+                dispatch(PlatformEvent::CaptureLost { window_id });
             }
             LRESULT(0)
         }
 
         WM_LBUTTONDOWN | WM_LBUTTONDBLCLK | WM_RBUTTONDOWN | WM_RBUTTONDBLCLK | WM_MBUTTONDOWN => {
-            let (button, bit) = match msg {
-                WM_LBUTTONDOWN | WM_LBUTTONDBLCLK => (MouseButton::Left, 0x1u8),
-                WM_RBUTTONDOWN | WM_RBUTTONDBLCLK => (MouseButton::Right, 0x2u8),
-                _ => (MouseButton::Middle, 0x4u8),
+            let button = match msg {
+                WM_LBUTTONDOWN | WM_LBUTTONDBLCLK => MouseButton::Left,
+                WM_RBUTTONDOWN | WM_RBUTTONDBLCLK => MouseButton::Right,
+                _ => MouseButton::Middle,
             };
             unsafe {
                 SetCapture(hwnd);
             }
             let ev = with_entry_mut(hwnd, |e| {
-                e.pressed_buttons_mask |= bit;
-                e.pressed_button = Some(button);
-                let (x, y, position) = client_point_from_lparam(lparam, e.scale_factor);
+                e.buttons.press(button);
+                let (x, y, position) = client_point_from_lparam(lparam, e.state.scale_factor.get());
                 let click_count = e.clicks.record(button, x, y);
                 PlatformEvent::MouseDown {
                     window_id: e.window_id,
@@ -1185,33 +1270,22 @@ fn window_wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
                 }
             });
             if let Some(ev) = ev {
-                dispatch_if_free(ev);
+                dispatch(ev);
             }
             LRESULT(0)
         }
 
         WM_LBUTTONUP | WM_RBUTTONUP | WM_MBUTTONUP => {
-            let (button, bit) = match msg {
-                WM_LBUTTONUP => (MouseButton::Left, 0x1u8),
-                WM_RBUTTONUP => (MouseButton::Right, 0x2u8),
-                _ => (MouseButton::Middle, 0x4u8),
+            let button = match msg {
+                WM_LBUTTONUP => MouseButton::Left,
+                WM_RBUTTONUP => MouseButton::Right,
+                _ => MouseButton::Middle,
             };
             let (release_cap, ev) = with_entry_mut(hwnd, |e| {
-                e.pressed_buttons_mask &= !bit;
-                if e.pressed_button == Some(button) {
-                    e.pressed_button = if (e.pressed_buttons_mask & 0x1) != 0 {
-                        Some(MouseButton::Left)
-                    } else if (e.pressed_buttons_mask & 0x2) != 0 {
-                        Some(MouseButton::Right)
-                    } else if (e.pressed_buttons_mask & 0x4) != 0 {
-                        Some(MouseButton::Middle)
-                    } else {
-                        None
-                    };
-                }
-                let (_, _, position) = client_point_from_lparam(lparam, e.scale_factor);
+                e.buttons.release(button);
+                let (_, _, position) = client_point_from_lparam(lparam, e.state.scale_factor.get());
                 (
-                    e.pressed_buttons_mask == 0,
+                    e.buttons.is_empty(),
                     PlatformEvent::MouseUp {
                         window_id: e.window_id,
                         button,
@@ -1224,7 +1298,7 @@ fn window_wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
                 let _ = unsafe { ReleaseCapture() };
             }
             if let Some(ev) = ev {
-                dispatch_if_free(ev);
+                dispatch(ev);
             }
             LRESULT(0)
         }
@@ -1234,7 +1308,7 @@ fn window_wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
             let horizontal = msg == WM_MOUSEHWHEEL || modifiers.shift;
             let raw_delta = ((wparam.0 >> 16) & 0xFFFF) as i16 as f32;
             let notches = raw_delta / 120.0;
-            let raw_amount = wheel_scroll_amount(horizontal).unwrap_or(3);
+            let raw_amount = system_settings().wheel_scroll_amount(horizontal);
             // WHEEL_PAGESCROLL is u32::MAX.
             let page_scroll = !horizontal && raw_amount == u32::MAX;
             let amount = if page_scroll { 1.0 } else { raw_amount.max(1) as f32 };
@@ -1251,7 +1325,7 @@ fn window_wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
                 point(0.0, notches * amount)
             };
             let ev = with_entry(hwnd, |e| {
-                let position = screen_to_client_point(hwnd, lparam, e.scale_factor);
+                let position = screen_to_client_point(hwnd, lparam, e.state.scale_factor.get());
                 PlatformEvent::ScrollWheel {
                     window_id: e.window_id,
                     position,
@@ -1261,7 +1335,7 @@ fn window_wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
                 }
             });
             if let Some(ev) = ev {
-                dispatch_if_free(ev);
+                dispatch(ev);
             }
             LRESULT(0)
         }
@@ -1283,7 +1357,7 @@ fn window_wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
             let mut handled = false;
             if let Some((window_id, mods_changed)) = prep {
                 if let Some(ev) = mods_changed {
-                    dispatch_if_free(ev);
+                    dispatch(ev);
                 }
                 if let Some(key) = translate_vk(vk, modifiers) {
                     if is_held && matches!(key, Key::Alt | Key::F(10)) {
@@ -1293,7 +1367,7 @@ fn window_wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
                         if key == Key::Alt {
                             stroke_mods.alt = false;
                         }
-                        handled = dispatch_if_free(PlatformEvent::KeyDown {
+                        handled = dispatch(PlatformEvent::KeyDown {
                             window_id,
                             event: KeyEvent {
                                 key,
@@ -1336,14 +1410,14 @@ fn window_wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
             });
             if let Some((window_id, mods_changed)) = prep {
                 if let Some(ev) = mods_changed {
-                    dispatch_if_free(ev);
+                    dispatch(ev);
                 }
                 if let Some(key) = translate_vk(vk, modifiers) {
                     let mut stroke_mods = modifiers;
                     if key == Key::Alt {
                         stroke_mods.alt = false;
                     }
-                    dispatch_if_free(PlatformEvent::KeyUp {
+                    dispatch(PlatformEvent::KeyUp {
                         window_id,
                         event: KeyEvent {
                             key,
@@ -1385,15 +1459,13 @@ fn window_wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
             })
             .flatten();
             if let Some(ev) = text_ev {
-                dispatch_if_free(ev);
+                dispatch(ev);
             }
             LRESULT(0)
         }
 
         WM_IME_STARTCOMPOSITION => {
-            if let Some(window_id) = with_entry(hwnd, |e| e.window_id) {
-                update_ime_pos(hwnd, window_id);
-            }
+            update_ime_pos(hwnd);
             LRESULT(0)
         }
 
@@ -1405,7 +1477,7 @@ fn window_wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
                     if (flags & GCS_RESULTSTR.0) != 0
                         && let Some(text) = read_ime_string(himc, GCS_RESULTSTR)
                     {
-                        dispatch_if_free(PlatformEvent::TextInput { window_id, text });
+                        dispatch(PlatformEvent::TextInput { window_id, text });
                     }
                     if (flags & GCS_COMPSTR.0) != 0 {
                         let text = read_ime_string(himc, GCS_COMPSTR).unwrap_or_default();
@@ -1413,14 +1485,14 @@ fn window_wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
                             ImmGetCompositionStringW(himc, GCS_CURSORPOS, None, 0)
                         }
                         .max(0) as usize;
-                        dispatch_if_free(PlatformEvent::ImeComposition {
+                        dispatch(PlatformEvent::ImeComposition {
                             window_id,
                             text,
                             cursor,
                         });
                     }
                     let _ = unsafe { ImmReleaseContext(hwnd, himc) };
-                    update_ime_pos(hwnd, window_id);
+                    update_ime_pos(hwnd);
                 }
             }
             LRESULT(0)
@@ -1428,7 +1500,7 @@ fn window_wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
 
         WM_IME_ENDCOMPOSITION => {
             if let Some(window_id) = with_entry(hwnd, |e| e.window_id) {
-                dispatch_if_free(PlatformEvent::ImeComposition {
+                dispatch(PlatformEvent::ImeComposition {
                     window_id,
                     text: String::new(),
                     cursor: 0,
@@ -1440,10 +1512,17 @@ fn window_wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
         WM_SIZE => {
             let w = (lparam.0 & 0xFFFF) as u32;
             let h = ((lparam.0 >> 16) & 0xFFFF) as u32;
-            if w > 0 && h > 0
-                && let Some((window_id, scale)) = with_entry(hwnd, |e| (e.window_id, e.scale_factor))
+            if w > 0
+                && h > 0
+                && let Some((window_id, scale)) = with_entry(hwnd, |e| {
+                    let s = e.state.scale_factor.get();
+                    e.state
+                        .logical_size
+                        .set(size(w as f32 / s, h as f32 / s));
+                    (e.window_id, s)
+                })
             {
-                dispatch_or_queue_event(PlatformEvent::Resized {
+                dispatch(PlatformEvent::Resized {
                     window_id,
                     physical_width: w,
                     physical_height: h,
@@ -1454,9 +1533,13 @@ fn window_wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
         }
 
         WM_MOVE => {
-            if let Some((window_id, scale)) = with_entry(hwnd, |e| (e.window_id, e.scale_factor)) {
-                let (_, origin) = query_client_metrics(hwnd, scale);
-                dispatch_or_queue_event(PlatformEvent::Moved { window_id, origin });
+            if let Some((window_id, changed)) = with_entry(hwnd, |e| {
+                let (_, origin) = query_client_metrics(hwnd, e.state.scale_factor.get());
+                let prev = e.state.origin.replace(origin);
+                (e.window_id, prev != origin)
+            }) && changed
+            {
+                dispatch(PlatformEvent::Moved { window_id });
             }
             LRESULT(0)
         }
@@ -1466,8 +1549,8 @@ fn window_wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
             let scale =
                 new_dpi.max(USER_DEFAULT_SCREEN_DPI) as f32 / USER_DEFAULT_SCREEN_DPI as f32;
             // Update scale_factor before SetWindowPos so nested WM_SIZE sees the new DPI; never resize overlays.
-            let info = with_entry_mut(hwnd, |e| {
-                e.scale_factor = scale;
+            let info = with_entry(hwnd, |e| {
+                e.state.scale_factor.set(scale);
                 (e.window_id, e.is_overlay)
             });
             if let Some((window_id, is_overlay)) = info {
@@ -1486,7 +1569,12 @@ fn window_wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
                     }
                 }
                 let (w, h) = query_physical_size(hwnd);
-                dispatch_or_queue_event(PlatformEvent::DpiChanged {
+                with_entry(hwnd, |e| {
+                    e.state
+                        .logical_size
+                        .set(size(w as f32 / scale, h as f32 / scale));
+                });
+                dispatch(PlatformEvent::Resized {
                     window_id,
                     physical_width: w,
                     physical_height: h,
@@ -1498,8 +1586,11 @@ fn window_wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
 
         WM_ACTIVATE => {
             let active = (wparam.0 & 0xFFFF) != 0;
-            if let Some(window_id) = with_entry(hwnd, |e| e.window_id) {
-                dispatch_or_queue_event(PlatformEvent::Activated { window_id, active });
+            if let Some(window_id) = with_entry(hwnd, |e| {
+                e.state.active.set(active);
+                e.window_id
+            }) {
+                dispatch(PlatformEvent::Activated { window_id, active });
             }
             LRESULT(0)
         }
@@ -1508,22 +1599,23 @@ fn window_wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
             let relevant = with_entry(hwnd, |e| !e.is_overlay).unwrap_or(false)
                 && (msg == WM_THEMECHANGED || is_relevant_setting_change(lparam));
             if relevant {
-                dispatch_or_queue_event(PlatformEvent::ThemeChanged);
+                refresh_system_settings();
+                dispatch(PlatformEvent::ThemeChanged);
             }
             LRESULT(0)
         }
 
         WM_ENTERSIZEMOVE | WM_ENTERMENULOOP => {
             if let Some((window_id, was_hovered)) = with_entry_mut(hwnd, |e| {
-                e.in_size_move = true;
+                e.state.in_size_move.set(true);
                 let h = e.hovered;
                 e.hovered = false;
                 (e.window_id, h)
             }) {
                 if was_hovered {
-                    dispatch_or_queue_event(PlatformEvent::MouseLeave { window_id });
+                    dispatch(PlatformEvent::MouseLeave { window_id });
                 }
-                dispatch_or_queue_event(PlatformEvent::SizeMoveChanged {
+                dispatch(PlatformEvent::SizeMoveChanged {
                     window_id,
                     entering: true,
                 });
@@ -1535,25 +1627,18 @@ fn window_wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
         }
 
         WM_TIMER if wparam.0 == SIZE_MOVE_TIMER_ID => {
-            if let Some(handler_rc) = ACTIVE_HANDLER.with(|s| s.borrow().clone()) {
-                if let Ok(mut handler) = handler_rc.try_borrow_mut() {
-                    handler.on_wake();
-                }
-                drain_pending_events();
-                if let Ok(mut handler) = handler_rc.try_borrow_mut() {
-                    handler.drive_frames();
-                }
-            }
+            super::mark_wake_pending();
+            service();
             LRESULT(0)
         }
 
         WM_EXITSIZEMOVE | WM_EXITMENULOOP => {
             let _ = unsafe { KillTimer(Some(hwnd), SIZE_MOVE_TIMER_ID) };
-            if let Some(window_id) = with_entry_mut(hwnd, |e| {
-                e.in_size_move = false;
+            if let Some(window_id) = with_entry(hwnd, |e| {
+                e.state.in_size_move.set(false);
                 e.window_id
             }) {
-                dispatch_or_queue_event(PlatformEvent::SizeMoveChanged {
+                dispatch(PlatformEvent::SizeMoveChanged {
                     window_id,
                     entering: false,
                 });
@@ -1562,18 +1647,16 @@ fn window_wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
         }
 
         WM_QUERYENDSESSION => {
-            let dirty = ACTIVE_HANDLER.with(|s| {
-                s.borrow()
-                    .as_ref()
-                    .and_then(|h| h.try_borrow().ok().map(|g| g.has_dirty_tabs()))
-                    .unwrap_or(false)
+            let block_reason = HWND_REGISTRY.with(|map| {
+                map.borrow()
+                    .values()
+                    .find_map(|e| e.state.block_shutdown.get())
             });
-            if dirty {
-                let _ = unsafe {
-                    ShutdownBlockReasonCreate(hwnd, w!("You have unsaved changes."))
-                };
+            if let Some(reason) = block_reason {
+                let wide = HSTRING::from(reason);
+                let _ = unsafe { ShutdownBlockReasonCreate(hwnd, &wide) };
                 if let Some(window_id) = with_entry(hwnd, |e| e.window_id) {
-                    dispatch_or_queue_event(PlatformEvent::CloseRequested { window_id });
+                    dispatch(PlatformEvent::CloseRequested { window_id });
                 }
                 LRESULT(0)
             } else {
@@ -1587,11 +1670,7 @@ fn window_wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
             if !ending {
                 let _ = unsafe { ShutdownBlockReasonDestroy(hwnd) };
             }
-            if let Some(handler_rc) = ACTIVE_HANDLER.with(|s| s.borrow().clone())
-                && let Ok(mut handler) = handler_rc.try_borrow_mut()
-            {
-                handler.on_end_session(ending);
-            }
+            dispatch(PlatformEvent::SessionEnding { ending });
             LRESULT(0)
         }
 
@@ -1602,14 +1681,14 @@ fn window_wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
             if !paths.is_empty()
                 && let Some(window_id) = with_entry(hwnd, |e| e.window_id)
             {
-                dispatch_or_queue_event(PlatformEvent::FilesDropped { window_id, paths });
+                dispatch(PlatformEvent::FilesDropped { window_id, paths });
             }
             LRESULT(0)
         }
 
         WM_CLOSE => {
             if let Some(window_id) = with_entry(hwnd, |e| e.window_id) {
-                dispatch_or_queue_event(PlatformEvent::CloseRequested { window_id });
+                dispatch(PlatformEvent::CloseRequested { window_id });
             }
             LRESULT(0)
         }
