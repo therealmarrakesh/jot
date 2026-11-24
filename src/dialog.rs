@@ -1,10 +1,8 @@
-use std::path::PathBuf;
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use crate::APP_NAME;
-use crate::document::Format;
-use crate::editor::{Editor, Rope};
-use crate::files::{FilePrompt, LOSSY_ANSI_WARNING, WorkflowGen, discard_prompt_text};
+use crate::editor::Editor;
 use crate::ids::{AnimKey, CustomDraw, EditorSlot, HitId, Node, UiState};
 use crate::platform::CursorStyle;
 use crate::tabs::TabId;
@@ -36,72 +34,52 @@ const GO_TO_TITLE: &str = "Go to line";
 const GO_TO_BUTTONS: &[&str] = &["Go to", "Cancel"];
 const OUT_OF_RANGE_MESSAGE: &str = "The line number is beyond the total number of lines";
 const OK_BUTTONS: &[&str] = &["OK"];
-const DISCARD_BUTTONS: &[&str] = &["Save", "Don't save", "Cancel"];
-const LOSSY_BUTTONS: &[&str] = &["OK", "Cancel"];
 const BORDER: f32 = 1.;
 const BODY_BASELINE_SNAP: f32 = -1.;
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct PromptId(u64);
+
+impl PromptId {
+    pub(crate) fn next() -> Self {
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        Self(NEXT.fetch_add(1, Ordering::Relaxed))
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct Prompt {
+    pub(crate) id: Option<PromptId>,
+    pub(crate) title: SharedStr,
+    pub(crate) message: SharedStr,
+    pub(crate) buttons: &'static [&'static str],
+    pub(crate) tab: Option<TabId>,
+}
+
+#[derive(Clone)]
 pub(crate) enum DialogKind {
     GoTo,
     LineOutOfRange,
-    Error {
-        title: SharedStr,
-        message: SharedStr,
-    },
-    ConfirmDiscard {
-        tab: TabId,
-        name: String,
-    },
-    ConfirmLossyAnsi {
-        wf_gen: WorkflowGen,
-        tab: TabId,
-        snapshot: u64,
-        text: Rope,
-        path: PathBuf,
-        format: Format,
-    },
+    Prompt(Prompt),
 }
 
 impl DialogKind {
-    pub(crate) fn from_file_prompt(prompt: FilePrompt) -> Self {
-        match prompt {
-            FilePrompt::Error { title, message } => Self::Error { title, message },
-            FilePrompt::ConfirmDiscard { tab, name } => Self::ConfirmDiscard { tab, name },
-            FilePrompt::ConfirmLossyAnsi {
-                wf_gen,
-                tab,
-                snapshot,
-                text,
-                path,
-                format,
-            } => Self::ConfirmLossyAnsi {
-                wf_gen,
-                tab,
-                snapshot,
-                text,
-                path,
-                format,
-            },
-        }
-    }
-
-    pub(crate) fn referenced_tab(&self) -> Option<TabId> {
+    fn referenced_tab(&self) -> Option<TabId> {
         match self {
-            Self::ConfirmDiscard { tab, .. } | Self::ConfirmLossyAnsi { tab, .. } => Some(*tab),
-            Self::GoTo | Self::LineOutOfRange | Self::Error { .. } => None,
+            Self::Prompt(p) => p.tab,
+            Self::GoTo | Self::LineOutOfRange => None,
         }
     }
 
-    pub(crate) fn buttons(&self) -> &'static [&'static str] {
+    fn buttons(&self) -> &'static [&'static str] {
         match self {
             Self::GoTo => GO_TO_BUTTONS,
-            Self::LineOutOfRange | Self::Error { .. } => OK_BUTTONS,
-            Self::ConfirmDiscard { .. } => DISCARD_BUTTONS,
-            Self::ConfirmLossyAnsi { .. } => LOSSY_BUTTONS,
+            Self::LineOutOfRange => OK_BUTTONS,
+            Self::Prompt(p) => p.buttons,
         }
     }
 
-    pub(crate) fn is_go_to(&self) -> bool {
+    fn is_go_to(&self) -> bool {
         matches!(self, Self::GoTo)
     }
 }
@@ -157,6 +135,7 @@ impl OpenDialog {
 
 pub(crate) struct Dialogs {
     open: Vec<OpenDialog>,
+    pending: VecDeque<DialogKind>,
     serial: usize,
     pub(crate) line: Editor,
 }
@@ -174,6 +153,7 @@ impl Dialogs {
             .with_validate(|t| t.chars().all(|c| c.is_ascii_digit()));
         Self {
             open: Vec::new(),
+            pending: VecDeque::new(),
             serial: 0,
             line,
         }
@@ -191,7 +171,15 @@ impl Dialogs {
         self.active().map_or(0, |d| d.kind.buttons().len())
     }
 
-    pub(crate) fn show(&mut self, kind: DialogKind) -> Focus {
+    pub(crate) fn enqueue(&mut self, kind: DialogKind) -> Option<Focus> {
+        if self.is_open() {
+            self.pending.push_back(kind);
+            return None;
+        }
+        Some(self.show_now(kind))
+    }
+
+    pub(crate) fn show_now(&mut self, kind: DialogKind) -> Focus {
         self.hide();
         self.serial += 1;
         let initial_focus = if kind.is_go_to() {
@@ -209,53 +197,29 @@ impl Dialogs {
         initial_focus
     }
 
+    pub(crate) fn dismiss(&mut self) -> Option<Focus> {
+        self.hide();
+        self.pending.pop_front().map(|next| self.show_now(next))
+    }
+
     pub(crate) fn hide(&mut self) {
         for d in &mut self.open {
             d.closing = true;
         }
     }
 
-    pub(crate) fn close_for_tab(&mut self, id: TabId) -> bool {
-        let mut closed = false;
+    pub(crate) fn close_for_tab(&mut self, id: TabId) {
         for d in &mut self.open {
             if !d.closing && d.kind.referenced_tab() == Some(id) {
                 d.closing = true;
-                closed = true;
             }
         }
-        closed
+        self.pending.retain(|d| d.referenced_tab() != Some(id));
     }
 
     pub(crate) fn take_active(&mut self) -> Option<DialogKind> {
         let ix = self.open.iter().rposition(|d| !d.closing)?;
-        let taken = match &mut self.open[ix].kind {
-            DialogKind::GoTo => DialogKind::GoTo,
-            DialogKind::LineOutOfRange => DialogKind::LineOutOfRange,
-            DialogKind::Error { title, message } => DialogKind::Error {
-                title: title.clone(),
-                message: message.clone(),
-            },
-            DialogKind::ConfirmDiscard { tab, name } => DialogKind::ConfirmDiscard {
-                tab: *tab,
-                name: name.clone(),
-            },
-            DialogKind::ConfirmLossyAnsi {
-                wf_gen,
-                tab,
-                snapshot,
-                text,
-                path,
-                format,
-            } => DialogKind::ConfirmLossyAnsi {
-                wf_gen: *wf_gen,
-                tab: *tab,
-                snapshot: *snapshot,
-                text: std::mem::take(text),
-                path: path.clone(),
-                format: *format,
-            },
-        };
-        Some(taken)
+        Some(self.open[ix].kind.clone())
     }
 
     pub(crate) fn next_focus_step(&self, current: Focus, delta: isize) -> Option<Focus> {
@@ -332,19 +296,11 @@ impl Dialogs {
                 SharedStr::new_static(GO_TO_TITLE),
                 message_body(OUT_OF_RANGE_MESSAGE.into()),
             ),
-            DialogKind::Error { title, message } => {
-                (None, title.clone(), message_body(message.clone()))
-            }
-            DialogKind::ConfirmDiscard { name, .. } => {
-                let (title, message) = discard_prompt_text(name);
-                (None, title, message_body(message))
-            }
-            DialogKind::ConfirmLossyAnsi { path, .. } => {
-                let title: SharedStr = APP_NAME.into();
-                let message: SharedStr =
-                    format!("{}\n{LOSSY_ANSI_WARNING}", path.display()).into();
-                (None, title, message_body(message))
-            }
+            DialogKind::Prompt(prompt) => (
+                None,
+                prompt.title.clone(),
+                message_body(prompt.message.clone()),
+            ),
         };
 
         row()

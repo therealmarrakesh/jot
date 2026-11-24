@@ -1,20 +1,22 @@
-use std::collections::HashSet;
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::APP_NAME;
+use crate::dialog::{Prompt, PromptId};
 use crate::document::{self, DocPath, Format, PathKey};
 use crate::editor::{EditorTimer, Rope};
-use crate::files::{self, WorkflowGen};
+use crate::files::{
+    DocHost, FileEvent, FileIo, FileOps, FileRequest, TabSnapshot, spawn_file_io,
+};
 use crate::geom::{Point, Rect, ScreenPoint, Size, point, size};
 use crate::gfx::{Gpu, TextSystem};
 use crate::ids::{EditorSlot, HitId};
 use crate::keytips::KeyTips;
 use crate::platform::{
     HandoffCommand, Jobs, Key, MouseButton, NativeWindow, Platform, PlatformEvent, PlatformHandler,
-    SaveDialogResult, WindowAppearance, WindowBackdrop, WindowHwnd, WindowId, WindowKind,
-    WindowOptions, WindowsDisplay, cursor_screen_pos, system_settings,
+    WindowAppearance, WindowBackdrop, WindowHwnd, WindowId, WindowKind, WindowOptions,
+    WindowsDisplay, cursor_screen_pos, system_settings,
 };
 use crate::tab_drag::TabDragState;
 use crate::tabs::{TabData, TabId};
@@ -60,40 +62,7 @@ pub(crate) enum AppEvent {
     },
     TooltipHideTimer,
     TabDragPoll,
-    OpenDialogDone {
-        window: WindowId,
-        result: crate::types::Result<Option<Vec<PathBuf>>>,
-    },
-    FilesLoaded {
-        window: WindowId,
-        results: Vec<(DocPath, Result<document::Loaded, document::LoadError>)>,
-    },
-    SaveDialogDone {
-        window: WindowId,
-        wf_gen: WorkflowGen,
-        tab: TabId,
-        format: Format,
-        result: SaveDialogResult,
-    },
-    LossyCheckDone {
-        window: WindowId,
-        wf_gen: WorkflowGen,
-        tab: TabId,
-        snapshot: u64,
-        text: Rope,
-        path: PathBuf,
-        format: Format,
-        result: std::io::Result<bool>,
-    },
-    FileSaved {
-        window: WindowId,
-        wf_gen: WorkflowGen,
-        tab: TabId,
-        snapshot: u64,
-        doc_path: DocPath,
-        format: Format,
-        result: std::io::Result<()>,
-    },
+    File(FileEvent),
     #[cfg(test)]
     TestCloseWindow(WindowId),
     #[cfg(test)]
@@ -126,6 +95,11 @@ pub(crate) enum Effect {
         index: usize,
         grab: Point,
         position: Point,
+    },
+    File(FileRequest),
+    PromptResponse {
+        id: PromptId,
+        button: usize,
     },
 }
 
@@ -169,13 +143,130 @@ impl Shell {
     }
 }
 
+struct AppDocHost<'a> {
+    windows: &'a mut Vec<MainWindow>,
+    active_window: Option<WindowId>,
+    shell: &'a Shell,
+}
+
+impl AppDocHost<'_> {
+    fn window_ix(&self, id: WindowId) -> Option<usize> {
+        self.windows.iter().position(|w| w.id() == id)
+    }
+
+    fn find_tab(&self, tab: TabId) -> Option<(usize, usize)> {
+        self.windows
+            .iter()
+            .enumerate()
+            .find_map(|(wix, w)| w.tab_index(tab).map(|tix| (wix, tix)))
+    }
+}
+
+impl DocHost for AppDocHost<'_> {
+    fn tab_info(&self, tab: TabId) -> Option<TabSnapshot> {
+        let (wix, tix) = self.find_tab(tab)?;
+        let w = &self.windows[wix];
+        let data = &w.tabs[tix].data;
+        Some(TabSnapshot {
+            window: w.id(),
+            name: w.tab_name(tix),
+            path: data.path().map(PathBuf::from),
+            format: data.format,
+            dirty: data.is_dirty(),
+            revision: data.editor.revision(),
+        })
+    }
+
+    fn window_dirty_tabs(&self, window: WindowId) -> Vec<TabId> {
+        self.window_ix(window)
+            .map(|ix| self.windows[ix].dirty_tabs())
+            .unwrap_or_default()
+    }
+
+    fn active_tab_path(&self, window: WindowId) -> Option<PathBuf> {
+        let ix = self.window_ix(window)?;
+        let w = &self.windows[ix];
+        w.tabs[w.active].data.path().map(PathBuf::from)
+    }
+
+    fn fallback_window(&self, preferred: WindowId) -> Option<WindowId> {
+        self.window_ix(preferred)
+            .or_else(|| self.active_window.and_then(|id| self.window_ix(id)))
+            .or_else(|| (!self.windows.is_empty()).then_some(self.windows.len() - 1))
+            .map(|ix| self.windows[ix].id())
+    }
+
+    fn find_tab_by_key(&self, key: &PathKey) -> Option<(WindowId, TabId)> {
+        self.windows.iter().find_map(|w| {
+            let tix = w.find_open_tab_by_key(key)?;
+            Some((w.id(), w.tabs[tix].data.id))
+        })
+    }
+
+    fn activate_tab(&mut self, window: WindowId, tab: TabId, bring_to_front: bool) {
+        let Some(wix) = self.window_ix(window) else {
+            return;
+        };
+        let Some(tix) = self.windows[wix].tab_index(tab) else {
+            return;
+        };
+        let hwnd = self.windows[wix].native.hwnd();
+        self.windows[wix].activate_tab(tix, &self.shell.jobs);
+        if bring_to_front {
+            hwnd.bring_to_front();
+        }
+    }
+
+    fn begin_save(&mut self, tab: TabId) -> Option<(u64, Rope)> {
+        let (wix, tix) = self.find_tab(tab)?;
+        let ed = &mut self.windows[wix].tabs[tix].data.editor;
+        let snapshot = ed.begin_save();
+        let text = ed.text().clone();
+        Some((snapshot, text))
+    }
+
+    fn mark_saved(&mut self, tab: TabId, snapshot: u64, doc_path: DocPath, format: Format) {
+        if let Some((wix, _)) = self.find_tab(tab) {
+            self.windows[wix].mark_tab_saved(tab, snapshot, doc_path, format);
+        }
+    }
+
+    fn adopt_loaded(&mut self, window: WindowId, loaded: document::Loaded) {
+        if let Some(wix) = self.window_ix(window) {
+            self.windows[wix].adopt_loaded_file(
+                loaded,
+                self.shell.view.word_wrap,
+                &self.shell.jobs,
+            );
+        }
+    }
+
+    fn remove_tab(&mut self, tab: TabId) {
+        if let Some((wix, tix)) = self.find_tab(tab) {
+            self.windows[wix].remove_tab(tix, &self.shell.jobs);
+        }
+    }
+
+    fn mark_window_close(&mut self, window: WindowId) {
+        if let Some(wix) = self.window_ix(window) {
+            self.windows[wix].pending_close = true;
+        }
+    }
+
+    fn show_prompt(&mut self, window: WindowId, prompt: Prompt) {
+        if let Some(wix) = self.window_ix(window) {
+            self.windows[wix].show_prompt(prompt, &self.shell.jobs);
+        }
+    }
+}
+
 pub(crate) struct App {
     pub(crate) windows: Vec<MainWindow>,
     pub(crate) active_window: Option<WindowId>,
     pub(crate) tab_drag: Option<TabDragState>,
+    pub(crate) file_ops: FileOps,
     pub(crate) keytips: KeyTips,
     pub(crate) tooltips: Tooltips,
-    in_flight_loads: HashSet<PathKey>,
     cascade_step: u32,
     #[cfg(test)]
     pub(crate) headless: bool,
@@ -199,9 +290,9 @@ impl App {
             windows: Vec::new(),
             active_window: None,
             tab_drag: None,
+            file_ops: FileOps::default(),
             keytips: KeyTips::default(),
             tooltips: Tooltips::default(),
-            in_flight_loads: HashSet::new(),
             cascade_step: 0,
             #[cfg(test)]
             headless: false,
@@ -217,6 +308,32 @@ impl App {
                 gpu,
             },
             platform,
+        }
+    }
+
+    fn run_file_ops(&mut self, f: impl FnOnce(&mut FileOps, &mut AppDocHost<'_>, &mut Vec<FileIo>)) {
+        let mut io = Vec::new();
+        {
+            let mut host = AppDocHost {
+                windows: &mut self.windows,
+                active_window: self.active_window,
+                shell: &self.shell,
+            };
+            f(&mut self.file_ops, &mut host, &mut io);
+        }
+        for cmd in io {
+            let owner_hwnd = match &cmd {
+                FileIo::OpenDialog { window, .. } => self.window_hwnd(*window),
+                FileIo::SaveDialog { owner, .. } => self.window_hwnd(*owner),
+                FileIo::LoadFiles { .. } | FileIo::WriteFile { .. } => None,
+            };
+            spawn_file_io(
+                cmd,
+                owner_hwnd,
+                self.file_ops.tracker(),
+                &self.shell.jobs,
+                AppEvent::File,
+            );
         }
     }
 
@@ -248,8 +365,11 @@ impl App {
                     let _ = self.open_window(None, None);
                 }
                 Effect::Exit => {
-                    for ix in 0..self.windows.len() {
-                        self.windows[ix].request_close_window(&self.shell.jobs);
+                    let ids: Vec<WindowId> = self.windows.iter().map(MainWindow::id).collect();
+                    for window in ids {
+                        self.run_file_ops(|ops, host, io| {
+                            ops.request(FileRequest::CloseWindow { window }, host, io);
+                        });
                     }
                     self.sweep_closed_windows();
                 }
@@ -282,6 +402,12 @@ impl App {
                 } => {
                     self.tab_drag_press(window, tab, index, grab, position);
                 }
+                Effect::File(req) => {
+                    self.run_file_ops(|ops, host, io| ops.request(req, host, io));
+                }
+                Effect::PromptResponse { id, button } => {
+                    self.run_file_ops(|ops, host, io| ops.on_prompt(id, button, host, io));
+                }
             }
         }
     }
@@ -298,12 +424,6 @@ impl App {
             .iter()
             .enumerate()
             .find_map(|(wix, w)| w.find_open_tab_by_key(key).map(|tix| (wix, tix)))
-    }
-
-    fn fallback_window_ix(&self, preferred: WindowId) -> Option<usize> {
-        self.window_ix(preferred)
-            .or_else(|| self.active_window.and_then(|id| self.window_ix(id)))
-            .or_else(|| (!self.windows.is_empty()).then_some(self.windows.len() - 1))
     }
 
     pub(crate) fn window_ix(&self, id: WindowId) -> Option<usize> {
@@ -362,7 +482,7 @@ impl App {
             )
         });
         let mut bounds = display.map_or_else(
-            || Rect::new(crate::geom::Point::ZERO, target_size),
+            || Rect::new(Point::ZERO, target_size),
             |d| d.centered_rect(target_size),
         );
         if target_point.is_none() && !self.windows.is_empty() && window_size.is_none() {
@@ -412,27 +532,28 @@ impl App {
         target_point: Option<ScreenPoint>,
     ) -> std::result::Result<(WindowId, WindowHwnd), Box<OpenWindowError>> {
         let opts = self.window_options(window_size, target_point);
-        let (native, surface) = match NativeWindow::create(&opts, self.shell.appearance).and_then(|n| {
-            let (w, h) = n.physical_size();
-            let s = crate::gfx::Surface::new(
-                self.shell.gpu.clone(),
-                n.hwnd().raw(),
-                w,
-                h,
-                n.scale_factor(),
-            )?;
-            Ok((n, s))
-        }) {
-            Ok(created) => created,
-            Err(err) => {
-                let message = err.to_string();
-                crate::diag::debug_log(&format!("window/surface create failed: {message}"));
-                return Err(Box::new(OpenWindowError {
-                    tab: initial,
-                    message,
-                }));
-            }
-        };
+        let (native, surface) =
+            match NativeWindow::create(&opts, self.shell.appearance).and_then(|n| {
+                let (w, h) = n.physical_size();
+                let s = crate::gfx::Surface::new(
+                    self.shell.gpu.clone(),
+                    n.hwnd().raw(),
+                    w,
+                    h,
+                    n.scale_factor(),
+                )?;
+                Ok((n, s))
+            }) {
+                Ok(created) => created,
+                Err(err) => {
+                    let message = err.to_string();
+                    crate::diag::debug_log(&format!("window/surface create failed: {message}"));
+                    return Err(Box::new(OpenWindowError {
+                        tab: initial,
+                        message,
+                    }));
+                }
+            };
         let id = native.id;
         let hwnd = native.hwnd();
         let win = MainWindow::new(
@@ -454,36 +575,10 @@ impl App {
         }
     }
 
-    pub(crate) fn open_paths_in_window(&mut self, window_id: WindowId, paths: Vec<PathBuf>) {
-        if paths.is_empty() {
-            return;
-        }
-        let mut to_load: Vec<DocPath> = Vec::new();
-        let mut last_existing: Option<(usize, usize)> = None;
-        for raw in paths {
-            let path = std::path::absolute(&raw).unwrap_or(raw);
-            let doc_path = DocPath::quick(path);
-            if let Some(found) = self.find_open_tab_by_key(&doc_path.key) {
-                last_existing = Some(found);
-                continue;
-            }
-            if self.in_flight_loads.contains(&doc_path.key)
-                || to_load.iter().any(|queued| queued.key == doc_path.key)
-            {
-                continue;
-            }
-            self.in_flight_loads.insert(doc_path.key.clone());
-            to_load.push(doc_path);
-        }
-        if to_load.is_empty() {
-            if let Some((wix, tix)) = last_existing {
-                let hwnd = self.windows[wix].native.hwnd();
-                self.windows[wix].activate_tab(tix, &self.shell.jobs);
-                hwnd.bring_to_front();
-            }
-            return;
-        }
-        files::spawn_load_files(window_id, to_load, &self.shell.jobs);
+    pub(crate) fn open_paths_in_window(&mut self, window: WindowId, paths: Vec<PathBuf>) {
+        self.run_file_ops(|ops, host, io| {
+            ops.request(FileRequest::OpenPaths { window, paths }, host, io);
+        });
     }
 
     pub(crate) fn open_handoff_paths(&mut self, paths: Vec<PathBuf>) {
@@ -543,6 +638,7 @@ impl App {
             for wid in closed {
                 self.keytips.window_closed(wid);
                 self.tooltips.window_closed(wid, &self.shell.jobs);
+                self.file_ops.on_window_closed(wid);
             }
             self.windows.retain(|w| !w.pending_close);
             if let Some(active) = self.active_window
@@ -557,7 +653,7 @@ impl App {
         for w in &self.windows {
             w.native.set_block_shutdown(block);
         }
-        if self.windows.is_empty() && !self.quit && crate::files::in_flight_writes() == 0 {
+        if self.windows.is_empty() && !self.quit && self.file_ops.in_flight_writes() == 0 {
             self.request_quit();
         }
     }
@@ -767,11 +863,13 @@ impl PlatformHandler for App {
                 self.tab_drag_size_move_changed(window_id, entering);
             }
             PlatformEvent::CloseRequested { window_id } => {
-                self.deliver(window_id, false, |w, cx| w.request_close_window(cx.jobs));
+                self.run_file_ops(|ops, host, io| {
+                    ops.request(FileRequest::CloseWindow { window: window_id }, host, io);
+                });
             }
             PlatformEvent::SessionEnding { ending } => {
                 if ending {
-                    crate::files::wait_for_in_flight_writes(std::time::Duration::from_secs(5));
+                    self.file_ops.wait_for_writes(Duration::from_secs(5));
                 }
             }
         }
@@ -826,217 +924,9 @@ impl PlatformHandler for App {
                     self.tooltips.on_hide_timer();
                 }
                 AppEvent::TabDragPoll => self.tab_drag_poll(),
-                AppEvent::OpenDialogDone { window, result } => {
-                    if let Some(ix) = self.window_ix(window) {
-                        self.windows[ix].open_dialog_active = false;
-                    }
-                    let Some(target_ix) = self.fallback_window_ix(window) else {
-                        continue;
-                    };
-                    let target_id = self.windows[target_ix].id();
-                    match result {
-                        Ok(Some(paths)) => self.open_paths_in_window(target_id, paths),
-                        Ok(None) => {}
-                        Err(err) => {
-                            self.windows[target_ix].show_file_prompt(
-                                files::dialog_error_prompt("Can't open file", err.to_string()),
-                                &self.shell.jobs,
-                            );
-                        }
-                    }
+                AppEvent::File(fe) => {
+                    self.run_file_ops(|ops, host, io| ops.on_event(fe, host, io));
                 }
-                AppEvent::FilesLoaded { window, results } => {
-                    let wrap = self.shell.view.word_wrap;
-                    for (doc_path, res) in results {
-                        self.in_flight_loads.remove(&doc_path.key);
-                        let dup = res
-                            .as_ref()
-                            .ok()
-                            .and_then(|loaded| self.find_open_tab_by_key(&loaded.doc_path.key))
-                            .or_else(|| self.find_open_tab_by_key(&doc_path.key));
-                        if let Some((wix, tix)) = dup {
-                            let hwnd = self.windows[wix].native.hwnd();
-                            self.windows[wix].activate_tab(tix, &self.shell.jobs);
-                            hwnd.bring_to_front();
-                            continue;
-                        }
-                        if let Some(ix) = self.fallback_window_ix(window) {
-                            self.windows[ix].adopt_loaded_file(
-                                doc_path.path,
-                                res,
-                                wrap,
-                                &self.shell.jobs,
-                            );
-                        }
-                    }
-                }
-                AppEvent::SaveDialogDone {
-                    window,
-                    wf_gen,
-                    tab,
-                    format,
-                    result,
-                } => match files::resolve_save_dialog(format, result) {
-                    Ok(Some((path, next_format))) => {
-                        let target_key = PathKey::quick(&path);
-                        let conflict = self
-                            .find_open_tab_by_key(&target_key)
-                            .is_some_and(|(wix, tix)| self.windows[wix].tabs[tix].data.id != tab);
-                        if conflict {
-                            let prompt_ix = self
-                                .find_tab_owner(tab)
-                                .map(|(wix, _)| wix)
-                                .or_else(|| self.fallback_window_ix(window));
-                            if let Some(ix) = prompt_ix {
-                                self.windows[ix].show_file_prompt(
-                                    files::already_open_save_prompt(&path),
-                                    &self.shell.jobs,
-                                );
-                            }
-                            if let Some(ix) = self.window_ix(window) {
-                                self.windows[ix].abort_file_workflow_if(wf_gen);
-                            }
-                        } else if let Some((owner_wix, owner_tix)) = self.find_tab_owner(tab) {
-                            self.windows[owner_wix].begin_write_tab_for_workflow(
-                                owner_tix,
-                                window,
-                                wf_gen,
-                                path,
-                                next_format,
-                                &self.shell.jobs,
-                            );
-                        } else if let Some(ix) = self.window_ix(window) {
-                            self.windows[ix].abort_file_workflow_if(wf_gen);
-                        }
-                    }
-                    Ok(None) => {
-                        if let Some(ix) = self.window_ix(window) {
-                            self.windows[ix].abort_file_workflow_if(wf_gen);
-                        }
-                    }
-                    Err(msg) => {
-                        let prompt_ix = self
-                            .find_tab_owner(tab)
-                            .map(|(wix, _)| wix)
-                            .or_else(|| self.fallback_window_ix(window));
-                        if let Some(ix) = prompt_ix {
-                            self.windows[ix].show_file_prompt(
-                                files::dialog_error_prompt("Can't save file", msg),
-                                &self.shell.jobs,
-                            );
-                        }
-                        if let Some(ix) = self.window_ix(window) {
-                            self.windows[ix].abort_file_workflow_if(wf_gen);
-                        }
-                    }
-                },
-                AppEvent::LossyCheckDone {
-                    window,
-                    wf_gen,
-                    tab,
-                    snapshot,
-                    text,
-                    path,
-                    format,
-                    result,
-                } => {
-                    let owner_wix = self
-                        .find_tab_owner(tab)
-                        .map(|(wix, _)| wix)
-                        .or_else(|| self.fallback_window_ix(window));
-                    match result {
-                        Err(err) => {
-                            if let Some((wix, _)) = self.find_tab_owner(tab) {
-                                let _ = self.windows[wix].clear_tab_save_in_flight(tab);
-                            }
-                            if let Some(ix) = owner_wix {
-                                self.windows[ix].show_file_prompt(
-                                    files::save_error_prompt(&path, &err),
-                                    &self.shell.jobs,
-                                );
-                            }
-                            if let Some(ix) = self.window_ix(window) {
-                                self.windows[ix].abort_file_workflow_if(wf_gen);
-                            }
-                        }
-                        Ok(true) => {
-                            if let Some(ix) = owner_wix {
-                                self.windows[ix].show_file_prompt(
-                                    files::FilePrompt::ConfirmLossyAnsi {
-                                        wf_gen,
-                                        tab,
-                                        snapshot,
-                                        text,
-                                        path,
-                                        format,
-                                    },
-                                    &self.shell.jobs,
-                                );
-                            } else if let Some(ix) = self.window_ix(window) {
-                                self.windows[ix].abort_file_workflow_if(wf_gen);
-                            }
-                        }
-                        Ok(false) => {
-                            files::spawn_write_file(
-                                window,
-                                wf_gen,
-                                tab,
-                                snapshot,
-                                text,
-                                path,
-                                format,
-                                &self.shell.jobs,
-                            );
-                        }
-                    }
-                }
-                AppEvent::FileSaved {
-                    window,
-                    wf_gen,
-                    tab,
-                    snapshot,
-                    doc_path,
-                    format,
-                    result,
-                } => match result {
-                    Ok(()) => {
-                        let mut retriggered_gen = None;
-                        if let Some((owner_wix, _)) = self.find_tab_owner(tab) {
-                            retriggered_gen = self.windows[owner_wix].apply_tab_saved(
-                                tab,
-                                snapshot,
-                                doc_path,
-                                format,
-                                window,
-                                &self.shell.jobs,
-                            );
-                        }
-                        if retriggered_gen != Some(wf_gen)
-                            && let Some(origin_ix) = self.window_ix(window)
-                        {
-                            self.windows[origin_ix]
-                                .advance_file_workflow_if(wf_gen, &self.shell.jobs);
-                        }
-                    }
-                    Err(err) => {
-                        if let Some((owner_wix, _)) = self.find_tab_owner(tab) {
-                            let _ = self.windows[owner_wix].clear_tab_save_in_flight(tab);
-                        }
-                        let prompt_ix = self
-                            .find_tab_owner(tab)
-                            .map(|(wix, _)| wix)
-                            .or_else(|| self.fallback_window_ix(window));
-                        if let Some(ix) = prompt_ix {
-                            self.windows[ix].show_file_prompt(
-                                files::save_error_prompt(doc_path.as_path(), &err),
-                                &self.shell.jobs,
-                            );
-                        }
-                        if let Some(origin_ix) = self.window_ix(window) {
-                            self.windows[origin_ix].abort_file_workflow_if(wf_gen);
-                        }
-                    }
-                },
                 #[cfg(test)]
                 AppEvent::TestCloseWindow(id) => {
                     if let Some(ix) = self.window_ix(id) {

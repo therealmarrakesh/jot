@@ -444,7 +444,7 @@ impl App {
         self.windows.iter().find_map(|w| {
             let w_hwnd = w.native.hwnd();
             let accepts_attach = !w.dialogs.is_open()
-                && w.file_workflow.is_none()
+                && !self.file_ops.has_active_workflow_for(w.id())
                 && !w.pending_close
                 && w_hwnd.is_enabled();
             (w_hwnd == hwnd && accepts_attach).then_some(w.native.id)

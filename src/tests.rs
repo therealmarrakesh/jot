@@ -1110,7 +1110,7 @@ fn stale_file_events_do_not_advance_unrelated_discard_workflow() {
     h.type_text("tab A content");
     h.press_key("ctrl-n");
     h.type_text("tab B unsaved");
-    let (tab_a, tab_b, wid) = h.read(|w, _| (w.tabs[0].data.id, w.tabs[1].data.id, w.id()));
+    let tab_b = h.read(|w, _| w.tabs[1].data.id);
 
     h.press_key("ctrl-w");
     h.read(|w, _| {
@@ -1118,25 +1118,23 @@ fn stale_file_events_do_not_advance_unrelated_discard_workflow() {
         assert_eq!(w.tabs.len(), 2);
     });
 
-    let stale_gen = crate::files::WorkflowGen::next();
+    let stale_wf = crate::files::WorkflowId::next();
     h.app
         .borrow()
         .shell
         .jobs
-        .post(AppEvent::FileSaved {
-            window: wid,
-            wf_gen: stale_gen,
-            tab: tab_a,
-            snapshot: 0,
-            doc_path: document::DocPath::quick(std::path::PathBuf::from(r"C:\Temp\stale.txt")),
-            format: document::Format::default(),
-            result: Ok(()),
-        });
+        .post(AppEvent::File(crate::files::FileEvent::WriteDone {
+            wf: stale_wf,
+            outcome: crate::files::WriteOutcome::Saved {
+                doc_path: document::DocPath::quick(std::path::PathBuf::from(r"C:\Temp\stale.txt")),
+                format: document::Format::default(),
+            },
+        }));
     h.draw();
 
     h.read(|w, _| {
-        assert!(w.dialogs.is_open(), "stale FileSaved must not dismiss ConfirmDiscard");
-        assert_eq!(w.tabs.len(), 2, "stale FileSaved must not silently close tab B");
+        assert!(w.dialogs.is_open(), "stale WriteDone must not dismiss ConfirmDiscard");
+        assert_eq!(w.tabs.len(), 2, "stale WriteDone must not silently close tab B");
         assert!(w.tab_index(tab_b).is_some());
     });
 }
@@ -1190,36 +1188,50 @@ fn close_save_keeps_window_open_when_edited_mid_write_and_migrated_save_cleans_t
     assert!(!h.window_open());
 
     let mut h2 = TestHarness::new();
-    h2.type_text("migrated");
-    let (wid1, tab_id, snap) = {
-        let mut app = h2.app.borrow_mut();
-        let w = &mut app.windows[0];
-        (w.id(), w.tabs[0].data.id, w.tabs[0].data.editor.begin_save())
+    let loaded2 = document::load(&path).unwrap();
+    let tab_id = {
+        let mut app_guard = h2.app.borrow_mut();
+        let app = &mut *app_guard;
+        let tab = crate::tabs::Tab::adopt(crate::tabs::TabData::create(
+            Some(loaded2),
+            true,
+            EDITOR_PADDINGS,
+        ));
+        let id = tab.data.id;
+        app.windows[0].replace_tab(0, tab, &app.shell.jobs);
+        id
     };
+    h2.draw();
+    h2.type_text(" migrated");
     h2.press_key("ctrl-n");
+    // Trigger Ctrl+S on tab_id (via real FileOps workflow), then migrate tab_id to a 2nd window.
+    h2.press_key("ctrl-1");
+    h2.press_key("ctrl-s");
     {
         let mut app_guard = h2.app.borrow_mut();
         let app = &mut *app_guard;
         let data = app.windows[0].take_tab(tab_id, &app.shell.jobs).unwrap();
         let _ = app.open_window(Some(data), Some(size(600.0, 400.0))).unwrap();
-        app.shell.jobs.post(AppEvent::FileSaved {
-            window: wid1,
-            wf_gen: crate::files::WorkflowGen::next(),
-            tab: tab_id,
-            snapshot: snap,
-            doc_path: document::DocPath::quick(path.clone()),
-            format: document::Format::default(),
-            result: Ok(()),
-        });
     }
-    h2.draw();
+    for _ in 0..100 {
+        h2.draw();
+        let clean = {
+            let app = h2.app.borrow();
+            let (wix, tix) = app.find_tab_owner(tab_id).expect("tab must exist in win2");
+            !app.windows[wix].tabs[tix].data.is_dirty()
+        };
+        if clean {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
     {
         let app = h2.app.borrow();
         let (wix, tix) = app.find_tab_owner(tab_id).expect("tab must exist in win2");
         assert_eq!(wix, 1);
         assert!(
             !app.windows[wix].tabs[tix].data.is_dirty(),
-            "FileSaved must route by TabId to migrated tab"
+            "WriteDone must route by TabId to migrated tab"
         );
     }
     let _ = std::fs::remove_dir_all(&dir);

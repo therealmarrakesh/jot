@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -74,29 +74,12 @@ const BUTTON_GLYPH_SIZE: f32 = 12.;
 #[derive(Clone, Copy, Default)]
 pub(crate) struct SlotKey(usize);
 
-#[derive(Clone, Debug)]
-pub(crate) struct PendingSave {
-    pub(crate) path: PathBuf,
-    pub(crate) format: Format,
-    pub(crate) wf_gen: crate::files::WorkflowGen,
-}
-
-#[derive(Default)]
-pub(crate) enum TabSaveState {
-    #[default]
-    Idle,
-    InFlight {
-        pending: Option<PendingSave>,
-    },
-}
-
 pub(crate) struct TabData {
     pub(crate) id: TabId,
     pub(crate) editor: Editor,
     pub(crate) zoom: f32,
     pub(crate) doc_path: Option<DocPath>,
     pub(crate) format: Format,
-    pub(crate) save_state: TabSaveState,
 }
 
 impl TabData {
@@ -137,7 +120,6 @@ impl TabData {
             zoom: 1.,
             doc_path,
             format,
-            save_state: TabSaveState::Idle,
         }
     }
 }

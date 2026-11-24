@@ -1,12 +1,12 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Condvar, Mutex, OnceLock};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::APP_NAME;
-use crate::app::AppEvent;
+use crate::dialog::{Prompt, PromptId};
 use crate::document::{
     self, DocPath, Encoding, Format, LoadError, PathKey, default_directory, display_name, file_name,
 };
@@ -18,343 +18,947 @@ use crate::platform::{
 use crate::tabs::TabId;
 use crate::types::{Error, SharedStr};
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct WorkflowGen(pub(crate) u64);
+const UNTITLED_FILE_NAME: &str = "Untitled.txt";
+const SAVE_AS_TITLE: &str = "Save as";
+const TEXT_FILE_TYPE: (&str, &str) = ("Text documents (*.txt)", "*.txt");
+const ALL_FILE_TYPE: (&str, &str) = ("All files", "*.*");
+const TEXT_EXTENSION: &str = "txt";
+const ENCODING_LABEL: &str = "Encoding:";
+const OK_BUTTONS: &[&str] = &["OK"];
+const DISCARD_BUTTONS: &[&str] = &["Save", "Don't save", "Cancel"];
+const LOSSY_BUTTONS: &[&str] = &["OK", "Cancel"];
+const LOSSY_ANSI_WARNING: &str = "This file contains characters in Unicode format which will be lost if you save this file as an ANSI encoded text file. To keep the Unicode information, click Cancel below and then select one of the Unicode options from the Encoding drop down list. Continue?";
 
-impl WorkflowGen {
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct WorkflowId(u64);
+
+impl WorkflowId {
     pub(crate) fn next() -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(1);
         Self(NEXT.fetch_add(1, Ordering::Relaxed))
     }
 }
 
-fn write_flight_tracker() -> &'static (Mutex<usize>, Condvar) {
-    static TRACKER: OnceLock<(Mutex<usize>, Condvar)> = OnceLock::new();
-    TRACKER.get_or_init(|| (Mutex::new(0), Condvar::new()))
-}
+#[derive(Clone, Default)]
+pub(crate) struct WriteTracker(Arc<(Mutex<usize>, Condvar)>);
 
-struct WriteFlightGuard;
-
-impl WriteFlightGuard {
-    fn enter() -> Self {
-        let (lock, _) = write_flight_tracker();
-        let mut count = lock.lock().unwrap_or_else(|e| e.into_inner());
+impl WriteTracker {
+    pub(crate) fn enter(&self) -> WriteFlightGuard {
+        let mut count = self.0.0.lock().unwrap_or_else(|e| e.into_inner());
         *count += 1;
-        Self
+        WriteFlightGuard(self.0.clone())
+    }
+
+    pub(crate) fn in_flight(&self) -> usize {
+        *self.0.0.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    pub(crate) fn wait(&self, timeout: Duration) {
+        let deadline = Instant::now() + timeout;
+        let mut count = self.0.0.lock().unwrap_or_else(|e| e.into_inner());
+        while *count > 0 {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            let (guard, _) = self
+                .0
+                .1
+                .wait_timeout(count, remaining)
+                .unwrap_or_else(|e| e.into_inner());
+            count = guard;
+        }
     }
 }
+
+pub(crate) struct WriteFlightGuard(Arc<(Mutex<usize>, Condvar)>);
 
 impl Drop for WriteFlightGuard {
     fn drop(&mut self) {
-        let (lock, cvar) = write_flight_tracker();
-        let mut count = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let mut count = self.0.0.lock().unwrap_or_else(|e| e.into_inner());
         *count = count.saturating_sub(1);
         if *count == 0 {
-            cvar.notify_all();
+            self.0.1.notify_all();
         }
     }
 }
 
-pub(crate) fn in_flight_writes() -> usize {
-    let (lock, _) = write_flight_tracker();
-    *lock.lock().unwrap_or_else(|e| e.into_inner())
+pub(crate) enum FileRequest {
+    OpenDialog { window: WindowId },
+    OpenPaths { window: WindowId, paths: Vec<PathBuf> },
+    Save { window: WindowId, tab: TabId },
+    SaveAs { window: WindowId, tab: TabId },
+    SaveAll { window: WindowId },
+    CloseTab { window: WindowId, tab: TabId },
+    CloseWindow { window: WindowId },
 }
 
-pub(crate) fn wait_for_in_flight_writes(timeout: Duration) {
-    let (lock, cvar) = write_flight_tracker();
-    let deadline = Instant::now() + timeout;
-    let mut count = lock.lock().unwrap_or_else(|e| e.into_inner());
-    while *count > 0 {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            break;
-        }
-        let (guard, _) = cvar
-            .wait_timeout(count, remaining)
-            .unwrap_or_else(|e| e.into_inner());
-        count = guard;
-    }
+pub(crate) enum WriteOutcome {
+    Saved { doc_path: DocPath, format: Format },
+    NeedsLossyConfirm,
+    Error(io::Error),
 }
 
-pub(crate) const UNTITLED_FILE_NAME: &str = "Untitled.txt";
-const SAVE_AS_TITLE: &str = "Save as";
-const TEXT_FILE_TYPE: (&str, &str) = ("Text documents (*.txt)", "*.txt");
-const ALL_FILE_TYPE: (&str, &str) = ("All files", "*.*");
-const TEXT_EXTENSION: &str = "txt";
-const ENCODING_LABEL: &str = "Encoding:";
-pub(crate) const LOSSY_ANSI_WARNING: &str = "This file contains characters in Unicode format which will be lost if you save this file as an ANSI encoded text file. To keep the Unicode information, click Cancel below and then select one of the Unicode options from the Encoding drop down list. Continue?";
+pub(crate) enum FileEvent {
+    OpenDialogDone {
+        window: WindowId,
+        result: crate::types::Result<Option<Vec<PathBuf>>>,
+    },
+    FilesLoaded {
+        window: WindowId,
+        results: Vec<(DocPath, Result<document::Loaded, LoadError>)>,
+    },
+    SaveDialogDone {
+        wf: WorkflowId,
+        result: SaveDialogResult,
+    },
+    WriteDone {
+        wf: WorkflowId,
+        outcome: WriteOutcome,
+    },
+}
+
+#[derive(Clone)]
+pub(crate) struct SaveJob {
+    pub(crate) tab: TabId,
+    pub(crate) snapshot: u64,
+    pub(crate) text: Rope,
+    pub(crate) path: PathBuf,
+    pub(crate) format: Format,
+}
+
+pub(crate) enum FileIo {
+    OpenDialog {
+        window: WindowId,
+        current: Option<PathBuf>,
+    },
+    LoadFiles {
+        window: WindowId,
+        paths: Vec<DocPath>,
+    },
+    SaveDialog {
+        wf: WorkflowId,
+        owner: WindowId,
+        current: Option<PathBuf>,
+        format: Format,
+    },
+    WriteFile {
+        wf: WorkflowId,
+        job: SaveJob,
+        force_lossy: bool,
+    },
+}
+
+pub(crate) struct TabSnapshot {
+    pub(crate) window: WindowId,
+    pub(crate) name: String,
+    pub(crate) path: Option<PathBuf>,
+    pub(crate) format: Format,
+    pub(crate) dirty: bool,
+    pub(crate) revision: u64,
+}
+
+pub(crate) trait DocHost {
+    fn tab_info(&self, tab: TabId) -> Option<TabSnapshot>;
+    fn window_dirty_tabs(&self, window: WindowId) -> Vec<TabId>;
+    fn active_tab_path(&self, window: WindowId) -> Option<PathBuf>;
+    fn fallback_window(&self, preferred: WindowId) -> Option<WindowId>;
+    fn find_tab_by_key(&self, key: &PathKey) -> Option<(WindowId, TabId)>;
+    fn activate_tab(&mut self, window: WindowId, tab: TabId, bring_to_front: bool);
+    fn begin_save(&mut self, tab: TabId) -> Option<(u64, Rope)>;
+    fn mark_saved(&mut self, tab: TabId, snapshot: u64, doc_path: DocPath, format: Format);
+    fn adopt_loaded(&mut self, window: WindowId, loaded: document::Loaded);
+    fn remove_tab(&mut self, tab: TabId);
+    fn mark_window_close(&mut self, window: WindowId);
+    fn show_prompt(&mut self, window: WindowId, prompt: Prompt);
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum WorkflowStep {
+enum Step {
     SaveTab { id: TabId, activate: bool },
     SaveTabAs(TabId),
     ConfirmDiscard { id: TabId, activate: bool },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum WorkflowFinish {
+enum Finish {
     None,
     RemoveTab(TabId),
-    CloseWindow,
+    CloseWindow(WindowId),
 }
 
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) struct FileWorkflow {
-    pub(crate) wf_gen: WorkflowGen,
-    pending: VecDeque<WorkflowStep>,
-    approved_discards: Vec<(TabId, u64)>,
-    pub(crate) on_finish: WorkflowFinish,
+enum Awaiting {
+    Nothing,
+    DiscardPrompt { prompt: PromptId, tab: TabId },
+    SaveDialog { tab: TabId, format: Format },
+    QueuedWrite,
+    Write(SaveJob),
+    LossyPrompt { prompt: PromptId, job: SaveJob },
 }
 
-impl FileWorkflow {
-    pub(crate) fn single(step: WorkflowStep, on_finish: WorkflowFinish) -> Self {
-        let mut pending = VecDeque::with_capacity(1);
-        pending.push_back(step);
-        Self {
-            wf_gen: WorkflowGen::next(),
-            pending,
-            approved_discards: Vec::new(),
-            on_finish,
-        }
-    }
+struct Workflow {
+    id: WorkflowId,
+    origin: WindowId,
+    queue: VecDeque<Step>,
+    approved: Vec<(TabId, u64)>,
+    finish: Finish,
+    awaiting: Awaiting,
+}
 
-    pub(crate) fn batch(
-        steps: impl IntoIterator<Item = WorkflowStep>,
-        on_finish: WorkflowFinish,
+impl Workflow {
+    fn new(
+        origin: WindowId,
+        steps: impl IntoIterator<Item = Step>,
+        finish: Finish,
     ) -> Self {
         Self {
-            wf_gen: WorkflowGen::next(),
-            pending: steps.into_iter().collect(),
-            approved_discards: Vec::new(),
-            on_finish,
+            id: WorkflowId::next(),
+            origin,
+            queue: steps.into_iter().collect(),
+            approved: Vec::new(),
+            finish,
+            awaiting: Awaiting::Nothing,
         }
     }
 
-    pub(crate) fn next_step(&mut self) -> Option<WorkflowStep> {
-        self.pending.pop_front()
+    fn approve_discard(&mut self, tab: TabId, revision: u64) {
+        self.approved.retain(|(id, _)| *id != tab);
+        self.approved.push((tab, revision));
     }
 
-    pub(crate) fn prepend(&mut self, step: WorkflowStep) {
-        self.pending.push_front(step);
-    }
-
-    pub(crate) fn approve_discard(&mut self, tab: TabId, revision: u64) {
-        self.approved_discards.retain(|(id, _)| *id != tab);
-        self.approved_discards.push((tab, revision));
-    }
-
-    pub(crate) fn is_discard_approved(&self, tab: TabId, revision: u64) -> bool {
-        self.approved_discards
+    fn is_discard_approved(&self, tab: TabId, revision: u64) -> bool {
+        self.approved
             .iter()
             .any(|&(id, rev)| id == tab && rev == revision)
     }
-
-    pub(crate) fn take_approved_discards(&mut self) -> Vec<(TabId, u64)> {
-        std::mem::take(&mut self.approved_discards)
-    }
-
-    pub(crate) fn with_approved_discards(mut self, approved: Vec<(TabId, u64)>) -> Self {
-        self.approved_discards = approved;
-        self
-    }
 }
 
-pub(crate) enum FilePrompt {
-    Error {
-        title: SharedStr,
-        message: SharedStr,
-    },
-    ConfirmDiscard {
-        tab: TabId,
-        name: String,
-    },
-    ConfirmLossyAnsi {
-        wf_gen: WorkflowGen,
-        tab: TabId,
-        snapshot: u64,
-        text: Rope,
-        path: PathBuf,
-        format: Format,
-    },
-}
-
-pub(crate) fn spawn_open_dialog(
-    window: WindowId,
-    hwnd: WindowHwnd,
-    current: Option<PathBuf>,
-    jobs: &Jobs<AppEvent>,
-) {
-    let owner_raw = hwnd.raw().0 as isize;
-    let options = OpenDialogOptions {
-        multiple: true,
-        directory: Some(default_directory(current.as_deref())),
-        file_types: [TEXT_FILE_TYPE, ALL_FILE_TYPE]
-            .map(|(name, spec)| (SharedStr::new_static(name), SharedStr::new_static(spec)))
-            .into(),
-    };
-    jobs.spawn(
-        "jot-open-dialog",
-        move || run_open_dialog(owner_raw, options),
-        move |res| AppEvent::OpenDialogDone {
-            window,
-            result: res.unwrap_or_else(|msg| Err(Error::new(msg))),
-        },
-    );
-}
-
-pub(crate) fn spawn_load_files(
-    window: WindowId,
-    paths: Vec<DocPath>,
-    jobs: &Jobs<AppEvent>,
-) {
-    let fallback_paths = paths.clone();
-    jobs.spawn(
-        "jot-load-files",
-        move || {
-            paths
-                .into_iter()
-                .map(|doc_path| {
-                    let loaded = document::load(doc_path.as_path());
-                    (doc_path, loaded)
-                })
-                .collect::<Vec<_>>()
-        },
-        move |res| {
-            let results = res.unwrap_or_else(|msg| {
-                fallback_paths
-                    .into_iter()
-                    .map(|doc_path| (doc_path, Err(LoadError::Io(io::Error::other(msg.clone())))))
-                    .collect()
-            });
-            AppEvent::FilesLoaded { window, results }
-        },
-    );
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn spawn_save_dialog(
-    window: WindowId,
-    wf_gen: WorkflowGen,
-    hwnd: WindowHwnd,
-    tab: TabId,
-    current: Option<PathBuf>,
-    format: Format,
-    jobs: &Jobs<AppEvent>,
-) {
-    let suggested = file_name(current.as_deref()).unwrap_or_else(|| UNTITLED_FILE_NAME.into());
-    let options = SaveDialogOptions {
-        title: Some(SAVE_AS_TITLE.into()),
-        directory: default_directory(current.as_deref()),
-        file_name: Some(suggested),
-        file_types: [TEXT_FILE_TYPE, ALL_FILE_TYPE]
-            .map(|(name, spec)| (SharedStr::new_static(name), SharedStr::new_static(spec)))
-            .into(),
-        default_extension: Some(TEXT_EXTENSION.into()),
-        choice: Some(SaveChoice {
-            label: ENCODING_LABEL.into(),
-            items: Encoding::SAVE_ORDER
-                .map(|encoding| SharedStr::new_static(encoding.label()))
-                .into(),
-            selected: Encoding::SAVE_ORDER
-                .iter()
-                .position(|&encoding| encoding == format.encoding)
-                .unwrap_or_default(),
-        }),
-    };
-    let owner_raw = hwnd.raw().0 as isize;
-    jobs.spawn(
-        "jot-save-dialog",
-        move || run_save_dialog(owner_raw, options),
-        move |res| AppEvent::SaveDialogDone {
-            window,
-            wf_gen,
-            tab,
-            format,
-            result: res.unwrap_or_else(|msg| Err(Error::new(msg))),
-        },
-    );
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn spawn_lossy_check(
-    window: WindowId,
-    wf_gen: WorkflowGen,
-    tab: TabId,
-    snapshot: u64,
-    text: Rope,
+struct PendingSave {
+    wf: WorkflowId,
     path: PathBuf,
     format: Format,
-    jobs: &Jobs<AppEvent>,
-) {
-    let path = std::path::absolute(&path).unwrap_or(path);
-    let check_text = text.clone();
-    jobs.spawn(
-        "jot-lossy-check",
-        move || document::is_lossy(&check_text, format),
-        move |res| AppEvent::LossyCheckDone {
+}
+
+#[derive(Default)]
+pub(crate) struct FileOps {
+    flows: Vec<Workflow>,
+    saving: HashMap<TabId, Option<PendingSave>>,
+    loading: HashSet<PathKey>,
+    open_dialogs: HashSet<WindowId>,
+    writes: WriteTracker,
+}
+
+impl FileOps {
+    pub(crate) fn tracker(&self) -> &WriteTracker {
+        &self.writes
+    }
+
+    pub(crate) fn in_flight_writes(&self) -> usize {
+        self.writes.in_flight()
+    }
+
+    pub(crate) fn wait_for_writes(&self, timeout: Duration) {
+        self.writes.wait(timeout);
+    }
+
+    pub(crate) fn has_active_workflow_for(&self, window: WindowId) -> bool {
+        self.flows.iter().any(|f| f.origin == window)
+    }
+
+    pub(crate) fn on_window_closed(&mut self, window: WindowId) {
+        self.open_dialogs.remove(&window);
+    }
+
+    pub(crate) fn request(
+        &mut self,
+        req: FileRequest,
+        host: &mut impl DocHost,
+        io: &mut Vec<FileIo>,
+    ) {
+        match req {
+            FileRequest::OpenDialog { window } => {
+                if self.open_dialogs.insert(window) {
+                    io.push(FileIo::OpenDialog {
+                        window,
+                        current: host.active_tab_path(window),
+                    });
+                }
+            }
+            FileRequest::OpenPaths { window, paths } => {
+                self.open_paths(window, paths, host, io);
+            }
+            FileRequest::Save { window, tab } => {
+                let Some(info) = host.tab_info(tab) else {
+                    return;
+                };
+                if info.path.is_some() && !info.dirty && !info.format.lossy_decode {
+                    return;
+                }
+                self.start_workflow(
+                    Workflow::new(
+                        window,
+                        [Step::SaveTab {
+                            id: tab,
+                            activate: false,
+                        }],
+                        Finish::None,
+                    ),
+                    host,
+                    io,
+                );
+            }
+            FileRequest::SaveAs { window, tab } => {
+                self.start_workflow(
+                    Workflow::new(window, [Step::SaveTabAs(tab)], Finish::None),
+                    host,
+                    io,
+                );
+            }
+            FileRequest::SaveAll { window } => {
+                let dirty = host.window_dirty_tabs(window);
+                if dirty.is_empty() {
+                    return;
+                }
+                self.start_workflow(
+                    Workflow::new(
+                        window,
+                        dirty
+                            .into_iter()
+                            .map(|id| Step::SaveTab { id, activate: true }),
+                        Finish::None,
+                    ),
+                    host,
+                    io,
+                );
+            }
+            FileRequest::CloseTab { window, tab } => {
+                let Some(info) = host.tab_info(tab) else {
+                    return;
+                };
+                if !info.dirty {
+                    host.remove_tab(tab);
+                    return;
+                }
+                host.activate_tab(info.window, tab, false);
+                self.start_workflow(
+                    Workflow::new(
+                        window,
+                        [Step::ConfirmDiscard {
+                            id: tab,
+                            activate: false,
+                        }],
+                        Finish::RemoveTab(tab),
+                    ),
+                    host,
+                    io,
+                );
+            }
+            FileRequest::CloseWindow { window } => {
+                let dirty = host.window_dirty_tabs(window);
+                if dirty.is_empty() {
+                    host.mark_window_close(window);
+                    return;
+                }
+                if self
+                    .flows
+                    .iter()
+                    .any(|f| f.origin == window && f.finish == Finish::CloseWindow(window))
+                {
+                    return;
+                }
+                self.start_workflow(
+                    Workflow::new(
+                        window,
+                        dirty
+                            .into_iter()
+                            .map(|id| Step::ConfirmDiscard { id, activate: true }),
+                        Finish::CloseWindow(window),
+                    ),
+                    host,
+                    io,
+                );
+            }
+        }
+    }
+
+    pub(crate) fn on_prompt(
+        &mut self,
+        prompt_id: PromptId,
+        button: usize,
+        host: &mut impl DocHost,
+        io: &mut Vec<FileIo>,
+    ) {
+        let Some(ix) = self.flows.iter().position(|f| match &f.awaiting {
+            Awaiting::DiscardPrompt { prompt, .. } | Awaiting::LossyPrompt { prompt, .. } => {
+                *prompt == prompt_id
+            }
+            _ => false,
+        }) else {
+            return;
+        };
+        let wf_id = self.flows[ix].id;
+        let awaiting = std::mem::replace(&mut self.flows[ix].awaiting, Awaiting::Nothing);
+        match awaiting {
+            Awaiting::DiscardPrompt { tab, .. } => match button {
+                0 => {
+                    self.flows[ix].queue.push_front(Step::SaveTab {
+                        id: tab,
+                        activate: false,
+                    });
+                    self.advance(wf_id, host, io);
+                }
+                1 => {
+                    if let Some(info) = host.tab_info(tab) {
+                        self.flows[ix].approve_discard(tab, info.revision);
+                    }
+                    self.advance(wf_id, host, io);
+                }
+                _ => {
+                    self.flows.remove(ix);
+                }
+            },
+            Awaiting::LossyPrompt { job, .. } => match button {
+                0 => {
+                    self.flows[ix].awaiting = Awaiting::Write(job.clone());
+                    io.push(FileIo::WriteFile {
+                        wf: wf_id,
+                        job,
+                        force_lossy: true,
+                    });
+                }
+                _ => {
+                    let tab = job.tab;
+                    self.clear_saving(tab);
+                    self.begin_save_as(wf_id, tab, host, io);
+                }
+            },
+            _ => {}
+        }
+    }
+
+    pub(crate) fn on_event(
+        &mut self,
+        event: FileEvent,
+        host: &mut impl DocHost,
+        io: &mut Vec<FileIo>,
+    ) {
+        match event {
+            FileEvent::OpenDialogDone { window, result } => {
+                self.open_dialogs.remove(&window);
+                let Some(target) = host.fallback_window(window) else {
+                    return;
+                };
+                match result {
+                    Ok(Some(paths)) => self.open_paths(target, paths, host, io),
+                    Ok(None) => {}
+                    Err(err) => {
+                        host.show_prompt(target, dialog_error_prompt("Can't open file", err.to_string()));
+                    }
+                }
+            }
+            FileEvent::FilesLoaded { window, results } => {
+                for (doc_path, res) in results {
+                    self.loading.remove(&doc_path.key);
+                    let dup = res
+                        .as_ref()
+                        .ok()
+                        .and_then(|loaded| host.find_tab_by_key(&loaded.doc_path.key))
+                        .or_else(|| host.find_tab_by_key(&doc_path.key));
+                    if let Some((win, tab)) = dup {
+                        host.activate_tab(win, tab, true);
+                        continue;
+                    }
+                    if let Some(target) = host.fallback_window(window) {
+                        match res {
+                            Ok(loaded) => host.adopt_loaded(target, loaded),
+                            Err(err) => {
+                                host.show_prompt(target, load_error_prompt(doc_path.as_path(), err));
+                            }
+                        }
+                    }
+                }
+            }
+            FileEvent::SaveDialogDone { wf, result } => {
+                let Some(ix) = self.flow_ix(wf) else {
+                    return;
+                };
+                let origin = self.flows[ix].origin;
+                let Awaiting::SaveDialog { tab, format } =
+                    std::mem::replace(&mut self.flows[ix].awaiting, Awaiting::Nothing)
+                else {
+                    return;
+                };
+                match resolve_save_dialog(format, result) {
+                    Ok(Some((path, next_format))) => {
+                        let key = PathKey::quick(&path);
+                        let conflict = host
+                            .find_tab_by_key(&key)
+                            .is_some_and(|(_, existing)| existing != tab);
+                        if conflict {
+                            self.show_prompt_for(tab, origin, already_open_save_prompt(&path), host);
+                            self.remove_flow(wf);
+                        } else {
+                            self.begin_write(wf, tab, path, next_format, host, io);
+                        }
+                    }
+                    Ok(None) => self.remove_flow(wf),
+                    Err(msg) => {
+                        self.show_prompt_for(
+                            tab,
+                            origin,
+                            dialog_error_prompt("Can't save file", msg),
+                            host,
+                        );
+                        self.remove_flow(wf);
+                    }
+                }
+            }
+            FileEvent::WriteDone { wf, outcome } => {
+                let Some(ix) = self.flow_ix(wf) else {
+                    return;
+                };
+                let origin = self.flows[ix].origin;
+                let Awaiting::Write(job) =
+                    std::mem::replace(&mut self.flows[ix].awaiting, Awaiting::Nothing)
+                else {
+                    return;
+                };
+                match outcome {
+                    WriteOutcome::Saved { doc_path, format } => {
+                        let pending = self.saving.remove(&job.tab).flatten();
+                        host.mark_saved(job.tab, job.snapshot, doc_path, format);
+                        self.advance(wf, host, io);
+                        if let Some(next) = pending {
+                            self.begin_write(next.wf, job.tab, next.path, next.format, host, io);
+                        }
+                    }
+                    WriteOutcome::NeedsLossyConfirm => {
+                        let Some(target) = self.prompt_window(job.tab, origin, host) else {
+                            self.clear_saving(job.tab);
+                            self.remove_flow(wf);
+                            return;
+                        };
+                        let prompt_id = PromptId::next();
+                        let prompt = lossy_ansi_prompt(prompt_id, job.tab, &job.path);
+                        self.flows[ix].awaiting = Awaiting::LossyPrompt {
+                            prompt: prompt_id,
+                            job,
+                        };
+                        host.show_prompt(target, prompt);
+                    }
+                    WriteOutcome::Error(err) => {
+                        self.clear_saving(job.tab);
+                        self.show_prompt_for(
+                            job.tab,
+                            origin,
+                            save_error_prompt(&job.path, &err),
+                            host,
+                        );
+                        self.remove_flow(wf);
+                    }
+                }
+            }
+        }
+    }
+
+    fn open_paths(
+        &mut self,
+        window: WindowId,
+        paths: Vec<PathBuf>,
+        host: &mut impl DocHost,
+        io: &mut Vec<FileIo>,
+    ) {
+        if paths.is_empty() {
+            return;
+        }
+        let mut to_load: Vec<DocPath> = Vec::new();
+        let mut last_existing = None;
+        for raw in paths {
+            let path = std::path::absolute(&raw).unwrap_or(raw);
+            let doc_path = DocPath::quick(path);
+            if let Some(found) = host.find_tab_by_key(&doc_path.key) {
+                last_existing = Some(found);
+                continue;
+            }
+            if self.loading.contains(&doc_path.key)
+                || to_load.iter().any(|q| q.key == doc_path.key)
+            {
+                continue;
+            }
+            self.loading.insert(doc_path.key.clone());
+            to_load.push(doc_path);
+        }
+        if to_load.is_empty() {
+            if let Some((win, tab)) = last_existing {
+                host.activate_tab(win, tab, true);
+            }
+            return;
+        }
+        io.push(FileIo::LoadFiles {
             window,
-            wf_gen,
+            paths: to_load,
+        });
+    }
+
+    fn start_workflow(
+        &mut self,
+        wf: Workflow,
+        host: &mut impl DocHost,
+        io: &mut Vec<FileIo>,
+    ) {
+        let id = wf.id;
+        self.flows.push(wf);
+        self.advance(id, host, io);
+    }
+
+    fn flow_ix(&self, id: WorkflowId) -> Option<usize> {
+        self.flows.iter().position(|f| f.id == id)
+    }
+
+    fn remove_flow(&mut self, id: WorkflowId) {
+        if let Some(ix) = self.flow_ix(id) {
+            self.flows.remove(ix);
+        }
+    }
+
+    fn clear_saving(&mut self, tab: TabId) {
+        if let Some(Some(pending)) = self.saving.remove(&tab) {
+            self.remove_flow(pending.wf);
+        }
+    }
+
+    fn prompt_window(&self, tab: TabId, origin: WindowId, host: &impl DocHost) -> Option<WindowId> {
+        host.tab_info(tab)
+            .map(|t| t.window)
+            .or_else(|| host.fallback_window(origin))
+    }
+
+    fn show_prompt_for(
+        &self,
+        tab: TabId,
+        origin: WindowId,
+        prompt: Prompt,
+        host: &mut impl DocHost,
+    ) {
+        if let Some(win) = self.prompt_window(tab, origin, host) {
+            host.show_prompt(win, prompt);
+        }
+    }
+
+    fn advance(&mut self, wf: WorkflowId, host: &mut impl DocHost, io: &mut Vec<FileIo>) {
+        loop {
+            let Some(ix) = self.flow_ix(wf) else {
+                return;
+            };
+            let next = self.flows[ix].queue.pop_front();
+            let Some(step) = next else {
+                let finished = self.flows.remove(ix);
+                match finished.finish {
+                    Finish::None => {}
+                    Finish::RemoveTab(tab) => {
+                        if let Some(info) = host.tab_info(tab) {
+                            if info.dirty && !finished.is_discard_approved(tab, info.revision) {
+                                let mut retry = Workflow::new(
+                                    finished.origin,
+                                    [Step::ConfirmDiscard {
+                                        id: tab,
+                                        activate: false,
+                                    }],
+                                    Finish::RemoveTab(tab),
+                                );
+                                retry.approved = finished.approved;
+                                self.start_workflow(retry, host, io);
+                            } else {
+                                host.remove_tab(tab);
+                            }
+                        }
+                    }
+                    Finish::CloseWindow(window) => {
+                        let remaining: Vec<TabId> = host
+                            .window_dirty_tabs(window)
+                            .into_iter()
+                            .filter(|&id| {
+                                host.tab_info(id)
+                                    .is_some_and(|t| !finished.is_discard_approved(id, t.revision))
+                            })
+                            .collect();
+                        if remaining.is_empty() {
+                            host.mark_window_close(window);
+                        } else {
+                            let mut retry = Workflow::new(
+                                window,
+                                remaining
+                                    .into_iter()
+                                    .map(|id| Step::ConfirmDiscard { id, activate: true }),
+                                Finish::CloseWindow(window),
+                            );
+                            retry.approved = finished.approved;
+                            self.start_workflow(retry, host, io);
+                        }
+                    }
+                }
+                return;
+            };
+
+            match step {
+                Step::SaveTab { id, activate } => {
+                    let Some(info) = host.tab_info(id) else {
+                        self.remove_flow(wf);
+                        return;
+                    };
+                    if activate {
+                        host.activate_tab(info.window, id, false);
+                    }
+                    match info.path {
+                        Some(path) => self.begin_write(wf, id, path, info.format, host, io),
+                        None => self.begin_save_as(wf, id, host, io),
+                    }
+                    return;
+                }
+                Step::SaveTabAs(id) => {
+                    self.begin_save_as(wf, id, host, io);
+                    return;
+                }
+                Step::ConfirmDiscard { id, activate } => {
+                    let Some(info) = host.tab_info(id) else {
+                        continue;
+                    };
+                    if !info.dirty {
+                        continue;
+                    }
+                    if activate {
+                        host.activate_tab(info.window, id, false);
+                    }
+                    let prompt_id = PromptId::next();
+                    let prompt = discard_prompt(prompt_id, id, &info.name);
+                    if let Some(ix) = self.flow_ix(wf) {
+                        self.flows[ix].awaiting = Awaiting::DiscardPrompt {
+                            prompt: prompt_id,
+                            tab: id,
+                        };
+                    }
+                    host.show_prompt(info.window, prompt);
+                    return;
+                }
+            }
+        }
+    }
+
+    fn begin_save_as(
+        &mut self,
+        wf: WorkflowId,
+        tab: TabId,
+        host: &impl DocHost,
+        io: &mut Vec<FileIo>,
+    ) {
+        let Some(info) = host.tab_info(tab) else {
+            self.remove_flow(wf);
+            return;
+        };
+        if let Some(ix) = self.flow_ix(wf) {
+            self.flows[ix].awaiting = Awaiting::SaveDialog {
+                tab,
+                format: info.format,
+            };
+        }
+        io.push(FileIo::SaveDialog {
+            wf,
+            owner: info.window,
+            current: info.path,
+            format: info.format,
+        });
+    }
+
+    fn begin_write(
+        &mut self,
+        wf: WorkflowId,
+        tab: TabId,
+        path: PathBuf,
+        format: Format,
+        host: &mut impl DocHost,
+        io: &mut Vec<FileIo>,
+    ) {
+        if let Some(pending) = self.saving.get_mut(&tab) {
+            let replaced = pending.replace(PendingSave { wf, path, format });
+            if let Some(ix) = self.flow_ix(wf) {
+                self.flows[ix].awaiting = Awaiting::QueuedWrite;
+            }
+            if let Some(old) = replaced {
+                self.remove_flow(old.wf);
+            }
+            return;
+        }
+        let Some((snapshot, text)) = host.begin_save(tab) else {
+            self.remove_flow(wf);
+            return;
+        };
+        let path = std::path::absolute(&path).unwrap_or(path);
+        let job = SaveJob {
             tab,
             snapshot,
             text,
             path,
             format,
-            result: res.unwrap_or_else(|msg| Err(io::Error::other(msg))),
-        },
-    );
+        };
+        self.saving.insert(tab, None);
+        if let Some(ix) = self.flow_ix(wf) {
+            self.flows[ix].awaiting = Awaiting::Write(job.clone());
+        }
+        io.push(FileIo::WriteFile {
+            wf,
+            job,
+            force_lossy: false,
+        });
+    }
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn spawn_write_file(
-    window: WindowId,
-    wf_gen: WorkflowGen,
-    tab: TabId,
-    snapshot: u64,
-    text: Rope,
-    path: PathBuf,
-    format: Format,
-    jobs: &Jobs<AppEvent>,
+pub(crate) fn spawn_file_io<E: Send + 'static>(
+    io: FileIo,
+    owner_hwnd: Option<WindowHwnd>,
+    tracker: &WriteTracker,
+    jobs: &Jobs<E>,
+    wrap: fn(FileEvent) -> E,
 ) {
-    let guard = WriteFlightGuard::enter();
-    let write_path = path.clone();
-    jobs.spawn(
-        "jot-write-file",
-        move || {
-            let _guard = guard;
-            let result = document::write_rope(&write_path, &text, format);
-            let key = if result.is_ok() {
-                PathKey::canonical(&write_path)
-            } else {
-                PathKey::quick(&write_path)
+    match io {
+        FileIo::OpenDialog { window, current } => {
+            let Some(hwnd) = owner_hwnd else {
+                jobs.post(wrap(FileEvent::OpenDialogDone {
+                    window,
+                    result: Ok(None),
+                }));
+                return;
             };
-            (key, result)
-        },
-        move |res| {
-            let (key, result) =
-                res.unwrap_or_else(|msg| (PathKey::quick(&path), Err(io::Error::other(msg))));
-            let saved_format = if result.is_ok() {
-                Format {
-                    mixed_line_endings: false,
-                    lossy_decode: false,
-                    ..format
-                }
-            } else {
-                format
+            let owner_raw = hwnd.raw().0 as isize;
+            let options = OpenDialogOptions {
+                multiple: true,
+                directory: Some(default_directory(current.as_deref())),
+                file_types: [TEXT_FILE_TYPE, ALL_FILE_TYPE]
+                    .map(|(name, spec)| (SharedStr::new_static(name), SharedStr::new_static(spec)))
+                    .into(),
             };
-            AppEvent::FileSaved {
-                window,
-                wf_gen,
-                tab,
-                snapshot,
-                doc_path: DocPath { path, key },
-                format: saved_format,
-                result,
-            }
-        },
-    );
+            jobs.spawn(
+                "jot-open-dialog",
+                move || run_open_dialog(owner_raw, options),
+                move |res| {
+                    wrap(FileEvent::OpenDialogDone {
+                        window,
+                        result: res.unwrap_or_else(|msg| Err(Error::new(msg))),
+                    })
+                },
+            );
+        }
+        FileIo::LoadFiles { window, paths } => {
+            let fallback = paths.clone();
+            jobs.spawn(
+                "jot-load-files",
+                move || {
+                    paths
+                        .into_iter()
+                        .map(|doc_path| {
+                            let loaded = document::load(doc_path.as_path());
+                            (doc_path, loaded)
+                        })
+                        .collect::<Vec<_>>()
+                },
+                move |res| {
+                    let results = res.unwrap_or_else(|msg| {
+                        fallback
+                            .into_iter()
+                            .map(|doc_path| {
+                                (doc_path, Err(LoadError::Io(io::Error::other(msg.clone()))))
+                            })
+                            .collect()
+                    });
+                    wrap(FileEvent::FilesLoaded { window, results })
+                },
+            );
+        }
+        FileIo::SaveDialog {
+            wf,
+            current,
+            format,
+            ..
+        } => {
+            let Some(hwnd) = owner_hwnd else {
+                jobs.post(wrap(FileEvent::SaveDialogDone {
+                    wf,
+                    result: Ok(None),
+                }));
+                return;
+            };
+            let suggested =
+                file_name(current.as_deref()).unwrap_or_else(|| UNTITLED_FILE_NAME.into());
+            let options = SaveDialogOptions {
+                title: Some(SAVE_AS_TITLE.into()),
+                directory: default_directory(current.as_deref()),
+                file_name: Some(suggested),
+                file_types: [TEXT_FILE_TYPE, ALL_FILE_TYPE]
+                    .map(|(name, spec)| (SharedStr::new_static(name), SharedStr::new_static(spec)))
+                    .into(),
+                default_extension: Some(TEXT_EXTENSION.into()),
+                choice: Some(SaveChoice {
+                    label: ENCODING_LABEL.into(),
+                    items: Encoding::SAVE_ORDER
+                        .map(|encoding| SharedStr::new_static(encoding.label()))
+                        .into(),
+                    selected: Encoding::SAVE_ORDER
+                        .iter()
+                        .position(|&encoding| encoding == format.encoding)
+                        .unwrap_or_default(),
+                }),
+            };
+            let owner_raw = hwnd.raw().0 as isize;
+            jobs.spawn(
+                "jot-save-dialog",
+                move || run_save_dialog(owner_raw, options),
+                move |res| {
+                    wrap(FileEvent::SaveDialogDone {
+                        wf,
+                        result: res.unwrap_or_else(|msg| Err(Error::new(msg))),
+                    })
+                },
+            );
+        }
+        FileIo::WriteFile {
+            wf,
+            job,
+            force_lossy,
+        } => {
+            let guard = tracker.enter();
+            jobs.spawn(
+                "jot-write-file",
+                move || {
+                    let _guard = guard;
+                    if !force_lossy {
+                        match document::is_lossy(&job.text, job.format) {
+                            Ok(true) => return WriteOutcome::NeedsLossyConfirm,
+                            Ok(false) => {}
+                            Err(err) => return WriteOutcome::Error(err),
+                        }
+                    }
+                    match document::write_rope(&job.path, &job.text, job.format) {
+                        Ok(()) => WriteOutcome::Saved {
+                            doc_path: DocPath::canonical(job.path),
+                            format: Format {
+                                mixed_line_endings: false,
+                                lossy_decode: false,
+                                ..job.format
+                            },
+                        },
+                        Err(err) => WriteOutcome::Error(err),
+                    }
+                },
+                move |res| {
+                    let outcome =
+                        res.unwrap_or_else(|msg| WriteOutcome::Error(io::Error::other(msg)));
+                    wrap(FileEvent::WriteDone { wf, outcome })
+                },
+            );
+        }
+    }
 }
 
-pub(crate) fn resolve_save_dialog(
+fn resolve_save_dialog(
     format: Format,
     result: SaveDialogResult,
 ) -> std::result::Result<Option<(PathBuf, Format)>, String> {
@@ -374,7 +978,7 @@ pub(crate) fn resolve_save_dialog(
     }
 }
 
-pub(crate) fn friendly_io_error(error: &io::Error) -> String {
+fn friendly_io_error(error: &io::Error) -> String {
     let raw = error.to_string();
     if let Some(prefix) = raw.strip_suffix(')')
         && let Some((clean, suffix)) = prefix.rsplit_once(" (os error ")
@@ -385,7 +989,17 @@ pub(crate) fn friendly_io_error(error: &io::Error) -> String {
     raw
 }
 
-pub(crate) fn load_error_prompt(path: &Path, error: LoadError) -> FilePrompt {
+fn info_prompt(title: SharedStr, message: SharedStr) -> Prompt {
+    Prompt {
+        id: None,
+        title,
+        message,
+        buttons: OK_BUTTONS,
+        tab: None,
+    }
+}
+
+fn load_error_prompt(path: &Path, error: LoadError) -> Prompt {
     let detail: SharedStr = match error {
         LoadError::Undecodable => "Jot can't decode the text in this file.".into(),
         LoadError::TooLarge(bytes) => format!(
@@ -395,90 +1009,362 @@ pub(crate) fn load_error_prompt(path: &Path, error: LoadError) -> FilePrompt {
         .into(),
         LoadError::Io(err) => friendly_io_error(&err).into(),
     };
-    FilePrompt::Error {
-        title: format!("Can't open {}", display_name(Some(path))).into(),
-        message: detail,
-    }
+    info_prompt(
+        format!("Can't open {}", display_name(Some(path))).into(),
+        detail,
+    )
 }
 
-pub(crate) fn save_error_prompt(path: &Path, error: &io::Error) -> FilePrompt {
-    FilePrompt::Error {
-        title: format!("Can't save {}", display_name(Some(path))).into(),
-        message: friendly_io_error(error).into(),
-    }
+fn save_error_prompt(path: &Path, error: &io::Error) -> Prompt {
+    info_prompt(
+        format!("Can't save {}", display_name(Some(path))).into(),
+        friendly_io_error(error).into(),
+    )
 }
 
-pub(crate) fn dialog_error_prompt(title: &'static str, message: String) -> FilePrompt {
-    FilePrompt::Error {
-        title: SharedStr::new_static(title),
-        message: message.into(),
-    }
+fn dialog_error_prompt(title: &'static str, message: String) -> Prompt {
+    info_prompt(SharedStr::new_static(title), message.into())
 }
 
-pub(crate) fn already_open_save_prompt(path: &Path) -> FilePrompt {
-    FilePrompt::Error {
-        title: format!("Can't save {}", display_name(Some(path))).into(),
-        message: SharedStr::new_static(
+fn already_open_save_prompt(path: &Path) -> Prompt {
+    info_prompt(
+        format!("Can't save {}", display_name(Some(path))).into(),
+        SharedStr::new_static(
             "This file is already open in another tab. Close that tab before saving over it.",
         ),
+    )
+}
+
+fn discard_prompt(id: PromptId, tab: TabId, name: &str) -> Prompt {
+    Prompt {
+        id: Some(id),
+        title: APP_NAME.into(),
+        message: format!("Do you want to save changes to {name}?").into(),
+        buttons: DISCARD_BUTTONS,
+        tab: Some(tab),
     }
 }
 
-pub(crate) fn discard_prompt_text(name: &str) -> (SharedStr, SharedStr) {
-    (
-        APP_NAME.into(),
-        format!("Do you want to save changes to {name}?").into(),
-    )
+fn lossy_ansi_prompt(id: PromptId, tab: TabId, path: &Path) -> Prompt {
+    Prompt {
+        id: Some(id),
+        title: APP_NAME.into(),
+        message: format!("{}\n{LOSSY_ANSI_WARNING}", path.display()).into(),
+        buttons: LOSSY_BUTTONS,
+        tab: Some(tab),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn file_workflow_queues_prepends_and_drains_steps_in_order() {
-        let id1 = TabId::next();
-        let id2 = TabId::next();
-        let mut wf = FileWorkflow::batch(
-            [
-                WorkflowStep::ConfirmDiscard {
-                    id: id1,
-                    activate: true,
-                },
-                WorkflowStep::ConfirmDiscard {
-                    id: id2,
-                    activate: true,
-                },
-            ],
-            WorkflowFinish::CloseWindow,
-        );
+    struct FakeTab {
+        id: TabId,
+        window: WindowId,
+        doc_path: Option<DocPath>,
+        format: Format,
+        text: String,
+        saved_rev: u64,
+        rev: u64,
+    }
 
-        assert_eq!(
-            wf.next_step(),
-            Some(WorkflowStep::ConfirmDiscard {
-                id: id1,
-                activate: true,
+    impl FakeTab {
+        fn new(window: WindowId, path: Option<&str>, text: &str, dirty: bool) -> Self {
+            let doc_path = path.map(|p| DocPath::quick(PathBuf::from(p)));
+            let rev = if dirty { 1 } else { 0 };
+            Self {
+                id: TabId::next(),
+                window,
+                doc_path,
+                format: Format::default(),
+                text: text.into(),
+                saved_rev: 0,
+                rev,
+            }
+        }
+
+        fn is_dirty(&self) -> bool {
+            self.rev != self.saved_rev
+        }
+
+        fn edit(&mut self, extra: &str) {
+            self.text.push_str(extra);
+            self.rev += 1;
+        }
+    }
+
+    #[derive(Default)]
+    struct FakeHost {
+        tabs: Vec<FakeTab>,
+        windows: Vec<WindowId>,
+        closed_windows: Vec<WindowId>,
+        prompts: Vec<(WindowId, Prompt)>,
+        activated: Vec<(WindowId, TabId, bool)>,
+    }
+
+    impl FakeHost {
+        fn add_window(&mut self, id: WindowId) {
+            self.windows.push(id);
+        }
+
+        fn add_tab(&mut self, tab: FakeTab) -> TabId {
+            let id = tab.id;
+            self.tabs.push(tab);
+            id
+        }
+
+        fn tab_mut(&mut self, id: TabId) -> &mut FakeTab {
+            self.tabs.iter_mut().find(|t| t.id == id).unwrap()
+        }
+
+        fn pop_prompt(&mut self) -> (WindowId, Prompt) {
+            self.prompts.remove(0)
+        }
+    }
+
+    impl DocHost for FakeHost {
+        fn tab_info(&self, tab: TabId) -> Option<TabSnapshot> {
+            let t = self.tabs.iter().find(|t| t.id == tab)?;
+            Some(TabSnapshot {
+                window: t.window,
+                name: display_name(t.doc_path.as_ref().map(DocPath::as_path)),
+                path: t.doc_path.as_ref().map(|p| p.path.clone()),
+                format: t.format,
+                dirty: t.is_dirty(),
+                revision: t.rev,
             })
+        }
+
+        fn window_dirty_tabs(&self, window: WindowId) -> Vec<TabId> {
+            self.tabs
+                .iter()
+                .filter(|t| t.window == window && t.is_dirty())
+                .map(|t| t.id)
+                .collect()
+        }
+
+        fn active_tab_path(&self, window: WindowId) -> Option<PathBuf> {
+            self.tabs
+                .iter()
+                .find(|t| t.window == window)
+                .and_then(|t| t.doc_path.as_ref().map(|p| p.path.clone()))
+        }
+
+        fn fallback_window(&self, preferred: WindowId) -> Option<WindowId> {
+            if self.windows.contains(&preferred) {
+                Some(preferred)
+            } else {
+                self.windows.last().copied()
+            }
+        }
+
+        fn find_tab_by_key(&self, key: &PathKey) -> Option<(WindowId, TabId)> {
+            self.tabs
+                .iter()
+                .find(|t| t.doc_path.as_ref().is_some_and(|p| &p.key == key))
+                .map(|t| (t.window, t.id))
+        }
+
+        fn activate_tab(&mut self, window: WindowId, tab: TabId, bring_to_front: bool) {
+            self.activated.push((window, tab, bring_to_front));
+        }
+
+        fn begin_save(&mut self, tab: TabId) -> Option<(u64, Rope)> {
+            let t = self.tabs.iter().find(|t| t.id == tab)?;
+            Some((t.rev, Rope::from(t.text.as_str())))
+        }
+
+        fn mark_saved(&mut self, tab: TabId, snapshot: u64, doc_path: DocPath, format: Format) {
+            if let Some(t) = self.tabs.iter_mut().find(|t| t.id == tab) {
+                t.saved_rev = snapshot;
+                t.doc_path = Some(doc_path);
+                t.format = format;
+            }
+        }
+
+        fn adopt_loaded(&mut self, window: WindowId, loaded: document::Loaded) {
+            self.tabs.push(FakeTab {
+                id: TabId::next(),
+                window,
+                doc_path: Some(loaded.doc_path),
+                format: loaded.format,
+                text: loaded.text.to_string(),
+                saved_rev: 0,
+                rev: 0,
+            });
+        }
+
+        fn remove_tab(&mut self, tab: TabId) {
+            self.tabs.retain(|t| t.id != tab);
+        }
+
+        fn mark_window_close(&mut self, window: WindowId) {
+            self.closed_windows.push(window);
+            self.windows.retain(|&w| w != window);
+        }
+
+        fn show_prompt(&mut self, window: WindowId, prompt: Prompt) {
+            self.prompts.push((window, prompt));
+        }
+    }
+
+    #[test]
+    fn close_window_saves_first_tab_reprompts_on_mid_write_edit_and_discards_second() {
+        let mut ops = FileOps::default();
+        let mut host = FakeHost::default();
+        let mut io = Vec::new();
+        let w1 = WindowId(1);
+        host.add_window(w1);
+        let t1 = host.add_tab(FakeTab::new(w1, Some(r"C:\a.txt"), "hello", true));
+        let t2 = host.add_tab(FakeTab::new(w1, None, "unsaved", true));
+
+        ops.request(FileRequest::CloseWindow { window: w1 }, &mut host, &mut io);
+        let (_, p1) = host.pop_prompt();
+        assert_eq!(p1.tab, Some(t1));
+
+        // User chooses Save on t1; then edits t1 while write is in flight.
+        ops.on_prompt(p1.id.unwrap(), 0, &mut host, &mut io);
+        let FileIo::WriteFile { wf, job, .. } = io.pop().unwrap() else {
+            panic!("expected WriteFile");
+        };
+        assert_eq!(job.tab, t1);
+        host.tab_mut(t1).edit(" more");
+
+        // Stale workflow event must be ignored.
+        ops.on_event(
+            FileEvent::WriteDone {
+                wf: WorkflowId::next(),
+                outcome: WriteOutcome::Saved {
+                    doc_path: DocPath::quick(PathBuf::from(r"C:\a.txt")),
+                    format: Format::default(),
+                },
+            },
+            &mut host,
+            &mut io,
         );
-        wf.prepend(WorkflowStep::SaveTab {
-            id: id1,
-            activate: false,
-        });
-        assert_eq!(
-            wf.next_step(),
-            Some(WorkflowStep::SaveTab {
-                id: id1,
-                activate: false,
-            })
+        assert!(host.prompts.is_empty());
+
+        // Real write finishes -> t1 is still dirty, advances to t2 discard prompt.
+        ops.on_event(
+            FileEvent::WriteDone {
+                wf,
+                outcome: WriteOutcome::Saved {
+                    doc_path: DocPath::quick(job.path),
+                    format: job.format,
+                },
+            },
+            &mut host,
+            &mut io,
         );
-        assert_eq!(
-            wf.next_step(),
-            Some(WorkflowStep::ConfirmDiscard {
-                id: id2,
-                activate: true,
-            })
+        let (_, p2) = host.pop_prompt();
+        assert_eq!(p2.tab, Some(t2));
+
+        // User chooses Don't save on t2 -> window must NOT close yet because t1 was edited mid-write.
+        ops.on_prompt(p2.id.unwrap(), 1, &mut host, &mut io);
+        assert!(host.closed_windows.is_empty());
+        let (_, p3) = host.pop_prompt();
+        assert_eq!(p3.tab, Some(t1));
+
+        // User chooses Don't save on re-prompted t1 -> window closes.
+        ops.on_prompt(p3.id.unwrap(), 1, &mut host, &mut io);
+        assert_eq!(host.closed_windows, vec![w1]);
+        assert!(!ops.has_active_workflow_for(w1));
+    }
+
+    #[test]
+    fn migrated_save_lossy_confirm_conflict_and_coalesced_resave() {
+        let mut ops = FileOps::default();
+        let mut host = FakeHost::default();
+        let mut io = Vec::new();
+        let (w1, w2) = (WindowId(1), WindowId(2));
+        host.add_window(w1);
+        host.add_window(w2);
+        let t1 = host.add_tab(FakeTab::new(w1, Some(r"C:\doc.txt"), "v1", true));
+        let t2 = host.add_tab(FakeTab::new(w2, Some(r"C:\other.txt"), "other", false));
+
+        // Start save on w1, coalesce a second save mid-flight, then migrate tab to w2.
+        ops.request(FileRequest::Save { window: w1, tab: t1 }, &mut host, &mut io);
+        let FileIo::WriteFile { wf: wf1, job: job1, .. } = io.pop().unwrap() else {
+            panic!("expected WriteFile");
+        };
+        host.tab_mut(t1).edit(" v2");
+        ops.request(FileRequest::Save { window: w1, tab: t1 }, &mut host, &mut io);
+        assert!(io.is_empty(), "second save must queue while first is in flight");
+        host.tab_mut(t1).window = w2;
+
+        // First save triggers lossy confirm -> prompt must appear on current owner w2!
+        ops.on_event(
+            FileEvent::WriteDone {
+                wf: wf1,
+                outcome: WriteOutcome::NeedsLossyConfirm,
+            },
+            &mut host,
+            &mut io,
         );
-        assert_eq!(wf.next_step(), None);
-        assert_eq!(wf.on_finish, WorkflowFinish::CloseWindow);
+        let (prompt_win, lossy_prompt) = host.pop_prompt();
+        assert_eq!(prompt_win, w2);
+        assert_eq!(lossy_prompt.tab, Some(t1));
+
+        // Confirm OK -> writes with force_lossy=true.
+        ops.on_prompt(lossy_prompt.id.unwrap(), 0, &mut host, &mut io);
+        let FileIo::WriteFile {
+            wf: wf1_again,
+            force_lossy,
+            ..
+        } = io.pop().unwrap()
+        else {
+            panic!("expected forced WriteFile");
+        };
+        assert_eq!(wf1_again, wf1);
+        assert!(force_lossy);
+
+        // First write completes -> immediately triggers queued second save with new snapshot.
+        ops.on_event(
+            FileEvent::WriteDone {
+                wf: wf1,
+                outcome: WriteOutcome::Saved {
+                    doc_path: DocPath::quick(job1.path),
+                    format: job1.format,
+                },
+            },
+            &mut host,
+            &mut io,
+        );
+        let FileIo::WriteFile { wf: wf2, job: job2, .. } = io.pop().unwrap() else {
+            panic!("expected queued WriteFile");
+        };
+        assert_eq!(job2.text.to_string(), "v1 v2");
+        ops.on_event(
+            FileEvent::WriteDone {
+                wf: wf2,
+                outcome: WriteOutcome::Saved {
+                    doc_path: DocPath::quick(job2.path),
+                    format: job2.format,
+                },
+            },
+            &mut host,
+            &mut io,
+        );
+        assert!(!host.tab_info(t1).unwrap().dirty);
+
+        // Save As over already-open tab t2 -> conflict error prompt, no write spawned.
+        ops.request(FileRequest::SaveAs { window: w2, tab: t1 }, &mut host, &mut io);
+        let FileIo::SaveDialog { wf: wf3, .. } = io.pop().unwrap() else {
+            panic!("expected SaveDialog");
+        };
+        ops.on_event(
+            FileEvent::SaveDialogDone {
+                wf: wf3,
+                result: Ok(Some((PathBuf::from(r"C:\other.txt"), None))),
+            },
+            &mut host,
+            &mut io,
+        );
+        assert!(io.is_empty());
+        let (conflict_win, conflict_prompt) = host.pop_prompt();
+        assert_eq!(conflict_win, w2);
+        assert!(conflict_prompt.id.is_none());
+        let _ = t2;
     }
 }

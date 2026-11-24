@@ -211,7 +211,6 @@ impl<E: Send + 'static> Jobs<E> {
         timers.rearm(Instant::now());
     }
 
-    #[cfg(test)]
     pub(crate) fn post(&self, event: E) {
         self.bg.push(event);
     }

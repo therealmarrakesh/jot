@@ -1,17 +1,13 @@
-use std::collections::VecDeque;
-use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crate::APP_NAME;
 use crate::app::{AppEvent, Cx, Effect};
 use crate::color::transparent_black;
 use crate::command::{AppCommand, Command, app_shortcut, edit_shortcut};
-use crate::dialog::{DialogKind, Dialogs};
+use crate::dialog::{DialogKind, Dialogs, Prompt};
 use crate::document::{self, DocPath, Format, PathKey};
 use crate::editor::{Editor, EditorPaintStyle, EditorTimer, EditorTimers, RopeExt as _};
-use crate::files::{
-    self, FilePrompt, FileWorkflow, WorkflowFinish, WorkflowGen, WorkflowStep,
-};
+use crate::files::FileRequest;
 use crate::find::FindBar;
 use crate::geom::{Edges, Point, Rect, Size, point, size};
 use crate::gfx::{Surface, TextSystem, fill, font};
@@ -23,8 +19,8 @@ use crate::platform::{
     WindowControlArea, WindowId, format_local_time_date,
 };
 use crate::tabs::{
-    self, CAPTION_BUTTON_WIDTH, PendingSave, SCROLL_REPEAT_DELAY, SCROLL_REPEAT_INTERVAL,
-    SCROLL_STEP, STRIP_TOP, TAB_HEIGHT, Tab, TabData, TabId, TabSaveState, TabStrip, WHEEL_SHARE,
+    self, CAPTION_BUTTON_WIDTH, SCROLL_REPEAT_DELAY, SCROLL_REPEAT_INTERVAL, SCROLL_STEP,
+    STRIP_TOP, TAB_HEIGHT, Tab, TabData, TabId, TabStrip, WHEEL_SHARE,
 };
 use crate::theme::Palette;
 use crate::tooltip::TooltipProbe;
@@ -145,10 +141,7 @@ pub(crate) struct MainWindow {
     pub(crate) menu_bar: MenuBar,
     pub(crate) find: FindBar,
     pub(crate) dialogs: Dialogs,
-    pending_prompts: VecDeque<DialogKind>,
-    pub(crate) open_dialog_active: bool,
     pub(crate) focus: Focus,
-    pub(crate) file_workflow: Option<FileWorkflow>,
     pub(crate) dirty: bool,
     pub(crate) has_painted: bool,
     pub(crate) pending_close: bool,
@@ -180,10 +173,7 @@ impl MainWindow {
             menu_bar: MenuBar::default(),
             find: FindBar::new(),
             dialogs: Dialogs::new(),
-            pending_prompts: VecDeque::new(),
-            open_dialog_active: false,
             focus: Focus::Editor(EditorSlot::Tab(active_id)),
-            file_workflow: None,
             dirty: true,
             has_painted: false,
             pending_close: false,
@@ -420,10 +410,7 @@ impl MainWindow {
         let tab = self.tabs.remove(ix);
         let removed_id = tab.data.id;
         self.strip.depart(removed_id);
-        if self.dialogs.close_for_tab(removed_id) {
-            self.pending_prompts
-                .retain(|d| d.referenced_tab() != Some(removed_id));
-        }
+        self.dialogs.close_for_tab(removed_id);
         if ix < self.tabs.len()
             && self.ui.pointer().is_some_and(|p| {
                 self.ui
@@ -583,7 +570,7 @@ impl MainWindow {
         self.tabs.iter().any(|tab| tab.data.is_dirty())
     }
 
-    fn dirty_tabs(&self) -> Vec<TabId> {
+    pub(crate) fn dirty_tabs(&self) -> Vec<TabId> {
         self.tabs
             .iter()
             .filter(|tab| tab.data.is_dirty())
@@ -593,337 +580,59 @@ impl MainWindow {
 
     pub(crate) fn adopt_loaded_file(
         &mut self,
-        path: PathBuf,
-        result: std::result::Result<document::Loaded, document::LoadError>,
+        loaded: document::Loaded,
         word_wrap: bool,
         jobs: &Jobs<AppEvent>,
     ) {
-        match result {
-            Ok(loaded) => {
-                let tab = Tab::adopt(TabData::create(Some(loaded), word_wrap, EDITOR_PADDINGS));
-                if self.is_blank(self.active) {
-                    self.replace_tab(self.active, tab, jobs);
-                } else {
-                    self.push_tab(tab, jobs);
-                }
-            }
-            Err(err) => {
-                self.show_file_prompt(files::load_error_prompt(&path, err), jobs);
-            }
+        let tab = Tab::adopt(TabData::create(Some(loaded), word_wrap, EDITOR_PADDINGS));
+        if self.is_blank(self.active) {
+            self.replace_tab(self.active, tab, jobs);
+        } else {
+            self.push_tab(tab, jobs);
         }
     }
 
-    pub(crate) fn save(&mut self, jobs: &Jobs<AppEvent>) {
-        let data = &self.tabs[self.active].data;
-        if data.doc_path.is_some() && !data.is_dirty() && !data.format.lossy_decode {
-            return;
-        }
-        let id = data.id;
-        self.start_file_workflow(
-            FileWorkflow::single(
-                WorkflowStep::SaveTab {
-                    id,
-                    activate: false,
-                },
-                WorkflowFinish::None,
-            ),
-            jobs,
-        );
-    }
-
-    pub(crate) fn save_as(&mut self, jobs: &Jobs<AppEvent>) {
-        let id = self.active_tab_id();
-        self.start_file_workflow(
-            FileWorkflow::single(WorkflowStep::SaveTabAs(id), WorkflowFinish::None),
-            jobs,
-        );
-    }
-
-    pub(crate) fn save_all(&mut self, jobs: &Jobs<AppEvent>) {
-        let dirty = self.dirty_tabs();
-        if dirty.is_empty() {
-            return;
-        }
-        self.start_file_workflow(
-            FileWorkflow::batch(
-                dirty
-                    .into_iter()
-                    .map(|id| WorkflowStep::SaveTab { id, activate: true }),
-                WorkflowFinish::None,
-            ),
-            jobs,
-        );
-    }
-
-    pub(crate) fn close_tab(&mut self, ix: usize, jobs: &Jobs<AppEvent>) {
-        if !self.tabs[ix].data.is_dirty() {
-            self.remove_tab(ix, jobs);
-            return;
-        }
-        let id = self.tabs[ix].data.id;
-        self.activate_tab(ix, jobs);
-        self.start_file_workflow(
-            FileWorkflow::single(
-                WorkflowStep::ConfirmDiscard {
-                    id,
-                    activate: false,
-                },
-                WorkflowFinish::RemoveTab(id),
-            ),
-            jobs,
-        );
-    }
-
-    pub(crate) fn request_close_window(&mut self, jobs: &Jobs<AppEvent>) {
-        let dirty = self.dirty_tabs();
-        if dirty.is_empty() {
-            self.pending_close = true;
-            return;
-        }
-        if self.dialogs.is_open()
-            && self
-                .file_workflow
-                .as_ref()
-                .is_some_and(|wf| wf.on_finish == WorkflowFinish::CloseWindow)
-        {
-            return;
-        }
-        self.start_file_workflow(
-            FileWorkflow::batch(
-                dirty
-                    .into_iter()
-                    .map(|id| WorkflowStep::ConfirmDiscard { id, activate: true }),
-                WorkflowFinish::CloseWindow,
-            ),
-            jobs,
-        );
-    }
-
-    fn start_file_workflow(&mut self, workflow: FileWorkflow, jobs: &Jobs<AppEvent>) {
-        self.file_workflow = Some(workflow);
-        self.advance_file_workflow(jobs);
-    }
-
-    pub(crate) fn abort_file_workflow(&mut self) {
-        self.file_workflow = None;
-    }
-
-    pub(crate) fn abort_file_workflow_if(&mut self, wf_gen: WorkflowGen) {
-        if self.file_workflow.as_ref().is_some_and(|wf| wf.wf_gen == wf_gen) {
-            self.file_workflow = None;
-        }
-    }
-
-    pub(crate) fn advance_file_workflow_if(&mut self, wf_gen: WorkflowGen, jobs: &Jobs<AppEvent>) {
-        if self.file_workflow.as_ref().is_some_and(|wf| wf.wf_gen == wf_gen) {
-            self.advance_file_workflow(jobs);
-        }
-    }
-
-    pub(crate) fn advance_file_workflow(&mut self, jobs: &Jobs<AppEvent>) {
-        loop {
-            let wf_gen = self.file_workflow.as_ref().map(|wf| wf.wf_gen);
-            let next = self
-                .file_workflow
-                .as_mut()
-                .and_then(FileWorkflow::next_step);
-            let Some(step) = next else {
-                if let Some(mut workflow) = self.file_workflow.take() {
-                    match workflow.on_finish {
-                        WorkflowFinish::None => {}
-                        WorkflowFinish::RemoveTab(id) => {
-                            if let Some(ix) = self.tab_index(id) {
-                                let rev = self.tabs[ix].data.editor.revision();
-                                if self.tabs[ix].data.is_dirty()
-                                    && !workflow.is_discard_approved(id, rev)
-                                {
-                                    self.close_tab(ix, jobs);
-                                } else {
-                                    self.remove_tab(ix, jobs);
-                                }
-                            }
-                        }
-                        WorkflowFinish::CloseWindow => {
-                            let remaining_dirty: Vec<TabId> = self
-                                .tabs
-                                .iter()
-                                .filter(|t| {
-                                    t.data.is_dirty()
-                                        && !workflow
-                                            .is_discard_approved(t.data.id, t.data.editor.revision())
-                                })
-                                .map(|t| t.data.id)
-                                .collect();
-                            if remaining_dirty.is_empty() {
-                                self.pending_close = true;
-                            } else {
-                                let approved = workflow.take_approved_discards();
-                                self.start_file_workflow(
-                                    FileWorkflow::batch(
-                                        remaining_dirty.into_iter().map(|id| {
-                                            WorkflowStep::ConfirmDiscard { id, activate: true }
-                                        }),
-                                        WorkflowFinish::CloseWindow,
-                                    )
-                                    .with_approved_discards(approved),
-                                    jobs,
-                                );
-                            }
-                        }
-                    }
-                }
-                return;
-            };
-            let wf_gen = wf_gen.unwrap_or_else(WorkflowGen::next);
-
-            match step {
-                WorkflowStep::SaveTab { id, activate } => {
-                    let Some(ix) = self.tab_index(id) else {
-                        self.abort_file_workflow();
-                        return;
-                    };
-                    if activate {
-                        self.activate_tab(ix, jobs);
-                    }
-                    match self.tabs[ix].data.path().map(PathBuf::from) {
-                        Some(path) => {
-                            let format = self.tabs[ix].data.format;
-                            let wid = self.id();
-                            self.begin_write_tab_for_workflow(ix, wid, wf_gen, path, format, jobs);
-                        }
-                        None => self.begin_save_tab_as(id, wf_gen, jobs),
-                    }
-                    return;
-                }
-                WorkflowStep::SaveTabAs(id) => {
-                    self.begin_save_tab_as(id, wf_gen, jobs);
-                    return;
-                }
-                WorkflowStep::ConfirmDiscard { id, activate } => {
-                    let Some(ix) = self.tab_index(id) else {
-                        continue;
-                    };
-                    if !self.tabs[ix].data.is_dirty() {
-                        continue;
-                    }
-                    if activate {
-                        self.activate_tab(ix, jobs);
-                    }
-                    let name = self.tab_name(ix);
-                    self.show_file_prompt(FilePrompt::ConfirmDiscard { tab: id, name }, jobs);
-                    return;
-                }
-            }
-        }
-    }
-
-    pub(crate) fn begin_save_tab_as(
-        &mut self,
-        id: TabId,
-        wf_gen: WorkflowGen,
-        jobs: &Jobs<AppEvent>,
-    ) {
-        let Some(ix) = self.tab_index(id) else {
-            self.abort_file_workflow_if(wf_gen);
-            return;
-        };
-        let current = self.tabs[ix].data.path().map(PathBuf::from);
-        let format = self.tabs[ix].data.format;
-        files::spawn_save_dialog(self.id(), wf_gen, self.native.hwnd(), id, current, format, jobs);
-    }
-
-    pub(crate) fn begin_write_tab_for_workflow(
-        &mut self,
-        ix: usize,
-        origin_window: WindowId,
-        wf_gen: WorkflowGen,
-        path: PathBuf,
-        format: Format,
-        jobs: &Jobs<AppEvent>,
-    ) {
-        let data = &mut self.tabs[ix].data;
-        if let TabSaveState::InFlight { pending } = &mut data.save_state {
-            *pending = Some(PendingSave {
-                path,
-                format,
-                wf_gen,
-            });
-            return;
-        }
-        data.save_state = TabSaveState::InFlight { pending: None };
-        let id = data.id;
-        let snapshot = data.editor.begin_save();
-        let text = data.editor.text().clone();
-        files::spawn_lossy_check(origin_window, wf_gen, id, snapshot, text, path, format, jobs);
-    }
-
-    pub(crate) fn clear_tab_save_in_flight(&mut self, tab: TabId) -> Option<PendingSave> {
-        let ix = self.tab_index(tab)?;
-        match std::mem::replace(&mut self.tabs[ix].data.save_state, TabSaveState::Idle) {
-            TabSaveState::InFlight { pending } => pending,
-            TabSaveState::Idle => None,
-        }
-    }
-
-    pub(crate) fn apply_tab_saved(
+    pub(crate) fn mark_tab_saved(
         &mut self,
         tab: TabId,
         snapshot: u64,
         doc_path: DocPath,
         format: Format,
-        origin_window: WindowId,
-        jobs: &Jobs<AppEvent>,
-    ) -> Option<WorkflowGen> {
-        let pending = self.clear_tab_save_in_flight(tab);
-        let ix = self.tab_index(tab)?;
+    ) {
+        let Some(ix) = self.tab_index(tab) else {
+            return;
+        };
         let t = &mut self.tabs[ix];
         t.data.editor.mark_saved_version(snapshot);
         t.data.doc_path = Some(doc_path);
         t.data.format = format;
         self.refresh_title();
         self.dirty = true;
-        if let Some(next) = pending {
-            let next_gen = next.wf_gen;
-            self.begin_write_tab_for_workflow(
-                ix,
-                origin_window,
-                next_gen,
-                next.path,
-                next.format,
-                jobs,
-            );
-            return Some(next_gen);
-        }
-        None
     }
 
-    fn show_dialog(&mut self, kind: DialogKind, jobs: &Jobs<AppEvent>) {
-        if self.dialogs.is_open() {
-            self.pending_prompts.push_back(kind);
-            return;
+    pub(crate) fn show_prompt(&mut self, prompt: Prompt, jobs: &Jobs<AppEvent>) {
+        if let Some(next_focus) = self.dialogs.enqueue(DialogKind::Prompt(prompt)) {
+            self.cancel_menu(jobs);
+            self.set_focus(next_focus, jobs);
+            self.dirty = true;
         }
-        self.show_dialog_now(kind, jobs);
     }
 
     fn show_dialog_now(&mut self, kind: DialogKind, jobs: &Jobs<AppEvent>) {
         self.cancel_menu(jobs);
-        let next_focus = self.dialogs.show(kind);
+        let next_focus = self.dialogs.show_now(kind);
         self.set_focus(next_focus, jobs);
         self.dirty = true;
     }
 
-    pub(crate) fn show_file_prompt(&mut self, prompt: FilePrompt, jobs: &Jobs<AppEvent>) {
-        self.show_dialog(DialogKind::from_file_prompt(prompt), jobs);
-    }
-
     fn close_dialogs(&mut self, jobs: &Jobs<AppEvent>) {
-        self.dialogs.hide();
-        if let Some(next) = self.pending_prompts.pop_front() {
-            self.show_dialog_now(next, jobs);
+        if let Some(next_focus) = self.dialogs.dismiss() {
+            self.cancel_menu(jobs);
+            self.set_focus(next_focus, jobs);
         } else {
             self.focus_active_editor(jobs);
-            self.dirty = true;
         }
+        self.dirty = true;
     }
 
     pub(crate) fn open_go_to(&mut self, ts: &TextSystem, jobs: &Jobs<AppEvent>) {
@@ -960,71 +669,18 @@ impl MainWindow {
         }
     }
 
-    fn press_dialog_button(&mut self, ix: usize, ts: &TextSystem, jobs: &Jobs<AppEvent>) {
+    fn press_dialog_button(&mut self, ix: usize, cx: &mut Cx<'_>) {
         let Some(kind) = self.dialogs.take_active() else {
             return;
         };
         match kind {
-            DialogKind::GoTo if ix == 0 => self.submit_go_to(jobs),
-            DialogKind::GoTo | DialogKind::Error { .. } => self.close_dialogs(jobs),
-            DialogKind::LineOutOfRange => self.show_go_to(None, ts, jobs),
-            DialogKind::ConfirmDiscard { tab, .. } => {
-                self.dialogs.hide();
-                match ix {
-                    0 => {
-                        if let Some(wf) = self.file_workflow.as_mut() {
-                            wf.prepend(WorkflowStep::SaveTab {
-                                id: tab,
-                                activate: false,
-                            });
-                        }
-                        self.advance_file_workflow(jobs);
-                    }
-                    1 => {
-                        if let Some(ix) = self.tab_index(tab) {
-                            let rev = self.tabs[ix].data.editor.revision();
-                            if let Some(wf) = self.file_workflow.as_mut() {
-                                wf.approve_discard(tab, rev);
-                            }
-                        }
-                        self.advance_file_workflow(jobs);
-                    }
-                    _ => self.abort_file_workflow(),
-                }
-                if !self.dialogs.is_open() {
-                    if let Some(next) = self.pending_prompts.pop_front() {
-                        self.show_dialog_now(next, jobs);
-                    } else {
-                        self.focus_active_editor(jobs);
-                    }
-                }
-            }
-            DialogKind::ConfirmLossyAnsi {
-                wf_gen,
-                tab,
-                snapshot,
-                text,
-                path,
-                format,
-            } => {
-                self.close_dialogs(jobs);
-                match ix {
-                    0 => {
-                        files::spawn_write_file(
-                            self.id(),
-                            wf_gen,
-                            tab,
-                            snapshot,
-                            text,
-                            path,
-                            format,
-                            jobs,
-                        );
-                    }
-                    _ => {
-                        let _ = self.clear_tab_save_in_flight(tab);
-                        self.begin_save_tab_as(tab, wf_gen, jobs);
-                    }
+            DialogKind::GoTo if ix == 0 => self.submit_go_to(cx.jobs),
+            DialogKind::GoTo => self.close_dialogs(cx.jobs),
+            DialogKind::LineOutOfRange => self.show_go_to(None, cx.ts, cx.jobs),
+            DialogKind::Prompt(prompt) => {
+                self.close_dialogs(cx.jobs);
+                if let Some(id) = prompt.id {
+                    cx.emit(Effect::PromptResponse { id, button: ix });
                 }
             }
         }
@@ -1386,9 +1042,12 @@ impl MainWindow {
             let pressed = self.middle_pressed_tab.take();
             if let Some(id) = pressed
                 && pressed == tab_over
-                && let Some(ix) = self.tab_index(id)
+                && self.tab_index(id).is_some()
             {
-                self.close_tab(ix, cx.jobs);
+                cx.emit(Effect::File(FileRequest::CloseTab {
+                    window: self.id(),
+                    tab: id,
+                }));
             }
             return;
         }
@@ -1418,7 +1077,7 @@ impl MainWindow {
         }
 
         match activated {
-            Some(HitId::DialogButton(ix)) => self.press_dialog_button(ix, cx.ts, cx.jobs),
+            Some(HitId::DialogButton(ix)) => self.press_dialog_button(ix, cx),
             Some(HitId::FieldClear(slot)) => {
                 if let Some(ed) = self.editor_by_slot_mut(slot) {
                     ed.set_value("", cx.ts);
@@ -1457,8 +1116,11 @@ impl MainWindow {
                 let _ = self.apply_menu_outcome(out, cx);
             }
             Some(HitId::TabClose(id)) => {
-                if let Some(ix) = self.tab_index(id) {
-                    self.close_tab(ix, cx.jobs);
+                if self.tab_index(id).is_some() {
+                    cx.emit(Effect::File(FileRequest::CloseTab {
+                        window: self.id(),
+                        tab: id,
+                    }));
                 }
             }
             Some(HitId::NewTab) => self.add_tab(cx.view.word_wrap, cx.jobs),
@@ -1528,18 +1190,18 @@ impl MainWindow {
                         Focus::DialogButton(ix) => ix,
                         _ => 0,
                     };
-                    self.press_dialog_button(btn, cx.ts, cx.jobs);
+                    self.press_dialog_button(btn, cx);
                     return true;
                 }
                 (false, false, false, false, Key::Space) => {
                     if let Focus::DialogButton(ix) = self.focus {
-                        self.press_dialog_button(ix, cx.ts, cx.jobs);
+                        self.press_dialog_button(ix, cx);
                         return true;
                     }
                 }
                 (false, false, false, false, Key::Escape) => {
                     let last = self.dialogs.active_button_count().saturating_sub(1);
-                    self.press_dialog_button(last, cx.ts, cx.jobs);
+                    self.press_dialog_button(last, cx);
                     return true;
                 }
                 (false, false, false, false, Key::Tab) => {
@@ -1729,27 +1391,38 @@ impl MainWindow {
             AppCommand::ZoomIn => self.set_zoom(self.zoom() + ZOOM_STEP),
             AppCommand::ZoomOut => self.set_zoom(self.zoom() - ZOOM_STEP),
             AppCommand::ResetZoom => self.set_zoom(1.),
-            AppCommand::CloseWindow => self.request_close_window(cx.jobs),
+            AppCommand::CloseWindow => {
+                cx.emit(Effect::File(FileRequest::CloseWindow { window: self.id() }));
+            }
             AppCommand::NewTab => self.add_tab(cx.view.word_wrap, cx.jobs),
-            AppCommand::CloseTab => self.close_tab(self.active, cx.jobs),
+            AppCommand::CloseTab => {
+                cx.emit(Effect::File(FileRequest::CloseTab {
+                    window: self.id(),
+                    tab: self.active_tab_id(),
+                }));
+            }
             AppCommand::NextTab => self.next_tab(cx.jobs),
             AppCommand::PrevTab => self.prev_tab(cx.jobs),
             AppCommand::SelectTab(ix) => self.select_tab(ix, cx.jobs),
             AppCommand::SelectLastTab => self.select_last_tab(cx.jobs),
             AppCommand::Open => {
-                if !self.open_dialog_active {
-                    self.open_dialog_active = true;
-                    files::spawn_open_dialog(
-                        self.id(),
-                        self.native.hwnd(),
-                        self.tabs[self.active].data.path().map(PathBuf::from),
-                        cx.jobs,
-                    );
-                }
+                cx.emit(Effect::File(FileRequest::OpenDialog { window: self.id() }));
             }
-            AppCommand::Save => self.save(cx.jobs),
-            AppCommand::SaveAs => self.save_as(cx.jobs),
-            AppCommand::SaveAll => self.save_all(cx.jobs),
+            AppCommand::Save => {
+                cx.emit(Effect::File(FileRequest::Save {
+                    window: self.id(),
+                    tab: self.active_tab_id(),
+                }));
+            }
+            AppCommand::SaveAs => {
+                cx.emit(Effect::File(FileRequest::SaveAs {
+                    window: self.id(),
+                    tab: self.active_tab_id(),
+                }));
+            }
+            AppCommand::SaveAll => {
+                cx.emit(Effect::File(FileRequest::SaveAll { window: self.id() }));
+            }
             AppCommand::TimeDate => {
                 let stamp = format_local_time_date();
                 self.active_editor_mut().replace(&stamp, cx.ts);
