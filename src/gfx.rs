@@ -650,6 +650,7 @@ pub(crate) struct Scope {
     pub(crate) opacity: Option<f32>,
     pub(crate) scale: Option<(Point, f32, f32)>,
     pub(crate) translate: Option<Point>,
+    /// In the caller's coordinates: it stays put while `scale` and `translate` move the content.
     pub(crate) clip: Option<Rect>,
 }
 
@@ -708,6 +709,13 @@ impl Canvas {
                 self.context.PushLayer(&params, None);
             }
         }
+        if let Some(bounds) = scope.clip {
+            let rect = to_d2d_rect(bounds);
+            unsafe {
+                self.context
+                    .PushAxisAlignedClip(&rect, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+            }
+        }
         let prev_transform = (scope.scale.is_some() || scope.translate.is_some()).then(|| {
             let (sx, sy, mut tx, mut ty) = match scope.scale {
                 Some((origin, sx, sy)) => (sx, sy, origin.x * (1.0 - sx), origin.y * (1.0 - sy)),
@@ -732,25 +740,18 @@ impl Canvas {
             }
             prev
         });
-        if let Some(bounds) = scope.clip {
-            let rect = to_d2d_rect(bounds);
-            unsafe {
-                self.context
-                    .PushAxisAlignedClip(&rect, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-            }
-        }
 
         draw(self);
 
-        if scope.clip.is_some() {
-            unsafe {
-                self.context.PopAxisAlignedClip();
-            }
-        }
         if let Some(prev) = prev_transform {
             self.transform = prev;
             unsafe {
                 self.context.SetTransform(&prev);
+            }
+        }
+        if scope.clip.is_some() {
+            unsafe {
+                self.context.PopAxisAlignedClip();
             }
         }
         if scope.opacity.is_some() {
