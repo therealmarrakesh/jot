@@ -99,25 +99,12 @@ impl Direct2DDevices {
             unsafe { CreateDXGIFactory2(DXGI_CREATE_FACTORY_FLAGS(0))? };
         let feature_levels = [D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0];
         let mut d3d_device: Option<ID3D11Device> = None;
-
-        let hw = unsafe {
-            D3D11CreateDevice(
-                None,
-                D3D_DRIVER_TYPE_HARDWARE,
-                windows::Win32::Foundation::HMODULE::default(),
-                D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-                Some(&feature_levels),
-                D3D11_SDK_VERSION,
-                Some(&mut d3d_device),
-                None,
-                None,
-            )
-        };
-        if hw.is_err() {
-            unsafe {
+        let mut last_err = None;
+        for driver in [D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP] {
+            match unsafe {
                 D3D11CreateDevice(
                     None,
-                    D3D_DRIVER_TYPE_WARP,
+                    driver,
                     windows::Win32::Foundation::HMODULE::default(),
                     D3D11_CREATE_DEVICE_BGRA_SUPPORT,
                     Some(&feature_levels),
@@ -125,8 +112,17 @@ impl Direct2DDevices {
                     Some(&mut d3d_device),
                     None,
                     None,
-                )?;
+                )
+            } {
+                Ok(()) => {
+                    last_err = None;
+                    break;
+                }
+                Err(err) => last_err = Some(err),
             }
+        }
+        if let Some(err) = last_err {
+            return Err(err.into());
         }
         let d3d_device =
             d3d_device.ok_or_else(|| Error::new("D3D11CreateDevice returned null device"))?;
@@ -215,6 +211,21 @@ pub(crate) struct Surface {
 }
 
 impl Surface {
+    fn build_state(
+        hwnd: HWND,
+        width: u32,
+        height: u32,
+        scale: f32,
+        generation: u64,
+        devices: Direct2DDevices,
+    ) -> Result<SurfaceState> {
+        let renderer = Box::new(D2DRenderer::new(devices, hwnd, width, height, scale)?);
+        Ok(SurfaceState::Ready {
+            generation,
+            renderer,
+        })
+    }
+
     pub(crate) fn new(
         gpu: Rc<Gpu>,
         hwnd: HWND,
@@ -222,23 +233,16 @@ impl Surface {
         physical_height: u32,
         scale_factor: f32,
     ) -> Result<Self> {
+        let width = physical_width.max(1);
+        let height = physical_height.max(1);
         let (generation, devices) = gpu.snapshot();
-        let renderer = Box::new(D2DRenderer::new(
-            devices,
-            hwnd,
-            physical_width,
-            physical_height,
-            scale_factor,
-        )?);
+        let state = Self::build_state(hwnd, width, height, scale_factor, generation, devices)?;
         Ok(Self {
             gpu,
             hwnd,
-            state: SurfaceState::Ready {
-                generation,
-                renderer,
-            },
-            width: physical_width.max(1),
-            height: physical_height.max(1),
+            state,
+            width,
+            height,
             scale: scale_factor,
         })
     }
@@ -266,13 +270,8 @@ impl Surface {
         }
         if matches!(self.state, SurfaceState::Lost) {
             let (generation, devices) = self.gpu.snapshot();
-            match D2DRenderer::new(devices, self.hwnd, self.width, self.height, self.scale) {
-                Ok(renderer) => {
-                    self.state = SurfaceState::Ready {
-                        generation,
-                        renderer: Box::new(renderer),
-                    };
-                }
+            match Self::build_state(self.hwnd, self.width, self.height, self.scale, generation, devices) {
+                Ok(ready) => self.state = ready,
                 Err(err) => {
                     crate::diag::debug_log(&format!("surface recreate failed: {err}"));
                     return false;
@@ -296,17 +295,15 @@ impl Surface {
                 self.state = SurfaceState::Lost;
                 match self.gpu.recover(used_gen) {
                     Ok((new_gen, new_devices)) => {
-                        if let Ok(new_renderer) = D2DRenderer::new(
-                            new_devices,
+                        if let Ok(ready) = Self::build_state(
                             self.hwnd,
                             self.width,
                             self.height,
                             self.scale,
+                            new_gen,
+                            new_devices,
                         ) {
-                            self.state = SurfaceState::Ready {
-                                generation: new_gen,
-                                renderer: Box::new(new_renderer),
-                            };
+                            self.state = ready;
                         }
                     }
                     Err(err) => {

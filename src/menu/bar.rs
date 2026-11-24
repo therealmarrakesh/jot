@@ -68,6 +68,15 @@ impl MenuOutcome {
             ..Default::default()
         }
     }
+
+    fn cancel_submenu() -> Self {
+        Self {
+            handled: true,
+            submenu_timer: SubmenuTimer::Cancel,
+            dirty: true,
+            ..Default::default()
+        }
+    }
 }
 
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
@@ -635,12 +644,7 @@ impl MenuBar {
                 Some(ix) => {
                     open.panel.focused = Some(ix);
                     self.close_submenu();
-                    MenuOutcome {
-                        handled: true,
-                        submenu_timer: SubmenuTimer::Cancel,
-                        dirty: true,
-                        ..Default::default()
-                    }
+                    MenuOutcome::cancel_submenu()
                 }
                 None => self.close_to_bar(),
             },
@@ -689,12 +693,7 @@ impl MenuBar {
                 BarMode::Idle
             };
             self.open_submenu(ix, true, ts);
-            MenuOutcome {
-                handled: true,
-                submenu_timer: SubmenuTimer::Cancel,
-                dirty: true,
-                ..Default::default()
-            }
+            MenuOutcome::cancel_submenu()
         } else {
             self.mode = BarMode::Idle;
             self.activate((ix, None), ts)
@@ -786,12 +785,7 @@ impl MenuBar {
         match self.live_open() {
             Some(open) if open.live_submenu().is_some() => {
                 self.close_submenu();
-                MenuOutcome {
-                    handled: true,
-                    submenu_timer: SubmenuTimer::Cancel,
-                    dirty: true,
-                    ..Default::default()
-                }
+                MenuOutcome::cancel_submenu()
             }
             Some(open) if open.kind.bar_kind().is_some() => self.close_to_bar(),
             Some(_) => self.close(),
@@ -802,15 +796,19 @@ impl MenuBar {
         }
     }
 
+    fn cycle_bar(&mut self, delta: isize) -> MenuOutcome {
+        if let BarMode::Focused { kind, key_tips } = self.mode {
+            self.mode = BarMode::Focused {
+                kind: kind.cycle(delta),
+                key_tips,
+            };
+        }
+        MenuOutcome::handled_dirty()
+    }
+
     fn on_left(&mut self, state: MenuState, ts: &TextSystem) -> MenuOutcome {
         let Some(open) = self.live_open_mut() else {
-            if let BarMode::Focused { kind, key_tips } = self.mode {
-                self.mode = BarMode::Focused {
-                    kind: kind.cycle(-1),
-                    key_tips,
-                };
-            }
-            return MenuOutcome::handled_dirty();
+            return self.cycle_bar(-1);
         };
         open.focus_visible = true;
         if !open.kind.commands().is_empty() {
@@ -818,12 +816,7 @@ impl MenuBar {
             MenuOutcome::handled_dirty()
         } else if open.in_submenu() {
             self.close_submenu();
-            MenuOutcome {
-                handled: true,
-                submenu_timer: SubmenuTimer::Cancel,
-                dirty: true,
-                ..Default::default()
-            }
+            MenuOutcome::cancel_submenu()
         } else if let Some(kind) = open.kind.bar_kind() {
             self.open_by_keyboard(kind.cycle(-1), state, false, ts)
         } else {
@@ -833,13 +826,7 @@ impl MenuBar {
 
     fn on_right(&mut self, state: MenuState, ts: &TextSystem) -> MenuOutcome {
         let Some(open) = self.live_open_mut() else {
-            if let BarMode::Focused { kind, key_tips } = self.mode {
-                self.mode = BarMode::Focused {
-                    kind: kind.cycle(1),
-                    key_tips,
-                };
-            }
-            return MenuOutcome::handled_dirty();
+            return self.cycle_bar(1);
         };
         open.focus_visible = true;
         if !open.kind.commands().is_empty() {
@@ -857,12 +844,7 @@ impl MenuBar {
         match submenu_row {
             Some(ix) => {
                 self.open_submenu(ix, true, ts);
-                MenuOutcome {
-                    handled: true,
-                    submenu_timer: SubmenuTimer::Cancel,
-                    dirty: true,
-                    ..Default::default()
-                }
+                MenuOutcome::cancel_submenu()
             }
             None => match open.kind.bar_kind() {
                 Some(kind) => self.open_by_keyboard(kind.cycle(1), state, false, ts),

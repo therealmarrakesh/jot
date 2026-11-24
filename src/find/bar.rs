@@ -381,6 +381,30 @@ impl FindBar {
             )
     }
 
+    fn render_field(
+        editor: &Editor,
+        slot: EditorSlot,
+        focused_slot: Option<EditorSlot>,
+        search_icon: bool,
+        p: Palette,
+        ui: &mut UiState,
+    ) -> Node {
+        let view = editor.view(HitId::Editor(slot), CustomDraw::Editor(slot), BODY_LINE + 2.);
+        text_field_frame(
+            p,
+            HitId::Editor(slot),
+            HitId::FieldClear(slot),
+            TextFieldStyle {
+                surface: p.card_surface,
+                focused: focused_slot == Some(slot),
+                empty: editor.text().len() == 0,
+                search_icon,
+            },
+            view,
+            ui,
+        )
+    }
+
     fn render_query_row(
         &self,
         p: Palette,
@@ -404,25 +428,8 @@ impl FindBar {
             CHEVRON_SIZE,
             ui,
         );
-        let query_slot = EditorSlot::FindQuery;
-        let query_editor = self.query.view(
-            HitId::Editor(query_slot),
-            CustomDraw::Editor(query_slot),
-            BODY_LINE + 2.,
-        );
-        let query_field = text_field_frame(
-            p,
-            HitId::Editor(query_slot),
-            HitId::FieldClear(query_slot),
-            TextFieldStyle {
-                surface: p.card_surface,
-                focused: focused_slot == Some(query_slot),
-                empty: self.query.text().len() == 0,
-                search_icon: true,
-            },
-            query_editor,
-            ui,
-        );
+        let query_field =
+            Self::render_field(&self.query, EditorSlot::FindQuery, focused_slot, true, p, ui);
         let next_btn = find_icon_button(
             p,
             HitId::FindNext,
@@ -474,23 +481,12 @@ impl FindBar {
         focused_slot: Option<EditorSlot>,
         ui: &mut UiState,
     ) -> Node {
-        let replace_slot = EditorSlot::FindReplace;
-        let replace_editor = self.replacement.view(
-            HitId::Editor(replace_slot),
-            CustomDraw::Editor(replace_slot),
-            BODY_LINE + 2.,
-        );
-        let replace_field = text_field_frame(
+        let replace_field = Self::render_field(
+            &self.replacement,
+            EditorSlot::FindReplace,
+            focused_slot,
+            false,
             p,
-            HitId::Editor(replace_slot),
-            HitId::FieldClear(replace_slot),
-            TextFieldStyle {
-                surface: p.card_surface,
-                focused: focused_slot == Some(replace_slot),
-                empty: self.replacement.text().len() == 0,
-                search_icon: false,
-            },
-            replace_editor,
             ui,
         );
         let replace_btn = button(p, buttons, HitId::FindReplace, "Replace", false, false, ui);

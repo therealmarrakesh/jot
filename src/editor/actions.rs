@@ -7,11 +7,17 @@ use super::buffer::{
     Bias, RopeExt as _, next_grapheme_boundary, next_word_end, prev_grapheme_boundary,
     prev_word_start,
 };
+use super::model::EditEffects;
 use super::{
     Clipboard, DocumentView, EditCommand, Editor, EditorTimers, Motion, MoveDirection, ViewKind,
 };
 
 impl Editor {
+    fn commit_edit(&mut self, fx: EditEffects, ts: &TextSystem, timers: &mut dyn EditorTimers) {
+        self.pause_blink(timers);
+        self.apply_effects(fx, ts);
+    }
+
     pub(crate) fn handle_command(
         &mut self,
         command: EditCommand,
@@ -25,31 +31,26 @@ impl Editor {
                 if self.model.selection().is_empty() && self.cursor() == 0 {
                     return false;
                 }
-                self.pause_blink(timers);
                 let fx = self.model.delete_backward();
-                self.apply_effects(fx, ts);
+                self.commit_edit(fx, ts, timers);
             }
             EditCommand::Delete => {
-                self.pause_blink(timers);
                 let fx = self.model.delete_forward();
-                self.apply_effects(fx, ts);
+                self.commit_edit(fx, ts, timers);
             }
             EditCommand::DeletePrevWord => {
-                self.pause_blink(timers);
                 let fx = self.model.delete_prev_word();
-                self.apply_effects(fx, ts);
+                self.commit_edit(fx, ts, timers);
             }
             EditCommand::DeleteNextWord => {
-                self.pause_blink(timers);
                 let fx = self.model.delete_next_word();
-                self.apply_effects(fx, ts);
+                self.commit_edit(fx, ts, timers);
             }
             EditCommand::Enter => {
                 let Some(fx) = self.model.enter() else {
                     return false;
                 };
-                self.pause_blink(timers);
-                self.apply_effects(fx, ts);
+                self.commit_edit(fx, ts, timers);
             }
             EditCommand::Escape => {
                 let Some(fx) = self.model.cancel_composition() else {
@@ -67,9 +68,8 @@ impl Editor {
                 if !self.model.selection().is_empty()
                     && clipboard.write(&self.selected_text().to_string())
                 {
-                    self.pause_blink(timers);
                     let fx = self.model.replace_selection("");
-                    self.apply_effects(fx, ts);
+                    self.commit_edit(fx, ts, timers);
                 }
             }
             EditCommand::Paste => {
@@ -81,38 +81,32 @@ impl Editor {
                         raw.split(['\r', '\n']).next().unwrap_or("")
                     };
                     if !text.is_empty() {
-                        self.pause_blink(timers);
                         let fx = self.model.replace_selection(text);
-                        self.apply_effects(fx, ts);
+                        self.commit_edit(fx, ts, timers);
                     }
                 }
             }
             EditCommand::Undo => {
                 if let Some(fx) = self.model.undo() {
-                    self.pause_blink(timers);
-                    self.apply_effects(fx, ts);
+                    self.commit_edit(fx, ts, timers);
                 }
             }
             EditCommand::Redo => {
                 if let Some(fx) = self.model.redo() {
-                    self.pause_blink(timers);
-                    self.apply_effects(fx, ts);
+                    self.commit_edit(fx, ts, timers);
                 }
             }
             EditCommand::IndentInline | EditCommand::Indent => {
-                let block = matches!(command, EditCommand::Indent);
-                let Some(fx) = self.model.indent(block) else {
+                let Some(fx) = self.model.indent(matches!(command, EditCommand::Indent)) else {
                     return false;
                 };
-                self.pause_blink(timers);
-                self.apply_effects(fx, ts);
+                self.commit_edit(fx, ts, timers);
             }
             EditCommand::OutdentInline | EditCommand::Outdent => {
                 let Some(fx) = self.model.outdent() else {
                     return false;
                 };
-                self.pause_blink(timers);
-                self.apply_effects(fx, ts);
+                self.commit_edit(fx, ts, timers);
             }
             EditCommand::SelectAll => self.select_all(),
             EditCommand::Move { motion, extend } => {
@@ -128,9 +122,8 @@ impl Editor {
         ts: &TextSystem,
         timers: &mut dyn EditorTimers,
     ) {
-        self.pause_blink(timers);
         let fx = self.model.insert_text(text);
-        self.apply_effects(fx, ts);
+        self.commit_edit(fx, ts, timers);
     }
 
     pub(crate) fn handle_ime_composition(&mut self, text: &str, cursor_utf16: usize, ts: &TextSystem) {

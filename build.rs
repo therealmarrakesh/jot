@@ -7,10 +7,39 @@ fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=assets/jot.ico");
     println!("cargo:rerun-if-changed=Cargo.toml");
+    println!("cargo:rerun-if-changed=Cargo.lock");
+
+    let root = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
+    verify_notices_against_lockfile(&root.join("Cargo.lock"));
 
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     fs::write(out_dir.join("notices.txt"), THIRD_PARTY_NOTICES).unwrap();
     compile_resources(&out_dir);
+}
+
+fn verify_notices_against_lockfile(lock_path: &Path) {
+    let Ok(lock) = fs::read_to_string(lock_path) else {
+        return;
+    };
+    const IGNORED: &[&str] = &["jot", "proc-macro2", "quote", "syn", "unicode-ident"];
+    let mut name: Option<&str> = None;
+    for line in lock.lines().map(str::trim) {
+        if line == "[[package]]" {
+            name = None;
+        } else if let Some(val) = line.strip_prefix("name = ") {
+            name = Some(val.trim_matches('"'));
+        } else if let Some(val) = line.strip_prefix("version = ")
+            && let Some(pkg) = name.take()
+            && !IGNORED.contains(&pkg)
+        {
+            let ver = val.trim_matches('"');
+            let expected = format!("{pkg} {ver}");
+            assert!(
+                THIRD_PARTY_NOTICES.contains(&expected),
+                "THIRD_PARTY_NOTICES in build.rs is missing `{expected}` from Cargo.lock"
+            );
+        }
+    }
 }
 
 fn compile_resources(out_dir: &Path) {

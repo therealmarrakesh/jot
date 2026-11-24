@@ -504,6 +504,15 @@ impl Editor {
         frame.hit_test(pos, self.model.text().len(), self.model.is_multi_line())
     }
 
+    fn apply_scrollbar_scroll(&mut self, next: Option<Point>) -> bool {
+        let Some(next) = next else {
+            return false;
+        };
+        self.reveal = None;
+        self.clamp_and_set_scroll_f64(next.x, f64::from(next.y));
+        true
+    }
+
     pub(crate) fn on_scrollbar_mouse_down(
         &mut self,
         axis: Axis,
@@ -519,13 +528,7 @@ impl Editor {
             }
             ViewKind::Field => None,
         };
-        if let Some(next) = next {
-            self.reveal = None;
-            self.clamp_and_set_scroll_f64(next.x, f64::from(next.y));
-            true
-        } else {
-            false
-        }
+        self.apply_scrollbar_scroll(next)
     }
 
     pub(crate) fn on_scrollbar_mouse_move(
@@ -546,10 +549,7 @@ impl Editor {
             scroll,
             |delay| timers.after(delay, EditorTimer::ScrollbarDrag),
         )?;
-        if let Some(next) = next {
-            self.reveal = None;
-            self.clamp_and_set_scroll_f64(next.x, f64::from(next.y));
-        }
+        self.apply_scrollbar_scroll(next);
         Some(notify)
     }
 
@@ -563,13 +563,7 @@ impl Editor {
             ViewKind::Document(doc) => doc.scrollbar.on_mouse_up(position, track_rect, scroll),
             ViewKind::Field => None,
         };
-        if let Some(next) = next {
-            self.reveal = None;
-            self.clamp_and_set_scroll_f64(next.x, f64::from(next.y));
-            true
-        } else {
-            false
-        }
+        self.apply_scrollbar_scroll(next)
     }
 
     pub(crate) fn render_scrollbars(
@@ -791,23 +785,87 @@ impl Editor {
         }
     }
 
+    fn finish_frame(&mut self, prep: PreparedFrame, params: EditorPaintParams<'_>) {
+        let content_width = if prep.max_line_w + RIGHT_MARGIN > prep.input_bounds.size.width {
+            prep.max_line_w + RIGHT_MARGIN
+        } else {
+            prep.max_line_w
+        };
+        self.content_width = content_width;
+
+        if prep.reveal_horizontal && !prep.soft_wrap {
+            let w = prep.input_bounds.size.width;
+            if self.scroll_x + prep.head_pt.x > w - RIGHT_MARGIN {
+                self.scroll_x = w - RIGHT_MARGIN - prep.head_pt.x;
+            } else if self.scroll_x + prep.head_pt.x < 0.0 {
+                self.scroll_x = -prep.head_pt.x;
+            }
+        }
+        self.scroll_x = if prep.soft_wrap {
+            0.0
+        } else {
+            clamp_horizontal_scroll(self.scroll_x, content_width, prep.input_bounds.size.width)
+        };
+
+        // Vertical scroll is baked into visible_line_tops in f64 so D2D coordinates stay exact on huge files.
+        let content_bounds = Rect::new(
+            point(
+                prep.input_bounds.origin.x + self.scroll_x,
+                prep.input_bounds.origin.y,
+            ),
+            prep.input_bounds.size,
+        );
+        let caret_rect = self.compute_caret_rect(
+            content_bounds.origin,
+            prep.head_pt,
+            prep.line_height,
+            params.scale,
+            params.caret_width_px,
+        );
+        let show_caret = params.focused
+            && params.window_active
+            && self.blink.visible()
+            && !self.caret_hidden
+            && (self.model.selection().is_empty() || self.model.composition().is_some());
+
+        let mut frame = FrameLayout {
+            input_bounds: prep.input_bounds,
+            content_bounds,
+            visible_lines: prep.visible_lines,
+            visible_byte_offsets: prep.visible_byte_offsets,
+            visible_line_tops: prep.visible_line_tops,
+            visible_byte_range: prep.visible_byte_range,
+            rows: prep.rows,
+            line_height: prep.line_height,
+            wrap_width: prep.wrap_width,
+            space_width: prep.space_width,
+            text_color: prep.text_color,
+            caret_rect,
+            show_caret,
+            selection_rects: Vec::new(),
+            marked_range: (!prep.is_empty)
+                .then(|| self.model.composition_range())
+                .flatten(),
+            last_cursor: prep.head,
+        };
+        if params.window_active
+            && params.show_selection
+            && self.model.composition().is_none()
+            && !self.model.selection().is_empty()
+        {
+            frame.selection_rects = frame.range_rects(&self.model.selected_range());
+        }
+        self.frame = Some(frame);
+    }
+
     fn prepare_field(&mut self, input_bounds: Rect, params: EditorPaintParams<'_>, ts: &TextSystem) {
-        let EditorPaintParams {
-            style,
-            palette: p,
-            window_active,
-            focused,
-            show_selection,
-            scale,
-            caret_width_px,
-            ..
-        } = params;
+        let style = params.style;
         let text_style = TextStyle::new(style.font.clone(), style.font_size);
         let line_height = style.line_height.max(1.0);
         let space_width = ts.measure(" ", &text_style);
         let is_empty = self.model.text().len() == 0;
         let (display_str, text_color): (SharedStr, Rgba) = if is_empty {
-            (self.placeholder.clone(), p.text_secondary)
+            (self.placeholder.clone(), params.palette.text_secondary)
         } else {
             (self.model.value().into(), style.color)
         };
@@ -818,68 +876,29 @@ impl Editor {
             .position_for_index(head, line_height, false)
             .unwrap_or(Point::ZERO);
         let max_line_w = row_layout.size(line_height).width.max(head_pt.x);
-        let content_width = if max_line_w + RIGHT_MARGIN > input_bounds.size.width {
-            max_line_w + RIGHT_MARGIN
-        } else {
-            max_line_w
-        };
-        self.content_width = content_width;
-
-        if self.reveal.take().is_some() {
-            let w = input_bounds.size.width;
-            if self.scroll_x + head_pt.x > w - RIGHT_MARGIN {
-                self.scroll_x = w - RIGHT_MARGIN - head_pt.x;
-            } else if self.scroll_x + head_pt.x < 0.0 {
-                self.scroll_x = -head_pt.x;
-            }
-        }
-        self.scroll_x =
-            clamp_horizontal_scroll(self.scroll_x, content_width, input_bounds.size.width);
-
-        let content_bounds = Rect::new(
-            point(input_bounds.origin.x + self.scroll_x, input_bounds.origin.y),
-            input_bounds.size,
+        let reveal_horizontal = self.reveal.take().is_some();
+        let text_len = self.model.text().len();
+        self.finish_frame(
+            PreparedFrame {
+                input_bounds,
+                visible_lines: vec![0],
+                visible_byte_offsets: vec![0],
+                visible_line_tops: vec![0.0],
+                visible_byte_range: 0..text_len,
+                rows: vec![row_layout],
+                line_height,
+                wrap_width: None,
+                space_width,
+                text_color,
+                head,
+                head_pt,
+                max_line_w,
+                is_empty,
+                reveal_horizontal,
+                soft_wrap: false,
+            },
+            params,
         );
-        let caret_rect = self.compute_caret_rect(
-            content_bounds.origin,
-            head_pt,
-            line_height,
-            scale,
-            caret_width_px,
-        );
-
-        let show_caret = focused
-            && window_active
-            && self.blink.visible()
-            && !self.caret_hidden
-            && (self.model.selection().is_empty() || self.model.composition().is_some());
-
-        let mut frame = FrameLayout {
-            input_bounds,
-            content_bounds,
-            visible_lines: vec![0],
-            visible_byte_offsets: vec![0],
-            visible_line_tops: vec![0.0],
-            visible_byte_range: 0..self.model.text().len(),
-            rows: vec![row_layout],
-            line_height,
-            wrap_width: None,
-            space_width,
-            text_color,
-            caret_rect,
-            show_caret,
-            selection_rects: Vec::new(),
-            marked_range: (!is_empty).then(|| self.model.composition_range()).flatten(),
-            last_cursor: head,
-        };
-        if window_active
-            && show_selection
-            && self.model.composition().is_none()
-            && !self.model.selection().is_empty()
-        {
-            frame.selection_rects = frame.range_rects(&self.model.selected_range());
-        }
-        self.frame = Some(frame);
     }
 
     fn prepare_document(
@@ -889,15 +908,7 @@ impl Editor {
         params: EditorPaintParams<'_>,
         ts: &TextSystem,
     ) -> EditorPaintOutcome {
-        let EditorPaintParams {
-            style,
-            palette: p,
-            window_active,
-            focused,
-            show_selection,
-            scale,
-            caret_width_px,
-        } = params;
+        let style = params.style;
         let font = &style.font;
         let font_size = style.font_size;
         let text_style = TextStyle::new(font.clone(), font_size);
@@ -906,6 +917,7 @@ impl Editor {
         let text = self.model.text();
         let reveal_req = self.reveal.take();
         let prev_content_width = self.content_width;
+        let prev_scroll_x = self.scroll_x;
 
         let ViewKind::Document(doc) = &mut self.view else {
             unreachable!()
@@ -965,11 +977,12 @@ impl Editor {
         }
         let min_y_f64 = (-content_height_f64 + f64::from(input_bounds.size.height)).min(0.0);
         doc.scroll_y = doc.scroll_y.clamp(min_y_f64, 0.0);
+        let scroll_y = doc.scroll_y;
 
         let placeholder_rope = Rope::from(self.placeholder.as_str());
         let is_empty = text.len() == 0;
         let (display_text, text_color) = if is_empty {
-            (&placeholder_rope, p.text_secondary)
+            (&placeholder_rope, params.palette.text_secondary)
         } else {
             (text, style.color)
         };
@@ -1054,7 +1067,7 @@ impl Editor {
                 let disp = doc.wrap.offset_to_display(text, head, end_affinity);
                 point(
                     0.0,
-                    (disp.row as f64 * f64::from(line_height) + doc.scroll_y) as f32,
+                    (disp.row as f64 * f64::from(line_height) + scroll_y) as f32,
                 )
             })
         };
@@ -1062,84 +1075,36 @@ impl Editor {
             max_line_w = max_line_w.max(head_pt.x);
         }
 
-        let content_width = if max_line_w + RIGHT_MARGIN > input_bounds.size.width {
-            max_line_w + RIGHT_MARGIN
-        } else {
-            max_line_w
-        };
-        let content_size = size(content_width, content_height_f64 as f32);
-        self.content_width = content_width;
-
-        let prev_scroll_x = self.scroll_x;
-        if reveal_req.is_some() && !soft_wrap {
-            let w = input_bounds.size.width;
-            if self.scroll_x + head_pt.x > w - RIGHT_MARGIN {
-                self.scroll_x = w - RIGHT_MARGIN - head_pt.x;
-            } else if self.scroll_x + head_pt.x < 0.0 {
-                self.scroll_x = -head_pt.x;
-            }
-        }
-        self.scroll_x = if soft_wrap {
-            0.0
-        } else {
-            clamp_horizontal_scroll(self.scroll_x, content_size.width, input_bounds.size.width)
-        };
-
-        // Vertical scroll is baked into visible_line_tops in f64 so D2D coordinates stay exact on huge files.
-        let content_bounds = Rect::new(
-            point(input_bounds.origin.x + self.scroll_x, input_bounds.origin.y),
-            input_bounds.size,
+        self.finish_frame(
+            PreparedFrame {
+                input_bounds,
+                visible_lines,
+                visible_byte_offsets,
+                visible_line_tops,
+                visible_byte_range: start_off..end_off,
+                rows,
+                line_height,
+                wrap_width,
+                space_width,
+                text_color,
+                head,
+                head_pt,
+                max_line_w,
+                is_empty,
+                reveal_horizontal: reveal_req.is_some(),
+                soft_wrap,
+            },
+            params,
         );
 
         let scrollable = content_height_f64 > f64::from(input_bounds.size.height)
-            || (!soft_wrap && content_width > input_bounds.size.width);
+            || (!soft_wrap && self.content_width > input_bounds.size.width);
         let scrollbar_metrics_changed = scrollable
             && (prev_size != input_bounds.size
-                || (prev_content_width - content_width).abs() > 0.5
+                || (prev_content_width - self.content_width).abs() > 0.5
                 || (prev_content_height - content_height_f64).abs() > 0.5
-                || (prev_scroll_y - doc.scroll_y).abs() > 0.5
+                || (prev_scroll_y - scroll_y).abs() > 0.5
                 || (prev_scroll_x - self.scroll_x).abs() > 0.5);
-
-        let caret_rect = self.compute_caret_rect(
-            content_bounds.origin,
-            head_pt,
-            line_height,
-            scale,
-            caret_width_px,
-        );
-        let show_caret = focused
-            && window_active
-            && self.blink.visible()
-            && !self.caret_hidden
-            && (self.model.selection().is_empty() || self.model.composition().is_some());
-
-        let mut frame = FrameLayout {
-            input_bounds,
-            content_bounds,
-            visible_lines,
-            visible_byte_offsets,
-            visible_line_tops,
-            visible_byte_range: start_off..end_off,
-            rows,
-            line_height,
-            wrap_width,
-            space_width,
-            text_color,
-            caret_rect,
-            show_caret,
-            selection_rects: Vec::new(),
-            marked_range: (!is_empty).then(|| self.model.composition_range()).flatten(),
-            last_cursor: head,
-        };
-        if window_active
-            && show_selection
-            && self.model.composition().is_none()
-            && !self.model.selection().is_empty()
-        {
-            frame.selection_rects = frame.range_rects(&self.model.selected_range());
-        }
-        self.frame = Some(frame);
-
         let needs_redraw = (shaped_windowed && (self.scroll_x - prev_scroll_x).abs() > 1.0)
             || scrollbar_metrics_changed;
         EditorPaintOutcome { needs_redraw }
@@ -1168,6 +1133,25 @@ impl Editor {
         let caret_w = (caret_width_px.max(1) as f32 / scale).max(1.0 / scale);
         Rect::new(caret_origin, size(caret_w, caret_h))
     }
+}
+
+struct PreparedFrame {
+    input_bounds: Rect,
+    visible_lines: Vec<usize>,
+    visible_byte_offsets: Vec<usize>,
+    visible_line_tops: Vec<f32>,
+    visible_byte_range: Range<usize>,
+    rows: Vec<RowLayout>,
+    line_height: f32,
+    wrap_width: Option<f32>,
+    space_width: f32,
+    text_color: Rgba,
+    head: usize,
+    head_pt: Point,
+    max_line_w: f32,
+    is_empty: bool,
+    reveal_horizontal: bool,
+    soft_wrap: bool,
 }
 
 struct ShapeContext<'a> {

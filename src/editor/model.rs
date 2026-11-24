@@ -261,6 +261,49 @@ impl TextModel {
         }
     }
 
+    fn validate_or_rollback(&mut self, before: Rope) -> bool {
+        if !self.policy.multi_line
+            && self.policy.validate.is_some()
+            && !self.accepts(&self.text.to_string())
+            && self.accepts(&before.to_string())
+        {
+            self.text = before;
+            return false;
+        }
+        true
+    }
+
+    fn splice_range(
+        &mut self,
+        range: Range<usize>,
+        text: &str,
+        validate: bool,
+    ) -> Option<LineChange> {
+        let old_start = self.text.offset_to_point(range.start).row;
+        let old_end = self.text.offset_to_point(range.end).row;
+        let before = validate.then(|| self.text.clone());
+        self.text.replace(range.clone(), text);
+        if let Some(before) = before
+            && !self.validate_or_rollback(before)
+        {
+            return None;
+        }
+        let new_start = self.text.offset_to_point(range.start).row;
+        let new_end = self.text.offset_to_point(range.start + text.len()).row;
+        Some(LineChange::Splice {
+            old_lines: old_start..old_end + 1,
+            new_lines: new_start..new_end + 1,
+        })
+    }
+
+    fn changed_effects(lines: LineChange) -> EditEffects {
+        EditEffects {
+            lines,
+            changed: true,
+            caret_moved: true,
+        }
+    }
+
     fn infer_kind(range: &Range<usize>, inserted: &str) -> EditKind {
         if range.is_empty() && !inserted.is_empty() && !inserted.contains(['\n', '\r']) {
             EditKind::Insert
@@ -317,13 +360,7 @@ impl TextModel {
             }
         }
 
-        if record_history
-            && !self.policy.multi_line
-            && self.policy.validate.is_some()
-            && !self.accepts(&self.text.to_string())
-            && self.accepts(&before_rope.to_string())
-        {
-            self.text = before_rope;
+        if record_history && !self.validate_or_rollback(before_rope) {
             return EditEffects::default();
         }
 
@@ -369,14 +406,10 @@ impl TextModel {
         }
         self.debug_assert_invariants();
 
-        EditEffects {
-            lines: LineChange::Splice {
-                old_lines: old_start_line..old_end_line + 1,
-                new_lines: new_start_line..new_end_line + 1,
-            },
-            changed: true,
-            caret_moved: true,
-        }
+        Self::changed_effects(LineChange::Splice {
+            old_lines: old_start_line..old_end_line + 1,
+            new_lines: new_start_line..new_end_line + 1,
+        })
     }
 
     pub(crate) fn replace_all(
@@ -442,25 +475,11 @@ impl TextModel {
     pub(crate) fn insert_text(&mut self, text: &str) -> EditEffects {
         if let Some(comp) = self.composition.take() {
             let normalized = self.normalize(text).into_owned();
-            let comp_range = comp.start..comp.end;
-            let old_start_line = self.text.offset_to_point(comp.start).row;
-            let old_end_line = self.text.offset_to_point(comp.end).row;
-            let before_rope = self.text.clone();
-            self.text.replace(comp_range, &normalized);
-
-            if !self.policy.multi_line
-                && self.policy.validate.is_some()
-                && !self.accepts(&self.text.to_string())
-                && self.accepts(&before_rope.to_string())
-            {
-                self.text = before_rope;
+            let Some(lines) = self.splice_range(comp.start..comp.end, &normalized, true) else {
                 self.composition = Some(comp);
                 return EditEffects::default();
-            }
-
+            };
             let new_end = comp.start + normalized.len();
-            let new_start_line = self.text.offset_to_point(comp.start).row;
-            let new_end_line = self.text.offset_to_point(new_end).row;
             self.revision = self.revision.wrapping_add(1);
             self.selection = Selection::caret(self.snap_boundary(new_end, Bias::Left));
 
@@ -477,14 +496,7 @@ impl TextModel {
                 selection_after: self.selection,
             });
             self.debug_assert_invariants();
-            return EditEffects {
-                lines: LineChange::Splice {
-                    old_lines: old_start_line..old_end_line + 1,
-                    new_lines: new_start_line..new_end_line + 1,
-                },
-                changed: true,
-                caret_moved: true,
-            };
+            return Self::changed_effects(lines);
         }
 
         let range = self.selected_range();
@@ -529,23 +541,10 @@ impl TextModel {
             }
         };
 
-        let old_start_line = self.text.offset_to_point(range.start).row;
-        let old_end_line = self.text.offset_to_point(range.end).row;
-        let before_rope = self.text.clone();
-        self.text.replace(range.clone(), &normalized);
-
-        if !self.policy.multi_line
-            && self.policy.validate.is_some()
-            && !self.accepts(&self.text.to_string())
-            && self.accepts(&before_rope.to_string())
-        {
-            self.text = before_rope;
+        let Some(lines) = self.splice_range(range.clone(), &normalized, true) else {
             return EditEffects::default();
-        }
-
+        };
         let new_end = range.start + normalized.len();
-        let new_start_line = self.text.offset_to_point(range.start).row;
-        let new_end_line = self.text.offset_to_point(new_end).row;
         self.revision = self.revision.wrapping_add(1);
         let caret = self.snap_boundary(range.start + cursor, Bias::Left);
         self.composition = Some(Composition {
@@ -557,15 +556,7 @@ impl TextModel {
         });
         self.selection = Selection::caret(caret);
         self.debug_assert_invariants();
-
-        EditEffects {
-            lines: LineChange::Splice {
-                old_lines: old_start_line..old_end_line + 1,
-                new_lines: new_start_line..new_end_line + 1,
-            },
-            changed: true,
-            caret_moved: true,
-        }
+        Self::changed_effects(lines)
     }
 
     pub(crate) fn commit_composition(&mut self) -> bool {
@@ -594,26 +585,14 @@ impl TextModel {
 
     pub(crate) fn cancel_composition(&mut self) -> Option<EditEffects> {
         let comp = self.composition.take()?;
-        let old_start_line = self.text.offset_to_point(comp.start).row;
-        let old_end_line = self.text.offset_to_point(comp.end).row;
-        self.text.replace(comp.start..comp.end, &comp.replaced_text);
-        let restored_end = comp.start + comp.replaced_text.len();
-        let new_start_line = self.text.offset_to_point(comp.start).row;
-        let new_end_line = self.text.offset_to_point(restored_end).row;
+        let lines = self.splice_range(comp.start..comp.end, &comp.replaced_text, false)?;
         self.revision = self.revision.wrapping_add(1);
         let mut sel = comp.sel_before;
         sel.anchor = self.snap_boundary(sel.anchor, Bias::Left);
         sel.head = self.snap_boundary(sel.head, Bias::Left);
         self.selection = sel;
         self.debug_assert_invariants();
-        Some(EditEffects {
-            lines: LineChange::Splice {
-                old_lines: old_start_line..old_end_line + 1,
-                new_lines: new_start_line..new_end_line + 1,
-            },
-            changed: true,
-            caret_moved: true,
-        })
+        Some(Self::changed_effects(lines))
     }
 
     fn delete_with(
@@ -789,15 +768,8 @@ impl TextModel {
                     } else {
                         (edit.old_range.clone(), edit.new_text.as_str())
                     };
-                    let old_start = self.text.offset_to_point(range.start).row;
-                    let old_end = self.text.offset_to_point(range.end).row;
-                    self.text.replace(range.clone(), text);
-                    let new_start = self.text.offset_to_point(range.start).row;
-                    let new_end = self.text.offset_to_point(range.start + text.len()).row;
-                    LineChange::Splice {
-                        old_lines: old_start..old_end + 1,
-                        new_lines: new_start..new_end + 1,
-                    }
+                    self.splice_range(range, text, false)
+                        .unwrap_or(LineChange::Full)
                 } else {
                     for edit in &edits {
                         let (range, text) = if is_undo {
@@ -823,11 +795,7 @@ impl TextModel {
         self.selection = sel;
         self.debug_assert_invariants();
 
-        Some(EditEffects {
-            lines,
-            changed: true,
-            caret_moved: true,
-        })
+        Some(Self::changed_effects(lines))
     }
 
     pub(crate) fn select_all(&mut self) {

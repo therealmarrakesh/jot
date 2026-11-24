@@ -1,5 +1,5 @@
 use std::ffi::OsString;
-use std::os::windows::ffi::{OsStrExt, OsStringExt};
+use std::os::windows::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
 
 use windows::Win32::{
@@ -11,8 +11,8 @@ use windows::Win32::{
     UI::Shell::{
         Common::COMDLG_FILTERSPEC,
         FOS_ALLOWMULTISELECT, FOS_FORCEFILESYSTEM, FOS_OVERWRITEPROMPT, FOS_PATHMUSTEXIST,
-        FileOpenDialog, FileSaveDialog, IFileDialogCustomize, IFileOpenDialog, IFileSaveDialog,
-        IShellItem, SHCreateItemFromParsingName, SIGDN_FILESYSPATH,
+        FileOpenDialog, FileSaveDialog, IFileDialog, IFileDialogCustomize, IFileOpenDialog,
+        IFileSaveDialog, IShellItem, SHCreateItemFromParsingName, SIGDN_FILESYSPATH,
     },
 };
 use windows::core::{HSTRING, Interface, PCWSTR};
@@ -63,17 +63,6 @@ impl Drop for OleGuard {
     }
 }
 
-fn to_wide_null(s: &str) -> Vec<u16> {
-    s.encode_utf16().chain(std::iter::once(0)).collect()
-}
-
-fn path_to_wide_null(p: &Path) -> Vec<u16> {
-    p.as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect()
-}
-
 unsafe fn shell_item_path(item: &IShellItem) -> Result<PathBuf> {
     let pwstr = unsafe { item.GetDisplayName(SIGDN_FILESYSPATH)? };
     let path = unsafe {
@@ -93,12 +82,51 @@ fn is_cancelled(err: &windows::core::Error) -> bool {
     err.code() == ERROR_CANCELLED.to_hresult()
 }
 
+unsafe fn configure_dialog(
+    dialog: &IFileDialog,
+    directory: Option<&Path>,
+    file_types: &[(SharedStr, SharedStr)],
+) -> Result<()> {
+    if let Some(dir) = directory.filter(|d| !d.as_os_str().is_empty()) {
+        let wide = HSTRING::from(dir.as_os_str());
+        if let Ok(folder) =
+            unsafe { SHCreateItemFromParsingName::<_, _, IShellItem>(&wide, None) }
+        {
+            let _ = unsafe { dialog.SetFolder(&folder) };
+        }
+    }
+    if !file_types.is_empty() {
+        let wide_types: Vec<(HSTRING, HSTRING)> = file_types
+            .iter()
+            .map(|(label, spec)| (HSTRING::from(label.as_str()), HSTRING::from(spec.as_str())))
+            .collect();
+        let specs: Vec<COMDLG_FILTERSPEC> = wide_types
+            .iter()
+            .map(|(label, spec)| COMDLG_FILTERSPEC {
+                pszName: PCWSTR(label.as_ptr()),
+                pszSpec: PCWSTR(spec.as_ptr()),
+            })
+            .collect();
+        unsafe { dialog.SetFileTypes(&specs)? };
+    }
+    Ok(())
+}
+
+unsafe fn show_dialog(dialog: &IFileDialog, owner_raw: isize) -> Result<bool> {
+    let owner = HWND(owner_raw as *mut _);
+    let parent = (!owner.0.is_null()).then_some(owner);
+    match unsafe { dialog.Show(parent) } {
+        Ok(()) => Ok(true),
+        Err(err) if is_cancelled(&err) => Ok(false),
+        Err(err) => Err(err.into()),
+    }
+}
+
 pub(crate) fn run_open_dialog(
     owner_raw: isize,
     options: OpenDialogOptions,
 ) -> Result<Option<Vec<PathBuf>>> {
     let _ole = OleGuard::init();
-    let owner = HWND(owner_raw as *mut _);
     unsafe {
         let dialog: IFileOpenDialog =
             CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER)?;
@@ -107,40 +135,10 @@ pub(crate) fn run_open_dialog(
             flags |= FOS_ALLOWMULTISELECT;
         }
         dialog.SetOptions(flags)?;
+        configure_dialog(&dialog, options.directory.as_deref(), &options.file_types)?;
 
-        if let Some(dir) = &options.directory
-            && !dir.as_os_str().is_empty()
-        {
-            let wide = path_to_wide_null(dir);
-            if let Ok(folder) =
-                SHCreateItemFromParsingName::<_, _, IShellItem>(PCWSTR(wide.as_ptr()), None)
-            {
-                let _ = dialog.SetFolder(&folder);
-            }
-        }
-
-        let wide_types: Vec<(Vec<u16>, Vec<u16>)> = options
-            .file_types
-            .iter()
-            .map(|(label, spec)| (to_wide_null(label), to_wide_null(spec)))
-            .collect();
-        if !wide_types.is_empty() {
-            let specs: Vec<COMDLG_FILTERSPEC> = wide_types
-                .iter()
-                .map(|(label, spec)| COMDLG_FILTERSPEC {
-                    pszName: PCWSTR(label.as_ptr()),
-                    pszSpec: PCWSTR(spec.as_ptr()),
-                })
-                .collect();
-            dialog.SetFileTypes(&specs)?;
-        }
-
-        let parent = (!owner.0.is_null()).then_some(owner);
-        if let Err(err) = dialog.Show(parent) {
-            if is_cancelled(&err) {
-                return Ok(None);
-            }
-            return Err(err.into());
+        if !show_dialog(&dialog, owner_raw)? {
+            return Ok(None);
         }
         let items = dialog.GetResults()?;
         let count = items.GetCount()?;
@@ -155,7 +153,6 @@ pub(crate) fn run_open_dialog(
 
 pub(crate) fn run_save_dialog(owner_raw: isize, options: SaveDialogOptions) -> SaveDialogResult {
     let _ole = OleGuard::init();
-    let owner = HWND(owner_raw as *mut _);
     unsafe {
         let dialog: IFileSaveDialog =
             CoCreateInstance(&FileSaveDialog, None, CLSCTX_INPROC_SERVER)?;
@@ -164,67 +161,30 @@ pub(crate) fn run_save_dialog(owner_raw: isize, options: SaveDialogOptions) -> S
         dialog.SetOptions(flags)?;
 
         if let Some(title) = &options.title {
-            let wide = HSTRING::from(title.as_str());
-            dialog.SetTitle(&wide)?;
+            dialog.SetTitle(&HSTRING::from(title.as_str()))?;
         }
-        if !options.directory.as_os_str().is_empty() {
-            let wide = path_to_wide_null(&options.directory);
-            if let Ok(folder) =
-                SHCreateItemFromParsingName::<_, _, IShellItem>(PCWSTR(wide.as_ptr()), None)
-            {
-                let _ = dialog.SetFolder(&folder);
-            }
-        }
+        configure_dialog(&dialog, Some(&options.directory), &options.file_types)?;
         if let Some(name) = &options.file_name {
-            let wide = HSTRING::from(name.as_str());
-            dialog.SetFileName(&wide)?;
+            dialog.SetFileName(&HSTRING::from(name.as_str()))?;
         }
         if let Some(ext) = &options.default_extension {
-            let wide = HSTRING::from(ext.as_str());
-            dialog.SetDefaultExtension(&wide)?;
+            dialog.SetDefaultExtension(&HSTRING::from(ext.as_str()))?;
         }
 
-        let wide_types: Vec<(Vec<u16>, Vec<u16>)> = options
-            .file_types
-            .iter()
-            .map(|(label, spec)| (to_wide_null(label), to_wide_null(spec)))
-            .collect();
-        if !wide_types.is_empty() {
-            let specs: Vec<COMDLG_FILTERSPEC> = wide_types
-                .iter()
-                .map(|(label, spec)| COMDLG_FILTERSPEC {
-                    pszName: PCWSTR(label.as_ptr()),
-                    pszSpec: PCWSTR(spec.as_ptr()),
-                })
-                .collect();
-            dialog.SetFileTypes(&specs)?;
-        }
-
-        let customize: Option<IFileDialogCustomize> = if let Some(choice) = &options.choice {
-            if let Ok(cust) = dialog.cast::<IFileDialogCustomize>() {
-                let label = HSTRING::from(choice.label.as_str());
-                let _ = cust.StartVisualGroup(ENCODING_COMBO_ID + 100, &label);
-                let _ = cust.AddComboBox(ENCODING_COMBO_ID);
-                for (ix, item) in choice.items.iter().enumerate() {
-                    let text = HSTRING::from(item.as_str());
-                    let _ = cust.AddControlItem(ENCODING_COMBO_ID, ix as u32, &text);
-                }
-                let _ = cust.SetSelectedControlItem(ENCODING_COMBO_ID, choice.selected as u32);
-                let _ = cust.EndVisualGroup();
-                Some(cust)
-            } else {
-                None
+        let customize: Option<IFileDialogCustomize> = options.choice.as_ref().and_then(|choice| {
+            let cust = dialog.cast::<IFileDialogCustomize>().ok()?;
+            let _ = cust.StartVisualGroup(ENCODING_COMBO_ID + 100, &HSTRING::from(choice.label.as_str()));
+            let _ = cust.AddComboBox(ENCODING_COMBO_ID);
+            for (ix, item) in choice.items.iter().enumerate() {
+                let _ = cust.AddControlItem(ENCODING_COMBO_ID, ix as u32, &HSTRING::from(item.as_str()));
             }
-        } else {
-            None
-        };
+            let _ = cust.SetSelectedControlItem(ENCODING_COMBO_ID, choice.selected as u32);
+            let _ = cust.EndVisualGroup();
+            Some(cust)
+        });
 
-        let parent = (!owner.0.is_null()).then_some(owner);
-        if let Err(err) = dialog.Show(parent) {
-            if is_cancelled(&err) {
-                return Ok(None);
-            }
-            return Err(err.into());
+        if !show_dialog(&dialog, owner_raw)? {
+            return Ok(None);
         }
 
         let item = dialog.GetResult()?;

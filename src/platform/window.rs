@@ -302,6 +302,15 @@ struct WindowState {
     block_shutdown: Cell<Option<&'static str>>,
 }
 
+impl WindowState {
+    fn set_metrics(&self, w: u32, h: u32, scale: f32) {
+        self.scale_factor.set(scale);
+        self.physical_size.set((w, h));
+        self.logical_size
+            .set(size(w as f32 / scale, h as f32 / scale));
+    }
+}
+
 struct HwndEntry {
     window_id: WindowId,
     state: Rc<WindowState>,
@@ -600,11 +609,9 @@ impl NativeWindow {
     fn finish_create(id: WindowId, hwnd: HWND, is_overlay: bool, state: Rc<WindowState>) -> Self {
         let final_dpi = unsafe { GetDpiForWindow(hwnd) }.max(USER_DEFAULT_SCREEN_DPI);
         let scale_factor = final_dpi as f32 / USER_DEFAULT_SCREEN_DPI as f32;
-        state.scale_factor.set(scale_factor);
         let (phys_w, phys_h) = query_physical_size(hwnd);
-        let (logical_size, origin) = query_client_metrics(hwnd, scale_factor);
-        state.physical_size.set((phys_w, phys_h));
-        state.logical_size.set(logical_size);
+        let (_, origin) = query_client_metrics(hwnd, scale_factor);
+        state.set_metrics(phys_w, phys_h, scale_factor);
         state.origin.set(origin);
         Self {
             id,
@@ -734,11 +741,7 @@ impl NativeWindow {
         let dpi = unsafe { GetDpiForWindow(self.hwnd) }.max(USER_DEFAULT_SCREEN_DPI);
         let scale = dpi as f32 / USER_DEFAULT_SCREEN_DPI as f32;
         let (pw, ph) = (w as u32, h as u32);
-        self.state.scale_factor.set(scale);
-        self.state.physical_size.set((pw, ph));
-        self.state
-            .logical_size
-            .set(size(pw as f32 / scale, ph as f32 / scale));
+        self.state.set_metrics(pw, ph, scale);
         Some((pw, ph, scale))
     }
 
@@ -894,6 +897,144 @@ fn update_ime_pos(hwnd: HWND) {
     }
 }
 
+fn handle_mouse_move(hwnd: HWND, lparam: LPARAM, live_buttons: Option<MouseButtons>) {
+    let non_client = live_buttons.is_none();
+    let info = with_entry_mut(hwnd, |e| {
+        if e.state.in_size_move.get() {
+            return None;
+        }
+        let scale = e.state.scale_factor.get();
+        let (need_track, position, pressed_button) = match live_buttons {
+            None => (
+                !e.tracking_nc_leave,
+                screen_to_client_point(hwnd, lparam, scale),
+                e.buttons.primary(),
+            ),
+            Some(live) => {
+                e.buttons = live;
+                (
+                    !e.tracking_leave,
+                    client_point_from_lparam(lparam, scale).2,
+                    live.primary(),
+                )
+            }
+        };
+        e.hovered = true;
+        Some((
+            need_track,
+            PlatformEvent::MouseMove {
+                window_id: e.window_id,
+                position,
+                pressed_button,
+            },
+        ))
+    })
+    .flatten();
+    if let Some((need_track, ev)) = info {
+        if need_track {
+            let mut tme = TRACKMOUSEEVENT {
+                cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+                dwFlags: if non_client {
+                    TME_LEAVE | TME_NONCLIENT
+                } else {
+                    TME_LEAVE
+                },
+                hwndTrack: hwnd,
+                dwHoverTime: 0,
+            };
+            if unsafe { TrackMouseEvent(&mut tme) }.is_ok() {
+                with_entry_mut(hwnd, |e| {
+                    if non_client {
+                        e.tracking_nc_leave = true;
+                    } else {
+                        e.tracking_leave = true;
+                    }
+                });
+            }
+        }
+        dispatch(ev);
+    }
+}
+
+fn handle_mouse_leave(hwnd: HWND, non_client: bool) {
+    let check_leave = with_entry_mut(hwnd, |e| {
+        if non_client {
+            e.tracking_nc_leave = false;
+            e.nc_button_down = None;
+            !e.tracking_leave
+        } else {
+            e.tracking_leave = false;
+            !e.tracking_nc_leave
+        }
+    })
+    .unwrap_or(false);
+    if check_leave && !cursor_is_over_hwnd(hwnd) {
+        let window_id = with_entry_mut(hwnd, |e| {
+            e.hovered = false;
+            e.window_id
+        });
+        if let Some(window_id) = window_id {
+            dispatch(PlatformEvent::MouseLeave { window_id });
+        }
+    }
+}
+
+fn dispatch_key_message(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+    is_down: bool,
+) -> LRESULT {
+    let vk = (wparam.0 & 0xFFFF) as u16;
+    let modifiers = current_modifiers();
+    let prep = with_entry_mut(hwnd, |e| {
+        e.suppress_next_char = false;
+        let mods_changed = (modifiers != e.last_modifiers).then(|| {
+            e.last_modifiers = modifiers;
+            PlatformEvent::ModifiersChanged { modifiers }
+        });
+        (e.window_id, mods_changed)
+    });
+
+    let mut handled = false;
+    if let Some((window_id, mods_changed)) = prep {
+        if let Some(ev) = mods_changed {
+            dispatch(ev);
+        }
+        if let Some(key) = translate_vk(vk, modifiers) {
+            let mut stroke_mods = modifiers;
+            if key == Key::Alt {
+                stroke_mods.alt = false;
+            }
+            let event = KeyEvent {
+                key,
+                modifiers: stroke_mods,
+            };
+            if is_down {
+                let is_held = (lparam.0 & (1 << 30)) != 0;
+                if is_held && matches!(key, Key::Alt | Key::F(10)) {
+                    handled = true;
+                } else {
+                    handled = dispatch(PlatformEvent::KeyDown { window_id, event });
+                    if handled {
+                        with_entry_mut(hwnd, |e| e.suppress_next_char = true);
+                    }
+                }
+            } else {
+                dispatch(PlatformEvent::KeyUp { window_id, event });
+            }
+        }
+    }
+    if (is_down && handled)
+        || (msg == WM_SYSKEYDOWN && !is_syskey_passthrough(vk))
+        || msg == WM_SYSKEYUP
+    {
+        return LRESULT(0);
+    }
+    unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+}
+
 unsafe extern "system" fn window_wnd_proc(
     hwnd: HWND,
     msg: u32,
@@ -992,56 +1133,12 @@ fn window_wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
         }
 
         WM_NCMOUSEMOVE => {
-            let info = with_entry_mut(hwnd, |e| {
-                if e.state.in_size_move.get() {
-                    return None;
-                }
-                let need_track = !e.tracking_nc_leave;
-                e.hovered = true;
-                let position = screen_to_client_point(hwnd, lparam, e.state.scale_factor.get());
-                Some((
-                    need_track,
-                    PlatformEvent::MouseMove {
-                        window_id: e.window_id,
-                        position,
-                        pressed_button: e.buttons.primary(),
-                    },
-                ))
-            })
-            .flatten();
-            if let Some((need_track, ev)) = info {
-                if need_track {
-                    let mut tme = TRACKMOUSEEVENT {
-                        cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
-                        dwFlags: TME_LEAVE | TME_NONCLIENT,
-                        hwndTrack: hwnd,
-                        dwHoverTime: 0,
-                    };
-                    if unsafe { TrackMouseEvent(&mut tme) }.is_ok() {
-                        with_entry_mut(hwnd, |e| e.tracking_nc_leave = true);
-                    }
-                }
-                dispatch(ev);
-            }
+            handle_mouse_move(hwnd, lparam, None);
             unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
         }
 
         WM_NCMOUSELEAVE => {
-            let check_leave = with_entry_mut(hwnd, |e| {
-                e.tracking_nc_leave = false;
-                e.nc_button_down = None;
-                !e.tracking_leave
-            })
-            .unwrap_or(false);
-            if check_leave && !cursor_is_over_hwnd(hwnd) {
-                let window_id = with_entry_mut(hwnd, |e| {
-                    e.hovered = false;
-                    e.window_id
-                });
-                if let Some(window_id) = window_id {
-                    dispatch(PlatformEvent::MouseLeave { window_id });
-                }
-            }
+            handle_mouse_leave(hwnd, true);
             LRESULT(0)
         }
 
@@ -1123,57 +1220,12 @@ fn window_wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
         }
 
         WM_MOUSEMOVE => {
-            let live_buttons = MouseButtons::from_wparam(wparam);
-            let info = with_entry_mut(hwnd, |e| {
-                if e.state.in_size_move.get() {
-                    return None;
-                }
-                let need_track = !e.tracking_leave;
-                e.hovered = true;
-                e.buttons = live_buttons;
-                let (_, _, position) = client_point_from_lparam(lparam, e.state.scale_factor.get());
-                Some((
-                    need_track,
-                    PlatformEvent::MouseMove {
-                        window_id: e.window_id,
-                        position,
-                        pressed_button: live_buttons.primary(),
-                    },
-                ))
-            })
-            .flatten();
-            if let Some((need_track, ev)) = info {
-                if need_track {
-                    let mut tme = TRACKMOUSEEVENT {
-                        cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
-                        dwFlags: TME_LEAVE,
-                        hwndTrack: hwnd,
-                        dwHoverTime: 0,
-                    };
-                    if unsafe { TrackMouseEvent(&mut tme) }.is_ok() {
-                        with_entry_mut(hwnd, |e| e.tracking_leave = true);
-                    }
-                }
-                dispatch(ev);
-            }
+            handle_mouse_move(hwnd, lparam, Some(MouseButtons::from_wparam(wparam)));
             LRESULT(0)
         }
 
         WM_MOUSELEAVE => {
-            let check_leave = with_entry_mut(hwnd, |e| {
-                e.tracking_leave = false;
-                !e.tracking_nc_leave
-            })
-            .unwrap_or(false);
-            if check_leave && !cursor_is_over_hwnd(hwnd) {
-                let window_id = with_entry_mut(hwnd, |e| {
-                    e.hovered = false;
-                    e.window_id
-                });
-                if let Some(window_id) = window_id {
-                    dispatch(PlatformEvent::MouseLeave { window_id });
-                }
-            }
+            handle_mouse_leave(hwnd, false);
             LRESULT(0)
         }
 
@@ -1280,54 +1332,7 @@ fn window_wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
             LRESULT(0)
         }
 
-        WM_KEYDOWN | WM_SYSKEYDOWN => {
-            let vk = (wparam.0 & 0xFFFF) as u16;
-            let modifiers = current_modifiers();
-            let is_held = (lparam.0 & (1 << 30)) != 0;
-
-            let prep = with_entry_mut(hwnd, |e| {
-                e.suppress_next_char = false;
-                let mods_changed = (modifiers != e.last_modifiers).then(|| {
-                    e.last_modifiers = modifiers;
-                    PlatformEvent::ModifiersChanged { modifiers }
-                });
-                (e.window_id, mods_changed)
-            });
-
-            let mut handled = false;
-            if let Some((window_id, mods_changed)) = prep {
-                if let Some(ev) = mods_changed {
-                    dispatch(ev);
-                }
-                if let Some(key) = translate_vk(vk, modifiers) {
-                    if is_held && matches!(key, Key::Alt | Key::F(10)) {
-                        handled = true;
-                    } else {
-                        let mut stroke_mods = modifiers;
-                        if key == Key::Alt {
-                            stroke_mods.alt = false;
-                        }
-                        handled = dispatch(PlatformEvent::KeyDown {
-                            window_id,
-                            event: KeyEvent {
-                                key,
-                                modifiers: stroke_mods,
-                            },
-                        });
-                        if handled {
-                            with_entry_mut(hwnd, |e| e.suppress_next_char = true);
-                        }
-                    }
-                }
-            }
-            if handled {
-                return LRESULT(0);
-            }
-            if msg == WM_SYSKEYDOWN && !is_syskey_passthrough(vk) {
-                return LRESULT(0);
-            }
-            unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
-        }
+        WM_KEYDOWN | WM_SYSKEYDOWN => dispatch_key_message(hwnd, msg, wparam, lparam, true),
 
         WM_SYSCHAR => {
             // Forward Alt+Space to DefWindowProcW so the native system menu opens.
@@ -1337,40 +1342,7 @@ fn window_wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
             LRESULT(0)
         }
 
-        WM_KEYUP | WM_SYSKEYUP => {
-            let vk = (wparam.0 & 0xFFFF) as u16;
-            let modifiers = current_modifiers();
-            let prep = with_entry_mut(hwnd, |e| {
-                e.suppress_next_char = false;
-                let mods_changed = (modifiers != e.last_modifiers).then(|| {
-                    e.last_modifiers = modifiers;
-                    PlatformEvent::ModifiersChanged { modifiers }
-                });
-                (e.window_id, mods_changed)
-            });
-            if let Some((window_id, mods_changed)) = prep {
-                if let Some(ev) = mods_changed {
-                    dispatch(ev);
-                }
-                if let Some(key) = translate_vk(vk, modifiers) {
-                    let mut stroke_mods = modifiers;
-                    if key == Key::Alt {
-                        stroke_mods.alt = false;
-                    }
-                    dispatch(PlatformEvent::KeyUp {
-                        window_id,
-                        event: KeyEvent {
-                            key,
-                            modifiers: stroke_mods,
-                        },
-                    });
-                }
-            }
-            if msg == WM_SYSKEYUP {
-                return LRESULT(0);
-            }
-            unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
-        }
+        WM_KEYUP | WM_SYSKEYUP => dispatch_key_message(hwnd, msg, wparam, lparam, false),
 
         WM_CHAR => {
             let code = (wparam.0 & 0xFFFF) as u16;
@@ -1456,10 +1428,7 @@ fn window_wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
                 && h > 0
                 && let Some((window_id, scale)) = with_entry(hwnd, |e| {
                     let s = e.state.scale_factor.get();
-                    e.state.physical_size.set((w, h));
-                    e.state
-                        .logical_size
-                        .set(size(w as f32 / s, h as f32 / s));
+                    e.state.set_metrics(w, h, s);
                     (e.window_id, s)
                 })
             {
@@ -1510,12 +1479,7 @@ fn window_wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
                     }
                 }
                 let (w, h) = query_physical_size(hwnd);
-                with_entry(hwnd, |e| {
-                    e.state.physical_size.set((w, h));
-                    e.state
-                        .logical_size
-                        .set(size(w as f32 / scale, h as f32 / scale));
-                });
+                with_entry(hwnd, |e| e.state.set_metrics(w, h, scale));
                 dispatch(PlatformEvent::Resized {
                     window_id,
                     physical_width: w,

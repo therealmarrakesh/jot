@@ -1488,319 +1488,215 @@ mod tests {
     }
 
     fn full() -> FlexStyle {
-        FlexStyle {
-            width: Dim::Pct(1.0),
-            height: Dim::Pct(1.0),
-            ..Default::default()
+        st().w_pct(1.0).h_pct(1.0)
+    }
+
+    impl FlexStyle {
+        fn w(mut self, v: f32) -> Self { self.width = Dim::Px(v); self }
+        fn h(mut self, v: f32) -> Self { self.height = Dim::Px(v); self }
+        fn w_pct(mut self, v: f32) -> Self { self.width = Dim::Pct(v); self }
+        fn h_pct(mut self, v: f32) -> Self { self.height = Dim::Pct(v); self }
+        fn min_w(mut self, v: f32) -> Self { self.min_width = Dim::Px(v); self }
+        fn min_h(mut self, v: f32) -> Self { self.min_height = Dim::Px(v); self }
+        fn min_h_pct(mut self, v: f32) -> Self { self.min_height = Dim::Pct(v); self }
+        fn max_w_pct(mut self, v: f32) -> Self { self.max_width = Dim::Pct(v); self }
+        fn flex_1(mut self) -> Self {
+            self.flex_grow = 1.0;
+            self.flex_shrink = 1.0;
+            self.flex_basis = Dim::Pct(0.0);
+            self
+        }
+        fn flex_none(mut self) -> Self {
+            self.flex_grow = 0.0;
+            self.flex_shrink = 0.0;
+            self
+        }
+        fn gap(mut self, v: f32) -> Self { self.gap = v; self }
+        fn items_center(mut self) -> Self { self.align_items = Some(AlignItems::Center); self }
+        fn justify_center(mut self) -> Self { self.justify_content = Some(JustifyContent::Center); self }
+        fn self_start(mut self) -> Self { self.align_self = Some(AlignItems::Start); self }
+        fn overflow_hidden(mut self) -> Self {
+            self.overflow_x = Overflow::Hidden;
+            self.overflow_y = Overflow::Hidden;
+            self
+        }
+        fn overflow_x_hidden(mut self) -> Self { self.overflow_x = Overflow::Hidden; self }
+        fn pad_all(mut self, v: f32) -> Self { self.padding = Edges::all(Dim::Px(v)); self }
+        fn pad_xy(mut self, x: f32, y: f32) -> Self { self.padding = Edges::xy(Dim::Px(x), Dim::Px(y)); self }
+        fn pad(mut self, t: f32, r: f32, b: f32, l: f32) -> Self {
+            self.padding = Edges { top: Dim::Px(t), right: Dim::Px(r), bottom: Dim::Px(b), left: Dim::Px(l) };
+            self
+        }
+        fn margin(mut self, t: f32, l: f32) -> Self {
+            self.margin = Edges { top: Dim::Px(t), left: Dim::Px(l), ..Edges::all(Dim::Px(0.)) };
+            self
+        }
+        fn border_all(mut self, v: f32) -> Self { self.border = Edges::all(v); self }
+        fn border(mut self, t: f32, r: f32, b: f32, l: f32) -> Self {
+            self.border = Edges { top: t, right: r, bottom: b, left: l };
+            self
+        }
+        fn abs(mut self) -> Self { self.position = Position::Absolute; self }
+        fn inset_tl(mut self, t: f32, l: f32) -> Self {
+            self.inset = Edges { top: Dim::Px(t), left: Dim::Px(l), ..Edges::all(Dim::Auto) };
+            self
+        }
+        fn inset(mut self, top: Dim, right: Dim, bottom: Dim, left: Dim) -> Self {
+            self.inset = Edges { top, right, bottom, left };
+            self
         }
     }
 
-    fn flex_1(mut s: FlexStyle) -> FlexStyle {
-        s.flex_grow = 1.0;
-        s.flex_shrink = 1.0;
-        s.flex_basis = Dim::Pct(0.0);
-        s
+    struct Tree {
+        engine: LayoutEngine,
+        scale: f32,
     }
 
-    fn flex_none(mut s: FlexStyle) -> FlexStyle {
-        s.flex_grow = 0.0;
-        s.flex_shrink = 0.0;
-        s
-    }
-
-    fn no_measure(_: LayoutId, _: Option<f32>, _: Option<f32>, _: AvailSize) -> Size {
-        Size::ZERO
+    impl Tree {
+        fn new(scale: f32) -> Self {
+            Self { engine: LayoutEngine::new(), scale }
+        }
+        fn leaf(&mut self, style: FlexStyle) -> LayoutId {
+            self.engine.add_node(style, self.scale, &[], false)
+        }
+        fn text(&mut self) -> LayoutId {
+            self.engine.add_node(st(), self.scale, &[], true)
+        }
+        fn node(&mut self, style: FlexStyle, children: &[LayoutId]) -> LayoutId {
+            self.engine.add_node(style, self.scale, children, false)
+        }
+        fn compute(&mut self, root: LayoutId, avail: AvailSize) {
+            self.engine.compute(root, avail, self.scale, &mut |_, _, _, _| Size::ZERO);
+        }
+        fn compute_with(
+            &mut self,
+            root: LayoutId,
+            avail: AvailSize,
+            mut measure: impl FnMut(LayoutId, Option<f32>, Option<f32>, AvailSize) -> Size,
+        ) {
+            self.engine.compute(root, avail, self.scale, &mut measure);
+        }
+        fn bounds(&mut self, id: LayoutId) -> Rect {
+            self.engine.bounds(id, self.scale)
+        }
     }
 
     #[test]
     fn flex_col_window_chrome_and_flex_1_editor() {
-        let mut engine = LayoutEngine::new();
-        let title = engine.add_node(flex_none(FlexStyle { height: Dim::Px(40.), ..st() }), 1.0, &[], false);
-        let menu = engine.add_node(flex_none(FlexStyle { height: Dim::Px(32.), ..st() }), 1.0, &[], false);
-        let editor = engine.add_node(flex_1(FlexStyle { min_height: Dim::Px(60.), ..st() }), 1.0, &[], false);
-        let status = engine.add_node(flex_none(FlexStyle { height: Dim::Px(33.), ..st() }), 1.0, &[], false);
-        let root = engine.add_node(full(), 1.0, &[title, menu, editor, status], false);
-        engine.compute(root, AvailSize::definite(800., 600.), 1.0, &mut no_measure);
+        let mut t = Tree::new(1.0);
+        let title = t.leaf(st().flex_none().h(40.));
+        let menu = t.leaf(st().flex_none().h(32.));
+        let editor = t.leaf(st().flex_1().min_h(60.));
+        let status = t.leaf(st().flex_none().h(33.));
+        let root = t.node(full(), &[title, menu, editor, status]);
+        t.compute(root, AvailSize::definite(800., 600.));
 
-        assert_eq!(engine.bounds(title, 1.0), rect(0., 0., 800., 40.));
-        assert_eq!(engine.bounds(menu, 1.0), rect(0., 40., 800., 32.));
-        assert_eq!(engine.bounds(editor, 1.0), rect(0., 72., 800., 495.));
-        assert_eq!(engine.bounds(status, 1.0), rect(0., 567., 800., 33.));
+        assert_eq!(t.bounds(title), rect(0., 0., 800., 40.));
+        assert_eq!(t.bounds(menu), rect(0., 40., 800., 32.));
+        assert_eq!(t.bounds(editor), rect(0., 72., 800., 495.));
+        assert_eq!(t.bounds(status), rect(0., 567., 800., 33.));
     }
 
     #[test]
     fn dialog_wrapped_text_and_equal_buttons() {
-        let mut engine = LayoutEngine::new();
-        let body_text = engine.add_node(st(), 1.0, &[], true);
-        let content = engine.add_node(
-            FlexStyle {
-                padding: Edges::all(Dim::Px(24.)),
-                border: Edges { bottom: 1., ..Edges::ZERO },
-                ..st()
-            },
-            1.0,
-            &[body_text],
-            false,
-        );
-        let btn_st = flex_1(FlexStyle {
-            min_width: Dim::Px(0.),
-            height: Dim::Px(32.),
-            ..st()
-        });
-        let b1 = engine.add_node(btn_st, 1.0, &[], false);
-        let b2 = engine.add_node(btn_st, 1.0, &[], false);
-        let footer = engine.add_node(
-            FlexStyle {
-                padding: Edges::all(Dim::Px(24.)),
-                gap: 8.,
-                ..row_st()
-            },
-            1.0,
-            &[b1, b2],
-            false,
-        );
-        let col = engine.add_node(st(), 1.0, &[content, footer], false);
-        let frame = engine.add_node(
-            FlexStyle {
-                width: Dim::Px(360.),
-                max_width: Dim::Pct(1.0),
-                border: Edges::all(1.),
-                ..st()
-            },
-            1.0,
-            &[col],
-            false,
-        );
-        let overlay = engine.add_node(
-            FlexStyle {
-                position: Position::Absolute,
-                inset: Edges { top: Dim::Px(0.), left: Dim::Px(0.), ..Edges::all(Dim::Auto) },
-                align_items: Some(AlignItems::Center),
-                justify_content: Some(JustifyContent::Center),
-                ..full()
-            },
-            1.0,
-            &[frame],
-            false,
-        );
-        let root = engine.add_node(full(), 1.0, &[overlay], false);
-        engine.compute(root, AvailSize::definite(800., 600.), 1.0, &mut |id, kw, _, avail| {
+        let mut t = Tree::new(1.0);
+        let body_text = t.text();
+        let content = t.node(st().pad_all(24.).border(0., 0., 1., 0.), &[body_text]);
+        let btn = st().flex_1().min_w(0.).h(32.);
+        let (b1, b2) = (t.leaf(btn), t.leaf(btn));
+        let footer = t.node(row_st().pad_all(24.).gap(8.), &[b1, b2]);
+        let col = t.node(st(), &[content, footer]);
+        let frame = t.node(st().w(360.).max_w_pct(1.0).border_all(1.), &[col]);
+        let overlay = t.node(full().abs().inset_tl(0., 0.).items_center().justify_center(), &[frame]);
+        let root = t.node(full(), &[overlay]);
+        t.compute_with(root, AvailSize::definite(800., 600.), |id, kw, _, avail| {
             assert_eq!(id, body_text);
             let wrap = kw.or(match avail.width {
                 AvailableSpace::Definite(w) => Some(w),
                 _ => None,
             });
             match wrap {
-                Some(w) if w < 500. => {
-                    let lines = (500.0 / w).ceil().max(1.0);
-                    size(w, lines * 20.)
-                }
+                Some(w) if w < 500. => size(w, (500.0 / w).ceil().max(1.0) * 20.),
                 _ => size(500., 20.),
             }
         });
 
-        assert_eq!(engine.bounds(body_text, 1.0).size, size(310., 40.));
-        assert_eq!(engine.bounds(content, 1.0).size, size(358., 89.));
-        assert_eq!(engine.bounds(b1, 1.0).size, size(151., 32.));
-        assert_eq!(engine.bounds(b2, 1.0).size, size(151., 32.));
-        let fb = engine.bounds(frame, 1.0);
+        assert_eq!(t.bounds(body_text).size, size(310., 40.));
+        assert_eq!(t.bounds(content).size, size(358., 89.));
+        assert_eq!(t.bounds(b1).size, size(151., 32.));
+        assert_eq!(t.bounds(b2).size, size(151., 32.));
+        let fb = t.bounds(frame);
         assert_eq!(fb.size, size(360., 171.));
         assert_eq!(fb.origin.x, 220.);
     }
 
     #[test]
     fn tab_label_min_w_0_truncates_wide_nowrap_text() {
-        let mut engine = LayoutEngine::new();
-        let long_text = engine.add_node(st(), 1.0, &[], true);
-        let label_box = engine.add_node(
-            flex_1(FlexStyle {
-                min_width: Dim::Px(0.),
-                overflow_x: Overflow::Hidden,
-                overflow_y: Overflow::Hidden,
-                ..st()
-            }),
-            1.0,
-            &[long_text],
-            false,
-        );
-        let tab = engine.add_node(
-            FlexStyle {
-                align_items: Some(AlignItems::Center),
-                width: Dim::Px(180.),
-                height: Dim::Px(32.),
-                padding: Edges { left: Dim::Px(12.), right: Dim::Px(36.), ..Edges::all(Dim::Px(0.)) },
-                ..row_st()
-            },
-            1.0,
-            &[label_box],
-            false,
-        );
-        engine.compute(tab, AvailSize::definite(180., 32.), 1.0, &mut |_, _, _, _| {
-            size(400., 16.)
-        });
+        let mut t = Tree::new(1.0);
+        let long_text = t.text();
+        let label_box = t.node(st().flex_1().min_w(0.).overflow_hidden(), &[long_text]);
+        let tab = t.node(row_st().items_center().w(180.).h(32.).pad(0., 36., 0., 12.), &[label_box]);
+        t.compute_with(tab, AvailSize::definite(180., 32.), |_, _, _, _| size(400., 16.));
 
-        assert_eq!(engine.bounds(label_box, 1.0), rect(12., 8., 132., 16.));
+        assert_eq!(t.bounds(label_box), rect(12., 8., 132., 16.));
     }
 
     #[test]
     fn text_field_negative_insets_and_absolute_glyph() {
-        let mut engine = LayoutEngine::new();
-        let bottom_edge = engine.add_node(
-            FlexStyle {
-                position: Position::Absolute,
-                inset: Edges {
-                    left: Dim::Px(-1.),
-                    right: Dim::Px(-1.),
-                    bottom: Dim::Px(0.),
-                    top: Dim::Auto,
-                },
-                height: Dim::Px(2.),
-                ..st()
-            },
-            1.0,
-            &[],
-            false,
-        );
-        let glyph = engine.add_node(
-            FlexStyle {
-                position: Position::Absolute,
-                inset: Edges {
-                    top: Dim::Px(2.),
-                    bottom: Dim::Px(2.),
-                    right: Dim::Px(4.),
-                    left: Dim::Auto,
-                },
-                width: Dim::Px(24.),
-                ..st()
-            },
-            1.0,
-            &[],
-            false,
-        );
-        let field = engine.add_node(
-            FlexStyle {
-                width: Dim::Px(200.),
-                height: Dim::Px(32.),
-                border: Edges { top: 1., left: 1., right: 1., bottom: 0. },
-                padding: Edges { bottom: Dim::Px(1.), ..Edges::all(Dim::Px(0.)) },
-                ..st()
-            },
-            1.0,
-            &[bottom_edge, glyph],
-            false,
-        );
-        engine.compute(field, AvailSize::definite(200., 32.), 1.0, &mut no_measure);
+        let mut t = Tree::new(1.0);
+        let bottom_edge = t.leaf(st().abs().inset(Dim::Auto, Dim::Px(-1.), Dim::Px(0.), Dim::Px(-1.)).h(2.));
+        let glyph = t.leaf(st().abs().inset(Dim::Px(2.), Dim::Px(4.), Dim::Px(2.), Dim::Auto).w(24.));
+        let field = t.node(st().w(200.).h(32.).border(1., 1., 0., 1.).pad(0., 0., 1., 0.), &[bottom_edge, glyph]);
+        t.compute(field, AvailSize::definite(200., 32.));
 
-        assert_eq!(engine.bounds(bottom_edge, 1.0), rect(0., 30., 200., 2.));
-        assert_eq!(engine.bounds(glyph, 1.0), rect(171., 3., 24., 27.));
+        assert_eq!(t.bounds(bottom_edge), rect(0., 30., 200., 2.));
+        assert_eq!(t.bounds(glyph), rect(171., 3., 24., 27.));
     }
 
     #[test]
     fn status_bar_min_content_root_measurement() {
-        let mut engine = LayoutEngine::new();
-        let t1 = engine.add_node(st(), 1.0, &[], true);
-        let div1 = engine.add_node(flex_none(FlexStyle { width: Dim::Px(1.), height: Dim::Px(14.), ..st() }), 1.0, &[], false);
-        let t2 = engine.add_node(st(), 1.0, &[], true);
-        let spacer = engine.add_node(flex_1(FlexStyle { min_width: Dim::Px(1.), height: Dim::Px(14.), ..st() }), 1.0, &[], false);
-        let t3 = engine.add_node(st(), 1.0, &[], true);
-        let row = engine.add_node(
-            FlexStyle {
-                align_items: Some(AlignItems::Center),
-                gap: 24.,
-                height: Dim::Px(32.),
-                padding: Edges::xy(Dim::Px(22.), Dim::Px(0.)),
-                ..row_st()
-            },
-            1.0,
-            &[t1, div1, t2, spacer, t3],
-            false,
-        );
-        let sep = engine.add_node(FlexStyle { height: Dim::Px(1.), ..st() }, 1.0, &[], false);
-        let status = engine.add_node(flex_none(st()), 1.0, &[sep, row], false);
-        engine.compute(status, AvailSize::MIN, 1.0, &mut |id, _, _, _| {
-            if id == t1 {
-                size(60., 16.)
-            } else if id == t2 {
-                size(80., 16.)
-            } else {
-                size(40., 16.)
-            }
+        let mut t = Tree::new(1.0);
+        let (t1, t2, t3) = (t.text(), t.text(), t.text());
+        let div1 = t.leaf(st().flex_none().w(1.).h(14.));
+        let spacer = t.leaf(st().flex_1().min_w(1.).h(14.));
+        let row = t.node(row_st().items_center().gap(24.).h(32.).pad_xy(22., 0.), &[t1, div1, t2, spacer, t3]);
+        let sep = t.leaf(st().h(1.));
+        let status = t.node(st().flex_none(), &[sep, row]);
+        t.compute_with(status, AvailSize::MIN, |id, _, _, _| {
+            if id == t1 { size(60., 16.) } else if id == t2 { size(80., 16.) } else { size(40., 16.) }
         });
 
-        assert_eq!(engine.bounds(status, 1.0).size, size(322., 33.));
+        assert_eq!(t.bounds(status).size, size(322., 33.));
     }
 
     #[test]
     fn menu_command_tile_self_start_text_center_and_relative_offset() {
-        let mut engine = LayoutEngine::new();
-        let icon = engine.add_node(st(), 1.0, &[], true);
-        let icon_box = engine.add_node(FlexStyle { height: Dim::Px(16.), ..st() }, 1.0, &[icon], false);
-        let label_text = engine.add_node(st(), 1.0, &[], true);
-        let label_box = engine.add_node(
-            FlexStyle {
-                align_self: Some(AlignItems::Start),
-                margin: Edges { left: Dim::Px(6.), top: Dim::Px(4.), ..Edges::all(Dim::Px(0.)) },
-                width: Dim::Px(48.),
-                height: Dim::Px(16.),
-                ..st()
-            },
-            1.0,
-            &[label_text],
-            false,
-        );
-        let tile = engine.add_node(
-            FlexStyle {
-                align_items: Some(AlignItems::Center),
-                width: Dim::Px(60.),
-                height: Dim::Px(50.),
-                padding: Edges { top: Dim::Px(8.), ..Edges::all(Dim::Px(0.)) },
-                ..st()
-            },
-            1.0,
-            &[icon_box, label_box],
-            false,
-        );
-        let nudged = engine.add_node(
-            FlexStyle {
-                inset: Edges { left: Dim::Px(1.), top: Dim::Px(2.), ..Edges::all(Dim::Auto) },
-                width: Dim::Px(10.),
-                height: Dim::Px(10.),
-                ..st()
-            },
-            1.0,
-            &[],
-            false,
-        );
-        let root = engine.add_node(row_st(), 1.0, &[tile, nudged], false);
-        engine.compute(root, AvailSize::definite(200., 100.), 1.0, &mut |id, _, _, _| {
+        let mut t = Tree::new(1.0);
+        let (icon, label_text) = (t.text(), t.text());
+        let icon_box = t.node(st().h(16.), &[icon]);
+        let label_box = t.node(st().self_start().margin(4., 6.).w(48.).h(16.), &[label_text]);
+        let tile = t.node(st().items_center().w(60.).h(50.).pad(8., 0., 0., 0.), &[icon_box, label_box]);
+        let nudged = t.leaf(st().inset_tl(2., 1.).w(10.).h(10.));
+        let root = t.node(row_st(), &[tile, nudged]);
+        t.compute_with(root, AvailSize::definite(200., 100.), |id, _, _, _| {
             if id == icon { size(16., 16.) } else { size(24., 14.) }
         });
 
-        assert_eq!(engine.bounds(icon_box, 1.0).origin, point(22., 8.));
-        assert_eq!(engine.bounds(label_box, 1.0), rect(6., 28., 48., 16.));
-        assert_eq!(engine.bounds(label_text, 1.0).size.width, 48.);
-        assert_eq!(engine.bounds(nudged, 1.0).origin, point(61., 2.));
+        assert_eq!(t.bounds(icon_box).origin, point(22., 8.));
+        assert_eq!(t.bounds(label_box), rect(6., 28., 48., 16.));
+        assert_eq!(t.bounds(label_text).size.width, 48.);
+        assert_eq!(t.bounds(nudged).origin, point(61., 2.));
     }
 
     #[test]
     fn fractional_dpi_edge_closure_between_flex_siblings() {
-        let scale = 1.5;
-        let mut engine = LayoutEngine::new();
-        let child = flex_1(FlexStyle { height: Dim::Px(20.), ..st() });
-        let a = engine.add_node(child, scale, &[], false);
-        let b = engine.add_node(child, scale, &[], false);
-        let c = engine.add_node(child, scale, &[], false);
-        let root = engine.add_node(
-            FlexStyle { width: Dim::Px(100.), height: Dim::Px(20.), ..row_st() },
-            scale,
-            &[a, b, c],
-            false,
-        );
-        engine.compute(root, AvailSize::definite(100., 20.), scale, &mut no_measure);
+        let mut t = Tree::new(1.5);
+        let child = st().flex_1().h(20.);
+        let (a, b, c) = (t.leaf(child), t.leaf(child), t.leaf(child));
+        let root = t.node(row_st().w(100.).h(20.), &[a, b, c]);
+        t.compute(root, AvailSize::definite(100., 20.));
 
-        let ba = engine.bounds(a, scale);
-        let bb = engine.bounds(b, scale);
-        let bc = engine.bounds(c, scale);
+        let (ba, bb, bc) = (t.bounds(a), t.bounds(b), t.bounds(c));
         assert_eq!(ba.right(), bb.left());
         assert_eq!(bb.right(), bc.left());
         assert_eq!(bc.right(), 100.);
@@ -1808,149 +1704,72 @@ mod tests {
 
     #[test]
     fn editor_percentage_chain_through_flex_1() {
-        let mut engine = LayoutEngine::new();
-        let text_el = engine.add_node(FlexStyle { min_height: Dim::Px(40.), ..full() }, 1.0, &[], false);
-        let scrollbar = engine.add_node(FlexStyle { position: Position::Absolute, ..full() }, 1.0, &[], false);
-        let editor_state = engine.add_node(
-            flex_1(FlexStyle {
-                height: Dim::Pct(1.0),
-                padding: Edges {
-                    top: Dim::Px(10.),
-                    right: Dim::Px(12.),
-                    bottom: Dim::Px(10.),
-                    left: Dim::Px(14.),
-                },
-                ..st()
-            }),
-            1.0,
-            &[text_el, scrollbar],
-            false,
-        );
-        let inner = engine.add_node(full(), 1.0, &[editor_state], false);
-        let editor_area = engine.add_node(flex_1(FlexStyle { min_height: Dim::Px(60.), ..st() }), 1.0, &[inner], false);
-        let header = engine.add_node(flex_none(FlexStyle { height: Dim::Px(100.), ..st() }), 1.0, &[], false);
-        let root = engine.add_node(full(), 1.0, &[header, editor_area], false);
-        engine.compute(root, AvailSize::definite(800., 500.), 1.0, &mut no_measure);
+        let mut t = Tree::new(1.0);
+        let text_el = t.leaf(full().min_h(40.));
+        let scrollbar = t.leaf(full().abs());
+        let editor_state = t.node(st().flex_1().h_pct(1.0).pad(10., 12., 10., 14.), &[text_el, scrollbar]);
+        let inner = t.node(full(), &[editor_state]);
+        let editor_area = t.node(st().flex_1().min_h(60.), &[inner]);
+        let header = t.leaf(st().flex_none().h(100.));
+        let root = t.node(full(), &[header, editor_area]);
+        t.compute(root, AvailSize::definite(800., 500.));
 
-        assert_eq!(engine.bounds(text_el, 1.0), rect(14., 110., 774., 380.));
-        assert_eq!(engine.bounds(scrollbar, 1.0).size, size(800., 400.));
+        assert_eq!(t.bounds(text_el), rect(14., 110., 774., 380.));
+        assert_eq!(t.bounds(scrollbar).size, size(800., 400.));
     }
 
     #[test]
     fn flex_shrink_respects_flex_none_and_min_size() {
-        let mut engine = LayoutEngine::new();
-        let fixed = engine.add_node(flex_none(FlexStyle { width: Dim::Px(100.), height: Dim::Px(20.), ..st() }), 1.0, &[], false);
-        let a = engine.add_node(FlexStyle { width: Dim::Px(200.), min_width: Dim::Px(80.), height: Dim::Px(20.), ..st() }, 1.0, &[], false);
-        let b = engine.add_node(FlexStyle { width: Dim::Px(200.), min_width: Dim::Px(0.), height: Dim::Px(20.), ..st() }, 1.0, &[], false);
-        let root = engine.add_node(FlexStyle { width: Dim::Px(220.), ..row_st() }, 1.0, &[fixed, a, b], false);
-        engine.compute(root, AvailSize::definite(220., 20.), 1.0, &mut no_measure);
+        let mut t = Tree::new(1.0);
+        let fixed = t.leaf(st().flex_none().w(100.).h(20.));
+        let a = t.leaf(st().w(200.).min_w(80.).h(20.));
+        let b = t.leaf(st().w(200.).min_w(0.).h(20.));
+        let root = t.node(row_st().w(220.), &[fixed, a, b]);
+        t.compute(root, AvailSize::definite(220., 20.));
 
-        assert_eq!(engine.bounds(fixed, 1.0).size.width, 100.);
-        assert_eq!(engine.bounds(a, 1.0).size.width, 80.);
-        assert_eq!(engine.bounds(b, 1.0).size.width, 40.);
+        assert_eq!(t.bounds(fixed).size.width, 100.);
+        assert_eq!(t.bounds(a).size.width, 80.);
+        assert_eq!(t.bounds(b).size.width, 40.);
     }
 
     #[test]
     fn abspos_dropdown_inside_narrow_button_does_not_squish() {
-        let mut engine = LayoutEngine::new();
-        let item = engine.add_node(st(), 1.0, &[], true);
-        let dropdown = engine.add_node(
-            FlexStyle {
-                position: Position::Absolute,
-                inset: Edges { left: Dim::Px(0.), top: Dim::Px(32.), ..Edges::all(Dim::Auto) },
-                ..st()
-            },
-            1.0,
-            &[item],
-            false,
-        );
-        let button = engine.add_node(FlexStyle { width: Dim::Px(40.), height: Dim::Px(32.), ..st() }, 1.0, &[dropdown], false);
-        engine.compute(button, AvailSize::definite(40., 32.), 1.0, &mut |_, _, _, _| {
-            size(180., 28.)
-        });
+        let mut t = Tree::new(1.0);
+        let item = t.text();
+        let dropdown = t.node(st().abs().inset_tl(32., 0.), &[item]);
+        let button = t.node(st().w(40.).h(32.), &[dropdown]);
+        t.compute_with(button, AvailSize::definite(40., 32.), |_, _, _, _| size(180., 28.));
 
-        assert_eq!(engine.bounds(dropdown, 1.0), rect(0., 32., 180., 28.));
+        assert_eq!(t.bounds(dropdown), rect(0., 32., 180., 28.));
     }
 
     #[test]
     fn auto_height_flex_col_does_not_crush_in_short_window_and_respects_max_w_full() {
-        let mut engine = LayoutEngine::new();
-        let content = engine.add_node(FlexStyle { height: Dim::Px(120.), ..st() }, 1.0, &[], false);
-        let footer = engine.add_node(FlexStyle { height: Dim::Px(80.), ..st() }, 1.0, &[], false);
-        let col = engine.add_node(st(), 1.0, &[content, footer], false);
-        let frame = engine.add_node(
-            FlexStyle {
-                width: Dim::Px(360.),
-                max_width: Dim::Pct(1.0),
-                border: Edges::all(1.),
-                ..st()
-            },
-            1.0,
-            &[col],
-            false,
-        );
-        let overlay = engine.add_node(
-            FlexStyle {
-                position: Position::Absolute,
-                inset: Edges { top: Dim::Px(0.), left: Dim::Px(0.), ..Edges::all(Dim::Auto) },
-                align_items: Some(AlignItems::Center),
-                justify_content: Some(JustifyContent::Center),
-                ..full()
-            },
-            1.0,
-            &[frame],
-            false,
-        );
-        let root = engine.add_node(full(), 1.0, &[overlay], false);
-        engine.compute(root, AvailSize::definite(250., 140.), 1.0, &mut no_measure);
+        let mut t = Tree::new(1.0);
+        let content = t.leaf(st().h(120.));
+        let footer = t.leaf(st().h(80.));
+        let col = t.node(st(), &[content, footer]);
+        let frame = t.node(st().w(360.).max_w_pct(1.0).border_all(1.), &[col]);
+        let overlay = t.node(full().abs().inset_tl(0., 0.).items_center().justify_center(), &[frame]);
+        let root = t.node(full(), &[overlay]);
+        t.compute(root, AvailSize::definite(250., 140.));
 
-        assert_eq!(engine.bounds(frame, 1.0).size, size(250., 202.));
-        assert_eq!(engine.bounds(content, 1.0).size, size(248., 120.));
-        assert_eq!(engine.bounds(footer, 1.0).size, size(248., 80.));
+        assert_eq!(t.bounds(frame).size, size(250., 202.));
+        assert_eq!(t.bounds(content).size, size(248., 120.));
+        assert_eq!(t.bounds(footer).size, size(248., 80.));
     }
 
     #[test]
     fn single_line_text_field_min_h_full_centers_text_element() {
-        let mut engine = LayoutEngine::new();
-        let text_el = engine.add_node(FlexStyle { width: Dim::Pct(1.0), height: Dim::Px(20.), ..st() }, 1.0, &[], false);
-        let input_state = engine.add_node(
-            flex_1(FlexStyle {
-                min_height: Dim::Pct(1.0),
-                align_items: Some(AlignItems::Center),
-                overflow_x: Overflow::Hidden,
-                ..row_st()
-            }),
-            1.0,
-            &[text_el],
-            false,
-        );
-        let inner = engine.add_node(
-            FlexStyle {
-                height: Dim::Pct(1.0),
-                align_items: Some(AlignItems::Center),
-                padding: Edges { left: Dim::Px(9.), right: Dim::Px(33.), ..Edges::all(Dim::Px(0.)) },
-                ..row_st()
-            },
-            1.0,
-            &[input_state],
-            false,
-        );
-        let field = engine.add_node(
-            FlexStyle {
-                width: Dim::Px(200.),
-                height: Dim::Px(32.),
-                border: Edges { top: 1., left: 1., right: 1., bottom: 0. },
-                padding: Edges { bottom: Dim::Px(1.), ..Edges::all(Dim::Px(0.)) },
-                ..st()
-            },
-            1.0,
-            &[inner],
-            false,
-        );
-        engine.compute(field, AvailSize::definite(200., 32.), 1.0, &mut no_measure);
+        let mut t = Tree::new(1.0);
+        let text_el = t.leaf(st().w_pct(1.0).h(20.));
+        let input_state = t.node(row_st().flex_1().min_h_pct(1.0).items_center().overflow_x_hidden(), &[text_el]);
+        let inner = t.node(row_st().h_pct(1.0).items_center().pad(0., 33., 0., 9.), &[input_state]);
+        let field = t.node(st().w(200.).h(32.).border(1., 1., 0., 1.).pad(0., 0., 1., 0.), &[inner]);
+        t.compute(field, AvailSize::definite(200., 32.));
 
-        assert_eq!(engine.bounds(input_state, 1.0), rect(10., 1., 156., 30.));
-        assert_eq!(engine.bounds(text_el, 1.0), rect(10., 6., 156., 20.));
+        assert_eq!(t.bounds(input_state), rect(10., 1., 156., 30.));
+        assert_eq!(t.bounds(text_el), rect(10., 6., 156., 20.));
     }
 
     #[test]
@@ -1962,36 +1781,22 @@ mod tests {
         let style = TextStyle::regular("Segoe UI Variable Small", 12.0);
         let labels = ["Ln 1, Col 1", "0 characters", "100%", "Windows (CRLF)", "UTF-8"];
 
-        let build = |engine: &mut LayoutEngine, scale: f32| {
-            let t0 = engine.add_node(st(), scale, &[], true);
-            let d1 = engine.add_node(flex_none(FlexStyle { width: Dim::Px(1.), height: Dim::Px(16.), ..st() }), scale, &[], false);
-            let t2 = engine.add_node(st(), scale, &[], true);
-            let sp = engine.add_node(flex_1(FlexStyle { min_width: Dim::Px(1.), height: Dim::Px(16.), ..st() }), scale, &[], false);
-            let t4 = engine.add_node(st(), scale, &[], true);
-            let d5 = engine.add_node(flex_none(FlexStyle { width: Dim::Px(1.), height: Dim::Px(16.), ..st() }), scale, &[], false);
-            let t6 = engine.add_node(st(), scale, &[], true);
-            let d7 = engine.add_node(flex_none(FlexStyle { width: Dim::Px(1.), height: Dim::Px(16.), ..st() }), scale, &[], false);
-            let t8 = engine.add_node(st(), scale, &[], true);
-            let row = engine.add_node(
-                FlexStyle {
-                    align_items: Some(AlignItems::Center),
-                    gap: 24.,
-                    height: Dim::Px(31.),
-                    padding: Edges::xy(Dim::Px(22.), Dim::Px(0.)),
-                    ..row_st()
-                },
-                scale,
+        let build = |t: &mut Tree| {
+            let (t0, t2, t4, t6, t8) = (t.text(), t.text(), t.text(), t.text(), t.text());
+            let div = st().flex_none().w(1.).h(16.);
+            let (d1, d5, d7) = (t.leaf(div), t.leaf(div), t.leaf(div));
+            let sp = t.leaf(st().flex_1().min_w(1.).h(16.));
+            let row = t.node(
+                row_st().items_center().gap(24.).h(31.).pad_xy(22., 0.),
                 &[t0, d1, t2, sp, t4, d5, t6, d7, t8],
-                false,
             );
-            let sep = engine.add_node(flex_none(FlexStyle { height: Dim::Px(1.), ..st() }), scale, &[], false);
-            let bar = engine.add_node(flex_none(st()), scale, &[sep, row], false);
+            let sep = t.leaf(st().flex_none().h(1.));
+            let bar = t.node(st().flex_none(), &[sep, row]);
             (bar, [t0, t2, t4, t6, t8], sp, d5)
         };
 
         let measure_labels = |ids: [LayoutId; 5]| {
-            let ts = &ts;
-            let style = &style;
+            let (ts, style) = (&ts, &style);
             move |id: LayoutId, kw: Option<f32>, _: Option<f32>, avail: AvailSize| {
                 let ix = ids.iter().position(|&x| x == id).unwrap();
                 let wrap_width = kw.or(match avail.width {
@@ -2001,32 +1806,25 @@ mod tests {
                 ts.shape_label(
                     SharedStr::new_static(labels[ix]),
                     style,
-                    LabelLayout {
-                        line_height: 16.0,
-                        wrap_width,
-                        line_clamp: None,
-                        align: TextAlign::Left,
-                    },
+                    LabelLayout { line_height: 16.0, wrap_width, line_clamp: None, align: TextAlign::Left },
                 )
                 .size()
             }
         };
 
-        let mut probe = LayoutEngine::new();
-        let (bar_probe, probe_ids, _, _) = build(&mut probe, 1.0);
-        probe.compute(bar_probe, AvailSize::MIN, 1.0, &mut measure_labels(probe_ids));
-        let min_sz = probe.bounds(bar_probe, 1.0).size;
+        let mut probe = Tree::new(1.0);
+        let (bar_probe, probe_ids, _, _) = build(&mut probe);
+        probe.compute_with(bar_probe, AvailSize::MIN, measure_labels(probe_ids));
+        let min_sz = probe.bounds(bar_probe).size;
 
-        let mut win = LayoutEngine::new();
-        let (bar_win, win_ids, sp, d5) = build(&mut win, 1.0);
-        let root = win.add_node(full(), 1.0, &[bar_win], false);
-        win.compute(root, AvailSize::definite(min_sz.width, 200.), 1.0, &mut measure_labels(win_ids));
+        let mut win = Tree::new(1.0);
+        let (bar_win, win_ids, sp, d5) = build(&mut win);
+        let root = win.node(full(), &[bar_win]);
+        win.compute_with(root, AvailSize::definite(min_sz.width, 200.), measure_labels(win_ids));
 
-        let spacer = win.bounds(sp, 1.0);
-        let zoom = win.bounds(win_ids[2], 1.0);
-        let next_div = win.bounds(d5, 1.0);
+        let (spacer, zoom, next_div) = (win.bounds(sp), win.bounds(win_ids[2]), win.bounds(d5));
         assert!(spacer.size.width >= 1.0);
-        assert!(zoom.size.height <= 16.0, "zoom must stay single-line, got {:?}", zoom);
+        assert!(zoom.size.height <= 16.0, "zoom must stay single-line, got {zoom:?}");
         assert!(zoom.right() < next_div.left());
     }
 }
