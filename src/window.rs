@@ -15,7 +15,9 @@ use crate::geom::{Edges, Point, Rect, Size, point, size};
 use crate::gfx::{Surface, TextSystem, fill, font};
 use crate::ids::{CustomDraw, EditorSlot, Frame, HitId, Node, UiState};
 use crate::keytips::KeyTip;
-use crate::menu::{Entry, MenuBar, MenuOutcome};
+use crate::menu::{
+    Entry, FocusRequest, MENU_BAR_HEIGHT, MenuBar, MenuOutcome, MenuState, SubmenuTimer,
+};
 use crate::platform::{
     Jobs, Key, KeyEvent, Modifiers, MouseButton, NativeWindow, SystemSettings, TimerHandle,
     WindowControlArea, WindowId, clipboard, format_local_time_date,
@@ -49,7 +51,6 @@ pub(crate) const WINDOW_HEIGHT: f32 = 1107.;
 pub(crate) const WINDOW_MAX_SCREEN_SHARE: f32 = 0.9;
 
 const SEPARATOR_HEIGHT: f32 = 1.;
-pub(crate) const MENU_BAR_HEIGHT: f32 = 32.;
 const MENU_BAR_LEFT: f32 = 4.;
 const STATUS_BAR_HEIGHT: f32 = 31.;
 const STATUS_DIVIDER_WIDTH: f32 = 1.;
@@ -175,6 +176,7 @@ pub(crate) struct MainWindow {
     pub(crate) has_painted: bool,
     pub(crate) pending_close: bool,
     blink_timing: (Option<Duration>, Option<Duration>),
+    menu_submenu_timer: TimerHandle,
     middle_pressed_tab: Option<TabId>,
     min_size_cache: Option<MinSizeCache>,
 }
@@ -209,6 +211,7 @@ impl MainWindow {
             has_painted: false,
             pending_close: false,
             blink_timing: (settings.caret_blink_interval, settings.caret_blink_timeout),
+            menu_submenu_timer: TimerHandle::default(),
             middle_pressed_tab: None,
             min_size_cache: None,
         };
@@ -800,16 +803,26 @@ impl MainWindow {
         self.menu_bar.key_tips(self.ui.frame(), ts)
     }
 
+    fn menu_state(&self, view: crate::app::ViewSettings) -> MenuState {
+        let ed = self.active_editor();
+        MenuState {
+            can_undo: ed.can_undo(),
+            can_redo: ed.can_redo(),
+            has_selection: !ed.selected_range().is_empty(),
+            has_text: ed.text().len() > 0,
+            clipboard_has_text: clipboard::clipboard_has_text(),
+            status_bar: view.status_bar,
+            word_wrap: view.word_wrap,
+        }
+    }
+
     pub(crate) fn cancel_menu(&mut self, jobs: &Jobs<AppEvent>) {
         let out = self.menu_bar.cancel();
-        if out.dirty {
-            self.dirty = true;
+        self.dirty |= out.dirty;
+        if matches!(out.submenu_timer, SubmenuTimer::Cancel) {
+            self.menu_submenu_timer.cancel();
         }
-        if let Some(f) = out.focus {
-            self.set_focus(f, jobs);
-        } else if out.restore_editor_focus {
-            self.set_focus(Focus::Editor(self.active_slot()), jobs);
-        }
+        self.apply_focus_request(out.focus, jobs);
     }
 
     pub(crate) fn on_menu_submenu_timer(&mut self, target: Option<usize>, ts: &TextSystem) {
@@ -818,13 +831,29 @@ impl MainWindow {
         }
     }
 
+    fn apply_focus_request(&mut self, req: FocusRequest, jobs: &Jobs<AppEvent>) {
+        match req {
+            FocusRequest::Keep => {}
+            FocusRequest::MenuBar => self.set_focus(Focus::MenuBar, jobs),
+            FocusRequest::RestoreEditor => self.set_focus(Focus::Editor(self.active_slot()), jobs),
+            FocusRequest::Editor(slot) => self.set_focus(Focus::Editor(slot), jobs),
+        }
+    }
+
     fn apply_menu_outcome(&mut self, out: MenuOutcome, cx: &mut Cx<'_>) -> bool {
         self.dirty |= out.dirty;
-        if let Some(f) = out.focus {
-            self.set_focus(f, cx.jobs);
-        } else if out.restore_editor_focus {
-            self.set_focus(Focus::Editor(self.active_slot()), cx.jobs);
+        match out.submenu_timer {
+            SubmenuTimer::Keep => {}
+            SubmenuTimer::Cancel => self.menu_submenu_timer.cancel(),
+            SubmenuTimer::Arm(target) => {
+                let delay = Duration::from_millis(u64::from(cx.settings.menu_show_delay_ms));
+                let window = self.id();
+                self.menu_submenu_timer = cx
+                    .jobs
+                    .after(delay, AppEvent::MenuSubmenuTimer { window, target });
+            }
         }
+        self.apply_focus_request(out.focus, cx.jobs);
         if let Some(cmd) = out.command {
             self.dispatch_command(cmd, cx);
             return true;
@@ -860,16 +889,9 @@ impl MainWindow {
         if !matches!(top, Some(HitId::TabScrollLeft | HitId::TabScrollRight)) {
             self.strip.stop_repeat();
         }
-        let wid = self.id();
         if !self.dialogs.is_open() {
-            let menu_out = self.menu_bar.on_hover_change(
-                wid,
-                top,
-                &self.tabs[self.active].data.editor,
-                cx.view,
-                cx.ts,
-                cx.jobs,
-            );
+            let state = self.menu_state(cx.view);
+            let menu_out = self.menu_bar.on_hover_change(top, state, cx.ts);
             let _ = self.apply_menu_outcome(menu_out, cx);
         }
 
@@ -993,12 +1015,8 @@ impl MainWindow {
                     | HitId::TabClose(_),
                 ) => return,
                 Some(HitId::MenuTrigger(kind)) => {
-                    let out = self.menu_bar.toggle_trigger(
-                        kind,
-                        &self.tabs[self.active].data.editor,
-                        cx.view,
-                        cx.ts,
-                    );
+                    let state = self.menu_state(cx.view);
+                    let out = self.menu_bar.toggle_trigger(kind, state, cx.ts);
                     let _ = self.apply_menu_outcome(out, cx);
                     return;
                 }
@@ -1136,12 +1154,8 @@ impl MainWindow {
             })
             .flatten();
         if let Some(anchor) = open_ctx {
-            let out = self.menu_bar.open_context_menu(
-                anchor,
-                &self.tabs[self.active].data.editor,
-                false,
-                cx.ts,
-            );
+            let state = self.menu_state(cx.view);
+            let out = self.menu_bar.open_context_menu(anchor, state, false, cx.ts);
             let _ = self.apply_menu_outcome(out, cx);
             return;
         }
@@ -1176,7 +1190,7 @@ impl MainWindow {
                 let out = self.menu_bar.open_flyout(
                     entries,
                     HitId::FindOptions,
-                    Focus::Editor(EditorSlot::FindQuery),
+                    EditorSlot::FindQuery,
                     cx.ts,
                 );
                 let _ = self.apply_menu_outcome(out, cx);
@@ -1311,13 +1325,10 @@ impl MainWindow {
             return true;
         }
 
-        let menu_out = self.menu_bar.on_key_down(
-            ev,
-            self.focus,
-            &self.tabs[self.active].data.editor,
-            cx.view,
-            cx.ts,
-        );
+        let state = self.menu_state(cx.view);
+        let menu_out =
+            self.menu_bar
+                .on_key_down(ev, self.focus == Focus::MenuBar, state, cx.ts);
         if menu_out.handled {
             return self.apply_menu_outcome(menu_out, cx);
         }
@@ -1455,12 +1466,8 @@ impl MainWindow {
                 }
                 if let Some(caret) = self.active_editor().caret_bounds() {
                     let anchor = point(caret.right(), caret.bottom());
-                    let out = self.menu_bar.open_context_menu(
-                        anchor,
-                        &self.tabs[self.active].data.editor,
-                        true,
-                        cx.ts,
-                    );
+                    let state = self.menu_state(cx.view);
+                    let out = self.menu_bar.open_context_menu(anchor, state, true, cx.ts);
                     let _ = self.apply_menu_outcome(out, cx);
                 }
                 return true;
@@ -1815,7 +1822,9 @@ impl MainWindow {
     }
 
     fn menu_bar_row(&mut self, p: Palette) -> Node {
-        let menu = self.menu_bar.render_bar(self.focus, p, &mut self.ui);
+        let menu = self
+            .menu_bar
+            .render_bar(self.focus == Focus::MenuBar, p, &mut self.ui);
         let theme_btn = icon_button(
             p,
             HitId::ThemeToggle,
