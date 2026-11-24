@@ -480,7 +480,7 @@ impl<H: Copy + Eq, C: Copy> Frame<H, C> {
 
         let root_rect = engine.bounds(root_lid, scale);
         let viewport = match (available.width, available.height) {
-            (Space::Definite(w), Space::Definite(h)) => Size::new(w, h),
+            (Space::Definite(w), Space::Definite(h)) => size(w, h),
             _ => root_rect.size,
         };
         for idx in 0..frame.nodes.len() {

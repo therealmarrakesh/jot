@@ -1,6 +1,5 @@
-use std::ops::{Add, AddAssign, Mul, Neg, Sub, SubAssign};
+use std::ops::{Add, Sub, SubAssign};
 
-#[inline]
 pub(crate) fn round_half_up(value: f32) -> f32 {
     (value + 0.5).floor()
 }
@@ -15,14 +14,12 @@ impl Point {
     pub(crate) const ZERO: Self = Self { x: 0.0, y: 0.0 };
 }
 
-#[inline]
 pub(crate) const fn point(x: f32, y: f32) -> Point {
     Point { x, y }
 }
 
 impl Add for Point {
     type Output = Self;
-    #[inline]
     fn add(self, rhs: Self) -> Self {
         Self {
             x: self.x + rhs.x,
@@ -31,17 +28,8 @@ impl Add for Point {
     }
 }
 
-impl AddAssign for Point {
-    #[inline]
-    fn add_assign(&mut self, rhs: Self) {
-        self.x += rhs.x;
-        self.y += rhs.y;
-    }
-}
-
 impl Sub for Point {
     type Output = Self;
-    #[inline]
     fn sub(self, rhs: Self) -> Self {
         Self {
             x: self.x - rhs.x,
@@ -51,32 +39,9 @@ impl Sub for Point {
 }
 
 impl SubAssign for Point {
-    #[inline]
     fn sub_assign(&mut self, rhs: Self) {
         self.x -= rhs.x;
         self.y -= rhs.y;
-    }
-}
-
-impl Neg for Point {
-    type Output = Self;
-    #[inline]
-    fn neg(self) -> Self {
-        Self {
-            x: -self.x,
-            y: -self.y,
-        }
-    }
-}
-
-impl Mul<f32> for Point {
-    type Output = Self;
-    #[inline]
-    fn mul(self, rhs: f32) -> Self {
-        Self {
-            x: self.x * rhs,
-            y: self.y * rhs,
-        }
     }
 }
 
@@ -92,18 +57,11 @@ impl Size {
         height: 0.0,
     };
 
-    #[inline]
-    pub(crate) const fn new(width: f32, height: f32) -> Self {
-        Self { width, height }
-    }
-
-    #[inline]
     pub(crate) fn is_empty(self) -> bool {
         self.width <= 0.0 || self.height <= 0.0
     }
 }
 
-#[inline]
 pub(crate) const fn size(width: f32, height: f32) -> Size {
     Size { width, height }
 }
@@ -120,12 +78,10 @@ impl Rect {
         size: Size::ZERO,
     };
 
-    #[inline]
     pub(crate) const fn new(origin: Point, size: Size) -> Self {
         Self { origin, size }
     }
 
-    #[inline]
     pub(crate) fn from_corners(origin: Point, lower_right: Point) -> Self {
         Self {
             origin,
@@ -136,27 +92,22 @@ impl Rect {
         }
     }
 
-    #[inline]
     pub(crate) const fn left(self) -> f32 {
         self.origin.x
     }
 
-    #[inline]
     pub(crate) const fn top(self) -> f32 {
         self.origin.y
     }
 
-    #[inline]
     pub(crate) fn right(self) -> f32 {
         self.origin.x + self.size.width
     }
 
-    #[inline]
     pub(crate) fn bottom(self) -> f32 {
         self.origin.y + self.size.height
     }
 
-    #[inline]
     pub(crate) fn center(self) -> Point {
         point(
             self.origin.x + self.size.width * 0.5,
@@ -164,17 +115,14 @@ impl Rect {
         )
     }
 
-    #[inline]
     pub(crate) fn is_empty(self) -> bool {
         self.size.is_empty()
     }
 
-    #[inline]
     pub(crate) fn contains(self, pt: Point) -> bool {
         pt.x >= self.left() && pt.x < self.right() && pt.y >= self.top() && pt.y < self.bottom()
     }
 
-    #[inline]
     pub(crate) fn intersect(self, other: Self) -> Self {
         let left = self.left().max(other.left());
         let top = self.top().max(other.top());
@@ -183,7 +131,6 @@ impl Rect {
         Self::from_corners(point(left, top), point(right, bottom))
     }
 
-    #[inline]
     pub(crate) fn inset(self, edges: Edges) -> Self {
         Self {
             origin: point(self.origin.x + edges.left, self.origin.y + edges.top),
@@ -194,7 +141,6 @@ impl Rect {
         }
     }
 
-    #[inline]
     pub(crate) fn inflate(self, amount: f32) -> Self {
         Self {
             origin: point(self.origin.x - amount, self.origin.y - amount),
@@ -205,7 +151,6 @@ impl Rect {
         }
     }
 
-    #[inline]
     pub(crate) fn translate(self, delta: Point) -> Self {
         Self {
             origin: self.origin + delta,
@@ -213,7 +158,6 @@ impl Rect {
         }
     }
 
-    #[inline]
     pub(crate) fn union(self, other: Self) -> Self {
         if self.is_empty() {
             return other;
@@ -228,7 +172,6 @@ impl Rect {
         Self::from_corners(point(left, top), point(right, bottom))
     }
 
-    #[inline]
     pub(crate) fn to_screen(self, scale: f32, origin: ScreenPoint) -> ScreenRect {
         let phys = |v: f32| (v * scale).round() as i32;
         ScreenRect {
@@ -241,7 +184,6 @@ impl Rect {
 }
 
 #[cfg(test)]
-#[inline]
 pub(crate) const fn rect(x: f32, y: f32, width: f32, height: f32) -> Rect {
     Rect {
         origin: Point { x, y },
@@ -258,7 +200,6 @@ pub(crate) struct Edges<T = f32> {
 }
 
 impl<T: Copy> Edges<T> {
-    #[inline]
     pub(crate) const fn all(value: T) -> Self {
         Self {
             top: value,
@@ -268,7 +209,6 @@ impl<T: Copy> Edges<T> {
         }
     }
 
-    #[inline]
     pub(crate) const fn xy(horiz: T, vert: T) -> Self {
         Self {
             top: vert,
@@ -282,22 +222,18 @@ impl<T: Copy> Edges<T> {
 impl Edges<f32> {
     pub(crate) const ZERO: Self = Self::all(0.0);
 
-    #[inline]
     pub(crate) fn horiz(self) -> f32 {
         self.left + self.right
     }
 
-    #[inline]
     pub(crate) fn vert(self) -> f32 {
         self.top + self.bottom
     }
 
-    #[inline]
     pub(crate) fn any_nonzero(self) -> bool {
         self.top != 0.0 || self.right != 0.0 || self.bottom != 0.0 || self.left != 0.0
     }
 
-    #[inline]
     pub(crate) fn add(self, other: Self) -> Self {
         Self {
             top: self.top + other.top,
@@ -319,7 +255,6 @@ pub(crate) struct Corners {
 impl Corners {
     pub(crate) const ZERO: Self = Self::all(0.0);
 
-    #[inline]
     pub(crate) const fn all(r: f32) -> Self {
         Self {
             top_left: r,
@@ -329,7 +264,6 @@ impl Corners {
         }
     }
 
-    #[inline]
     pub(crate) const fn top(r: f32) -> Self {
         Self {
             top_left: r,
@@ -339,7 +273,6 @@ impl Corners {
         }
     }
 
-    #[inline]
     pub(crate) const fn bottom(r: f32) -> Self {
         Self {
             top_left: 0.0,
@@ -349,7 +282,6 @@ impl Corners {
         }
     }
 
-    #[inline]
     pub(crate) fn clamp_to(self, size: Size) -> Self {
         let tl = self.top_left.max(0.0);
         let tr = self.top_right.max(0.0);
@@ -392,12 +324,10 @@ pub(crate) struct Shadows(pub(crate) [Option<BoxShadow>; 2]);
 impl Shadows {
     pub(crate) const NONE: Self = Self([None, None]);
 
-    #[inline]
     pub(crate) fn is_empty(self) -> bool {
         self.0[0].is_none() && self.0[1].is_none()
     }
 
-    #[inline]
     pub(crate) fn iter(&self) -> impl Iterator<Item = &BoxShadow> {
         self.0.iter().flatten()
     }
@@ -426,17 +356,14 @@ pub(crate) struct Rgba {
 }
 
 impl Rgba {
-    #[inline]
     pub(crate) const fn new(r: f32, g: f32, b: f32, a: f32) -> Self {
         Self { r, g, b, a }
     }
 
-    #[inline]
     pub(crate) const fn alpha(self, a: f32) -> Self {
         Self { a, ..self }
     }
 
-    #[inline]
     pub(crate) fn opacity(self, factor: f32) -> Self {
         Self {
             a: self.a * factor,
@@ -444,12 +371,10 @@ impl Rgba {
         }
     }
 
-    #[inline]
     pub(crate) fn is_transparent(self) -> bool {
         self.a <= 0.0
     }
 
-    #[inline]
     pub(crate) fn mix_opaque(self, toward: Self, amount: f32) -> Self {
         Self {
             r: self.r + (toward.r - self.r) * amount,
@@ -460,7 +385,6 @@ impl Rgba {
     }
 }
 
-#[inline]
 pub(crate) const fn rgb(hex: u32) -> Rgba {
     Rgba {
         r: ((hex >> 16) & 0xFF) as f32 / 255.0,
@@ -470,7 +394,6 @@ pub(crate) const fn rgb(hex: u32) -> Rgba {
     }
 }
 
-#[inline]
 pub(crate) const fn rgba(hex: u32) -> Rgba {
     Rgba {
         r: ((hex >> 24) & 0xFF) as f32 / 255.0,
@@ -480,17 +403,14 @@ pub(crate) const fn rgba(hex: u32) -> Rgba {
     }
 }
 
-#[inline]
 pub(crate) const fn black() -> Rgba {
     Rgba::new(0.0, 0.0, 0.0, 1.0)
 }
 
-#[inline]
 pub(crate) const fn white() -> Rgba {
     Rgba::new(1.0, 1.0, 1.0, 1.0)
 }
 
-#[inline]
 pub(crate) const fn transparent_black() -> Rgba {
     Rgba::new(0.0, 0.0, 0.0, 0.0)
 }
