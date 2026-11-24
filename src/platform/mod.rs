@@ -10,7 +10,6 @@ mod jobs;
 mod pump;
 mod settings;
 mod window;
-mod wndproc;
 
 use std::any::Any;
 use std::panic::{AssertUnwindSafe, catch_unwind};
