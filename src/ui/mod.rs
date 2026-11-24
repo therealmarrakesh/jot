@@ -7,4 +7,6 @@ pub(crate) mod scene;
 pub(crate) use anim::{AnimStatus, AnimTracks, Easing, Presence, TimedTransition};
 pub(crate) use layout::AvailSize;
 pub(crate) use overlay::OverlaySurface;
-pub(crate) use scene::{Brushes, Frame, Node, PointerState, UiState, box_, col, custom, row, text};
+pub(crate) use scene::{
+    Anchor, Brushes, Frame, Node, PointerState, UiState, box_, col, custom, row, text,
+};

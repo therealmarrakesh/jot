@@ -99,16 +99,6 @@ impl TextStyle {
         Self::new(font(family), size)
     }
 
-    pub(crate) fn semibold(family: impl Into<SharedStr>, size: f32) -> Self {
-        Self::new(
-            Font {
-                family: family.into(),
-                weight: FontWeight::SEMIBOLD,
-            },
-            size,
-        )
-    }
-
     #[inline]
     pub(crate) fn size(&self) -> f32 {
         self.size_hundredths as f32 / 100.0

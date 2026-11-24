@@ -2,7 +2,7 @@ use std::hash::Hash;
 use std::time::{Duration, Instant};
 
 use crate::color::{Rgba, black, transparent_black};
-use crate::geom::{Corners, Edges, Point, Rect, Shadows, Size};
+use crate::geom::{Corners, Edges, Point, Rect, Shadows, Size, point};
 use crate::gfx::{
     D2DRenderer, Font, FontWeight, Label, LabelLayout, PaintQuad, TextAlign, TextStyle, TextSystem,
 };
@@ -104,6 +104,77 @@ enum NodePayload<H, C> {
     Custom(C),
 }
 
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub(crate) enum Anchor<H> {
+    Point(Point),
+    BelowStart {
+        target: H,
+        gap: f32,
+    },
+    AboveOrBelowCenter {
+        target: H,
+        gap: f32,
+        min_top: f32,
+    },
+    SideOf {
+        target: H,
+        overlap: f32,
+        offset_y: f32,
+    },
+}
+
+impl<H: Copy> Anchor<H> {
+    fn resolve(
+        self,
+        viewport: Size,
+        popup: Size,
+        mut lookup: impl FnMut(H) -> Option<Rect>,
+    ) -> Point {
+        let clamp_x = |x: f32| x.min((viewport.width - popup.width).max(0.)).max(0.);
+        let clamp_y = |y: f32| y.min((viewport.height - popup.height).max(0.)).max(0.);
+        match self {
+            Self::Point(p) => point(clamp_x(p.x), clamp_y(p.y)),
+            Self::BelowStart { target, gap } => {
+                let p = lookup(target).map_or(Point::ZERO, |r| point(r.left(), r.bottom() + gap));
+                point(clamp_x(p.x), clamp_y(p.y))
+            }
+            Self::AboveOrBelowCenter {
+                target,
+                gap,
+                min_top,
+            } => {
+                let Some(r) = lookup(target) else {
+                    return Point::ZERO;
+                };
+                let x = clamp_x(r.center().x - (popup.width / 2.).floor());
+                let above = r.top() - (gap + popup.height);
+                let y = if above >= min_top {
+                    above
+                } else {
+                    r.bottom() + gap
+                };
+                point(x, clamp_y(y))
+            }
+            Self::SideOf {
+                target,
+                overlap,
+                offset_y,
+            } => {
+                let Some(r) = lookup(target) else {
+                    return Point::ZERO;
+                };
+                let right_x = r.right() - overlap;
+                let x = if right_x + popup.width <= viewport.width {
+                    right_x
+                } else {
+                    (r.left() - popup.width + overlap).max(0.)
+                };
+                point(x, clamp_y(r.top() + offset_y))
+            }
+        }
+    }
+}
+
 pub(crate) struct Node<H, C> {
     flex: FlexStyle,
     bg: Rgba,
@@ -113,6 +184,7 @@ pub(crate) struct Node<H, C> {
     opacity: f32,
     scale: (f32, f32),
     inert: bool,
+    anchor: Option<Anchor<H>>,
     text: TextOverrides,
     hit: Option<H>,
     cursor: Option<CursorStyle>,
@@ -148,6 +220,7 @@ impl<H, C> Node<H, C> {
             opacity: 1.0,
             scale: (1.0, 1.0),
             inert: false,
+            anchor: None,
             text: TextOverrides::default(),
             hit: None,
             cursor: None,
@@ -168,6 +241,7 @@ impl<H, C> Node<H, C> {
         min_w(v: f32) => |s| { s.flex.min_width = Dim::Px(v); }
         min_h(v: f32) => |s| { s.flex.min_height = Dim::Px(v); }
         min_h_full() => |s| { s.flex.min_height = Dim::Pct(1.0); }
+        max_w(v: f32) => |s| { s.flex.max_width = Dim::Px(v); }
         max_w_full() => |s| { s.flex.max_width = Dim::Pct(1.0); }
         flex_1() => |s| {
             s.flex.flex_grow = 1.0;
@@ -237,6 +311,7 @@ impl<H, C> Node<H, C> {
         opacity(opacity: f32) => |s| { s.opacity = opacity; }
         scale(sx: f32, sy: f32) => |s| { s.scale = (sx, sy); }
         inert() => |s| { s.inert = true; }
+        anchored(anchor: Anchor<H>) => |s| { s.anchor = Some(anchor); }
         font_semibold() => |s| { s.text.weight = Some(FontWeight::SEMIBOLD); }
         text_size(size: f32) => |s| { s.text.size = Some(size); }
         line_height(lh: f32) => |s| { s.text.line_height = Some(lh); }
@@ -264,7 +339,6 @@ impl<H, C> Node<H, C> {
     pub(crate) fn min_w_0(self) -> Self {
         self.min_w(0.0)
     }
-    #[cfg(test)]
     pub(crate) fn inset_0(self) -> Self {
         self.top(0.0).right(0.0).bottom(0.0).left(0.0)
     }
@@ -348,6 +422,7 @@ struct FlatNode<H, C> {
     opacity: f32,
     scale: (f32, f32),
     inert: bool,
+    anchor: Option<Anchor<H>>,
     clip: bool,
     hit: Option<H>,
     cursor: Option<CursorStyle>,
@@ -438,16 +513,33 @@ impl<H: Copy + Eq, C: Copy> Frame<H, C> {
             sz
         });
 
+        let root_rect = engine.bounds(root_layout_id, scale);
+        let viewport = match (available.width, available.height) {
+            (AvailableSpace::Definite(w), AvailableSpace::Definite(h)) => Size::new(w, h),
+            _ => root_rect.size,
+        };
+        for idx in 0..frame.nodes.len() {
+            let Some(anchor) = frame.nodes[idx].anchor else {
+                continue;
+            };
+            let lid = frame.nodes[idx].layout_id;
+            let popup_size = engine.bounds(lid, scale).size;
+            let origin = anchor.resolve(viewport, popup_size, |target| {
+                frame
+                    .nodes
+                    .iter()
+                    .rev()
+                    .find(|n| n.hit == Some(target))
+                    .map(|n| engine.bounds(n.layout_id, scale))
+            });
+            engine.set_origin(lid, origin, scale);
+        }
+
         for node in &mut frame.nodes {
             node.rect = engine.bounds(node.layout_id, scale);
         }
 
-        let initial_clip = match (available.width, available.height) {
-            (AvailableSpace::Definite(w), AvailableSpace::Definite(h)) => {
-                Rect::new(Point::ZERO, Size::new(w, h))
-            }
-            _ => frame.nodes[root_idx].rect,
-        };
+        let initial_clip = Rect::new(Point::ZERO, viewport);
         frame.collect_hits(root_idx, initial_clip);
         frame
     }
@@ -458,6 +550,17 @@ impl<H: Copy + Eq, C: Copy> Frame<H, C> {
         text_system: &TextSystem,
     ) -> Size {
         let frame = Self::layout(root_node, AvailSize::MIN, scale, text_system);
+        frame
+            .root
+            .map_or(Size::ZERO, |idx| frame.nodes[idx].rect.size)
+    }
+
+    pub(crate) fn measure_fit(
+        root_node: Node<H, C>,
+        scale: f32,
+        text_system: &TextSystem,
+    ) -> Size {
+        let frame = Self::layout(root_node, AvailSize::MAX, scale, text_system);
         frame
             .root
             .map_or(Size::ZERO, |idx| frame.nodes[idx].rect.size)
@@ -478,7 +581,7 @@ impl<H: Copy + Eq, C: Copy> Frame<H, C> {
         let border = snap_border_edges(node.flex.border, scale);
         let flat_idx = self.nodes.len();
         let Node {
-            flex,
+            mut flex,
             bg,
             border_color,
             corners,
@@ -486,6 +589,7 @@ impl<H: Copy + Eq, C: Copy> Frame<H, C> {
             opacity,
             scale: node_scale,
             inert,
+            anchor,
             hit,
             cursor,
             window_area,
@@ -493,6 +597,9 @@ impl<H: Copy + Eq, C: Copy> Frame<H, C> {
             payload,
             ..
         } = node;
+        if anchor.is_some() {
+            flex.position = Position::Absolute;
+        }
 
         self.nodes.push(FlatNode {
             parent,
@@ -506,6 +613,7 @@ impl<H: Copy + Eq, C: Copy> Frame<H, C> {
             opacity,
             scale: node_scale,
             inert,
+            anchor,
             clip,
             hit,
             cursor,
@@ -1014,5 +1122,115 @@ mod tests {
             modal_frame.hit_chain(point(95., 10.)),
             vec![TestHit::Backdrop]
         );
+    }
+
+    #[test]
+    fn same_frame_anchor_and_measure_fit_work() {
+        #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+        enum AnchorHit {
+            Trigger,
+            Popup,
+            Item,
+            Submenu,
+            FlyoutBtn,
+            Flyout,
+        }
+
+        let ts = TextSystem::new();
+        let tree: Node<AnchorHit, ()> = box_()
+            .relative()
+            .size_full()
+            .child(
+                row()
+                    .h(32.)
+                    .pl(120.)
+                    .child(box_().w(50.).h(32.).hit(AnchorHit::Trigger)),
+            )
+            .child(
+                box_()
+                    .absolute()
+                    .left(140.)
+                    .top(60.)
+                    .w(30.)
+                    .h(30.)
+                    .hit(AnchorHit::FlyoutBtn),
+            )
+            .child(
+                box_()
+                    .w(120.)
+                    .h(80.)
+                    .hit(AnchorHit::Popup)
+                    .anchored(Anchor::BelowStart {
+                        target: AnchorHit::Trigger,
+                        gap: 0.,
+                    })
+                    .child(
+                        box_()
+                            .absolute()
+                            .left(1.)
+                            .top(20.)
+                            .w(118.)
+                            .h(30.)
+                            .hit(AnchorHit::Item),
+                    )
+                    .child(box_().w(100.).h(60.).hit(AnchorHit::Submenu).anchored(
+                        Anchor::SideOf {
+                            target: AnchorHit::Item,
+                            overlap: 3.,
+                            offset_y: -3.,
+                        },
+                    )),
+            )
+            .child(box_().w(80.).h(50.).hit(AnchorHit::Flyout).anchored(
+                Anchor::AboveOrBelowCenter {
+                    target: AnchorHit::FlyoutBtn,
+                    gap: 4.,
+                    min_top: 32.,
+                },
+            ));
+
+        let frame = Frame::layout(tree, AvailSize::definite(300., 200.), 1.0, &ts);
+        assert_eq!(
+            frame.rect_of(AnchorHit::Popup).unwrap().origin,
+            point(120., 32.)
+        );
+        assert_eq!(
+            frame.rect_of(AnchorHit::Submenu).unwrap().origin,
+            point(24., 49.)
+        );
+        assert_eq!(
+            frame.rect_of(AnchorHit::Flyout).unwrap().origin,
+            point(115., 94.)
+        );
+
+        for scale in [1.0f32, 1.5] {
+            let short: Node<(), ()> = box_()
+                .max_w(320.)
+                .border(1., black())
+                .px(9.)
+                .pt(6.)
+                .pb(8.)
+                .text_size(12.)
+                .line_height(16.)
+                .child(text("New tab"));
+            let short_sz = Frame::measure_fit(short, scale, &ts);
+            assert!(short_sz.width > 30. && short_sz.width < 150.);
+            assert!((short_sz.height - 32.).abs() <= 1.0);
+
+            let long: Node<(), ()> = box_()
+                .max_w(320.)
+                .border(1., black())
+                .px(9.)
+                .pt(6.)
+                .pb(8.)
+                .text_size(12.)
+                .line_height(16.)
+                .child(text(
+                    "This is a significantly longer tooltip message that must wrap cleanly across multiple lines inside the 320px cap",
+                ));
+            let long_sz = Frame::measure_fit(long, scale, &ts);
+            assert!(long_sz.width <= 320.5);
+            assert!(long_sz.height >= 48. - 1.0);
+        }
     }
 }

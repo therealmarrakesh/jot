@@ -180,7 +180,6 @@ impl Rect {
         Self::from_corners(point(left, top), point(right, bottom))
     }
 
-    #[cfg(test)]
     #[inline]
     pub(crate) fn inset(self, edges: Edges) -> Self {
         Self {
@@ -255,7 +254,6 @@ impl<T: Copy> Edges<T> {
         }
     }
 
-    #[cfg(test)]
     #[inline]
     pub(crate) const fn xy(horiz: T, vert: T) -> Self {
         Self {

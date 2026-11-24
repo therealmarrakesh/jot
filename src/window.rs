@@ -1541,17 +1541,15 @@ impl MainWindow {
                 self.find_step(false, ts, jobs);
             }
             Some(HitId::FindOptions) => {
-                if let Some(target) = self.ui.frame().rect_of(HitId::FindOptions) {
-                    let entries = self.find.options_entries();
-                    let out = self.menu_bar.open_flyout_above(
-                        entries,
-                        target,
-                        Focus::Editor(EditorSlot::FindQuery),
-                        ts,
-                    );
-                    let (_, action) = self.apply_menu_outcome(out, view, false, ts, jobs);
-                    return action;
-                }
+                let entries = self.find.options_entries();
+                let out = self.menu_bar.open_flyout(
+                    entries,
+                    HitId::FindOptions,
+                    Focus::Editor(EditorSlot::FindQuery),
+                    ts,
+                );
+                let (_, action) = self.apply_menu_outcome(out, view, false, ts, jobs);
+                return action;
             }
             Some(HitId::FindClose) => self.close_find(jobs),
             Some(HitId::FindReplace) => self.replace_next(ts, jobs),
@@ -2027,12 +2025,8 @@ impl MainWindow {
             .map_or(0., |s| s.width)
             .max(menu_row)
             .max(tabs::TITLE_BAR_MIN_WIDTH);
-        let rows = tabs::STRIP_TOP
-            + tabs::TAB_HEIGHT
-            + MENU_BAR_HEIGHT
-            + SEPARATOR_HEIGHT
-            + self.editor_min_height();
-        let height = rows + status_sz.map_or(0., |s| s.height);
+        let chrome_top = frame.rect_of(HitId::EditorArea).map_or(0., |r| r.top());
+        let height = chrome_top + self.editor_min_height() + status_sz.map_or(0., |s| s.height);
         let next = size(width, height);
         let changed = self
             .min_size_cache
@@ -2072,8 +2066,8 @@ impl MainWindow {
             .render(logical.width, self.focused_editor_slot(), p, &mut self.ui);
         let editor_node = self.editor_area(find_node, p);
         let status_node = status_metrics.map(|m| self.status_bar(m, p));
-        let menu_popup = self.menu_bar.render_popup(logical, p, ts, &mut self.ui);
-        let dialog_node = self.dialogs.render(self.focus, p, ts, &mut self.ui);
+        let menu_popup = self.menu_bar.render_popup(p, ts, &mut self.ui);
+        let dialog_node = self.dialogs.render(self.focus, p, &mut self.ui);
 
         let chrome = col()
             .size_full()

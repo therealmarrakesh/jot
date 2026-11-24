@@ -65,6 +65,11 @@ impl AvailSize {
         height: AvailableSpace::MinContent,
     };
 
+    pub(crate) const MAX: Self = Self {
+        width: AvailableSpace::MaxContent,
+        height: AvailableSpace::MaxContent,
+    };
+
     #[inline]
     pub(crate) const fn definite(width: f32, height: f32) -> Self {
         Self {
@@ -394,6 +399,100 @@ struct LayoutReq {
     sizing_mode: SizingMode,
 }
 
+impl LayoutReq {
+    #[inline]
+    fn new(
+        known: (Option<f32>, Option<f32>),
+        parent: (Option<f32>, Option<f32>),
+        avail: (Avail, Avail),
+        run_mode: RunMode,
+        sizing_mode: SizingMode,
+    ) -> Self {
+        Self {
+            known_w: known.0,
+            known_h: known.1,
+            parent_w: parent.0,
+            parent_h: parent.1,
+            avail_w: avail.0,
+            avail_h: avail.1,
+            run_mode,
+            sizing_mode,
+        }
+    }
+}
+
+#[derive(Copy, Clone)]
+struct AxisBounds {
+    size: Option<f32>,
+    min: Option<f32>,
+    max: Option<f32>,
+    floor: f32,
+}
+
+impl AxisBounds {
+    #[inline]
+    fn resolve(
+        size: Dim,
+        min: Dim,
+        max: Dim,
+        base: Option<f32>,
+        pb: f32,
+        inherent: bool,
+    ) -> Self {
+        let (size, min, max) = if inherent {
+            (size.resolve(base), min.resolve(base), max.resolve(base))
+        } else {
+            (None, None, None)
+        };
+        Self {
+            size,
+            min,
+            max,
+            floor: min.map_or(pb, |m| m.max(pb)),
+        }
+    }
+
+    #[inline]
+    fn clamp(self, v: f32) -> f32 {
+        clamp_dim(v, Some(self.floor), self.max)
+    }
+
+    #[inline]
+    fn definite(self, known: Option<f32>) -> Option<f32> {
+        known.or(self.size).map(|v| self.clamp(v))
+    }
+}
+
+#[inline]
+fn resolve_item_cross(
+    cs: &FlexStyle,
+    row: bool,
+    pb_cross: f32,
+    margin_cross: f32,
+    align: Option<AlignItems>,
+    inner_cross: Option<f32>,
+    stretch: bool,
+) -> Option<f32> {
+    let b = AxisBounds::resolve(
+        cs.size_cross(row),
+        cs.min_cross(row),
+        cs.max_cross(row),
+        inner_cross,
+        pb_cross,
+        true,
+    );
+    if let Some(s) = b.size {
+        Some(b.clamp(s))
+    } else if stretch
+        && align.is_none()
+        && let Some(ic) = inner_cross
+    {
+        Some(b.clamp((ic - margin_cross).max(0.0)))
+    } else {
+        None
+    }
+}
+
 #[derive(Copy, Clone, Eq, PartialEq)]
 struct SizeCacheKey {
     known_w: u32,
@@ -573,6 +672,37 @@ impl LayoutEngine {
         self.nodes[id.idx()].abs_bounds = Some(logical);
         logical
     }
+
+    pub(crate) fn set_origin(&mut self, id: LayoutId, logical_origin: Point, scale: f32) {
+        let parent_origin = match self.nodes[id.idx()].parent {
+            Some(parent_id) => {
+                self.bounds(parent_id, scale);
+                self.nodes[parent_id.idx()]
+                    .abs_origin
+                    .unwrap_or(Point::ZERO)
+            }
+            None => Point::ZERO,
+        };
+        let desired = point(
+            round_to_device_pixel(logical_origin.x, scale),
+            round_to_device_pixel(logical_origin.y, scale),
+        );
+        self.nodes[id.idx()].location =
+            point(desired.x - parent_origin.x, desired.y - parent_origin.y);
+        self.invalidate_bounds(id);
+    }
+
+    fn invalidate_bounds(&mut self, id: LayoutId) {
+        let node = &mut self.nodes[id.idx()];
+        node.abs_origin = None;
+        node.abs_bounds = None;
+        let start = node.children_start as usize;
+        let end = start + node.children_len as usize;
+        for i in start..end {
+            let child = self.children_arena[i];
+            self.invalidate_bounds(child);
+        }
+    }
 }
 
 struct Solver<'a> {
@@ -643,29 +773,25 @@ impl<'a> Solver<'a> {
         let pb = padding.add(style.border);
         let pb_w = pb.horiz();
         let pb_h = pb.vert();
-
-        let (style_w, style_h, min_w, max_w, min_h, max_h) = match req.sizing_mode {
-            SizingMode::InherentSize => (
-                style.width.resolve(req.parent_w),
-                style.height.resolve(req.parent_h),
-                style.min_width.resolve(req.parent_w),
-                style.max_width.resolve(req.parent_w),
-                style.min_height.resolve(req.parent_h),
-                style.max_height.resolve(req.parent_h),
-            ),
-            SizingMode::ContentSize => (None, None, None, None, None, None),
-        };
-
-        let floor_w = min_w.map_or(pb_w, |m| m.max(pb_w));
-        let floor_h = min_h.map_or(pb_h, |m| m.max(pb_h));
-        let node_w = req
-            .known_w
-            .or(style_w)
-            .map(|w| clamp_dim(w, Some(floor_w), max_w));
-        let node_h = req
-            .known_h
-            .or(style_h)
-            .map(|h| clamp_dim(h, Some(floor_h), max_h));
+        let inherent = req.sizing_mode == SizingMode::InherentSize;
+        let bx = AxisBounds::resolve(
+            style.width,
+            style.min_width,
+            style.max_width,
+            req.parent_w,
+            pb_w,
+            inherent,
+        );
+        let by = AxisBounds::resolve(
+            style.height,
+            style.min_height,
+            style.max_height,
+            req.parent_h,
+            pb_h,
+            inherent,
+        );
+        let node_w = bx.definite(req.known_w);
+        let node_h = by.definite(req.known_h);
 
         if measured && (node_w.is_none() || node_h.is_none() || req.run_mode == RunMode::PerformLayout)
         {
@@ -675,15 +801,15 @@ impl<'a> Solver<'a> {
                 width: req
                     .avail_w
                     .maybe_set(node_w)
-                    .maybe_min(max_w)
-                    .maybe_max(min_w)
+                    .maybe_min(bx.max)
+                    .maybe_max(bx.min)
                     .maybe_sub(pb_w)
                     .to_logical(self.scale),
                 height: req
                     .avail_h
                     .maybe_set(node_h)
-                    .maybe_min(max_h)
-                    .maybe_max(min_h)
+                    .maybe_min(by.max)
+                    .maybe_max(by.min)
                     .maybe_sub(pb_h)
                     .to_logical(self.scale),
             };
@@ -691,14 +817,14 @@ impl<'a> Solver<'a> {
             let mw = ceil_to_device_pixel(logical.width.max(0.0), self.scale);
             let mh = ceil_to_device_pixel(logical.height.max(0.0), self.scale);
             return size(
-                node_w.unwrap_or_else(|| clamp_dim(mw + pb_w, Some(floor_w), max_w)),
-                node_h.unwrap_or_else(|| clamp_dim(mh + pb_h, Some(floor_h), max_h)),
+                node_w.unwrap_or_else(|| bx.clamp(mw + pb_w)),
+                node_h.unwrap_or_else(|| by.clamp(mh + pb_h)),
             );
         }
 
         size(
-            node_w.unwrap_or_else(|| clamp_dim(pb_w, Some(floor_w), max_w)),
-            node_h.unwrap_or_else(|| clamp_dim(pb_h, Some(floor_h), max_h)),
+            node_w.unwrap_or_else(|| bx.clamp(pb_w)),
+            node_h.unwrap_or_else(|| by.clamp(pb_h)),
         )
     }
 
@@ -715,22 +841,28 @@ impl<'a> Solver<'a> {
         let pb = padding.add(border);
         let pb_main = edge_main_sum(pb, row);
         let pb_cross = edge_cross_sum(pb, row);
-
-        let (style_w, style_h, min_w, max_w, min_h, max_h) = match req.sizing_mode {
-            SizingMode::InherentSize => (
-                style.width.resolve(req.parent_w),
-                style.height.resolve(req.parent_h),
-                style.min_width.resolve(req.parent_w),
-                style.max_width.resolve(req.parent_w),
-                style.min_height.resolve(req.parent_h),
-                style.max_height.resolve(req.parent_h),
-            ),
-            SizingMode::ContentSize => (None, None, None, None, None, None),
+        let inherent = req.sizing_mode == SizingMode::InherentSize;
+        let (parent_main, parent_cross) = if row {
+            (req.parent_w, req.parent_h)
+        } else {
+            (req.parent_h, req.parent_w)
         };
-
-        let (style_main, style_cross) = if row { (style_w, style_h) } else { (style_h, style_w) };
-        let (min_main, min_cross) = if row { (min_w, min_h) } else { (min_h, min_w) };
-        let (max_main, max_cross) = if row { (max_w, max_h) } else { (max_h, max_w) };
+        let b_main = AxisBounds::resolve(
+            style.size_main(row),
+            style.min_main(row),
+            style.max_main(row),
+            parent_main,
+            pb_main,
+            inherent,
+        );
+        let b_cross = AxisBounds::resolve(
+            style.size_cross(row),
+            style.min_cross(row),
+            style.max_cross(row),
+            parent_cross,
+            pb_cross,
+            inherent,
+        );
         let (known_main, known_cross) = if row {
             (req.known_w, req.known_h)
         } else {
@@ -741,15 +873,8 @@ impl<'a> Solver<'a> {
         } else {
             (req.avail_h, req.avail_w)
         };
-
-        let floor_main = min_main.map_or(pb_main, |m| m.max(pb_main));
-        let floor_cross = min_cross.map_or(pb_cross, |m| m.max(pb_cross));
-        let node_main = known_main
-            .or(style_main)
-            .map(|v| clamp_dim(v, Some(floor_main), max_main));
-        let node_cross = known_cross
-            .or(style_cross)
-            .map(|v| clamp_dim(v, Some(floor_cross), max_cross));
+        let node_main = b_main.definite(known_main);
+        let node_cross = b_cross.definite(known_cross);
 
         let children = self.child_slice(id);
         let in_flow_count = children
@@ -758,10 +883,8 @@ impl<'a> Solver<'a> {
             .count();
 
         if in_flow_count == 0 {
-            let final_main =
-                node_main.unwrap_or_else(|| clamp_dim(pb_main, Some(floor_main), max_main));
-            let final_cross =
-                node_cross.unwrap_or_else(|| clamp_dim(pb_cross, Some(floor_cross), max_cross));
+            let final_main = node_main.unwrap_or_else(|| b_main.clamp(pb_main));
+            let final_cross = node_cross.unwrap_or_else(|| b_cross.clamp(pb_cross));
             let container_size = size_from(final_main, final_cross, row);
             if req.run_mode == RunMode::PerformLayout {
                 self.layout_absolute_children(
@@ -783,11 +906,11 @@ impl<'a> Solver<'a> {
 
         let avail_main = avail_main_in
             .maybe_set(node_main)
-            .maybe_min(max_main)
+            .maybe_min(b_main.max)
             .maybe_sub(pb_main);
         let avail_cross = avail_cross_in
             .maybe_set(node_cross)
-            .maybe_min(max_cross)
+            .maybe_min(b_cross.max)
             .maybe_sub(pb_cross);
 
         struct FlexItem {
@@ -819,26 +942,18 @@ impl<'a> Solver<'a> {
             let align = cs.align_self.or(style.align_items);
 
             let c_size_main = cs.size_main(row).resolve(inner_main_opt);
-            let c_size_cross = cs.size_cross(row).resolve(inner_cross_opt);
             let c_min_main = cs.min_main(row).resolve(inner_main_opt);
             let c_max_main = cs.max_main(row).resolve(inner_main_opt);
-            let c_min_cross = cs.min_cross(row).resolve(inner_cross_opt);
-            let c_max_cross = cs.max_cross(row).resolve(inner_cross_opt);
-            let c_floor_cross = c_min_cross.map_or(c_pb_cross, |m| m.max(c_pb_cross));
-
-            let pre_cross = if let Some(s) = c_size_cross {
-                Some(clamp_dim(s, Some(c_floor_cross), c_max_cross))
-            } else if align.is_none()
-                && let Some(ic) = inner_cross_opt
-            {
-                Some(clamp_dim(
-                    (ic - edge_cross_sum(margin, row)).max(0.0),
-                    Some(c_floor_cross),
-                    c_max_cross,
-                ))
-            } else {
-                None
-            };
+            let margin_cross = edge_cross_sum(margin, row);
+            let pre_cross = resolve_item_cross(
+                &cs,
+                row,
+                c_pb_cross,
+                margin_cross,
+                align,
+                inner_cross_opt,
+                true,
+            );
 
             let explicit_basis = match cs.flex_basis {
                 Dim::Auto => c_size_main,
@@ -852,21 +967,15 @@ impl<'a> Solver<'a> {
                     } else {
                         Avail::MaxContent
                     };
-                    let (kw, kh) = pair_from(None, pre_cross, row);
-                    let (aw, ah) =
-                        pair_from(probe_main, avail_cross.maybe_sub(edge_cross_sum(margin, row)), row);
                     let measured = self.compute_node(
                         child,
-                        LayoutReq {
-                            known_w: kw,
-                            known_h: kh,
-                            parent_w: inner_w_opt,
-                            parent_h: inner_h_opt,
-                            avail_w: aw,
-                            avail_h: ah,
-                            run_mode: RunMode::ComputeSize,
-                            sizing_mode: SizingMode::InherentSize,
-                        },
+                        LayoutReq::new(
+                            pair_from(None, pre_cross, row),
+                            (inner_w_opt, inner_h_opt),
+                            pair_from(probe_main, avail_cross.maybe_sub(margin_cross), row),
+                            RunMode::ComputeSize,
+                            SizingMode::InherentSize,
+                        ),
                         measure,
                     );
                     (main_of(measured, row), true)
@@ -882,24 +991,15 @@ impl<'a> Solver<'a> {
             {
                 c_pb_main
             } else {
-                let (kw, kh) = pair_from(None, pre_cross, row);
-                let (aw, ah) = pair_from(
-                    Avail::MinContent,
-                    avail_cross.maybe_sub(edge_cross_sum(margin, row)),
-                    row,
-                );
                 let measured_min = self.compute_node(
                     child,
-                    LayoutReq {
-                        known_w: kw,
-                        known_h: kh,
-                        parent_w: inner_w_opt,
-                        parent_h: inner_h_opt,
-                        avail_w: aw,
-                        avail_h: ah,
-                        run_mode: RunMode::ComputeSize,
-                        sizing_mode: SizingMode::ContentSize,
-                    },
+                    LayoutReq::new(
+                        pair_from(None, pre_cross, row),
+                        (inner_w_opt, inner_h_opt),
+                        pair_from(Avail::MinContent, avail_cross.maybe_sub(margin_cross), row),
+                        RunMode::ComputeSize,
+                        SizingMode::ContentSize,
+                    ),
                     measure,
                 );
                 let mut auto_min = main_of(measured_min, row);
@@ -944,7 +1044,7 @@ impl<'a> Solver<'a> {
             Some(m) => (m, true),
             None => {
                 let raw = total_hypothetical + pb_main;
-                let clamped = clamp_dim(raw, Some(floor_main), max_main);
+                let clamped = b_main.clamp(raw);
                 let constrained = (clamped - raw).abs() > 1e-4;
                 (clamped, constrained)
             }
@@ -1079,44 +1179,40 @@ impl<'a> Solver<'a> {
             }
         }
 
-        let (pw_with_main, ph_with_main) = pair_from(Some(inner_main), inner_cross_opt, row);
+        let parent_with_main = pair_from(Some(inner_main), inner_cross_opt, row);
         let container_cross = match node_cross {
             Some(c) => c,
             None => {
                 let mut max_outer_cross = 0.0f32;
                 for item in &items {
-                    let c_min_cross = item.style.min_cross(row).resolve(inner_cross_opt);
-                    let c_max_cross = item.style.max_cross(row).resolve(inner_cross_opt);
-                    let c_floor_cross = c_min_cross.map_or(item.pb_cross, |m| m.max(item.pb_cross));
-                    let c_known_cross = item
-                        .style
-                        .size_cross(row)
-                        .resolve(inner_cross_opt)
-                        .map(|s| clamp_dim(s, Some(c_floor_cross), c_max_cross));
-                    let (kw, kh) = pair_from(Some(item.target_main), c_known_cross, row);
-                    let (aw, ah) = pair_from(
-                        Avail::Definite(item.target_main),
-                        avail_cross.maybe_sub(edge_cross_sum(item.margin, row)),
+                    let margin_cross = edge_cross_sum(item.margin, row);
+                    let c_known_cross = resolve_item_cross(
+                        &item.style,
                         row,
+                        item.pb_cross,
+                        margin_cross,
+                        item.align,
+                        inner_cross_opt,
+                        false,
                     );
                     let measured = self.compute_node(
                         item.id,
-                        LayoutReq {
-                            known_w: kw,
-                            known_h: kh,
-                            parent_w: pw_with_main,
-                            parent_h: ph_with_main,
-                            avail_w: aw,
-                            avail_h: ah,
-                            run_mode: RunMode::ComputeSize,
-                            sizing_mode: SizingMode::InherentSize,
-                        },
+                        LayoutReq::new(
+                            pair_from(Some(item.target_main), c_known_cross, row),
+                            parent_with_main,
+                            pair_from(
+                                Avail::Definite(item.target_main),
+                                avail_cross.maybe_sub(margin_cross),
+                                row,
+                            ),
+                            RunMode::ComputeSize,
+                            SizingMode::InherentSize,
+                        ),
                         measure,
                     );
-                    max_outer_cross = max_outer_cross
-                        .max(cross_of(measured, row) + edge_cross_sum(item.margin, row));
+                    max_outer_cross = max_outer_cross.max(cross_of(measured, row) + margin_cross);
                 }
-                clamp_dim(max_outer_cross + pb_cross, Some(floor_cross), max_cross)
+                b_cross.clamp(max_outer_cross + pb_cross)
             }
         };
 
@@ -1131,41 +1227,29 @@ impl<'a> Solver<'a> {
         let mut final_sizes: Vec<Size> = Vec::with_capacity(items.len());
         let mut used_main = total_gaps;
         for item in &items {
-            let c_min_cross = item.style.min_cross(row).resolve(Some(inner_cross));
-            let c_max_cross = item.style.max_cross(row).resolve(Some(inner_cross));
-            let c_floor_cross = c_min_cross.map_or(item.pb_cross, |m| m.max(item.pb_cross));
-
-            let final_cross_known = if let Some(s) = item.style.size_cross(row).resolve(Some(inner_cross))
-            {
-                Some(clamp_dim(s, Some(c_floor_cross), c_max_cross))
-            } else if item.align.is_none() {
-                Some(clamp_dim(
-                    (inner_cross - edge_cross_sum(item.margin, row)).max(0.0),
-                    Some(c_floor_cross),
-                    c_max_cross,
-                ))
-            } else {
-                None
-            };
-
-            let (kw, kh) = pair_from(Some(item.target_main), final_cross_known, row);
-            let (aw, ah) = pair_from(
-                Avail::Definite(item.target_main),
-                Avail::Definite((inner_cross - edge_cross_sum(item.margin, row)).max(0.0)),
+            let margin_cross = edge_cross_sum(item.margin, row);
+            let final_cross_known = resolve_item_cross(
+                &item.style,
                 row,
+                item.pb_cross,
+                margin_cross,
+                item.align,
+                Some(inner_cross),
+                true,
             );
             let child_size = self.compute_node(
                 item.id,
-                LayoutReq {
-                    known_w: kw,
-                    known_h: kh,
-                    parent_w: final_pw,
-                    parent_h: final_ph,
-                    avail_w: aw,
-                    avail_h: ah,
-                    run_mode: RunMode::PerformLayout,
-                    sizing_mode: SizingMode::InherentSize,
-                },
+                LayoutReq::new(
+                    pair_from(Some(item.target_main), final_cross_known, row),
+                    (final_pw, final_ph),
+                    pair_from(
+                        Avail::Definite(item.target_main),
+                        Avail::Definite((inner_cross - margin_cross).max(0.0)),
+                        row,
+                    ),
+                    RunMode::PerformLayout,
+                    SizingMode::InherentSize,
+                ),
                 measure,
             );
             used_main += main_of(child_size, row) + edge_main_sum(item.margin, row);
@@ -1241,47 +1325,42 @@ impl<'a> Solver<'a> {
             let m = resolve_edges_or_zero(cs.margin, Some(cb_w));
             let c_pb = resolve_edges_or_zero(cs.padding, Some(cb_w)).add(cs.border);
 
-            let c_min_w = cs.min_width.resolve(Some(cb_w));
-            let c_max_w = cs.max_width.resolve(Some(cb_w));
-            let c_min_h = cs.min_height.resolve(Some(cb_h));
-            let c_max_h = cs.max_height.resolve(Some(cb_h));
-            let floor_w = c_min_w.map_or(c_pb.horiz(), |v| v.max(c_pb.horiz()));
-            let floor_h = c_min_h.map_or(c_pb.vert(), |v| v.max(c_pb.vert()));
-
-            let known_w = if let Some(w) = cs.width.resolve(Some(cb_w)) {
-                Some(clamp_dim(w, Some(floor_w), c_max_w))
-            } else if let (Some(l), Some(r)) = (inset_l, inset_r) {
-                Some(clamp_dim((cb_w - l - r - m.horiz()).max(0.0), Some(floor_w), c_max_w))
-            } else {
-                None
-            };
-            let known_h = if let Some(h) = cs.height.resolve(Some(cb_h)) {
-                Some(clamp_dim(h, Some(floor_h), c_max_h))
-            } else if let (Some(t), Some(b)) = (inset_t, inset_b) {
-                Some(clamp_dim((cb_h - t - b - m.vert()).max(0.0), Some(floor_h), c_max_h))
-            } else {
-                None
-            };
-
-            let avail_w = known_w
-                .or(c_max_w)
-                .map_or(Avail::MaxContent, Avail::Definite);
-            let avail_h = known_h
-                .or(c_max_h)
-                .map_or(Avail::MaxContent, Avail::Definite);
+            let bx = AxisBounds::resolve(
+                cs.width,
+                cs.min_width,
+                cs.max_width,
+                Some(cb_w),
+                c_pb.horiz(),
+                true,
+            );
+            let by = AxisBounds::resolve(
+                cs.height,
+                cs.min_height,
+                cs.max_height,
+                Some(cb_h),
+                c_pb.vert(),
+                true,
+            );
+            let known_w = bx.definite(None).or_else(|| match (inset_l, inset_r) {
+                (Some(l), Some(r)) => Some(bx.clamp((cb_w - l - r - m.horiz()).max(0.0))),
+                _ => None,
+            });
+            let known_h = by.definite(None).or_else(|| match (inset_t, inset_b) {
+                (Some(t), Some(b)) => Some(by.clamp((cb_h - t - b - m.vert()).max(0.0))),
+                _ => None,
+            });
+            let avail_w = known_w.or(bx.max).map_or(Avail::MaxContent, Avail::Definite);
+            let avail_h = known_h.or(by.max).map_or(Avail::MaxContent, Avail::Definite);
 
             let child_size = self.compute_node(
                 child,
-                LayoutReq {
-                    known_w,
-                    known_h,
-                    parent_w: Some(cb_w),
-                    parent_h: Some(cb_h),
-                    avail_w,
-                    avail_h,
-                    run_mode: RunMode::PerformLayout,
-                    sizing_mode: SizingMode::InherentSize,
-                },
+                LayoutReq::new(
+                    (known_w, known_h),
+                    (Some(cb_w), Some(cb_h)),
+                    (avail_w, avail_h),
+                    RunMode::PerformLayout,
+                    SizingMode::InherentSize,
+                ),
                 measure,
             );
 

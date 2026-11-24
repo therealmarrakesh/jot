@@ -4,7 +4,7 @@ use crate::app::{AppEvent, ViewSettings};
 use crate::color::transparent_black;
 use crate::command::{Command, shortcut_label};
 use crate::editor::Editor;
-use crate::geom::{Edges, Point, Rect, Size, point, size};
+use crate::geom::{Edges, Point};
 use crate::gfx::{TextStyle, TextSystem};
 use crate::ids::{AnimKey, Frame, HitId, Node, UiState};
 use crate::keytips::{self, KeyTip, round_half_up};
@@ -17,7 +17,7 @@ use crate::types::SharedStr;
 use crate::ui::controls::{
     CONTROL_RADIUS, ICON_FONT, OVERLAY_RADIUS, SMALL_FONT, TEXT_FONT, focus_ring, subtle_brushes,
 };
-use crate::ui::{AnimStatus, Easing, box_, col, row, text};
+use crate::ui::{Anchor, AnimStatus, Easing, box_, col, row, text};
 use crate::window::{Focus, MENU_BAR_HEIGHT};
 
 const OPEN_DURATION: Duration = Duration::from_millis(250);
@@ -361,10 +361,6 @@ impl Panel {
         2. * (BORDER + PADDING_Y) + self.entries.iter().map(Entry::height).sum::<f32>()
     }
 
-    fn row_top(&self, ix: usize) -> f32 {
-        BORDER + PADDING_Y + self.entries[..ix].iter().map(Entry::height).sum::<f32>()
-    }
-
     fn find_key(&self, key: char) -> Option<usize> {
         self.entries
             .iter()
@@ -451,9 +447,7 @@ struct OpenSubmenu {
 
 struct OpenMenu {
     kind: Option<MenuKind>,
-    anchor: Option<Point>,
-    upward: bool,
-    flip_below_y: Option<f32>,
+    anchor: Anchor<HitId>,
     commands: Vec<CommandButton>,
     return_focus: Option<Focus>,
     panel: Panel,
@@ -464,12 +458,10 @@ struct OpenMenu {
 }
 
 impl OpenMenu {
-    fn new(kind: Option<MenuKind>, panel: Panel) -> Self {
+    fn new(kind: Option<MenuKind>, anchor: Anchor<HitId>, panel: Panel) -> Self {
         Self {
             kind,
-            anchor: None,
-            upward: false,
-            flip_below_y: None,
+            anchor,
             commands: Vec::new(),
             return_focus: None,
             panel,
@@ -692,7 +684,14 @@ impl MenuBar {
     ) -> MenuOutcome {
         let entries = kind.entries(editor, view);
         let panel = Panel::new(entries, MIN_WIDTH, true, ts);
-        self.show(OpenMenu::new(Some(kind), panel))
+        self.show(OpenMenu::new(
+            Some(kind),
+            Anchor::BelowStart {
+                target: HitId::MenuTrigger(kind),
+                gap: 0.,
+            },
+            panel,
+        ))
     }
 
     fn open_by_keyboard(
@@ -721,32 +720,32 @@ impl MenuBar {
         let panel = Panel::new(entries, CONTEXT_WIDTH, false, ts);
         let focused_command = commands.iter().position(|b| b.command.enabled);
         self.show(OpenMenu {
-            anchor: Some(anchor),
             commands,
             focused_command,
             focus_visible: keyboard,
-            ..OpenMenu::new(None, panel)
+            ..OpenMenu::new(None, Anchor::Point(anchor), panel)
         })
     }
 
-    pub(crate) fn open_flyout_above(
+    pub(crate) fn open_flyout(
         &mut self,
         entries: Vec<Entry>,
-        target: Rect,
+        target: HitId,
         return_focus: Focus,
         ts: &TextSystem,
     ) -> MenuOutcome {
         let panel = Panel::new(entries, FLYOUT_MIN_WIDTH, true, ts);
-        let anchor = point(
-            target.center().x - (panel.width / 2.).floor(),
-            target.top() - (FLYOUT_GAP + panel.height()),
-        );
         self.show(OpenMenu {
-            anchor: Some(anchor),
-            upward: true,
-            flip_below_y: Some(target.bottom() + FLYOUT_GAP),
             return_focus: Some(return_focus),
-            ..OpenMenu::new(None, panel)
+            ..OpenMenu::new(
+                None,
+                Anchor::AboveOrBelowCenter {
+                    target,
+                    gap: FLYOUT_GAP,
+                    min_top: MENU_BAR_HEIGHT,
+                },
+                panel,
+            )
         })
     }
 
@@ -1451,7 +1450,6 @@ impl MenuBar {
 
     pub(crate) fn render_popup(
         &self,
-        viewport: Size,
         p: Palette,
         ts: &TextSystem,
         ui: &mut UiState,
@@ -1459,38 +1457,9 @@ impl MenuBar {
         let open = self.open.as_ref()?;
         let (height, bar) = open.total_height();
         let width = open.panel.width;
-        let (desired, upward) = if let Some(anchor) = open.anchor {
-            if open.upward
-                && anchor.y < MENU_BAR_HEIGHT
-                && let Some(below_y) = open.flip_below_y
-            {
-                (point(anchor.x, below_y), false)
-            } else {
-                (anchor, open.upward)
-            }
-        } else if let Some(kind) = open.kind {
-            let pos = if let Some(tr) = ui.frame().rect_of(HitId::MenuTrigger(kind)) {
-                point(tr.left(), tr.top() + MENU_BAR_HEIGHT)
-            } else {
-                point(4., crate::tabs::STRIP_TOP + crate::tabs::TAB_HEIGHT + MENU_BAR_HEIGHT)
-            };
-            (pos, open.upward)
-        } else {
-            (Point::ZERO, open.upward)
-        };
-
-        let clamped = point(
-            desired.x.min((viewport.width - width).max(0.)).max(0.),
-            desired.y.min((viewport.height - height).max(0.)).max(0.),
-        );
-
         let has_commands = !open.commands.is_empty();
         let hidden = open.panel.height() * CLOSED_RATIO * (1. - open.motion.unroll);
-        let (top, offset) = match (has_commands, upward) {
-            (true, _) => (0., 0.),
-            (false, true) => (hidden, hidden),
-            (false, false) => (0., -hidden),
-        };
+        let offset = if has_commands { 0. } else { -hidden };
 
         let cmd_row = has_commands.then(|| render_command_row(open, p, ts, ui));
         let main_rows = render_panel_rows(
@@ -1506,7 +1475,7 @@ impl MenuBar {
         let sub_node = open
             .submenu
             .as_ref()
-            .map(|sub| render_submenu_popup(open, sub, clamped, viewport, p, ui));
+            .map(|sub| render_submenu_popup(open, sub, p, ui));
 
         let content = box_()
             .size_full()
@@ -1517,13 +1486,11 @@ impl MenuBar {
             box_()
                 .hit(HitId::MenuPanel)
                 .cursor(CursorStyle::Arrow)
-                .absolute()
-                .left(clamped.x)
-                .top(clamped.y)
+                .anchored(open.anchor)
                 .w(width)
                 .h(height)
                 .opacity(open.motion.opacity)
-                .children(reveal_card(p, MENU_Z, height, top, height - hidden, offset, content))
+                .children(reveal_card(p, MENU_Z, height, height - hidden, offset, content))
                 .when_some(sub_node, |this, sub| this.child(sub))
                 .when(open.is_closing(), Node::inert),
         )
@@ -1546,19 +1513,11 @@ impl MenuBar {
         if open.kind.is_none() {
             return Vec::new();
         }
-        let (panel, area, motion) = match open.focused_submenu() {
-            Some(sub) => (
-                &sub.panel,
-                frame.rect_of(HitId::SubmenuPanel).unwrap_or(Rect::ZERO),
-                &sub.motion,
-            ),
-            None => (
-                &open.panel,
-                frame.rect_of(HitId::MenuPanel).unwrap_or(Rect::ZERO),
-                &open.motion,
-            ),
+        let (panel, serial, is_sub, motion) = match open.focused_submenu() {
+            Some(sub) => (&sub.panel, sub.motion.serial, true, &sub.motion),
+            None => (&open.panel, open.motion.serial, false, &open.motion),
         };
-        if motion.unroll < 1. || area.is_empty() {
+        if motion.unroll < 1. {
             return Vec::new();
         }
         panel
@@ -1567,13 +1526,12 @@ impl MenuBar {
             .enumerate()
             .filter_map(|(ix, entry)| {
                 let key = entry.access_key()?;
-                let face = Rect::new(
-                    area.origin + point(BORDER + ROW_INSET, panel.row_top(ix) + ROW_MARGIN_Y),
-                    size(
-                        panel.width - 2. * (BORDER + ROW_INSET),
-                        entry.height() - 2. * ROW_MARGIN_Y,
-                    ),
-                );
+                let hit = if is_sub {
+                    HitId::SubmenuItem { serial, ix }
+                } else {
+                    HitId::MenuItem { serial, ix }
+                };
+                let face = frame.rect_of(hit)?.inset(Edges::xy(ROW_INSET, ROW_MARGIN_Y));
                 Some(keytips::layout_tip(ts, key, face, keytips::Placement::Left))
             })
             .collect()
@@ -1709,25 +1667,12 @@ fn render_command_button(
 fn render_submenu_popup(
     open: &OpenMenu,
     submenu: &OpenSubmenu,
-    parent_origin: Point,
-    viewport: Size,
     p: Palette,
     ui: &mut UiState,
 ) -> Node {
     let sub_w = submenu.panel.width;
     let sub_h = submenu.panel.height();
     let hidden = sub_h * SUBMENU_CLOSED_RATIO * (1. - submenu.motion.unroll);
-    let right_x = open.panel.width - SUBMENU_OVERLAP;
-    let left_x = -(sub_w - SUBMENU_OVERLAP);
-    let left = if parent_origin.x + right_x + sub_w <= viewport.width {
-        right_x
-    } else {
-        left_x.max(-parent_origin.x)
-    };
-    let desired_top = open.panel.row_top(submenu.ix) - BORDER - PADDING_Y;
-    let min_top = -parent_origin.y;
-    let max_top = (viewport.height - sub_h - parent_origin.y).max(min_top);
-    let top = desired_top.clamp(min_top, max_top);
     let rows = render_panel_rows(
         open,
         &submenu.panel,
@@ -1742,13 +1687,18 @@ fn render_submenu_popup(
     box_()
         .hit(HitId::SubmenuPanel)
         .cursor(CursorStyle::Arrow)
-        .absolute()
-        .left(left)
-        .top(top)
+        .anchored(Anchor::SideOf {
+            target: HitId::MenuItem {
+                serial: open.motion.serial,
+                ix: submenu.ix,
+            },
+            overlap: SUBMENU_OVERLAP - BORDER,
+            offset_y: -(BORDER + PADDING_Y),
+        })
         .w(sub_w)
         .h(sub_h)
         .opacity(submenu.motion.opacity)
-        .children(reveal_card(p, SUBMENU_Z, sub_h, 0., sub_h - hidden, -hidden, rows))
+        .children(reveal_card(p, SUBMENU_Z, sub_h, sub_h - hidden, -hidden, rows))
         .when(submenu.motion.closing, Node::inert)
 }
 
@@ -1932,14 +1882,13 @@ fn reveal_card(
     p: Palette,
     z: f32,
     height: f32,
-    top: f32,
     shown: f32,
     offset: f32,
     rows: Node,
 ) -> [Node; 2] {
     let card = box_()
         .absolute()
-        .top(top)
+        .top(0.)
         .left(0.)
         .w_full()
         .h(shown)
@@ -1956,7 +1905,7 @@ fn reveal_card(
         card,
         box_()
             .absolute()
-            .top(top)
+            .top(0.)
             .left(0.)
             .w_full()
             .h(shown)
@@ -1965,7 +1914,7 @@ fn reveal_card(
                 box_()
                     .absolute()
                     .left(0.)
-                    .top(offset - top)
+                    .top(offset)
                     .w_full()
                     .h(height)
                     .child(rows),

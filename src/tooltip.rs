@@ -2,8 +2,8 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use crate::app::AppEvent;
-use crate::geom::{ScreenPoint, ScreenRect, Size, size};
-use crate::gfx::{Gpu, LabelLayout, TextAlign, TextStyle, TextSystem};
+use crate::geom::{ScreenPoint, ScreenRect};
+use crate::gfx::{Gpu, TextSystem};
 use crate::ids::{Frame, HitId};
 use crate::platform::{
     Jobs, Modifiers, TimerHandle, WindowAppearance, WindowId, cursor_screen_pos,
@@ -24,7 +24,6 @@ const BORDER: f32 = 1.;
 const MAX_WIDTH: f32 = 320.;
 const FONT_SIZE: f32 = 12.;
 const LINE_HEIGHT: f32 = 16.;
-const SINGLE_HEIGHT: f32 = PADDING_TOP + LINE_HEIGHT + PADDING_BOTTOM + 2. * BORDER;
 const ELEVATION: f32 = 8.;
 const SHADOW_SIDE: f32 = ELEVATION;
 const SHADOW_TOP: f32 = ELEVATION / 2.;
@@ -133,7 +132,6 @@ pub(crate) struct Tooltips {
     overlay: OverlaySurface,
     fade: AnimTracks<()>,
     text: SharedStr,
-    card_size: Size,
     dirty: bool,
     state: State,
     pressed: bool,
@@ -346,7 +344,11 @@ impl Tooltips {
     ) {
         let entered = snap.entered;
         let (work, scale) = monitor_work_area_and_scale(entered);
-        let measured = measure_tooltip(&snap.text, ts);
+        let measured = GenericFrame::measure_fit(
+            tooltip_card(Palette::resolve(false, None, None), snap.text.clone()),
+            scale,
+            ts,
+        );
         let phys = |v: f32| (v * scale).round() as i32;
         let (w, h) = (phys(measured.width), phys(measured.height));
         let gap = phys(POINTER_OFFSET);
@@ -364,7 +366,6 @@ impl Tooltips {
         };
 
         self.text = snap.text;
-        self.card_size = measured;
         self.dirty = true;
         self.hiding = None;
         self.shown = Some(Shown {
@@ -387,7 +388,6 @@ impl Tooltips {
         self.dirty = false;
         let visible = self.shown.is_some();
         let text = self.text.clone();
-        let card_size = self.card_size;
         let fade = &mut self.fade;
         let mut animating = false;
         let needs_retry = self.overlay.paint(|logical, scale, renderer| {
@@ -403,7 +403,7 @@ impl Tooltips {
                     .absolute()
                     .left(SHADOW_SIDE)
                     .top(SHADOW_TOP)
-                    .child(tooltip_card(p, text, card_size)),
+                    .child(tooltip_card(p, text)),
             );
             let frame = GenericFrame::layout(
                 tree,
@@ -431,54 +431,22 @@ fn show_delay(reshow: bool) -> Duration {
     Duration::from_millis((hover * factor) as u64)
 }
 
-fn measure_tooltip(content: &SharedStr, ts: &TextSystem) -> Size {
-    let chrome = 2. * (PADDING_X + BORDER);
-    let wrap = MAX_WIDTH - chrome;
-    let label = ts.shape_label(
-        content.clone(),
-        &TextStyle::regular(SMALL_FONT, FONT_SIZE),
-        LabelLayout {
-            line_height: LINE_HEIGHT,
-            wrap_width: Some(wrap),
-            line_clamp: None,
-            align: TextAlign::Left,
-        },
-    );
-    let widest = if label.line_count > 1 && !content.contains('\n') {
-        wrap
-    } else {
-        label.width
-    };
-    size(
-        (widest.ceil() + chrome).min(MAX_WIDTH),
-        SINGLE_HEIGHT + label.line_count.saturating_sub(1) as f32 * LINE_HEIGHT,
-    )
-}
-
-fn tooltip_card(p: Palette, content: SharedStr, sz: Size) -> GenericNode<(), ()> {
+fn tooltip_card(p: Palette, content: SharedStr) -> GenericNode<(), ()> {
     box_()
-        .w(sz.width)
-        .h(sz.height)
+        .max_w(MAX_WIDTH)
         .rounded(CONTROL_RADIUS)
         .border(BORDER, p.flyout_stroke)
         .shadows(theme_shadow(p.dark, ELEVATION * 2.))
         .child(
             box_()
                 .relative()
-                .size_full()
                 .rounded(CONTROL_RADIUS - BORDER)
                 .overflow_hidden()
                 .bg(p.acrylic_fallback)
-                .child(
-                    box_()
-                        .absolute()
-                        .size_full()
-                        .bg(p.acrylic_luminosity),
-                )
+                .child(box_().absolute().inset_0().bg(p.acrylic_luminosity))
                 .child(
                     box_()
                         .relative()
-                        .size_full()
                         .px(PADDING_X)
                         .pt(PADDING_TOP)
                         .pb(PADDING_BOTTOM)
@@ -486,7 +454,6 @@ fn tooltip_card(p: Palette, content: SharedStr, sz: Size) -> GenericNode<(), ()>
                         .text_size(FONT_SIZE)
                         .line_height(LINE_HEIGHT)
                         .text_color(p.text_primary)
-                        .when(sz.height <= SINGLE_HEIGHT, GenericNode::nowrap)
                         .child(text(content)),
                 ),
         )

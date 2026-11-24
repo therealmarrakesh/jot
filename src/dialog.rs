@@ -5,7 +5,6 @@ use crate::APP_NAME;
 use crate::document::Format;
 use crate::editor::{Editor, Rope};
 use crate::files::{FilePrompt, LOSSY_ANSI_WARNING, WorkflowGen, discard_prompt_text};
-use crate::gfx::{TextStyle, TextSystem};
 use crate::ids::{AnimKey, CustomDraw, EditorSlot, HitId, Node, UiState};
 use crate::platform::CursorStyle;
 use crate::tabs::TabId;
@@ -281,13 +280,7 @@ impl Dialogs {
         Some(ring[next])
     }
 
-    pub(crate) fn render(
-        &mut self,
-        focus: Focus,
-        p: Palette,
-        ts: &TextSystem,
-        ui: &mut UiState,
-    ) -> Option<Node> {
+    pub(crate) fn render(&mut self, focus: Focus, p: Palette, ui: &mut UiState) -> Option<Node> {
         self.open.retain_mut(|d| !d.sample(ui));
         if self.open.is_empty() {
             return None;
@@ -295,26 +288,12 @@ impl Dialogs {
         let layers: Vec<Node> = self
             .open
             .iter()
-            .map(|d| self.render_layer(d, focus, p, ts, ui))
+            .map(|d| self.render_layer(d, focus, p, ui))
             .collect();
-        Some(
-            box_()
-                .absolute()
-                .top(0.)
-                .left(0.)
-                .size_full()
-                .children(layers),
-        )
+        Some(box_().absolute().inset_0().children(layers))
     }
 
-    fn render_layer(
-        &self,
-        dialog: &OpenDialog,
-        focus: Focus,
-        p: Palette,
-        ts: &TextSystem,
-        ui: &mut UiState,
-    ) -> Node {
+    fn render_layer(&self, dialog: &OpenDialog, focus: Focus, p: Palette, ui: &mut UiState) -> Node {
         let style = ButtonStyle {
             surface: p.command_surface,
             accent: p.accent,
@@ -342,51 +321,35 @@ impl Dialogs {
             })
             .collect();
 
-        let body_style = TextStyle::regular(TEXT_FONT, BODY_SIZE);
-        let title_style = TextStyle::semibold(TITLE_FONT, TITLE_SIZE);
-        let (width, title, body) = match &dialog.kind {
+        let (fixed_width, title, body) = match &dialog.kind {
             DialogKind::GoTo => (
-                GO_TO_WIDTH,
+                Some(GO_TO_WIDTH + 2. * PADDING + 2. * BORDER),
                 SharedStr::new_static(GO_TO_TITLE),
                 self.render_go_to_body(focus, p, ui),
             ),
             DialogKind::LineOutOfRange => (
-                ts.measure(OUT_OF_RANGE_MESSAGE, &body_style).ceil(),
+                None,
                 SharedStr::new_static(GO_TO_TITLE),
                 message_body(OUT_OF_RANGE_MESSAGE.into()),
             ),
-            DialogKind::Error { title, message } => (
-                ts.measure(message, &body_style)
-                    .max(ts.measure(title, &title_style))
-                    .ceil(),
-                title.clone(),
-                message_body(message.clone()),
-            ),
+            DialogKind::Error { title, message } => {
+                (None, title.clone(), message_body(message.clone()))
+            }
             DialogKind::ConfirmDiscard { name, .. } => {
                 let (title, message) = discard_prompt_text(name);
-                let w = ts
-                    .measure(&message, &body_style)
-                    .max(ts.measure(&title, &title_style))
-                    .ceil();
-                (w, title, message_body(message))
+                (None, title, message_body(message))
             }
             DialogKind::ConfirmLossyAnsi { path, .. } => {
                 let title: SharedStr = APP_NAME.into();
                 let message: SharedStr =
                     format!("{}\n{LOSSY_ANSI_WARNING}", path.display()).into();
-                let w = ts
-                    .measure(&message, &body_style)
-                    .max(ts.measure(&title, &title_style))
-                    .ceil();
-                (w, title, message_body(message))
+                (None, title, message_body(message))
             }
         };
 
         row()
             .absolute()
-            .top(0.)
-            .left(0.)
-            .size_full()
+            .inset_0()
             .items_center()
             .justify_center()
             .bg(p.smoke)
@@ -395,7 +358,7 @@ impl Dialogs {
                 this.hit(HitId::DialogBackdrop).cursor(CursorStyle::Arrow)
             })
             .child(
-                dialog_frame(p, width, title, body, buttons)
+                dialog_frame(p, fixed_width, title, body, buttons)
                     .scale(dialog.scale, dialog.scale)
                     .when(dialog.closing, Node::inert),
             )
@@ -438,17 +401,18 @@ fn message_body(message: SharedStr) -> Node {
 
 fn dialog_frame(
     p: Palette,
-    content_width: f32,
+    fixed_width: Option<f32>,
     title: SharedStr,
     body: Node,
     buttons: Vec<Node>,
 ) -> Node {
-    let width = (content_width + 2. * PADDING + 2. * BORDER).clamp(MIN_WIDTH, MAX_WIDTH);
     let spacer = (buttons.len() == 1).then(|| box_().flex_1().min_w_0());
     box_()
         .hit(HitId::DialogCard)
-        .w(width)
-        .max_w_full()
+        .when_some(fixed_width, |this, w| this.w(w).max_w_full())
+        .when(fixed_width.is_none(), |this| {
+            this.min_w(MIN_WIDTH).max_w(MAX_WIDTH)
+        })
         .border(BORDER, p.surface_stroke)
         .rounded(OVERLAY_RADIUS)
         .shadows(theme_shadow(p.dark, DIALOG_Z))
