@@ -439,20 +439,19 @@ impl<H: Copy + Eq, C: Copy> Frame<H, C> {
         scale: f32,
         text_system: &TextSystem,
     ) -> Self {
-        let mut engine = LayoutEngine::default();
+        let mut tree = LayoutTree::default();
         let mut frame = Frame::default();
         let default_text = ResolvedTextStyle::default();
 
-        let root_idx = frame.flatten(root_node, None, &default_text, scale, &mut engine);
+        let root_idx = frame.flatten(root_node, None, &default_text, scale, &mut tree);
         frame.root = Some(root_idx);
-        let root_lid = LayoutId(root_idx as u32);
 
-        engine.compute(root_lid, available, scale, &mut |lid, kw, _kh, avail| {
+        tree.solve(root_idx, available, scale, &mut |idx, kw, _kh, avail| {
             let FlatKind::Text {
                 content,
                 style,
                 label,
-            } = &mut frame.nodes[lid.0 as usize].kind
+            } = &mut frame.nodes[idx].kind
             else {
                 return Size::ZERO;
             };
@@ -478,7 +477,7 @@ impl<H: Copy + Eq, C: Copy> Frame<H, C> {
             sz
         });
 
-        let root_rect = engine.bounds(root_lid, scale);
+        let root_rect = tree.rect(root_idx, scale);
         let viewport = match (available.width, available.height) {
             (Space::Definite(w), Space::Definite(h)) => size(w, h),
             _ => root_rect.size,
@@ -487,8 +486,7 @@ impl<H: Copy + Eq, C: Copy> Frame<H, C> {
             let Some(anchor) = frame.nodes[idx].anchor else {
                 continue;
             };
-            let lid = LayoutId(idx as u32);
-            let popup_size = engine.bounds(lid, scale).size;
+            let popup_size = tree.rect(idx, scale).size;
             let origin = anchor.resolve(viewport, popup_size, |target| {
                 frame
                     .nodes
@@ -496,13 +494,13 @@ impl<H: Copy + Eq, C: Copy> Frame<H, C> {
                     .enumerate()
                     .rev()
                     .find(|(_, n)| n.interact.hit == Some(target))
-                    .map(|(i, _)| engine.bounds(LayoutId(i as u32), scale))
+                    .map(|(i, _)| tree.rect(i, scale))
             });
-            engine.set_origin(lid, origin, scale);
+            tree.set_origin(idx, origin, scale);
         }
 
         for (idx, node) in frame.nodes.iter_mut().enumerate() {
-            node.rect = engine.bounds(LayoutId(idx as u32), scale);
+            node.rect = tree.rect(idx, scale);
         }
 
         let initial_clip = Rect::new(Point::ZERO, viewport);
@@ -528,7 +526,7 @@ impl<H: Copy + Eq, C: Copy> Frame<H, C> {
         parent: Option<usize>,
         inherited_text: &ResolvedTextStyle,
         scale: f32,
-        engine: &mut LayoutEngine,
+        tree: &mut LayoutTree,
     ) -> usize {
         let resolved_text = inherited_text.merge(&node.text);
         let clip = node.flex.clip[0] || node.flex.clip[1];
@@ -546,8 +544,7 @@ impl<H: Copy + Eq, C: Copy> Frame<H, C> {
         }
         let is_text = matches!(payload, NodePayload::Text(_));
         let flat_idx = self.nodes.len();
-        let lid = engine.reserve_node(flex, scale, is_text);
-        debug_assert_eq!(lid.0 as usize, flat_idx);
+        tree.add(flex, scale, is_text);
 
         self.nodes.push(FlatNode {
             parent,
@@ -565,16 +562,13 @@ impl<H: Copy + Eq, C: Copy> Frame<H, C> {
 
         let kind = match payload {
             NodePayload::Box(children) => {
-                let mut child_flat_ids = Vec::with_capacity(children.len());
-                let mut child_lids = Vec::with_capacity(children.len());
-                for child in children {
-                    let c_idx = self.flatten(child, Some(flat_idx), &resolved_text, scale, engine);
-                    child_flat_ids.push(c_idx);
-                    child_lids.push(LayoutId(c_idx as u32));
-                }
+                let child_flat_ids: Vec<usize> = children
+                    .into_iter()
+                    .map(|child| self.flatten(child, Some(flat_idx), &resolved_text, scale, tree))
+                    .collect();
                 let start = self.child_order.len();
                 self.child_order.extend_from_slice(&child_flat_ids);
-                engine.set_children(lid, &child_lids);
+                tree.set_children(flat_idx, &child_flat_ids);
                 FlatKind::Box {
                     children_start: start,
                     children_len: child_flat_ids.len(),
@@ -1402,1092 +1396,734 @@ impl<K: Copy + Eq + Hash> AnimTracks<K> {
     }
 }
 
-fn round_half_toward_zero(value: f32) -> f32 {
-    (value.abs() - 0.5).ceil().copysign(value)
-}
+pub(crate) use layout::{AvailSize, Dim, Flex, FlexStyle, LayoutTree, Space, snap_border_edges};
 
-fn round_px(logical: f32, scale: f32) -> f32 {
-    round_half_toward_zero(logical * scale)
-}
+/// A flexbox subset solved in physical pixels. Axis 0 is horizontal, axis 1 vertical.
+mod layout {
+    use std::ops::Range;
 
-fn round_stroke(logical: f32, scale: f32) -> f32 {
-    if logical == 0.0 {
-        0.0
-    } else {
-        round_px(logical.max(0.0), scale).max(1.0)
-    }
-}
+    use crate::geom::{Edges, Point, Rect, Size, point, size};
 
-pub(crate) fn snap_border_edges(border: Edges<f32>, scale: f32) -> Edges<f32> {
-    let s = scale.max(0.5);
-    border.map(|v| round_stroke(v, s) / s)
-}
-
-#[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
-pub(crate) struct LayoutId(pub(crate) u32);
-
-impl LayoutId {
-    fn idx(self) -> usize {
-        self.0 as usize
-    }
-}
-
-#[derive(Copy, Clone, Default, Debug, PartialEq)]
-pub(crate) enum Space {
-    Definite(f32),
-    #[default]
-    MinContent,
-    MaxContent,
-}
-
-impl Space {
-    fn scale(self, factor: f32) -> Self {
-        match self {
-            Self::Definite(v) => Self::Definite(v * factor),
-            other => other,
-        }
+    fn round_half_toward_zero(value: f32) -> f32 {
+        (value.abs() - 0.5).ceil().copysign(value)
     }
 
-    fn maybe_sub(self, delta: f32) -> Self {
-        match self {
-            Self::Definite(v) => Self::Definite((v - delta).max(0.0)),
-            other => other,
-        }
+    fn round_px(logical: f32, scale: f32) -> f32 {
+        round_half_toward_zero(logical * scale)
     }
 
-    fn maybe_min(self, limit: Option<f32>) -> Self {
-        match (self, limit) {
-            (Self::Definite(a), Some(m)) => Self::Definite(a.min(m)),
-            (Self::MaxContent, Some(m)) => Self::Definite(m),
-            _ => self,
-        }
-    }
-
-    fn maybe_max(self, floor: Option<f32>) -> Self {
-        match (self, floor) {
-            (Self::Definite(a), Some(m)) => Self::Definite(a.max(m)),
-            _ => self,
-        }
-    }
-
-    fn maybe_set(self, known: Option<f32>) -> Self {
-        known.map_or(self, Self::Definite)
-    }
-
-    fn key(self) -> (u8, u32) {
-        match self {
-            Self::Definite(v) => (0, v.to_bits()),
-            Self::MinContent => (1, 0),
-            Self::MaxContent => (2, 0),
-        }
-    }
-}
-
-#[derive(Copy, Clone, Default, Debug, PartialEq)]
-pub(crate) struct AvailSize {
-    pub(crate) width: Space,
-    pub(crate) height: Space,
-}
-
-impl AvailSize {
-    pub(crate) const MIN: Self = Self {
-        width: Space::MinContent,
-        height: Space::MinContent,
-    };
-
-    pub(crate) const MAX: Self = Self {
-        width: Space::MaxContent,
-        height: Space::MaxContent,
-    };
-
-    pub(crate) const fn definite(width: f32, height: f32) -> Self {
-        Self {
-            width: Space::Definite(width),
-            height: Space::Definite(height),
-        }
-    }
-}
-
-impl From<Size> for AvailSize {
-    fn from(s: Size) -> Self {
-        Self::definite(s.width, s.height)
-    }
-}
-
-#[derive(Copy, Clone, Debug, Default, PartialEq)]
-pub(crate) enum Dim {
-    #[default]
-    Auto,
-    Px(f32),
-    Full,
-}
-
-impl Dim {
-    fn snap(self, scale: f32) -> Self {
-        match self {
-            Self::Px(v) => Self::Px(round_px(v, scale)),
-            other => other,
-        }
-    }
-
-    fn resolve(self, base: Option<f32>) -> Option<f32> {
-        match self {
-            Self::Auto => None,
-            Self::Px(v) => Some(v),
-            Self::Full => base,
-        }
-    }
-}
-
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) enum Flex {
-    #[default]
-    Shrink,
-    Fill,
-    Fixed,
-}
-
-impl Flex {
-    fn can_grow(self) -> bool {
-        matches!(self, Self::Fill)
-    }
-
-    fn can_shrink(self) -> bool {
-        !matches!(self, Self::Fixed)
-    }
-}
-
-#[derive(Copy, Clone, Debug, PartialEq)]
-pub(crate) struct FlexStyle {
-    pub(crate) row: bool,
-    pub(crate) absolute: bool,
-    pub(crate) clip: [bool; 2],
-    pub(crate) inset: Edges<Option<f32>>,
-    pub(crate) size: [Dim; 2],
-    pub(crate) min: [Dim; 2],
-    pub(crate) max: [Dim; 2],
-    pub(crate) margin: Edges<f32>,
-    pub(crate) padding: Edges<f32>,
-    pub(crate) border: Edges<f32>,
-    pub(crate) gap: f32,
-    pub(crate) items_center: bool,
-    pub(crate) justify_center: bool,
-    pub(crate) flex: Flex,
-}
-
-impl Default for FlexStyle {
-    fn default() -> Self {
-        Self {
-            row: false,
-            absolute: false,
-            clip: [false; 2],
-            inset: Edges::all(None),
-            size: [Dim::Auto; 2],
-            min: [Dim::Auto; 2],
-            max: [Dim::Auto; 2],
-            margin: Edges::ZERO,
-            padding: Edges::ZERO,
-            border: Edges::ZERO,
-            gap: 0.0,
-            items_center: false,
-            justify_center: false,
-            flex: Flex::Shrink,
-        }
-    }
-}
-
-impl FlexStyle {
-    fn snap_for_scale(self, scale: f32) -> Self {
-        let px = |v: f32| round_px(v, scale);
-        Self {
-            inset: self.inset.map(|v| v.map(px)),
-            size: self.size.map(|d| d.snap(scale)),
-            min: self.min.map(|d| d.snap(scale)),
-            max: self.max.map(|d| d.snap(scale)),
-            margin: self.margin.map(px),
-            padding: self.padding.map(px),
-            border: self.border.map(|v| round_stroke(v, scale)),
-            gap: round_px(self.gap, scale),
-            ..self
-        }
-    }
-}
-
-fn edge_start(e: Edges<f32>, axis: usize) -> f32 {
-    if axis == 0 { e.left } else { e.top }
-}
-
-fn edge_end(e: Edges<f32>, axis: usize) -> f32 {
-    if axis == 0 { e.right } else { e.bottom }
-}
-
-fn edge_sum(e: Edges<f32>, axis: usize) -> f32 {
-    if axis == 0 { e.horiz() } else { e.vert() }
-}
-
-fn pair<T>(main_axis: usize, main: T, cross: T) -> [T; 2] {
-    if main_axis == 0 {
-        [main, cross]
-    } else {
-        [cross, main]
-    }
-}
-
-#[inline]
-fn clamp_dim(val: f32, min: Option<f32>, max: Option<f32>) -> f32 {
-    let v = max.map_or(val, |hi| val.min(hi));
-    min.map_or(v, |lo| v.max(lo))
-}
-
-#[derive(Copy, Clone, Eq, PartialEq, Debug)]
-enum RunMode {
-    PerformLayout,
-    ComputeSize,
-}
-
-#[derive(Copy, Clone, Eq, PartialEq, Debug)]
-enum SizingMode {
-    InherentSize,
-    ContentSize,
-}
-
-#[derive(Copy, Clone)]
-struct LayoutReq {
-    known: [Option<f32>; 2],
-    parent: [Option<f32>; 2],
-    avail: [Space; 2],
-    run_mode: RunMode,
-    sizing_mode: SizingMode,
-}
-
-#[derive(Copy, Clone)]
-struct AxisBounds {
-    size: Option<f32>,
-    min: Option<f32>,
-    max: Option<f32>,
-    floor: f32,
-}
-
-impl AxisBounds {
-    fn resolve(
-        size: Dim,
-        min: Dim,
-        max: Dim,
-        base: Option<f32>,
-        pb: f32,
-        inherent: bool,
-    ) -> Self {
-        let (size, min, max) = if inherent {
-            (size.resolve(base), min.resolve(base), max.resolve(base))
+    fn round_stroke(logical: f32, scale: f32) -> f32 {
+        if logical == 0.0 {
+            0.0
         } else {
-            (None, None, None)
+            round_px(logical.max(0.0), scale).max(1.0)
+        }
+    }
+
+    pub(crate) fn snap_border_edges(border: Edges<f32>, scale: f32) -> Edges<f32> {
+        let s = scale.max(0.5);
+        border.map(|v| round_stroke(v, s) / s)
+    }
+
+    #[derive(Copy, Clone, Default, Debug, PartialEq)]
+    pub(crate) enum Space {
+        Definite(f32),
+        #[default]
+        MinContent,
+        MaxContent,
+    }
+
+    impl Space {
+        fn scale(self, factor: f32) -> Self {
+            match self {
+                Self::Definite(v) => Self::Definite(v * factor),
+                other => other,
+            }
+        }
+
+        fn maybe_sub(self, delta: f32) -> Self {
+            match self {
+                Self::Definite(v) => Self::Definite((v - delta).max(0.0)),
+                other => other,
+            }
+        }
+
+        fn maybe_min(self, limit: Option<f32>) -> Self {
+            match (self, limit) {
+                (Self::Definite(a), Some(m)) => Self::Definite(a.min(m)),
+                (Self::MaxContent, Some(m)) => Self::Definite(m),
+                _ => self,
+            }
+        }
+
+        fn maybe_max(self, floor: Option<f32>) -> Self {
+            match (self, floor) {
+                (Self::Definite(a), Some(m)) => Self::Definite(a.max(m)),
+                _ => self,
+            }
+        }
+
+        fn maybe_set(self, known: Option<f32>) -> Self {
+            known.map_or(self, Self::Definite)
+        }
+
+        fn key(self) -> (u8, u32) {
+            match self {
+                Self::Definite(v) => (0, v.to_bits()),
+                Self::MinContent => (1, 0),
+                Self::MaxContent => (2, 0),
+            }
+        }
+    }
+
+    #[derive(Copy, Clone, Default, Debug, PartialEq)]
+    pub(crate) struct AvailSize {
+        pub(crate) width: Space,
+        pub(crate) height: Space,
+    }
+
+    impl AvailSize {
+        pub(crate) const MIN: Self = Self {
+            width: Space::MinContent,
+            height: Space::MinContent,
         };
-        Self {
-            size,
-            min,
-            max,
-            floor: min.map_or(pb, |m| m.max(pb)),
+
+        pub(crate) const MAX: Self = Self {
+            width: Space::MaxContent,
+            height: Space::MaxContent,
+        };
+
+        pub(crate) const fn definite(width: f32, height: f32) -> Self {
+            Self {
+                width: Space::Definite(width),
+                height: Space::Definite(height),
+            }
+        }
+    }
+
+    impl From<Size> for AvailSize {
+        fn from(s: Size) -> Self {
+            Self::definite(s.width, s.height)
+        }
+    }
+
+    #[derive(Copy, Clone, Debug, Default, PartialEq)]
+    pub(crate) enum Dim {
+        #[default]
+        Auto,
+        Px(f32),
+        Full,
+    }
+
+    impl Dim {
+        fn snap(self, scale: f32) -> Self {
+            match self {
+                Self::Px(v) => Self::Px(round_px(v, scale)),
+                other => other,
+            }
+        }
+
+        fn resolve(self, base: Option<f32>) -> Option<f32> {
+            match self {
+                Self::Auto => None,
+                Self::Px(v) => Some(v),
+                Self::Full => base,
+            }
+        }
+    }
+
+    #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+    pub(crate) enum Flex {
+        #[default]
+        Shrink,
+        Fill,
+        Fixed,
+    }
+
+    impl Flex {
+        fn can_grow(self) -> bool {
+            matches!(self, Self::Fill)
+        }
+
+        fn can_shrink(self) -> bool {
+            !matches!(self, Self::Fixed)
+        }
+    }
+
+    #[derive(Copy, Clone, Debug, PartialEq)]
+    pub(crate) struct FlexStyle {
+        pub(crate) row: bool,
+        pub(crate) absolute: bool,
+        pub(crate) clip: [bool; 2],
+        pub(crate) inset: Edges<Option<f32>>,
+        pub(crate) size: [Dim; 2],
+        pub(crate) min: [Dim; 2],
+        pub(crate) max: [Dim; 2],
+        pub(crate) margin: Edges<f32>,
+        pub(crate) padding: Edges<f32>,
+        pub(crate) border: Edges<f32>,
+        pub(crate) gap: f32,
+        pub(crate) items_center: bool,
+        pub(crate) justify_center: bool,
+        pub(crate) flex: Flex,
+    }
+
+    impl Default for FlexStyle {
+        fn default() -> Self {
+            Self {
+                row: false,
+                absolute: false,
+                clip: [false; 2],
+                inset: Edges::all(None),
+                size: [Dim::Auto; 2],
+                min: [Dim::Auto; 2],
+                max: [Dim::Auto; 2],
+                margin: Edges::ZERO,
+                padding: Edges::ZERO,
+                border: Edges::ZERO,
+                gap: 0.0,
+                items_center: false,
+                justify_center: false,
+                flex: Flex::Shrink,
+            }
+        }
+    }
+
+    #[derive(Copy, Clone, PartialEq, Eq)]
+    enum Pass {
+        /// Final pass: sizes and positions are stored on the nodes.
+        Layout,
+        /// Outer size under the node's own size constraints.
+        Size,
+        /// Min-content size, ignoring the node's own size constraints.
+        Content,
+    }
+
+    #[derive(Copy, Clone)]
+    struct Req {
+        known: [Option<f32>; 2],
+        parent: [Option<f32>; 2],
+        avail: [Space; 2],
+        pass: Pass,
+    }
+
+    type CacheKey = (Pass, [u32; 2], [u32; 2], [(u8, u32); 2]);
+
+    impl Req {
+        fn key(&self) -> CacheKey {
+            let bits = |v: [Option<f32>; 2]| v.map(|v| v.map_or(u32::MAX, f32::to_bits));
+            (self.pass, bits(self.known), bits(self.parent), self.avail.map(Space::key))
+        }
+    }
+
+    /// Resolved size constraints along one axis; `floor` also covers padding and border.
+    #[derive(Copy, Clone)]
+    struct Bounds {
+        size: Option<f32>,
+        min: Option<f32>,
+        max: Option<f32>,
+        floor: f32,
+    }
+
+    impl Bounds {
+        #[inline]
+        fn clamp(self, v: f32) -> f32 {
+            clamp(v, Some(self.floor), self.max)
+        }
+
+        fn definite(self, known: Option<f32>) -> Option<f32> {
+            known.or(self.size).map(|v| self.clamp(v))
         }
     }
 
     #[inline]
-    fn clamp(self, v: f32) -> f32 {
-        clamp_dim(v, Some(self.floor), self.max)
+    fn clamp(v: f32, min: Option<f32>, max: Option<f32>) -> f32 {
+        let v = max.map_or(v, |hi| v.min(hi));
+        min.map_or(v, |lo| v.max(lo))
     }
 
-    fn definite(self, known: Option<f32>) -> Option<f32> {
-        known.or(self.size).map(|v| self.clamp(v))
-    }
-}
-
-fn resolve_item_cross(
-    cs: &FlexStyle,
-    c: usize,
-    pb_cross: f32,
-    margin_cross: f32,
-    items_center: bool,
-    inner_cross: Option<f32>,
-    stretch: bool,
-) -> Option<f32> {
-    let b = AxisBounds::resolve(cs.size[c], cs.min[c], cs.max[c], inner_cross, pb_cross, true);
-    if let Some(s) = b.size {
-        Some(b.clamp(s))
-    } else if stretch
-        && !items_center
-        && let Some(ic) = inner_cross
-    {
-        Some(b.clamp((ic - margin_cross).max(0.0)))
-    } else {
-        None
-    }
-}
-
-#[derive(Copy, Clone, Eq, PartialEq)]
-struct SizeCacheKey {
-    known: [u32; 2],
-    avail: [(u8, u32); 2],
-    parent: [u32; 2],
-    sizing_mode: SizingMode,
-}
-
-fn opt_bits(v: Option<f32>) -> u32 {
-    v.map_or(u32::MAX, f32::to_bits)
-}
-
-#[derive(Default)]
-struct SizeCache {
-    entries: [Option<(SizeCacheKey, Size)>; 8],
-    next: usize,
-}
-
-impl SizeCache {
-    fn get(&self, key: SizeCacheKey) -> Option<Size> {
-        self.entries
-            .iter()
-            .flatten()
-            .find_map(|&(k, v)| (k == key).then_some(v))
+    /// Places a `(main, cross)` pair on absolute axes.
+    fn axes<T>(main: usize, along_main: T, along_cross: T) -> [T; 2] {
+        if main == 0 { [along_main, along_cross] } else { [along_cross, along_main] }
     }
 
-    fn insert(&mut self, key: SizeCacheKey, value: Size) {
-        for slot in &mut self.entries {
-            if let Some((k, v)) = slot
-                && *k == key
-            {
-                *v = value;
-                return;
+    impl FlexStyle {
+        fn snap_for_scale(self, scale: f32) -> Self {
+            let px = |v: f32| round_px(v, scale);
+            Self {
+                inset: self.inset.map(|v| v.map(px)),
+                size: self.size.map(|d| d.snap(scale)),
+                min: self.min.map(|d| d.snap(scale)),
+                max: self.max.map(|d| d.snap(scale)),
+                margin: self.margin.map(px),
+                padding: self.padding.map(px),
+                border: self.border.map(|v| round_stroke(v, scale)),
+                gap: round_px(self.gap, scale),
+                ..self
             }
         }
-        self.entries[self.next] = Some((key, value));
-        self.next = (self.next + 1) % self.entries.len();
-    }
-}
 
-struct LayoutNode {
-    style: FlexStyle,
-    parent: Option<LayoutId>,
-    children_start: u32,
-    children_len: u32,
-    measured: bool,
-    location: Point,
-    size: Size,
-    abs_origin: Option<Point>,
-    abs_bounds: Option<Rect>,
-    cache: SizeCache,
-}
-
-#[derive(Default)]
-pub(crate) struct LayoutEngine {
-    nodes: Vec<LayoutNode>,
-    children_arena: Vec<LayoutId>,
-}
-
-impl LayoutEngine {
-    pub(crate) fn reserve_node(&mut self, style: FlexStyle, scale: f32, measured: bool) -> LayoutId {
-        let id = LayoutId(self.nodes.len() as u32);
-        self.nodes.push(LayoutNode {
-            style: style.snap_for_scale(scale),
-            parent: None,
-            children_start: 0,
-            children_len: 0,
-            measured,
-            location: Point::ZERO,
-            size: Size::ZERO,
-            abs_origin: None,
-            abs_bounds: None,
-            cache: SizeCache::default(),
-        });
-        id
-    }
-
-    pub(crate) fn set_children(&mut self, id: LayoutId, children: &[LayoutId]) {
-        let start = self.children_arena.len() as u32;
-        self.children_arena.extend_from_slice(children);
-        for &child in children {
-            self.nodes[child.idx()].parent = Some(id);
+        fn pb(&self, axis: usize) -> f32 {
+            self.padding.add(self.border).along(axis)
         }
-        let node = &mut self.nodes[id.idx()];
-        node.children_start = start;
-        node.children_len = children.len() as u32;
+
+        fn bounds(&self, axis: usize, base: Option<f32>, inherent: bool) -> Bounds {
+            let resolve = |d: Dim| if inherent { d.resolve(base) } else { None };
+            let (min, pb) = (resolve(self.min[axis]), self.pb(axis));
+            Bounds {
+                size: resolve(self.size[axis]),
+                min,
+                max: resolve(self.max[axis]),
+                floor: min.map_or(pb, |m| m.max(pb)),
+            }
+        }
+
+        /// Cross size of a flex item: its own size, or the line stretched to fit.
+        fn cross_size(&self, c: usize, line: Option<f32>, centered: bool, stretch: bool) -> Option<f32> {
+            let b = self.bounds(c, line, true);
+            match (b.size, line) {
+                (Some(s), _) => Some(b.clamp(s)),
+                (None, Some(l)) if stretch && !centered => {
+                    Some(b.clamp((l - self.margin.along(c)).max(0.0)))
+                }
+                _ => None,
+            }
+        }
     }
 
-    #[cfg(test)]
-    fn add_node(
-        &mut self,
+    struct Node {
         style: FlexStyle,
-        scale: f32,
-        children: &[LayoutId],
+        parent: Option<usize>,
+        kids: Range<usize>,
         measured: bool,
-    ) -> LayoutId {
-        let id = self.reserve_node(style, scale, measured);
-        self.set_children(id, children);
-        id
+        pos: Point,
+        size: Size,
+        cache: [Option<(CacheKey, Size)>; 8],
+        next: usize,
     }
 
-    pub(crate) fn compute(
-        &mut self,
-        root: LayoutId,
-        available: AvailSize,
-        scale: f32,
-        measure: &mut impl FnMut(LayoutId, Option<f32>, Option<f32>, AvailSize) -> Size,
-    ) {
-        let avail = [available.width.scale(scale), available.height.scale(scale)];
-        let parent = avail.map(|a| match a {
-            Space::Definite(v) => Some(v),
-            _ => None,
-        });
-        let req = LayoutReq {
-            known: [None; 2],
-            parent,
-            avail,
-            run_mode: RunMode::PerformLayout,
-            sizing_mode: SizingMode::InherentSize,
-        };
-        let mut solver = Solver {
-            nodes: &mut self.nodes,
-            children: &self.children_arena,
-            scale,
-            measure,
-        };
-        let root_size = solver.compute_node(root, req);
-        let node = &mut self.nodes[root.idx()];
-        node.location = Point::ZERO;
-        node.size = root_size;
+    /// Layout tree; node ids are insertion order.
+    #[derive(Default)]
+    pub(crate) struct LayoutTree {
+        nodes: Vec<Node>,
+        kids: Vec<usize>,
     }
 
-    pub(crate) fn bounds(&mut self, id: LayoutId, scale: f32) -> Rect {
-        if let Some(b) = self.nodes[id.idx()].abs_bounds {
-            return b;
+    impl LayoutTree {
+        pub(crate) fn add(&mut self, style: FlexStyle, scale: f32, measured: bool) -> usize {
+            self.nodes.push(Node {
+                style: style.snap_for_scale(scale),
+                parent: None,
+                kids: 0..0,
+                measured,
+                pos: Point::ZERO,
+                size: Size::ZERO,
+                cache: Default::default(),
+                next: 0,
+            });
+            self.nodes.len() - 1
         }
-        let parent = self.nodes[id.idx()].parent;
-        let location = self.nodes[id.idx()].location;
-        let node_size = self.nodes[id.idx()].size;
 
-        let abs_origin = match parent {
-            Some(parent_id) => {
-                self.bounds(parent_id, scale);
-                self.nodes[parent_id.idx()]
-                    .abs_origin
-                    .unwrap_or(Point::ZERO)
-                    + location
+        pub(crate) fn set_children(&mut self, id: usize, kids: &[usize]) {
+            let start = self.kids.len();
+            self.kids.extend_from_slice(kids);
+            for &k in kids {
+                self.nodes[k].parent = Some(id);
             }
-            None => location,
-        };
-        self.nodes[id.idx()].abs_origin = Some(abs_origin);
-
-        let snapped = Rect::from_corners(
-            point(
-                round_half_toward_zero(abs_origin.x),
-                round_half_toward_zero(abs_origin.y),
-            ),
-            point(
-                round_half_toward_zero(abs_origin.x + node_size.width),
-                round_half_toward_zero(abs_origin.y + node_size.height),
-            ),
-        );
-        let logical = Rect::new(
-            point(snapped.origin.x / scale, snapped.origin.y / scale),
-            size(snapped.size.width / scale, snapped.size.height / scale),
-        );
-        self.nodes[id.idx()].abs_bounds = Some(logical);
-        logical
-    }
-
-    pub(crate) fn set_origin(&mut self, id: LayoutId, logical_origin: Point, scale: f32) {
-        let parent_origin = match self.nodes[id.idx()].parent {
-            Some(parent_id) => {
-                self.bounds(parent_id, scale);
-                self.nodes[parent_id.idx()]
-                    .abs_origin
-                    .unwrap_or(Point::ZERO)
-            }
-            None => Point::ZERO,
-        };
-        let desired = point(
-            round_px(logical_origin.x, scale),
-            round_px(logical_origin.y, scale),
-        );
-        self.nodes[id.idx()].location = desired - parent_origin;
-        self.invalidate_bounds(id);
-    }
-
-    fn invalidate_bounds(&mut self, id: LayoutId) {
-        let node = &mut self.nodes[id.idx()];
-        node.abs_origin = None;
-        node.abs_bounds = None;
-        let start = node.children_start as usize;
-        let end = start + node.children_len as usize;
-        for i in start..end {
-            self.invalidate_bounds(self.children_arena[i]);
+            self.nodes[id].kids = start..self.kids.len();
         }
-    }
-}
 
-struct Solver<'a, F> {
-    nodes: &'a mut [LayoutNode],
-    children: &'a [LayoutId],
-    scale: f32,
-    measure: &'a mut F,
-}
-
-impl<'a, F: FnMut(LayoutId, Option<f32>, Option<f32>, AvailSize) -> Size> Solver<'a, F> {
-    fn child_slice(&self, id: LayoutId) -> &'a [LayoutId] {
-        let node = &self.nodes[id.idx()];
-        let start = node.children_start as usize;
-        &self.children[start..start + node.children_len as usize]
-    }
-
-    fn compute_node(&mut self, id: LayoutId, req: LayoutReq) -> Size {
-        if req.run_mode == RunMode::ComputeSize {
-            let key = SizeCacheKey {
-                known: req.known.map(opt_bits),
-                avail: req.avail.map(Space::key),
-                parent: req.parent.map(opt_bits),
-                sizing_mode: req.sizing_mode,
-            };
-            if let Some(cached) = self.nodes[id.idx()].cache.get(key) {
-                return cached;
-            }
-            let result = self.compute_uncached(id, req);
-            self.nodes[id.idx()].cache.insert(key, result);
-            return result;
+        /// Lays out the tree under `root`; `measure` sizes text leaves in logical units.
+        pub(crate) fn solve(
+            &mut self,
+            root: usize,
+            avail: AvailSize,
+            scale: f32,
+            measure: &mut impl FnMut(usize, Option<f32>, Option<f32>, AvailSize) -> Size,
+        ) {
+            let avail = [avail.width, avail.height].map(|s| s.scale(scale));
+            let parent = avail.map(|s| match s {
+                Space::Definite(v) => Some(v),
+                _ => None,
+            });
+            let req = Req { known: [None; 2], parent, avail, pass: Pass::Layout };
+            Solver { nodes: &mut self.nodes, kids: &self.kids, scale, measure }.node(root, req);
+            self.nodes[root].pos = Point::ZERO;
         }
-        let result = self.compute_uncached(id, req);
-        self.nodes[id.idx()].size = result;
-        result
-    }
 
-    fn compute_uncached(&mut self, id: LayoutId, req: LayoutReq) -> Size {
-        let node = &self.nodes[id.idx()];
-        if node.children_len == 0 || node.measured {
-            self.compute_leaf(id, req)
-        } else {
-            self.compute_flex(id, req)
+        fn origin(&self, id: usize) -> Point {
+            let n = &self.nodes[id];
+            n.parent.map_or(n.pos, |p| self.origin(p) + n.pos)
         }
-    }
 
-    fn compute_leaf(&mut self, id: LayoutId, req: LayoutReq) -> Size {
-        let node = &self.nodes[id.idx()];
-        let style = node.style;
-        let measured = node.measured;
-        let pb = style.padding.add(style.border);
-        let pb_axes = [pb.horiz(), pb.vert()];
-        let inherent = req.sizing_mode == SizingMode::InherentSize;
-        let bounds = [0, 1].map(|a| {
-            AxisBounds::resolve(
-                style.size[a],
-                style.min[a],
-                style.max[a],
-                req.parent[a],
-                pb_axes[a],
-                inherent,
+        /// Pixel-snapped bounds in logical units.
+        pub(crate) fn rect(&self, id: usize, scale: f32) -> Rect {
+            let (o, s) = (self.origin(id), self.nodes[id].size);
+            let snap = |x: f32, y: f32| point(round_half_toward_zero(x), round_half_toward_zero(y));
+            let px = Rect::from_corners(snap(o.x, o.y), snap(o.x + s.width, o.y + s.height));
+            Rect::new(
+                point(px.origin.x / scale, px.origin.y / scale),
+                size(px.size.width / scale, px.size.height / scale),
             )
-        });
-        let known = [0, 1].map(|a| bounds[a].definite(req.known[a]));
-
-        if measured && (known[0].is_none() || known[1].is_none() || req.run_mode == RunMode::PerformLayout) {
-            let inv = 1.0 / self.scale;
-            let known_inner = [0, 1].map(|a| known[a].map(|v| (v - pb_axes[a]).max(0.0) * inv));
-            let avail_inner = [0, 1].map(|a| {
-                req.avail[a]
-                    .maybe_set(known[a])
-                    .maybe_min(bounds[a].max)
-                    .maybe_max(bounds[a].min)
-                    .maybe_sub(pb_axes[a])
-                    .scale(inv)
-            });
-            let logical = (self.measure)(
-                id,
-                known_inner[0],
-                known_inner[1],
-                AvailSize {
-                    width: avail_inner[0],
-                    height: avail_inner[1],
-                },
-            );
-            let m = [
-                (logical.width.max(0.0) * self.scale).ceil(),
-                (logical.height.max(0.0) * self.scale).ceil(),
-            ];
-            return size(
-                known[0].unwrap_or_else(|| bounds[0].clamp(m[0] + pb_axes[0])),
-                known[1].unwrap_or_else(|| bounds[1].clamp(m[1] + pb_axes[1])),
-            );
         }
 
-        size(
-            known[0].unwrap_or_else(|| bounds[0].clamp(pb_axes[0])),
-            known[1].unwrap_or_else(|| bounds[1].clamp(pb_axes[1])),
-        )
+        /// Moves `id` so its top-left lands on `logical`.
+        pub(crate) fn set_origin(&mut self, id: usize, logical: Point, scale: f32) {
+            let parent = self.nodes[id].parent.map_or(Point::ZERO, |p| self.origin(p));
+            self.nodes[id].pos = point(round_px(logical.x, scale), round_px(logical.y, scale)) - parent;
+        }
     }
 
-    fn compute_flex(&mut self, id: LayoutId, req: LayoutReq) -> Size {
-        let style = self.nodes[id.idx()].style;
-        let (m, c) = if style.row { (0, 1) } else { (1, 0) };
-        let pb = style.padding.add(style.border);
-        let pb_main = edge_sum(pb, m);
-        let pb_cross = edge_sum(pb, c);
-        let inherent = req.sizing_mode == SizingMode::InherentSize;
-        let [b_main, b_cross] = [(m, pb_main), (c, pb_cross)].map(|(a, pb)| {
-            AxisBounds::resolve(style.size[a], style.min[a], style.max[a], req.parent[a], pb, inherent)
-        });
-        let node_main = b_main.definite(req.known[m]);
-        let node_cross = b_cross.definite(req.known[c]);
-
-        let children = self.child_slice(id);
-        let in_flow_count = children
-            .iter()
-            .filter(|&&ch| !self.nodes[ch.idx()].style.absolute)
-            .count();
-
-        if in_flow_count == 0 {
-            let final_main = node_main.unwrap_or_else(|| b_main.clamp(pb_main));
-            let final_cross = node_cross.unwrap_or_else(|| b_cross.clamp(pb_cross));
-            let s = pair(m, final_main, final_cross);
-            let container_size = size(s[0], s[1]);
-            if req.run_mode == RunMode::PerformLayout {
-                self.layout_absolute_children(children, container_size, &style);
-            }
-            return container_size;
-        }
-
-        let inner_main_opt = node_main.map(|v| (v - pb_main).max(0.0));
-        let inner_cross_opt = node_cross.map(|v| (v - pb_cross).max(0.0));
-        let inner_parent = pair(m, inner_main_opt, inner_cross_opt);
-        let gap_main = style.gap;
-
-        let avail_main = req.avail[m]
-            .maybe_set(node_main)
-            .maybe_min(b_main.max)
-            .maybe_sub(pb_main);
-        let avail_cross = req.avail[c]
-            .maybe_set(node_cross)
-            .maybe_min(b_cross.max)
-            .maybe_sub(pb_cross);
-
-        struct FlexItem {
-            id: LayoutId,
-            style: FlexStyle,
-            pb_main: f32,
-            pb_cross: f32,
-            flex_basis: f32,
-            min_main: f32,
-            max_main: Option<f32>,
-            hypothetical_main: f32,
-            target_main: f32,
-            violation: f32,
-            frozen: bool,
-        }
-
-        let mut items: Vec<FlexItem> = Vec::with_capacity(in_flow_count);
-        for &child in children {
-            let cs = self.nodes[child.idx()].style;
-            if cs.absolute {
-                continue;
-            }
-            let c_pb = cs.padding.add(cs.border);
-            let c_pb_main = edge_sum(c_pb, m);
-            let c_pb_cross = edge_sum(c_pb, c);
-
-            let c_size_main = cs.size[m].resolve(inner_main_opt);
-            let c_min_main = cs.min[m].resolve(inner_main_opt);
-            let c_max_main = cs.max[m].resolve(inner_main_opt);
-            let margin_cross = edge_sum(cs.margin, c);
-            let pre_cross = resolve_item_cross(
-                &cs,
-                c,
-                c_pb_cross,
-                margin_cross,
-                style.items_center,
-                inner_cross_opt,
-                true,
-            );
-
-            let explicit_basis = match cs.flex {
-                Flex::Fill => inner_main_opt.map(|_| 0.0),
-                Flex::Shrink | Flex::Fixed => c_size_main,
-            };
-            let (flex_basis, basis_from_content) = match explicit_basis {
-                Some(b) => (b, false),
-                None => {
-                    let probe = if avail_main == Space::MinContent {
-                        Space::MinContent
-                    } else {
-                        Space::MaxContent
-                    };
-                    let sz = self.compute_node(
-                        child,
-                        LayoutReq {
-                            known: pair(m, None, pre_cross),
-                            parent: inner_parent,
-                            avail: pair(m, probe, avail_cross.maybe_sub(margin_cross)),
-                            run_mode: RunMode::ComputeSize,
-                            sizing_mode: SizingMode::InherentSize,
-                        },
-                    );
-                    ([sz.width, sz.height][m], true)
-                }
-            };
-
-            let effective_min_main = if let Some(min_m) = c_min_main {
-                min_m.max(c_pb_main)
-            } else if cs.clip[m]
-                || c_max_main == Some(0.0)
-                || c_size_main.is_some_and(|s| s == 0.0 || (!cs.flex.can_shrink() && flex_basis >= s))
-                || (!cs.flex.can_shrink() && basis_from_content)
-            {
-                c_pb_main
-            } else {
-                let sz = self.compute_node(
-                    child,
-                    LayoutReq {
-                        known: pair(m, None, pre_cross),
-                        parent: inner_parent,
-                        avail: pair(m, Space::MinContent, avail_cross.maybe_sub(margin_cross)),
-                        run_mode: RunMode::ComputeSize,
-                        sizing_mode: SizingMode::ContentSize,
-                    },
-                );
-                let mut auto_min = [sz.width, sz.height][m];
-                if let Some(s) = c_size_main {
-                    auto_min = auto_min.min(s);
-                }
-                if let Some(mx) = c_max_main {
-                    auto_min = auto_min.min(mx);
-                }
-                auto_min.max(c_pb_main)
-            };
-
-            let effective_max_main = c_max_main.map(|mx| mx.max(effective_min_main));
-            let hypothetical_main =
-                clamp_dim(flex_basis, Some(effective_min_main), effective_max_main);
-
-            items.push(FlexItem {
-                id: child,
-                style: cs,
-                pb_main: c_pb_main,
-                pb_cross: c_pb_cross,
-                flex_basis,
-                min_main: effective_min_main,
-                max_main: effective_max_main,
-                hypothetical_main,
-                target_main: hypothetical_main,
-                violation: 0.0,
-                frozen: false,
-            });
-        }
-
-        let total_gaps = gap_main * items.len().saturating_sub(1) as f32;
-        let total_hypothetical: f32 = total_gaps
-            + items
-                .iter()
-                .map(|it| it.hypothetical_main + edge_sum(it.style.margin, m))
-                .sum::<f32>();
-
-        let (container_main, resolve_flex) = match node_main {
-            Some(v) => (v, true),
-            None => {
-                let raw = total_hypothetical + pb_main;
-                let clamped = b_main.clamp(raw);
-                (clamped, (clamped - raw).abs() > 1e-4)
-            }
-        };
-        let inner_main = (container_main - pb_main).max(0.0);
-
-        if resolve_flex {
-            let growing = total_hypothetical < inner_main;
-            for item in &mut items {
-                item.frozen = if growing {
-                    !item.style.flex.can_grow() || item.flex_basis > item.hypothetical_main
-                } else {
-                    !item.style.flex.can_shrink() || item.flex_basis < item.hypothetical_main
-                };
-                item.target_main = if item.frozen {
-                    item.hypothetical_main
-                } else {
-                    item.flex_basis
-                };
-            }
-
-            loop {
-                let mut unfrozen = 0usize;
-                let mut used = total_gaps;
-                for item in &items {
-                    let base = if item.frozen {
-                        item.target_main
-                    } else {
-                        unfrozen += 1;
-                        item.flex_basis
-                    };
-                    used += base + edge_sum(item.style.margin, m);
-                }
-                if unfrozen == 0 {
-                    break;
-                }
-
-                let remaining_free = inner_main - used;
-                if growing && remaining_free > 0.0 {
-                    let share = remaining_free / unfrozen as f32;
-                    for item in items.iter_mut().filter(|it| !it.frozen) {
-                        item.target_main = item.flex_basis + share;
-                    }
-                } else if !growing && remaining_free < 0.0 {
-                    let mut scaled_sum: f32 = items
-                        .iter()
-                        .filter(|it| !it.frozen)
-                        .map(|it| (it.flex_basis - it.pb_main).max(0.0))
-                        .sum();
-                    let use_raw = scaled_sum == 0.0;
-                    if use_raw {
-                        scaled_sum = items
-                            .iter()
-                            .filter(|it| !it.frozen)
-                            .map(|it| it.flex_basis.max(1.0))
-                            .sum();
-                    }
-                    if scaled_sum > 0.0 {
-                        for item in items.iter_mut().filter(|it| !it.frozen) {
-                            let factor = if use_raw {
-                                item.flex_basis.max(1.0)
-                            } else {
-                                (item.flex_basis - item.pb_main).max(0.0)
-                            };
-                            item.target_main = item.flex_basis + remaining_free * (factor / scaled_sum);
-                        }
-                    }
-                }
-
-                let mut total_violation = 0.0f32;
-                for item in &mut items {
-                    if item.frozen {
-                        item.violation = 0.0;
-                    } else {
-                        let clamped =
-                            clamp_dim(item.target_main, Some(item.min_main), item.max_main);
-                        item.violation = clamped - item.target_main;
-                        item.target_main = clamped;
-                        total_violation += item.violation;
-                    }
-                }
-
-                if total_violation.abs() < 1e-4 {
-                    break;
-                }
-                let mut froze_any = false;
-                for item in items.iter_mut().filter(|it| !it.frozen) {
-                    if (total_violation > 0.0 && item.violation > 0.0)
-                        || (total_violation < 0.0 && item.violation < 0.0)
-                    {
-                        item.frozen = true;
-                        froze_any = true;
-                    }
-                }
-                if !froze_any {
-                    break;
-                }
-            }
-        }
-
-        let parent_with_main = pair(m, Some(inner_main), inner_cross_opt);
-        let container_cross = match node_cross {
-            Some(v) => v,
-            None => {
-                let mut max_outer_cross = 0.0f32;
-                for item in &items {
-                    let margin_cross = edge_sum(item.style.margin, c);
-                    let c_known_cross = resolve_item_cross(
-                        &item.style,
-                        c,
-                        item.pb_cross,
-                        margin_cross,
-                        style.items_center,
-                        inner_cross_opt,
-                        false,
-                    );
-                    let sz = self.compute_node(
-                        item.id,
-                        LayoutReq {
-                            known: pair(m, Some(item.target_main), c_known_cross),
-                            parent: parent_with_main,
-                            avail: pair(
-                                m,
-                                Space::Definite(item.target_main),
-                                avail_cross.maybe_sub(margin_cross),
-                            ),
-                            run_mode: RunMode::ComputeSize,
-                            sizing_mode: SizingMode::InherentSize,
-                        },
-                    );
-                    max_outer_cross = max_outer_cross.max([sz.width, sz.height][c] + margin_cross);
-                }
-                b_cross.clamp(max_outer_cross + pb_cross)
-            }
-        };
-
-        let s = pair(m, container_main, container_cross);
-        let container_size = size(s[0], s[1]);
-        if req.run_mode == RunMode::ComputeSize {
-            return container_size;
-        }
-
-        let inner_cross = (container_cross - pb_cross).max(0.0);
-        let final_parent = pair(m, Some(inner_main), Some(inner_cross));
-        let mut final_sizes: Vec<Size> = Vec::with_capacity(items.len());
-        let mut used_main = total_gaps;
-        for item in &items {
-            let margin_cross = edge_sum(item.style.margin, c);
-            let final_cross_known = resolve_item_cross(
-                &item.style,
-                c,
-                item.pb_cross,
-                margin_cross,
-                style.items_center,
-                Some(inner_cross),
-                true,
-            );
-            let child_size = self.compute_node(
-                item.id,
-                LayoutReq {
-                    known: pair(m, Some(item.target_main), final_cross_known),
-                    parent: final_parent,
-                    avail: pair(
-                        m,
-                        Space::Definite(item.target_main),
-                        Space::Definite((inner_cross - margin_cross).max(0.0)),
-                    ),
-                    run_mode: RunMode::PerformLayout,
-                    sizing_mode: SizingMode::InherentSize,
-                },
-            );
-            used_main += [child_size.width, child_size.height][m] + edge_sum(item.style.margin, m);
-            final_sizes.push(child_size);
-        }
-
-        let main_offset = if style.justify_center {
-            (inner_main - used_main) / 2.0
-        } else {
-            0.0
-        };
-        let mut main_cursor = edge_start(pb, m) + main_offset;
-        let cross_origin = edge_start(pb, c);
-
-        for (item, child_size) in items.iter().zip(final_sizes.iter()) {
-            let cs = [child_size.width, child_size.height];
-            let main_pos = main_cursor + edge_start(item.style.margin, m);
-            let cross_pos = if style.items_center {
-                cross_origin
-                    + (inner_cross - (cs[c] + edge_sum(item.style.margin, c))) / 2.0
-                    + edge_start(item.style.margin, c)
-            } else {
-                cross_origin + edge_start(item.style.margin, c)
-            };
-            let pos = pair(m, main_pos, cross_pos);
-            let inset = item.style.inset;
-            let rel_x = inset.left.or_else(|| inset.right.map(|r| -r)).unwrap_or(0.0);
-            let rel_y = inset.top.or_else(|| inset.bottom.map(|b| -b)).unwrap_or(0.0);
-            self.nodes[item.id.idx()].location = point(pos[0] + rel_x, pos[1] + rel_y);
-            main_cursor += edge_start(item.style.margin, m)
-                + cs[m]
-                + edge_end(item.style.margin, m)
-                + gap_main;
-        }
-
-        self.layout_absolute_children(children, container_size, &style);
-        container_size
+    struct Item {
+        id: usize,
+        style: FlexStyle,
+        basis: f32,
+        min: f32,
+        max: Option<f32>,
+        hypothetical: f32,
+        target: f32,
+        violation: f32,
+        frozen: bool,
     }
 
-    fn layout_absolute_children(
-        &mut self,
-        children: &[LayoutId],
-        parent_size: Size,
-        parent_style: &FlexStyle,
-    ) {
-        let border = parent_style.border;
-        let padding = parent_style.padding;
-        let cb_origin = point(border.left, border.top);
-        let cb = [
-            (parent_size.width - border.horiz()).max(0.0),
-            (parent_size.height - border.vert()).max(0.0),
-        ];
-        let content = [
-            (cb[0] - padding.horiz()).max(0.0),
-            (cb[1] - padding.vert()).max(0.0),
-        ];
-        let (m, c) = if parent_style.row { (0, 1) } else { (1, 0) };
+    struct Solver<'a, F> {
+        nodes: &'a mut [Node],
+        kids: &'a [usize],
+        scale: f32,
+        measure: &'a mut F,
+    }
 
-        for &child in children {
-            let cs = self.nodes[child.idx()].style;
-            if !cs.absolute {
-                continue;
+    impl<'a, F: FnMut(usize, Option<f32>, Option<f32>, AvailSize) -> Size> Solver<'a, F> {
+        fn node(&mut self, id: usize, req: Req) -> Size {
+            if req.pass == Pass::Layout {
+                let s = self.solve(id, req);
+                self.nodes[id].size = s;
+                return s;
             }
-            let c_pb = cs.padding.add(cs.border);
-            let c_pb_axes = [c_pb.horiz(), c_pb.vert()];
-            let insets = [
-                (cs.inset.left, cs.inset.right),
-                (cs.inset.top, cs.inset.bottom),
-            ];
-            let margin_axes = [cs.margin.horiz(), cs.margin.vert()];
-            let bounds = [0, 1].map(|a| {
-                AxisBounds::resolve(
-                    cs.size[a],
-                    cs.min[a],
-                    cs.max[a],
-                    Some(cb[a]),
-                    c_pb_axes[a],
-                    true,
-                )
+            let key = req.key();
+            if let Some(&(_, s)) = self.nodes[id].cache.iter().flatten().find(|(k, _)| *k == key) {
+                return s;
+            }
+            let s = self.solve(id, req);
+            let n = &mut self.nodes[id];
+            n.cache[n.next] = Some((key, s));
+            n.next = (n.next + 1) % n.cache.len();
+            s
+        }
+
+        fn solve(&mut self, id: usize, req: Req) -> Size {
+            let n = &self.nodes[id];
+            if n.kids.is_empty() || n.measured { self.leaf(id, req) } else { self.flex(id, req) }
+        }
+
+        fn kids_of(&self, id: usize) -> &'a [usize] {
+            &self.kids[self.nodes[id].kids.clone()]
+        }
+
+        fn leaf(&mut self, id: usize, req: Req) -> Size {
+            let (style, measured) = (self.nodes[id].style, self.nodes[id].measured);
+            let b = [0, 1].map(|a| style.bounds(a, req.parent[a], req.pass != Pass::Content));
+            let pb = [0, 1].map(|a| style.pb(a));
+            let known = [0, 1].map(|a| b[a].definite(req.known[a]));
+            let content = (measured && (known.contains(&None) || req.pass == Pass::Layout)).then(|| {
+                let inv = 1.0 / self.scale;
+                let [kw, kh] = [0, 1].map(|a| known[a].map(|v| (v - pb[a]).max(0.0) * inv));
+                let [width, height] = [0, 1].map(|a| {
+                    let space = req.avail[a].maybe_set(known[a]).maybe_min(b[a].max);
+                    space.maybe_max(b[a].min).maybe_sub(pb[a]).scale(inv)
+                });
+                let s = (self.measure)(id, kw, kh, AvailSize { width, height });
+                [s.width, s.height].map(|v| (v.max(0.0) * self.scale).ceil())
             });
-            let known = [0, 1].map(|a| {
-                bounds[a].definite(None).or_else(|| match insets[a] {
-                    (Some(s), Some(e)) => {
-                        Some(bounds[a].clamp((cb[a] - s - e - margin_axes[a]).max(0.0)))
-                    }
-                    _ => None,
-                })
+            let [w, h] = [0, 1].map(|a| {
+                known[a].unwrap_or_else(|| b[a].clamp(content.map_or(pb[a], |c| c[a] + pb[a])))
             });
+            size(w, h)
+        }
+
+        fn flex(&mut self, id: usize, req: Req) -> Size {
+            let style = self.nodes[id].style;
+            let (m, c) = if style.row { (0, 1) } else { (1, 0) };
+            let b = [0, 1].map(|a| style.bounds(a, req.parent[a], req.pass != Pass::Content));
+            let pb = [0, 1].map(|a| style.pb(a));
+            let outer = [0, 1].map(|a| b[a].definite(req.known[a]));
+            let kids = self.kids_of(id);
+            if kids.iter().all(|&k| self.nodes[k].style.absolute) {
+                let [w, h] = [0, 1].map(|a| outer[a].unwrap_or_else(|| b[a].clamp(pb[a])));
+                if req.pass == Pass::Layout {
+                    self.place_absolute(kids, size(w, h), &style);
+                }
+                return size(w, h);
+            }
+
+            let inner = [0, 1].map(|a| outer[a].map(|v| (v - pb[a]).max(0.0)));
             let avail = [0, 1].map(|a| {
-                known[a]
-                    .or(bounds[a].max)
-                    .map_or(Space::MaxContent, Space::Definite)
+                req.avail[a].maybe_set(outer[a]).maybe_min(b[a].max).maybe_sub(pb[a])
             });
-
-            let child_size = self.compute_node(
-                child,
-                LayoutReq {
-                    known,
-                    parent: [Some(cb[0]), Some(cb[1])],
-                    avail,
-                    run_mode: RunMode::PerformLayout,
-                    sizing_mode: SizingMode::InherentSize,
-                },
-            );
-            let child_axes = [child_size.width, child_size.height];
-
-            let main_off = if parent_style.justify_center {
-                (content[m] - (child_axes[m] + edge_sum(cs.margin, m))) / 2.0
-            } else {
-                0.0
-            };
-            let cross_off = if parent_style.items_center {
-                (content[c] - (child_axes[c] + edge_sum(cs.margin, c))) / 2.0
-            } else {
-                0.0
-            };
-            let static_off = pair(m, main_off, cross_off);
-
-            let pos = [0, 1].map(|a| {
-                let origin = if a == 0 { cb_origin.x } else { cb_origin.y };
-                let pad_s = edge_start(padding, a);
-                let ms = edge_start(cs.margin, a);
-                let me = edge_end(cs.margin, a);
-                if let Some(s) = insets[a].0 {
-                    origin + s + ms
-                } else if let Some(e) = insets[a].1 {
-                    origin + cb[a] - e - me - child_axes[a]
-                } else {
-                    origin + pad_s + static_off[a] + ms
+            let mut items = self.items(kids, &style, m, inner, avail);
+            let gaps = style.gap * items.len().saturating_sub(1) as f32;
+            let hypothetical =
+                gaps + items.iter().map(|it| it.hypothetical + it.style.margin.along(m)).sum::<f32>();
+            let (main, flexible) = match outer[m] {
+                Some(v) => (v, true),
+                None => {
+                    let raw = hypothetical + pb[m];
+                    let v = b[m].clamp(raw);
+                    (v, (v - raw).abs() > 1e-4)
                 }
-            });
-            self.nodes[child.idx()].location = point(pos[0], pos[1]);
+            };
+            let inner_main = (main - pb[m]).max(0.0);
+            if flexible {
+                resolve_lengths(&mut items, m, inner_main, gaps, hypothetical < inner_main);
+            }
+
+            let cross = match outer[c] {
+                Some(v) => v,
+                None => {
+                    let parent = axes(m, Some(inner_main), inner[c]);
+                    let mut tallest = 0.0f32;
+                    for it in &items {
+                        let margin = it.style.margin.along(c);
+                        let cross = it.style.cross_size(c, inner[c], style.items_center, false);
+                        let req = Req {
+                            known: axes(m, Some(it.target), cross),
+                            parent,
+                            avail: axes(m, Space::Definite(it.target), avail[c].maybe_sub(margin)),
+                            pass: Pass::Size,
+                        };
+                        tallest = tallest.max(self.node(it.id, req).along(c) + margin);
+                    }
+                    b[c].clamp(tallest + pb[c])
+                }
+            };
+            let [w, h] = axes(m, main, cross);
+            if req.pass == Pass::Layout {
+                self.place_items(&items, &style, m, inner_main, (cross - pb[c]).max(0.0), gaps);
+                self.place_absolute(kids, size(w, h), &style);
+            }
+            size(w, h)
+        }
+
+        /// Flex basis, min/max and hypothetical main size of every in-flow child.
+        fn items(
+            &mut self,
+            kids: &[usize],
+            style: &FlexStyle,
+            m: usize,
+            inner: [Option<f32>; 2],
+            avail: [Space; 2],
+        ) -> Vec<Item> {
+            let c = 1 - m;
+            let mut items = Vec::with_capacity(kids.len());
+            for &id in kids {
+                let cs = self.nodes[id].style;
+                if cs.absolute {
+                    continue;
+                }
+                let [own, lo, hi] = [cs.size[m], cs.min[m], cs.max[m]].map(|d| d.resolve(inner[m]));
+                let cross = cs.cross_size(c, inner[c], style.items_center, true);
+                let probe = |space, pass| Req {
+                    known: axes(m, None, cross),
+                    parent: inner,
+                    avail: axes(m, space, avail[c].maybe_sub(cs.margin.along(c))),
+                    pass,
+                };
+                let explicit = if cs.flex == Flex::Fill { inner[m].map(|_| 0.0) } else { own };
+                let (basis, from_content) = match explicit {
+                    Some(v) => (v, false),
+                    None => {
+                        let space = if avail[m] == Space::MinContent {
+                            Space::MinContent
+                        } else {
+                            Space::MaxContent
+                        };
+                        (self.node(id, probe(space, Pass::Size)).along(m), true)
+                    }
+                };
+                let (pb, rigid) = (cs.pb(m), !cs.flex.can_shrink());
+                let min = match lo {
+                    Some(v) => v.max(pb),
+                    None if cs.clip[m]
+                        || hi == Some(0.0)
+                        || own.is_some_and(|s| s == 0.0 || (rigid && basis >= s))
+                        || (rigid && from_content) =>
+                    {
+                        pb
+                    }
+                    None => {
+                        let content = self.node(id, probe(Space::MinContent, Pass::Content)).along(m);
+                        [own, hi].into_iter().flatten().fold(content, f32::min).max(pb)
+                    }
+                };
+                let max = hi.map(|v| v.max(min));
+                let hypothetical = clamp(basis, Some(min), max);
+                items.push(Item {
+                    id,
+                    style: cs,
+                    basis,
+                    min,
+                    max,
+                    hypothetical,
+                    target: hypothetical,
+                    violation: 0.0,
+                    frozen: false,
+                });
+            }
+            items
+        }
+
+        /// Final pass over in-flow children: size each one and place it along the line.
+        fn place_items(
+            &mut self,
+            items: &[Item],
+            style: &FlexStyle,
+            m: usize,
+            inner_main: f32,
+            inner_cross: f32,
+            gaps: f32,
+        ) {
+            let c = 1 - m;
+            let parent = axes(m, Some(inner_main), Some(inner_cross));
+            let mut used = gaps;
+            let sizes: Vec<Size> = items
+                .iter()
+                .map(|it| {
+                    let margin = it.style.margin;
+                    let cross = it.style.cross_size(c, Some(inner_cross), style.items_center, true);
+                    let line = Space::Definite((inner_cross - margin.along(c)).max(0.0));
+                    let req = Req {
+                        known: axes(m, Some(it.target), cross),
+                        parent,
+                        avail: axes(m, Space::Definite(it.target), line),
+                        pass: Pass::Layout,
+                    };
+                    let s = self.node(it.id, req);
+                    used += s.along(m) + margin.along(m);
+                    s
+                })
+                .collect();
+
+            let edge = style.padding.add(style.border);
+            let offset = if style.justify_center { (inner_main - used) / 2.0 } else { 0.0 };
+            let mut cursor = edge.start(m) + offset;
+            for (it, s) in items.iter().zip(sizes) {
+                let (margin, inset) = (it.style.margin, it.style.inset);
+                let cross_pos = if style.items_center {
+                    let slack = (inner_cross - (s.along(c) + margin.along(c))) / 2.0;
+                    edge.start(c) + slack + margin.start(c)
+                } else {
+                    edge.start(c) + margin.start(c)
+                };
+                let [x, y] = axes(m, cursor + margin.start(m), cross_pos);
+                let shift = |a: usize| inset.start(a).or_else(|| inset.end(a).map(|e| -e)).unwrap_or(0.0);
+                self.nodes[it.id].pos = point(x + shift(0), y + shift(1));
+                cursor += margin.start(m) + s.along(m) + margin.end(m) + style.gap;
+            }
+        }
+
+        /// Absolutely positioned children, placed against the padding box of `outer`.
+        fn place_absolute(&mut self, kids: &[usize], outer: Size, style: &FlexStyle) {
+            let (border, padding) = (style.border, style.padding);
+            let main = if style.row { 0 } else { 1 };
+            let block = [0, 1].map(|a| (outer.along(a) - border.along(a)).max(0.0));
+            let content = [0, 1].map(|a| (block[a] - padding.along(a)).max(0.0));
+            for &id in kids {
+                let cs = self.nodes[id].style;
+                if !cs.absolute {
+                    continue;
+                }
+                let (inset, margin) = (cs.inset, cs.margin);
+                let b = [0, 1].map(|a| cs.bounds(a, Some(block[a]), true));
+                let known = [0, 1].map(|a| {
+                    b[a].definite(None).or_else(|| match (inset.start(a), inset.end(a)) {
+                        (Some(s), Some(e)) => Some(b[a].clamp((block[a] - s - e - margin.along(a)).max(0.0))),
+                        _ => None,
+                    })
+                });
+                let avail = [0, 1].map(|a| known[a].or(b[a].max).map_or(Space::MaxContent, Space::Definite));
+                let req = Req { known, parent: block.map(Some), avail, pass: Pass::Layout };
+                let s = self.node(id, req);
+                let center = |a: usize, on: bool| {
+                    if on { (content[a] - (s.along(a) + margin.along(a))) / 2.0 } else { 0.0 }
+                };
+                let offset = axes(main, center(main, style.justify_center), center(1 - main, style.items_center));
+                let [x, y] = [0, 1].map(|a| match (inset.start(a), inset.end(a)) {
+                    (Some(st), _) => border.start(a) + st + margin.start(a),
+                    (None, Some(e)) => border.start(a) + block[a] - e - margin.end(a) - s.along(a),
+                    (None, None) => border.start(a) + padding.start(a) + offset[a] + margin.start(a),
+                });
+                self.nodes[id].pos = point(x, y);
+            }
+        }
+    }
+
+    /// CSS flexible-length resolution: grow or shrink unfrozen items, freezing those that hit
+    /// their min/max, until the line fits.
+    fn resolve_lengths(items: &mut [Item], m: usize, inner: f32, gaps: f32, growing: bool) {
+        for it in items.iter_mut() {
+            it.frozen = if growing {
+                !it.style.flex.can_grow() || it.basis > it.hypothetical
+            } else {
+                !it.style.flex.can_shrink() || it.basis < it.hypothetical
+            };
+            it.target = if it.frozen { it.hypothetical } else { it.basis };
+        }
+        loop {
+            let mut unfrozen = 0usize;
+            let mut used = gaps;
+            for it in items.iter() {
+                let base = if it.frozen {
+                    it.target
+                } else {
+                    unfrozen += 1;
+                    it.basis
+                };
+                used += base + it.style.margin.along(m);
+            }
+            if unfrozen == 0 {
+                break;
+            }
+            let free = inner - used;
+            if growing && free > 0.0 {
+                let share = free / unfrozen as f32;
+                for it in items.iter_mut().filter(|it| !it.frozen) {
+                    it.target = it.basis + share;
+                }
+            } else if !growing && free < 0.0 {
+                // Shrink in proportion to the size above padding and border. Items with none
+                // already sit at their minimum, so an all-zero line has nothing to shrink.
+                let scaled = |it: &Item| (it.basis - it.style.pb(m)).max(0.0);
+                let total: f32 = items.iter().filter(|it| !it.frozen).map(scaled).sum();
+                if total > 0.0 {
+                    for it in items.iter_mut().filter(|it| !it.frozen) {
+                        it.target = it.basis + free * (scaled(it) / total);
+                    }
+                }
+            }
+            let mut violation = 0.0f32;
+            for it in items.iter_mut() {
+                if it.frozen {
+                    it.violation = 0.0;
+                } else {
+                    let clamped = clamp(it.target, Some(it.min), it.max);
+                    it.violation = clamped - it.target;
+                    it.target = clamped;
+                    violation += it.violation;
+                }
+            }
+            if violation.abs() < 1e-4 {
+                break;
+            }
+            let mut froze = false;
+            for it in items.iter_mut().filter(|it| !it.frozen) {
+                if (violation > 0.0 && it.violation > 0.0) || (violation < 0.0 && it.violation < 0.0) {
+                    it.frozen = true;
+                    froze = true;
+                }
+            }
+            if !froze {
+                break;
+            }
         }
     }
 }
@@ -3023,36 +2659,38 @@ mod tests {
     }
 
     struct Tree {
-        engine: LayoutEngine,
+        tree: LayoutTree,
         scale: f32,
     }
 
     impl Tree {
         fn new(scale: f32) -> Self {
-            Self { engine: LayoutEngine::default(), scale }
+            Self { tree: LayoutTree::default(), scale }
         }
-        fn leaf(&mut self, style: FlexStyle) -> LayoutId {
-            self.engine.add_node(style, self.scale, &[], false)
+        fn leaf(&mut self, style: FlexStyle) -> usize {
+            self.tree.add(style, self.scale, false)
         }
-        fn text(&mut self) -> LayoutId {
-            self.engine.add_node(st(), self.scale, &[], true)
+        fn text(&mut self) -> usize {
+            self.tree.add(st(), self.scale, true)
         }
-        fn node(&mut self, style: FlexStyle, children: &[LayoutId]) -> LayoutId {
-            self.engine.add_node(style, self.scale, children, false)
+        fn node(&mut self, style: FlexStyle, children: &[usize]) -> usize {
+            let id = self.tree.add(style, self.scale, false);
+            self.tree.set_children(id, children);
+            id
         }
-        fn compute(&mut self, root: LayoutId, avail: AvailSize) {
-            self.engine.compute(root, avail, self.scale, &mut |_, _, _, _| Size::ZERO);
+        fn compute(&mut self, root: usize, avail: AvailSize) {
+            self.tree.solve(root, avail, self.scale, &mut |_, _, _, _| Size::ZERO);
         }
         fn compute_with(
             &mut self,
-            root: LayoutId,
+            root: usize,
             avail: AvailSize,
-            mut measure: impl FnMut(LayoutId, Option<f32>, Option<f32>, AvailSize) -> Size,
+            mut measure: impl FnMut(usize, Option<f32>, Option<f32>, AvailSize) -> Size,
         ) {
-            self.engine.compute(root, avail, self.scale, &mut measure);
+            self.tree.solve(root, avail, self.scale, &mut measure);
         }
-        fn bounds(&mut self, id: LayoutId) -> Rect {
-            self.engine.bounds(id, self.scale)
+        fn bounds(&mut self, id: usize) -> Rect {
+            self.tree.rect(id, self.scale)
         }
     }
 
@@ -3270,9 +2908,9 @@ mod tests {
             (bar, [t0, t2, t4, t6, t8], sp, d5)
         };
 
-        let measure_labels = |ids: [LayoutId; 5]| {
+        let measure_labels = |ids: [usize; 5]| {
             let (ts, style) = (&ts, &style);
-            move |id: LayoutId, kw: Option<f32>, _: Option<f32>, avail: AvailSize| {
+            move |id: usize, kw: Option<f32>, _: Option<f32>, avail: AvailSize| {
                 let ix = ids.iter().position(|&x| x == id).unwrap();
                 let wrap_width = kw.or(match avail.width {
                     Space::Definite(x) => Some(x),

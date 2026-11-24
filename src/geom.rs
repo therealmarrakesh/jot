@@ -60,6 +60,11 @@ impl Size {
     pub(crate) fn is_empty(self) -> bool {
         self.width <= 0.0 || self.height <= 0.0
     }
+
+    /// Extent along `axis` (0 = width, 1 = height).
+    pub(crate) fn along(self, axis: usize) -> f32 {
+        if axis == 0 { self.width } else { self.height }
+    }
 }
 
 pub(crate) const fn size(width: f32, height: f32) -> Size {
@@ -200,6 +205,16 @@ pub(crate) struct Edges<T = f32> {
 }
 
 impl<T: Copy> Edges<T> {
+    /// Leading edge along `axis` (0 = horizontal, 1 = vertical).
+    pub(crate) fn start(self, axis: usize) -> T {
+        if axis == 0 { self.left } else { self.top }
+    }
+
+    /// Trailing edge along `axis`.
+    pub(crate) fn end(self, axis: usize) -> T {
+        if axis == 0 { self.right } else { self.bottom }
+    }
+
     pub(crate) fn map<U>(self, f: impl Fn(T) -> U) -> Edges<U> {
         Edges { top: f(self.top), right: f(self.right), bottom: f(self.bottom), left: f(self.left) }
     }
@@ -232,6 +247,11 @@ impl Edges<f32> {
 
     pub(crate) fn vert(self) -> f32 {
         self.top + self.bottom
+    }
+
+    /// Both edges along `axis`.
+    pub(crate) fn along(self, axis: usize) -> f32 {
+        if axis == 0 { self.horiz() } else { self.vert() }
     }
 
     pub(crate) fn any_nonzero(self) -> bool {
