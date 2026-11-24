@@ -1,10 +1,10 @@
 use std::rc::Rc;
 
-use crate::geom::{Rect, ScreenPoint, ScreenRect, point, size};
+use crate::geom::{Rect, ScreenRect, point, round_half_up, size};
 use crate::gfx::{Gpu, TextStyle, TextSystem};
 use crate::platform::WindowId;
 use crate::theme::Palette;
-use crate::ui::{AvailSize, Frame, Node, OverlaySurface, box_, text};
+use crate::ui::{Node, OverlayAnchor, OverlaySurface, box_, text};
 
 const PADDING: f32 = 4.;
 const MARGIN: f32 = 1.;
@@ -22,11 +22,6 @@ pub(crate) enum Placement {
 pub(crate) struct KeyTip {
     pub(crate) key: char,
     pub(crate) bounds: Rect,
-}
-
-#[inline]
-pub(crate) fn round_half_up(value: f32) -> f32 {
-    (value + 0.5).floor()
 }
 
 pub(crate) fn layout_tip(
@@ -84,27 +79,20 @@ impl KeyTips {
         }
     }
 
-    pub(crate) fn sync(
-        &mut self,
-        owner: WindowId,
-        origin: ScreenPoint,
-        scale: f32,
-        mut tips: Vec<KeyTip>,
-        gpu: &Rc<Gpu>,
-    ) {
+    pub(crate) fn sync(&mut self, anchor: OverlayAnchor, mut tips: Vec<KeyTip>, gpu: &Rc<Gpu>) {
         let Some(union) = tips.iter().map(|t| t.bounds).reduce(Rect::union) else {
-            self.hide_owner(owner);
+            self.hide_owner(anchor.window);
             return;
         };
         for tip in &mut tips {
             tip.bounds.origin -= union.origin;
         }
-        let rect = union.to_screen(scale, origin);
-        if self.owner == Some(owner) && self.rect == rect && self.tips == tips {
+        let rect = union.to_screen(anchor.scale, anchor.origin);
+        if self.owner == Some(anchor.window) && self.rect == rect && self.tips == tips {
             return;
         }
         self.tips = tips;
-        self.owner = Some(owner);
+        self.owner = Some(anchor.window);
         self.rect = rect;
         self.dirty = true;
         self.overlay.show(gpu, rect);
@@ -119,16 +107,7 @@ impl KeyTips {
             return false;
         }
         let tips = &self.tips;
-        let needs_retry = self.overlay.paint(|logical, scale, renderer| {
-            let tree = render_tips(tips, p);
-            let frame = Frame::layout(
-                tree,
-                AvailSize::definite(logical.width, logical.height),
-                scale,
-                ts,
-            );
-            frame.paint(renderer, &mut |_, _, _| {});
-        });
+        let needs_retry = self.overlay.paint_scene(ts, |_| render_tips(tips, p));
         if needs_retry {
             self.dirty = true;
         }

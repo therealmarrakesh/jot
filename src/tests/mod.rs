@@ -71,7 +71,7 @@ struct TestHarness {
 
 impl TestHarness {
     fn new() -> Self {
-        let platform = Rc::new(Platform::new().expect("Platform::new failed"));
+        let platform = Rc::new(Platform::new(None).expect("Platform::new failed"));
         let gpu = Gpu::new().expect("Gpu::new failed");
         let mut app = App::new(platform, gpu);
         app.shell.settings.reduce_motion = true;

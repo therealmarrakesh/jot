@@ -13,7 +13,7 @@ use crate::types::SharedStr;
 use crate::ui::controls::{CONTROL_RADIUS, SMALL_FONT};
 use crate::ui::{
     AnimTracks, AvailSize, Curve, Easing, Frame as GenericFrame, Node as GenericNode,
-    OverlaySurface, PointerState, box_, text,
+    OverlayAnchor, OverlaySurface, PointerState, box_, text,
 };
 
 const PADDING_X: f32 = 9.;
@@ -40,10 +40,8 @@ pub(crate) struct TooltipTarget {
 }
 
 pub(crate) struct TooltipProbe<'a> {
-    pub(crate) window: WindowId,
+    pub(crate) anchor: OverlayAnchor,
     pub(crate) pointer: Option<PointerState>,
-    pub(crate) origin: ScreenPoint,
-    pub(crate) scale: f32,
     pub(crate) frame: &'a Frame,
 }
 
@@ -202,10 +200,12 @@ impl Tooltips {
         jobs: &Jobs<AppEvent>,
     ) {
         let TooltipProbe {
-            window,
+            anchor: OverlayAnchor {
+                window,
+                origin,
+                scale,
+            },
             pointer,
-            origin,
-            scale,
             frame,
         } = probe;
         if let Some(ptr) = pointer {
@@ -383,24 +383,17 @@ impl Tooltips {
         let text = self.text.clone();
         let fade = &mut self.fade;
         let mut animating = false;
-        let needs_retry = self.overlay.paint(|logical, scale, renderer| {
+        let needs_retry = self.overlay.paint_scene(ts, |_| {
             fade.begin_frame(now, reduce_motion);
             let opacity = fade.progress((), visible, FADE_CURVE).value;
-            let tree: GenericNode<(), ()> = box_().size_full().opacity(opacity).child(
+            animating = fade.end_frame();
+            box_().size_full().opacity(opacity).child(
                 box_()
                     .absolute()
                     .left(SHADOW_SIDE)
                     .top(SHADOW_TOP)
                     .child(tooltip_card(p, text)),
-            );
-            let frame = GenericFrame::layout(
-                tree,
-                AvailSize::definite(logical.width, logical.height),
-                scale,
-                ts,
-            );
-            frame.paint(renderer, &mut |_, _, _| {});
-            animating = fade.end_frame();
+            )
         });
         if !visible && !animating && !needs_retry {
             self.overlay.hide();

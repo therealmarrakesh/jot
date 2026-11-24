@@ -1,7 +1,5 @@
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::rc::Rc;
-use std::time::Instant;
 
 use windows::Win32::{
     Foundation::{D2DERR_RECREATE_TARGET, HWND},
@@ -54,8 +52,11 @@ use crate::color::Rgba;
 use crate::geom::{Corners, Edges, Point, Rect, Shadows, Size, point, size};
 use crate::types::{Error, Result};
 
+use super::FrameCache;
+
 const SWAPCHAIN_BUFFERS: u32 = 2;
 const MAX_SHADOW_CACHE_ENTRIES: usize = 16;
+const SHADOW_CACHE_KEEP_FRAMES: u64 = 120;
 
 #[inline]
 fn is_device_lost_hr(hr: HRESULT) -> bool {
@@ -331,6 +332,7 @@ impl Target {
         if self.target_bitmap.is_none() && self.attach_backbuffer(scale).is_err() {
             attach_failed = true;
         }
+        self.canvas.shadow_cache.advance_frame();
         self.canvas.transform = Matrix3x2::identity();
         unsafe {
             self.canvas.context.BeginDraw();
@@ -499,13 +501,35 @@ struct ShadowCacheKey {
     radius_tenths: u32,
     blur_tenths: u32,
     color_bits: [u32; 4],
-    dpi_hundredths: u32,
 }
 
 struct CachedShadow {
     bitmap: ID2D1Bitmap1,
     pad_dip: f32,
-    last_used: Instant,
+}
+
+#[derive(Clone)]
+struct ShadowPipeline {
+    context: ID2D1DeviceContext,
+    white_brush: ID2D1SolidColorBrush,
+    effect: ID2D1Effect,
+}
+
+impl ShadowPipeline {
+    fn new(d2d_device: &ID2D1Device) -> Option<Self> {
+        let context =
+            unsafe { d2d_device.CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE) }.ok()?;
+        let white_brush = unsafe {
+            context.CreateSolidColorBrush(&to_d2d_color(Rgba::new(1.0, 1.0, 1.0, 1.0)), None)
+        }
+        .ok()?;
+        let effect = unsafe { context.CreateEffect(&CLSID_D2D1Shadow) }.ok()?;
+        Some(Self {
+            context,
+            white_brush,
+            effect,
+        })
+    }
 }
 
 #[derive(Copy, Clone, Debug, Default, PartialEq)]
@@ -537,10 +561,8 @@ pub(crate) struct Canvas {
     devices: Direct2DDevices,
     context: ID2D1DeviceContext,
     solid_brush: ID2D1SolidColorBrush,
-    shadow_context: Option<ID2D1DeviceContext>,
-    shadow_white_brush: Option<ID2D1SolidColorBrush>,
-    shadow_effect: Option<ID2D1Effect>,
-    shadow_cache: HashMap<ShadowCacheKey, CachedShadow>,
+    shadow_pipeline: Option<ShadowPipeline>,
+    shadow_cache: FrameCache<ShadowCacheKey, CachedShadow>,
     scale_factor: f32,
     transform: Matrix3x2,
 }
@@ -557,30 +579,14 @@ impl Canvas {
                 context.CreateSolidColorBrush(&to_d2d_color(Rgba::new(0.0, 0.0, 0.0, 1.0)), None)?;
             (context, solid_brush)
         };
-        let shadow_context = unsafe {
-            devices
-                .d2d_device
-                .CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE)
-        }
-        .ok();
-        let shadow_white_brush = shadow_context.as_ref().and_then(|ctx| {
-            unsafe {
-                ctx.CreateSolidColorBrush(&to_d2d_color(Rgba::new(1.0, 1.0, 1.0, 1.0)), None)
-            }
-            .ok()
-        });
-        let shadow_effect = shadow_context.as_ref().and_then(|ctx| {
-            unsafe { ctx.CreateEffect(&CLSID_D2D1Shadow) }.ok()
-        });
+        let shadow_pipeline = ShadowPipeline::new(&devices.d2d_device);
 
         Ok(Self {
             devices,
             context,
             solid_brush,
-            shadow_context,
-            shadow_white_brush,
-            shadow_effect,
-            shadow_cache: HashMap::new(),
+            shadow_pipeline,
+            shadow_cache: FrameCache::new(MAX_SHADOW_CACHE_ENTRIES, 0, SHADOW_CACHE_KEEP_FRAMES),
             scale_factor,
             transform: Matrix3x2::identity(),
         })
@@ -782,94 +788,68 @@ impl Canvas {
         if uniform_border || (max_r > 0.0 && active_equal) {
             let stroke = max_bw;
             let half = stroke * 0.5;
-            let inset_rect = D2D_RECT_F {
-                left: quad.bounds.left() + half,
-                top: quad.bounds.top() + half,
-                right: quad.bounds.right() - half,
-                bottom: quad.bounds.bottom() - half,
+            let inset_rect = to_d2d_rect(quad.bounds.inset(Edges::all(half)));
+            let draw_stroke = |canvas: &Self| {
+                if max_r <= 0.0 {
+                    unsafe {
+                        canvas
+                            .context
+                            .DrawRectangle(&inset_rect, &canvas.solid_brush, stroke, None);
+                    }
+                } else if uniform_radii {
+                    let r = (max_r - half).max(0.0);
+                    let rr = D2D1_ROUNDED_RECT {
+                        rect: inset_rect,
+                        radiusX: r,
+                        radiusY: r,
+                    };
+                    unsafe {
+                        canvas
+                            .context
+                            .DrawRoundedRectangle(&rr, &canvas.solid_brush, stroke, None);
+                    }
+                } else if let Some(geom) = canvas.create_per_corner_geometry(
+                    inset_rect,
+                    (tl - half).max(0.0),
+                    (tr - half).max(0.0),
+                    (br - half).max(0.0),
+                    (bl - half).max(0.0),
+                ) {
+                    unsafe {
+                        canvas
+                            .context
+                            .DrawGeometry(&geom, &canvas.solid_brush, stroke, None);
+                    }
+                }
             };
-            let need_clip = !uniform_border;
-            if need_clip {
-                let clip_rect = D2D_RECT_F {
-                    left: quad.bounds.left() + if blw <= 0.0 { stroke } else { 0.0 },
-                    top: quad.bounds.top() + if bt <= 0.0 { stroke } else { 0.0 },
-                    right: quad.bounds.right() - if brw <= 0.0 { stroke } else { 0.0 },
-                    bottom: quad.bounds.bottom() - if bb <= 0.0 { stroke } else { 0.0 },
-                };
-                unsafe {
-                    self.context
-                        .PushAxisAlignedClip(&clip_rect, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-                }
-            }
-            if max_r <= 0.0 {
-                unsafe {
-                    self.context
-                        .DrawRectangle(&inset_rect, &self.solid_brush, stroke, None);
-                }
-            } else if uniform_radii {
-                let r = (max_r - half).max(0.0);
-                let rr = D2D1_ROUNDED_RECT {
-                    rect: inset_rect,
-                    radiusX: r,
-                    radiusY: r,
-                };
-                unsafe {
-                    self.context
-                        .DrawRoundedRectangle(&rr, &self.solid_brush, stroke, None);
-                }
-            } else if let Some(geom) = self.create_per_corner_geometry(
-                inset_rect,
-                (tl - half).max(0.0),
-                (tr - half).max(0.0),
-                (br - half).max(0.0),
-                (bl - half).max(0.0),
-            ) {
-                unsafe {
-                    self.context
-                        .DrawGeometry(&geom, &self.solid_brush, stroke, None);
-                }
-            }
-            if need_clip {
-                unsafe {
-                    self.context.PopAxisAlignedClip();
-                }
+            if uniform_border {
+                draw_stroke(self);
+            } else {
+                let clip_bounds = quad.bounds.inset(Edges {
+                    top: if bt <= 0.0 { stroke } else { 0.0 },
+                    right: if brw <= 0.0 { stroke } else { 0.0 },
+                    bottom: if bb <= 0.0 { stroke } else { 0.0 },
+                    left: if blw <= 0.0 { stroke } else { 0.0 },
+                });
+                self.with_clip(clip_bounds, |c| draw_stroke(c));
             }
         } else {
             let b = quad.bounds;
-            let draw_edge = |rect: D2D_RECT_F| unsafe {
-                self.context.FillRectangle(&rect, &self.solid_brush);
+            let draw_edge = |r: Rect| {
+                let rect = to_d2d_rect(r);
+                unsafe { self.context.FillRectangle(&rect, &self.solid_brush) };
             };
             if bt > 0.0 {
-                draw_edge(D2D_RECT_F {
-                    left: b.left(),
-                    top: b.top(),
-                    right: b.right(),
-                    bottom: b.top() + bt,
-                });
+                draw_edge(Rect::new(b.origin, size(b.size.width, bt)));
             }
             if bb > 0.0 {
-                draw_edge(D2D_RECT_F {
-                    left: b.left(),
-                    top: b.bottom() - bb,
-                    right: b.right(),
-                    bottom: b.bottom(),
-                });
+                draw_edge(Rect::new(point(b.left(), b.bottom() - bb), size(b.size.width, bb)));
             }
             if blw > 0.0 {
-                draw_edge(D2D_RECT_F {
-                    left: b.left(),
-                    top: b.top(),
-                    right: b.left() + blw,
-                    bottom: b.bottom(),
-                });
+                draw_edge(Rect::new(b.origin, size(blw, b.size.height)));
             }
             if brw > 0.0 {
-                draw_edge(D2D_RECT_F {
-                    left: b.right() - brw,
-                    top: b.top(),
-                    right: b.right(),
-                    bottom: b.bottom(),
-                });
+                draw_edge(Rect::new(point(b.right() - brw, b.top()), size(brw, b.size.height)));
             }
         }
     }
@@ -884,28 +864,15 @@ impl Canvas {
                 continue;
             }
             let spread = shadow.spread_radius;
-            let sb = Rect::new(
-                point(
-                    bounds.origin.x + shadow.offset.x - spread,
-                    bounds.origin.y + shadow.offset.y - spread,
-                ),
-                size(
-                    (bounds.size.width + spread * 2.0).max(1.0),
-                    (bounds.size.height + spread * 2.0).max(1.0),
-                ),
-            );
+            let mut sb = bounds.translate(shadow.offset).inflate(spread);
+            sb.size = size(sb.size.width.max(1.0), sb.size.height.max(1.0));
             let blur = shadow.blur_radius.max(0.0);
             let radius = (max_r + spread).max(0.0);
 
             if let Some((bitmap, pad_dip)) =
                 self.get_or_render_shadow(sb.size, radius, blur, shadow.color)
             {
-                let dst = D2D_RECT_F {
-                    left: sb.left() - pad_dip,
-                    top: sb.top() - pad_dip,
-                    right: sb.right() + pad_dip,
-                    bottom: sb.bottom() + pad_dip,
-                };
+                let dst = to_d2d_rect(sb.inflate(pad_dip));
                 unsafe {
                     self.context.DrawBitmap(
                         &bitmap,
@@ -942,17 +909,13 @@ impl Canvas {
                 color.b.to_bits(),
                 color.a.to_bits(),
             ],
-            dpi_hundredths: (scale * 100.0).round() as u32,
         };
 
-        if let Some(entry) = self.shadow_cache.get_mut(&key) {
-            entry.last_used = Instant::now();
+        if let Some(entry) = self.shadow_cache.get(&key) {
             return Some((entry.bitmap.clone(), entry.pad_dip));
         }
 
-        let offscreen = self.shadow_context.clone()?;
-        let white_brush = self.shadow_white_brush.clone()?;
-        let shadow_eff = self.shadow_effect.clone()?;
+        let pipeline = self.shadow_pipeline.clone()?;
         let sigma = (blur_radius * 0.5).max(0.5);
         let pad_dip = (sigma * 3.0).ceil();
         let shape_w_dip = width_px as f32 / scale;
@@ -981,16 +944,18 @@ impl Canvas {
                 width: total_w_px,
                 height: total_h_px,
             };
-            let shape_bmp = offscreen.CreateBitmap(sz, None, 0, &props).ok()?;
-            let blurred_bmp = offscreen.CreateBitmap(sz, None, 0, &props).ok()?;
+            let shape_bmp = pipeline.context.CreateBitmap(sz, None, 0, &props).ok()?;
+            let blurred_bmp = pipeline.context.CreateBitmap(sz, None, 0, &props).ok()?;
             (shape_bmp, blurred_bmp)
         };
 
         unsafe {
-            offscreen.SetDpi(dpi, dpi);
-            offscreen.SetTarget(&shape_bmp);
-            offscreen.BeginDraw();
-            offscreen.Clear(Some(&to_d2d_color(Rgba::new(0.0, 0.0, 0.0, 0.0))));
+            pipeline.context.SetDpi(dpi, dpi);
+            pipeline.context.SetTarget(&shape_bmp);
+            pipeline.context.BeginDraw();
+            pipeline
+                .context
+                .Clear(Some(&to_d2d_color(Rgba::new(0.0, 0.0, 0.0, 0.0))));
             let rr = D2D1_ROUNDED_RECT {
                 rect: D2D_RECT_F {
                     left: pad_dip,
@@ -1001,8 +966,10 @@ impl Canvas {
                 radiusX: radius,
                 radiusY: radius,
             };
-            offscreen.FillRoundedRectangle(&rr, &white_brush);
-            offscreen.EndDraw(None, None).ok()?;
+            pipeline
+                .context
+                .FillRoundedRectangle(&rr, &pipeline.white_brush);
+            pipeline.context.EndDraw(None, None).ok()?;
         }
 
         let mut color_bytes = [0u8; 16];
@@ -1011,40 +978,32 @@ impl Canvas {
         color_bytes[8..12].copy_from_slice(&color.b.to_le_bytes());
         color_bytes[12..16].copy_from_slice(&color.a.to_le_bytes());
         unsafe {
-            shadow_eff.SetInput(0, &shape_bmp, true);
-            let _ = shadow_eff.SetValue(
+            pipeline.effect.SetInput(0, &shape_bmp, true);
+            let _ = pipeline.effect.SetValue(
                 D2D1_SHADOW_PROP_BLUR_STANDARD_DEVIATION.0 as u32,
                 D2D1_PROPERTY_TYPE_UNKNOWN,
                 &sigma.to_le_bytes(),
             );
-            let _ = shadow_eff.SetValue(
+            let _ = pipeline.effect.SetValue(
                 D2D1_SHADOW_PROP_COLOR.0 as u32,
                 D2D1_PROPERTY_TYPE_UNKNOWN,
                 &color_bytes,
             );
-            offscreen.SetTarget(&blurred_bmp);
-            offscreen.BeginDraw();
-            offscreen.Clear(Some(&to_d2d_color(Rgba::new(0.0, 0.0, 0.0, 0.0))));
-            let output = shadow_eff.GetOutput().ok()?;
-            offscreen.DrawImage(
+            pipeline.context.SetTarget(&blurred_bmp);
+            pipeline.context.BeginDraw();
+            pipeline
+                .context
+                .Clear(Some(&to_d2d_color(Rgba::new(0.0, 0.0, 0.0, 0.0))));
+            let output = pipeline.effect.GetOutput().ok()?;
+            pipeline.context.DrawImage(
                 &output,
                 Some(&Vector2 { X: 0.0, Y: 0.0 }),
                 None,
                 D2D1_INTERPOLATION_MODE_LINEAR,
                 D2D1_COMPOSITE_MODE_SOURCE_OVER,
             );
-            offscreen.EndDraw(None, None).ok()?;
-            offscreen.SetTarget(None);
-        }
-
-        if self.shadow_cache.len() >= MAX_SHADOW_CACHE_ENTRIES
-            && let Some(oldest_key) = self
-                .shadow_cache
-                .iter()
-                .min_by_key(|(_, entry)| entry.last_used)
-                .map(|(k, _)| *k)
-        {
-            self.shadow_cache.remove(&oldest_key);
+            pipeline.context.EndDraw(None, None).ok()?;
+            pipeline.context.SetTarget(None);
         }
 
         self.shadow_cache.insert(
@@ -1052,8 +1011,8 @@ impl Canvas {
             CachedShadow {
                 bitmap: blurred_bmp.clone(),
                 pad_dip,
-                last_used: Instant::now(),
             },
+            0,
         );
         Some((blurred_bmp, pad_dip))
     }

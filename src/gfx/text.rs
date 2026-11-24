@@ -1,6 +1,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ops::Range;
+use std::rc::Rc;
 
 use windows::Win32::Graphics::DirectWrite::{
     DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
@@ -17,12 +18,15 @@ use crate::color::Rgba;
 use crate::geom::{Point, Rect, Size, point, size};
 use crate::types::SharedStr;
 
+use super::FrameCache;
 use super::d2d::{Canvas, fill};
-use super::wrap::{AdvanceTable, analyze_break_opportunities};
+use super::wrap::{AdvanceTable, can_wrap_with_advances};
 
 const MAX_LAYOUT_CACHE: usize = 512;
 const MAX_SHAPED_CACHE_BYTES: usize = 4 * 1024 * 1024;
 const MAX_CACHEABLE_LINE_BYTES: usize = 16 * 1024;
+const ROW_CACHE_KEEP_FRAMES: u64 = 16;
+const HUGE_LINE_BYTES: usize = 4096;
 pub(super) const TAB_STOP_COLUMNS: f32 = 8.0;
 
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash)]
@@ -340,12 +344,92 @@ impl Canvas {
     }
 }
 
-struct FontEntry {
+pub(crate) struct FontFace {
+    factory: IDWriteFactory5,
+    analyzer: Option<IDWriteTextAnalyzer>,
     format: IDWriteTextFormat,
     ascent: f32,
     descent: f32,
     space_width: f32,
-    advances: Option<AdvanceTable>,
+    advances: RefCell<Option<AdvanceTable>>,
+}
+
+impl FontFace {
+    #[inline]
+    pub(crate) fn space_width(&self) -> f32 {
+        self.space_width
+    }
+
+    fn with_advances<R>(&self, f: impl FnOnce(&mut AdvanceTable) -> R) -> R {
+        let mut slot = self.advances.borrow_mut();
+        let table = slot.get_or_insert_with(|| AdvanceTable::new(self.factory.clone(), self.format.clone()));
+        f(table)
+    }
+
+    pub(crate) fn max_printable_ascii(&self) -> f32 {
+        self.with_advances(|adv| adv.max_printable_ascii())
+    }
+
+    pub(crate) fn hanging_indent(&self, line: &str, max_chars: u32, max_width: f32) -> f32 {
+        self.with_advances(|adv| {
+            let mut chars = 0u32;
+            let mut width = 0.0f32;
+            for ch in line.chars() {
+                if (ch == ' ' || ch == '\t') && chars < max_chars {
+                    width += adv.advance(ch, width);
+                    chars += 1;
+                } else {
+                    break;
+                }
+            }
+            if width >= max_width { 0.0 } else { width }
+        })
+    }
+
+    pub(crate) fn line_breaks(
+        &self,
+        line: &str,
+        wrap_width: f32,
+        indent_px: f32,
+        out: &mut Vec<usize>,
+    ) {
+        out.clear();
+        if line.is_empty() || !wrap_width.is_finite() || wrap_width <= 0.0 {
+            return;
+        }
+        self.with_advances(|adv| {
+            if can_wrap_with_advances(line) {
+                adv.fast_breaks(line, wrap_width, indent_px, self.analyzer.as_ref(), out);
+            } else {
+                let cont_width = (wrap_width - indent_px).max(1.0);
+                adv.dwrite_breaks(line, wrap_width, cont_width, out);
+            }
+        });
+    }
+
+    pub(crate) fn horizontal_window(
+        &self,
+        line: &str,
+        min_x: f32,
+        max_x: f32,
+    ) -> Option<(usize, usize, f32, f32)> {
+        if !can_wrap_with_advances(line) {
+            return None;
+        }
+        Some(self.with_advances(|adv| adv.horizontal_slice(line, min_x, max_x)))
+    }
+
+    pub(crate) fn unwrapped_width(&self, line: &str) -> f32 {
+        if line.is_empty() {
+            return 0.0;
+        }
+        if line.len() > HUGE_LINE_BYTES && can_wrap_with_advances(line) {
+            self.with_advances(|adv| adv.horizontal_slice(line, 0.0, 0.0).3)
+        } else {
+            let utf16 = encode_single_line_utf16(line);
+            measure_utf16(&self.factory, &utf16, &self.format)
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -365,26 +449,15 @@ struct LabelCacheKey {
 }
 
 pub(crate) struct TextSystem {
+    factory: IDWriteFactory5,
     analyzer: Option<IDWriteTextAnalyzer>,
     state: RefCell<TextSystemState>,
 }
 
 struct TextSystemState {
-    factory: IDWriteFactory5,
-    fonts: HashMap<TextStyle, FontEntry>,
-    rows: HashMap<RowCacheKey, ShapedRow>,
-    row_cache_bytes: usize,
-    prev_labels: HashMap<LabelCacheKey, Label>,
-    curr_labels: HashMap<LabelCacheKey, Label>,
-}
-
-impl TextSystemState {
-    fn font_entry(&mut self, style: &TextStyle) -> &mut FontEntry {
-        let factory = &self.factory;
-        self.fonts
-            .entry(style.clone())
-            .or_insert_with(|| create_font_entry(factory, style))
-    }
+    faces: HashMap<TextStyle, Rc<FontFace>>,
+    rows: FrameCache<RowCacheKey, ShapedRow>,
+    labels: FrameCache<LabelCacheKey, Label>,
 }
 
 impl TextSystem {
@@ -394,52 +467,63 @@ impl TextSystem {
                 .expect("failed to create DirectWrite factory");
         let analyzer = unsafe { factory.CreateTextAnalyzer() }.ok();
         Self {
+            factory,
             analyzer,
             state: RefCell::new(TextSystemState {
-                factory,
-                fonts: HashMap::new(),
-                rows: HashMap::new(),
-                row_cache_bytes: 0,
-                prev_labels: HashMap::new(),
-                curr_labels: HashMap::new(),
+                faces: HashMap::new(),
+                rows: FrameCache::new(
+                    MAX_LAYOUT_CACHE,
+                    MAX_SHAPED_CACHE_BYTES,
+                    ROW_CACHE_KEEP_FRAMES,
+                ),
+                labels: FrameCache::new(MAX_LAYOUT_CACHE, 0, 1),
             }),
         }
     }
 
-    pub(crate) fn break_opportunities(&self, text: &str) -> Vec<usize> {
-        let Some(analyzer) = &self.analyzer else {
-            return Vec::new();
-        };
-        analyze_break_opportunities(analyzer, text)
+    pub(crate) fn face(&self, style: &TextStyle) -> Rc<FontFace> {
+        let mut state = self.state.borrow_mut();
+        state
+            .faces
+            .entry(style.clone())
+            .or_insert_with(|| Rc::new(create_font_face(&self.factory, &self.analyzer, style)))
+            .clone()
     }
 
     pub(crate) fn finish_frame(&self) {
         let mut state = self.state.borrow_mut();
-        state.prev_labels = std::mem::take(&mut state.curr_labels);
+        state.labels.advance_frame();
+        state.rows.advance_frame();
     }
 
     pub(crate) fn measure(&self, text: &str, style: &TextStyle) -> f32 {
         if text.is_empty() {
             return 0.0;
         }
-        let mut state = self.state.borrow_mut();
         if text == " " {
-            return state.font_entry(style).space_width;
+            return self.face(style).space_width();
         }
-        let format = state.font_entry(style).format.clone();
-        let utf16 = encode_single_line_utf16(text);
-        measure_utf16(&state.factory, &utf16, &format)
+        self.shape_label(
+            SharedStr::from(text.to_owned()),
+            style,
+            LabelLayout {
+                line_height: style.size(),
+                wrap_width: None,
+                line_clamp: None,
+                align: TextAlign::Left,
+            },
+        )
+        .width
     }
 
     pub(crate) fn shape_row(&self, text: SharedStr, style: &TextStyle) -> ShapedRow {
-        let mut state = self.state.borrow_mut();
+        let face = self.face(style);
         if text.is_empty() {
-            let entry = state.font_entry(style);
             return ShapedRow {
                 len: 0,
                 width: 0.0,
-                ascent: entry.ascent,
-                descent: entry.descent,
+                ascent: face.ascent,
+                descent: face.descent,
                 text,
                 layout: None,
                 is_ascii: true,
@@ -451,21 +535,16 @@ impl TextSystem {
             style: style.clone(),
         });
         if let Some(key) = &cache_key
-            && let Some(cached) = state.rows.get(key)
+            && let Some(cached) = self.state.borrow_mut().rows.get(key)
         {
             return cached.clone();
         }
 
-        let (format, ascent, descent) = {
-            let entry = state.font_entry(style);
-            (entry.format.clone(), entry.ascent, entry.descent)
-        };
         let utf16 = encode_single_line_utf16(text.as_str());
         let is_ascii = text.as_str().is_ascii();
         let layout = unsafe {
-            state
-                .factory
-                .CreateTextLayout(&utf16, &format, f32::MAX, f32::MAX)
+            self.factory
+                .CreateTextLayout(&utf16, &face.format, f32::MAX, f32::MAX)
         }
         .ok();
 
@@ -473,8 +552,8 @@ impl TextSystem {
             let _ = unsafe {
                 layout.SetLineSpacing(
                     DWRITE_LINE_SPACING_METHOD_UNIFORM,
-                    ascent + descent,
-                    ascent,
+                    face.ascent + face.descent,
+                    face.ascent,
                 )
             };
         }
@@ -491,23 +570,16 @@ impl TextSystem {
         let shaped = ShapedRow {
             len: text.len(),
             width,
-            ascent,
-            descent,
+            ascent: face.ascent,
+            descent: face.descent,
             text,
             layout,
             is_ascii,
         };
 
         if let Some(key) = cache_key {
-            let entry_bytes = key.text.len().max(64);
-            if state.rows.len() >= MAX_LAYOUT_CACHE
-                || state.row_cache_bytes.saturating_add(entry_bytes) > MAX_SHAPED_CACHE_BYTES
-            {
-                state.rows.clear();
-                state.row_cache_bytes = 0;
-            }
-            state.row_cache_bytes += entry_bytes;
-            state.rows.insert(key, shaped.clone());
+            let weight = key.text.len().max(64);
+            self.state.borrow_mut().rows.insert(key, shaped.clone(), weight);
         }
         shaped
     }
@@ -529,26 +601,17 @@ impl TextSystem {
             align: opts.align,
         };
 
-        let mut state = self.state.borrow_mut();
-        if let Some(cached) = state.curr_labels.get(&key) {
+        if let Some(cached) = self.state.borrow_mut().labels.get(&key) {
             return cached.clone();
         }
-        if let Some(cached) = state.prev_labels.remove(&key) {
-            state.curr_labels.insert(key, cached.clone());
-            return cached;
-        }
 
-        let (format, ascent, descent) = {
-            let entry = state.font_entry(style);
-            (entry.format.clone(), entry.ascent, entry.descent)
-        };
-        let glyph_h = (ascent + descent).max(1.0);
+        let face = self.face(style);
+        let glyph_h = (face.ascent + face.descent).max(1.0);
         let utf16: Vec<u16> = text.as_str().encode_utf16().collect();
         let max_w = box_w.unwrap_or(f32::MAX);
         let layout = unsafe {
-            state
-                .factory
-                .CreateTextLayout(&utf16, &format, max_w, f32::MAX)
+            self.factory
+                .CreateTextLayout(&utf16, &face.format, max_w, f32::MAX)
         }
         .ok();
 
@@ -563,7 +626,7 @@ impl TextSystem {
                 let _ = layout.SetLineSpacing(
                     DWRITE_LINE_SPACING_METHOD_UNIFORM,
                     lh,
-                    top_pad + ascent,
+                    top_pad + face.ascent,
                 );
                 if box_w.is_some() {
                     let dw_align = match opts.align {
@@ -587,7 +650,7 @@ impl TextSystem {
                 if let Some(layout) = &layout {
                     unsafe {
                         let _ = layout.SetMaxHeight(lh * clamped_lines as f32);
-                        if let Ok(sign) = state.factory.CreateEllipsisTrimmingSign(&format) {
+                        if let Ok(sign) = self.factory.CreateEllipsisTrimmingSign(&face.format) {
                             let trimming = DWRITE_TRIMMING {
                                 granularity: DWRITE_TRIMMING_GRANULARITY_CHARACTER,
                                 delimiter: 0,
@@ -611,35 +674,21 @@ impl TextSystem {
             clamped,
             layout,
         };
-        if state.curr_labels.len() < MAX_LAYOUT_CACHE {
-            state.curr_labels.insert(key, label.clone());
-        }
+        self.state.borrow_mut().labels.insert(key, label.clone(), 0);
         label
-    }
-
-    pub(crate) fn with_advances<R>(
-        &self,
-        style: &TextStyle,
-        f: impl FnOnce(&mut AdvanceTable) -> R,
-    ) -> R {
-        let mut state = self.state.borrow_mut();
-        let factory = state.factory.clone();
-        let entry = state.font_entry(style);
-        let format = entry.format.clone();
-        let advances = entry
-            .advances
-            .get_or_insert_with(|| AdvanceTable::new(factory, format));
-        f(advances)
     }
 
     #[cfg(test)]
     pub(crate) fn label_cache_counts(&self) -> (usize, usize) {
-        let state = self.state.borrow();
-        (state.curr_labels.len(), state.prev_labels.len())
+        self.state.borrow().labels.age_counts()
     }
 }
 
-fn create_font_entry(factory: &IDWriteFactory5, style: &TextStyle) -> FontEntry {
+fn create_font_face(
+    factory: &IDWriteFactory5,
+    analyzer: &Option<IDWriteTextAnalyzer>,
+    style: &TextStyle,
+) -> FontFace {
     let safe_size = style.size();
     let family = HSTRING::from(style.font.family.as_str());
     let locale = HSTRING::from("");
@@ -690,12 +739,14 @@ fn create_font_entry(factory: &IDWriteFactory5, style: &TextStyle) -> FontEntry 
                     (safe_size * 0.8, safe_size * 0.2)
                 }
             });
-    FontEntry {
+    FontFace {
+        factory: factory.clone(),
+        analyzer: analyzer.clone(),
         format,
         ascent,
         descent,
         space_width,
-        advances: None,
+        advances: RefCell::new(None),
     }
 }
 
@@ -780,10 +831,16 @@ mod tests {
         let hit = shaped.closest_index_for_x(mid_x);
         assert!(hit <= shaped.len);
 
-        let breaks = ts.break_opportunities("hello world");
+        let analyzer = ts.analyzer.as_ref().expect("text analyzer");
+        let breaks = super::super::wrap::analyze_break_opportunities(analyzer, "hello world");
         assert!(breaks.contains(&6));
-        assert!(ts.break_opportunities("foo\u{00A0}bar").is_empty());
-        assert_eq!(ts.break_opportunities("foo-bar"), vec![4]);
+        assert!(
+            super::super::wrap::analyze_break_opportunities(analyzer, "foo\u{00A0}bar").is_empty()
+        );
+        assert_eq!(
+            super::super::wrap::analyze_break_opportunities(analyzer, "foo-bar"),
+            vec![4]
+        );
     }
 
     #[test]

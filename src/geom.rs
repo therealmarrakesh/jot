@@ -2,6 +2,11 @@ use std::ops::{Add, AddAssign, Mul, Neg, Sub, SubAssign};
 
 use crate::color::Rgba;
 
+#[inline]
+pub(crate) fn round_half_up(value: f32) -> f32 {
+    (value + 0.5).floor()
+}
+
 #[derive(Copy, Clone, Debug, Default, PartialEq)]
 pub(crate) struct Point {
     pub(crate) x: f32,
@@ -187,6 +192,17 @@ impl Rect {
             size: size(
                 (self.size.width - edges.horiz()).max(0.0),
                 (self.size.height - edges.vert()).max(0.0),
+            ),
+        }
+    }
+
+    #[inline]
+    pub(crate) fn inflate(self, amount: f32) -> Self {
+        Self {
+            origin: point(self.origin.x - amount, self.origin.y - amount),
+            size: size(
+                (self.size.width + amount * 2.0).max(0.0),
+                (self.size.height + amount * 2.0).max(0.0),
             ),
         }
     }

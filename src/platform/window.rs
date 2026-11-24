@@ -69,7 +69,6 @@ use super::input::{
     ClickTracker, Key, KeyEvent, Modifiers, MouseButton, current_modifiers, is_syskey_passthrough,
     read_ime_string, set_ime_candidate_pos, translate_vk,
 };
-use super::instance::HandoffCommand;
 use super::os::WindowHwnd;
 use super::settings::SystemSettings;
 use super::{ACTIVE_HANDLER, DisplayId, WindowsDisplay};
@@ -217,7 +216,9 @@ pub(crate) enum PlatformEvent {
         window_id: WindowId,
         paths: Vec<PathBuf>,
     },
-    Handoff(HandoffCommand),
+    Launch {
+        paths: Vec<PathBuf>,
+    },
     SizeMoveChanged {
         window_id: WindowId,
         entering: bool,

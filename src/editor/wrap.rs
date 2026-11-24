@@ -1,11 +1,11 @@
 use std::borrow::Cow;
-use std::ops::{Range, RangeInclusive};
+use std::ops::Range;
 
 use ropey::Rope;
 
 use crate::color::Rgba;
 use crate::geom::{Point, Size, point, size};
-use crate::gfx::{AdvanceTable, Canvas, ShapedRow, TextStyle, TextSystem};
+use crate::gfx::{Canvas, FontFace, ShapedRow, TextStyle, TextSystem};
 
 use super::buffer::{RopeExt, TextPoint};
 use super::model::LineChange;
@@ -555,149 +555,19 @@ impl LineChunks {
     }
 }
 
-const CHAR_WIDTH_RANGES: [RangeInclusive<u32>; 17] = [
-    0x0020..=0x007e,
-    0x00a0..=0x02ff,
-    0x0370..=0x0482,
-    0x048a..=0x052f,
-    0x1e00..=0x1fff,
-    0x2010..=0x2027,
-    0x2030..=0x205e,
-    0x2070..=0x20cf,
-    0x2100..=0x2bff,
-    0x3000..=0x3029,
-    0x3030..=0x3098,
-    0x309b..=0x30ff,
-    0x3400..=0x4dbf,
-    0x4e00..=0x9fff,
-    0xac00..=0xd7a3,
-    0xf900..=0xfaff,
-    0xff01..=0xffee,
-];
-
 #[inline]
 fn is_printable_ascii(bytes: &[u8]) -> bool {
     bytes.iter().all(|&b| (0x20..=0x7e).contains(&b))
 }
 
-#[inline]
-fn is_printable_ascii_or_tab(bytes: &[u8]) -> bool {
-    bytes.iter().all(|&b| b == b'\t' || (0x20..=0x7e).contains(&b))
-}
-
-pub(crate) fn can_wrap_with_advances(text: &str) -> bool {
-    if is_printable_ascii_or_tab(text.as_bytes()) {
-        return true;
-    }
-    text.chars().all(|c| {
-        c == '\t' || CHAR_WIDTH_RANGES.iter().any(|r| r.contains(&(c as u32)))
-    })
-}
-
-fn hanging_indent(line: &str, wrap_width: f32, advances: &mut AdvanceTable) -> f32 {
-    let mut chars: u32 = 0;
-    let mut width = 0.0f32;
-    for ch in line.chars() {
-        if (ch == ' ' || ch == '\t') && chars < MAX_WRAP_INDENT {
-            width += advances.advance(ch, width);
-            chars += 1;
-        } else {
-            break;
-        }
-    }
-    if width >= wrap_width * 0.5 {
-        0.0
-    } else {
-        width
-    }
-}
-
-fn wrap_line(
-    line: &str,
-    wrap_width: f32,
-    advances: &mut AdvanceTable,
-    ts: &TextSystem,
-    out: &mut Vec<usize>,
-) -> f32 {
+fn wrap_line(line: &str, wrap_width: f32, face: &FontFace, out: &mut Vec<usize>) -> f32 {
     out.clear();
     if line.is_empty() || !wrap_width.is_finite() || wrap_width <= 0.0 {
         return 0.0;
     }
-    let indent_px = hanging_indent(line, wrap_width, advances);
-    if !can_wrap_with_advances(line) {
-        let cont_width = (wrap_width - indent_px).max(1.0);
-        advances.dwrite_breaks(line, wrap_width, cont_width, out);
-        return if out.is_empty() { 0.0 } else { indent_px };
-    }
-
-    let break_offsets = ts.break_opportunities(line);
-    let mut row_start = 0usize;
-    let mut row_width = 0.0f32;
-    let mut last_break_ix = 0usize;
-    let mut break_cursor = 0usize;
-
-    for (ix, ch) in line.char_indices() {
-        let char_end = ix + ch.len_utf8();
-        while break_cursor < break_offsets.len() && break_offsets[break_cursor] <= ix {
-            break_cursor += 1;
-        }
-        let w = advances.advance(ch, row_width);
-        if row_width + w > wrap_width && ix > row_start {
-            let split_at = if last_break_ix > row_start {
-                last_break_ix
-            } else {
-                ix
-            };
-            out.push(split_at);
-            row_start = split_at;
-            row_width = indent_px;
-            for c in line[split_at..char_end].chars() {
-                row_width += advances.advance(c, row_width);
-            }
-            last_break_ix = split_at;
-        } else {
-            row_width += w;
-        }
-        if break_cursor < break_offsets.len() && break_offsets[break_cursor] == char_end {
-            last_break_ix = char_end;
-            break_cursor += 1;
-        }
-    }
+    let indent_px = face.hanging_indent(line, MAX_WRAP_INDENT, wrap_width * 0.5);
+    face.line_breaks(line, wrap_width, indent_px, out);
     if out.is_empty() { 0.0 } else { indent_px }
-}
-
-pub(crate) fn horizontal_slice(
-    line: &str,
-    min_x: f32,
-    max_x: f32,
-    advances: &mut AdvanceTable,
-) -> (usize, usize, f32, f32) {
-    let mut x = 0.0f32;
-    let mut start_byte = 0usize;
-    let mut start_x = 0.0f32;
-    let mut found_start = false;
-    let mut end_byte = line.len();
-    let mut found_end = false;
-
-    for (ix, ch) in line.char_indices() {
-        let adv = advances.advance(ch, x);
-        if !found_start && x + adv >= min_x {
-            start_byte = ix;
-            start_x = x;
-            found_start = true;
-        }
-        x += adv;
-        if found_start && !found_end && x >= max_x {
-            end_byte = ix + ch.len_utf8();
-            found_end = true;
-        }
-    }
-    if !found_start {
-        start_byte = line.len();
-        start_x = x;
-        end_byte = line.len();
-    }
-    (start_byte, end_byte, start_x, x)
 }
 
 pub(crate) struct WrapIndex {
@@ -842,22 +712,20 @@ impl WrapIndex {
             return;
         };
 
-        let style = self.style.clone();
-        ts.with_advances(&style, |advances| {
-            let max_ascii = advances.max_printable_ascii();
-            let ascii_fit_len = if max_ascii > 0.0 {
-                (wrap_width / max_ascii).floor().max(0.0) as usize
-            } else {
-                0
-            };
-            self.splice_line_range(
-                updated_text,
-                old_lines,
-                new_lines,
-                ascii_fit_len,
-                &mut |line_str, width, out| wrap_line(line_str, width, advances, ts, out),
-            );
-        });
+        let face = ts.face(&self.style);
+        let max_ascii = face.max_printable_ascii();
+        let ascii_fit_len = if max_ascii > 0.0 {
+            (wrap_width / max_ascii).floor().max(0.0) as usize
+        } else {
+            0
+        };
+        self.splice_line_range(
+            updated_text,
+            old_lines,
+            new_lines,
+            ascii_fit_len,
+            &mut |line_str, width, out| wrap_line(line_str, width, &face, out),
+        );
     }
 
     fn splice_line_range<F>(

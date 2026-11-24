@@ -1,9 +1,18 @@
 use std::rc::Rc;
 
 use crate::color::transparent_black;
-use crate::geom::{ScreenRect, Size};
-use crate::gfx::{Canvas, Gpu, Surface};
-use crate::platform::NativeWindow;
+use crate::geom::{ScreenPoint, ScreenRect, Size};
+use crate::gfx::{Gpu, Surface, TextSystem};
+use crate::platform::{NativeWindow, WindowId};
+
+use super::{AvailSize, Frame, Node};
+
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub(crate) struct OverlayAnchor {
+    pub(crate) window: WindowId,
+    pub(crate) origin: ScreenPoint,
+    pub(crate) scale: f32,
+}
 
 struct LiveOverlay {
     // Surface drops before NativeWindow so DComp/swapchain release before DestroyWindow.
@@ -50,7 +59,11 @@ impl OverlaySurface {
         }
     }
 
-    pub(crate) fn paint(&mut self, render: impl FnOnce(Size, f32, &mut Canvas)) -> bool {
+    pub(crate) fn paint_scene(
+        &mut self,
+        ts: &TextSystem,
+        build: impl FnOnce(Size) -> Node<(), ()>,
+    ) -> bool {
         let Some(live) = &mut self.live else {
             return false;
         };
@@ -59,8 +72,14 @@ impl OverlaySurface {
         };
         live.surface.resize(w, h, scale);
         let logical = live.window.logical_size();
-        live.surface.draw(transparent_black(), |renderer| {
-            render(logical, scale, renderer);
+        live.surface.draw(transparent_black(), |canvas| {
+            let frame = Frame::layout(
+                build(logical),
+                AvailSize::definite(logical.width, logical.height),
+                scale,
+                ts,
+            );
+            frame.paint(canvas, &mut |_, _, _| {});
         })
     }
 }

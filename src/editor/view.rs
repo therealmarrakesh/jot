@@ -14,7 +14,7 @@ use crate::types::SharedStr;
 
 use super::buffer::RopeExt as _;
 use super::scrollbar::ScrollbarViewport;
-use super::wrap::{LineRanges, RowLayout, VisualRow, can_wrap_with_advances, horizontal_slice};
+use super::wrap::{LineRanges, RowLayout, VisualRow};
 use super::{DocumentView, Editor, EditorTimer, EditorTimers, MoveDirection};
 
 const BOTTOM_MARGIN_ROWS: usize = 3;
@@ -835,7 +835,7 @@ impl Editor {
         let style = params.style;
         let text_style = &style.text;
         let line_height = style.line_height.max(1.0);
-        let space_width = ts.measure(" ", text_style);
+        let space_width = ts.face(text_style).space_width();
         let is_empty = self.model.text().len() == 0;
         let (display_str, text_color): (SharedStr, Rgba) = if is_empty {
             (self.placeholder.clone(), params.palette.text_secondary)
@@ -892,7 +892,8 @@ impl Editor {
         let style = params.style;
         let text_style = &style.text;
         let line_height = style.line_height.max(1.0);
-        let space_width = ts.measure(" ", text_style);
+        let face = ts.face(text_style);
+        let space_width = face.space_width();
         let text = self.model.text();
         let reveal_req = self.reveal.take();
         let head = self.model.cursor();
@@ -969,7 +970,7 @@ impl Editor {
                 Some((cached, w)) if *cached == key => *w,
                 _ => {
                     let s: Cow<str> = slice.into();
-                    let w = measure_unwrapped_line(&s, text_style, ts);
+                    let w = face.unwrapped_width(&s);
                     doc.longest_line_cache = Some((key, w));
                     w
                 }
@@ -978,7 +979,7 @@ impl Editor {
                 let pt = text.offset_to_point(head);
                 let line = text.slice_line(pt.row);
                 let prefix: Cow<str> = line.slice(..pt.column.min(line.len())).into();
-                let caret_x = measure_unwrapped_line(&prefix, text_style, ts);
+                let caret_x = face.unwrapped_width(&prefix);
                 max_line_w = max_line_w.max(caret_x);
                 self.scroll.x =
                     reveal_horizontal_scroll(self.scroll.x, caret_x, input_bounds.size.width);
@@ -1087,14 +1088,12 @@ impl Editor {
             let layout =
                 if !doc.soft_wrap && total_sub_rows == 1 && line_len > HUGE_UNWRAPPED_LINE_BYTES {
                     let line_str: Cow<str> = line_slice.into();
-                    if can_wrap_with_advances(&line_str) {
-                        let min_x = (-self.scroll.x - HORIZONTAL_WINDOW_PAD).max(0.0);
-                        let max_x =
-                            (-self.scroll.x + viewport_width + HORIZONTAL_WINDOW_PAD).max(min_x);
-                        let (mut start_b, mut end_b, start_x, total_w) =
-                            ts.with_advances(text_style, |adv| {
-                                horizontal_slice(&line_str, min_x, max_x, adv)
-                            });
+                    let min_x = (-self.scroll.x - HORIZONTAL_WINDOW_PAD).max(0.0);
+                    let max_x =
+                        (-self.scroll.x + viewport_width + HORIZONTAL_WINDOW_PAD).max(min_x);
+                    if let Some((mut start_b, mut end_b, start_x, total_w)) =
+                        ts.face(text_style).horizontal_window(&line_str, min_x, max_x)
+                    {
                         if caret >= line_byte_start && caret <= line_byte_start + line_len {
                             let local_caret = caret - line_byte_start;
                             if local_caret < start_b {
@@ -1236,17 +1235,6 @@ fn content_width_with_margin(max_line_w: f32, viewport_width: f32) -> f32 {
         max_line_w + RIGHT_MARGIN
     } else {
         max_line_w
-    }
-}
-
-fn measure_unwrapped_line(s: &str, text_style: &TextStyle, ts: &TextSystem) -> f32 {
-    if s.is_empty() {
-        return 0.0;
-    }
-    if s.len() > HUGE_UNWRAPPED_LINE_BYTES && can_wrap_with_advances(s) {
-        ts.with_advances(text_style, |adv| horizontal_slice(s, 0.0, 0.0, adv).3)
-    } else {
-        ts.measure(s, text_style)
     }
 }
 

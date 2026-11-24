@@ -11,8 +11,7 @@ use crate::gfx::Gpu;
 use crate::ids::EditorSlot;
 use crate::keytips::KeyTips;
 use crate::platform::{
-    HandoffCommand, Key, MouseButton, Platform, PlatformEvent, PlatformHandler, WindowHwnd,
-    WindowId,
+    Key, MouseButton, Platform, PlatformEvent, PlatformHandler, WindowHwnd, WindowId,
 };
 use crate::shell::{AppEvent, Cx, Effect, Shell, WindowTimer};
 use crate::tabs::TabData;
@@ -229,33 +228,42 @@ impl App {
         }
     }
 
-    pub(crate) fn open_paths_in_window(&mut self, window: WindowId, paths: Vec<PathBuf>) {
-        self.run_file_ops(|ops, host, io| {
-            ops.request(FileRequest::OpenPaths { window, paths }, host, io);
-        });
-    }
-
-    pub(crate) fn open_handoff_paths(&mut self, paths: Vec<PathBuf>) {
-        if paths.is_empty() {
-            return;
+    pub(crate) fn launch(
+        &mut self,
+        paths: Vec<PathBuf>,
+        bring_to_front: bool,
+    ) -> std::result::Result<(), String> {
+        if paths.is_empty() || self.windows.is_empty() {
+            let (window, hwnd) = self.open_window(None, None).map_err(|e| e.message)?;
+            if bring_to_front {
+                hwnd.bring_to_front();
+            }
+            if !paths.is_empty() {
+                self.open_paths_in_window(window, paths);
+            }
+            return Ok(());
         }
-        let target = self
-            .windows
-            .fallback(None)
-            .or_else(|| self.open_window(None, None).ok().map(|(id, _)| id));
-        if let Some(window) = target {
+        if let Some(window) = self.windows.fallback(None) {
             let mut loaded_any = false;
             self.run_file_ops(|ops, host, io| {
                 let before = io.len();
                 ops.request(FileRequest::OpenPaths { window, paths }, host, io);
                 loaded_any = io.len() > before;
             });
-            if loaded_any
+            if bring_to_front
+                && loaded_any
                 && let Some(hwnd) = self.windows.hwnd(window)
             {
                 hwnd.bring_to_front();
             }
         }
+        Ok(())
+    }
+
+    fn open_paths_in_window(&mut self, window: WindowId, paths: Vec<PathBuf>) {
+        self.run_file_ops(|ops, host, io| {
+            ops.request(FileRequest::OpenPaths { window, paths }, host, io);
+        });
     }
 
     pub(crate) fn sweep_closed_windows(&mut self) {
@@ -292,9 +300,8 @@ impl App {
         let needs_vsync = self.windows[ix].render_frame(now, &self.shell);
         let wid = self.windows[ix].id();
         if self.windows[ix].key_tips_active() || self.keytips.is_owner(wid) {
-            let (origin, scale, tips) = self.windows[ix].key_tip_request(&self.shell);
-            self.keytips
-                .sync(wid, origin, scale, tips, &self.shell.gpu);
+            let (anchor, tips) = self.windows[ix].key_tip_request(&self.shell);
+            self.keytips.sync(anchor, tips, &self.shell.gpu);
         }
         if self.windows[ix].has_pointer() {
             self.evaluate_tooltip_for(ix);
@@ -483,14 +490,9 @@ impl PlatformHandler for App {
                     self.open_paths_in_window(window_id, paths);
                 }
             }
-            PlatformEvent::Handoff(cmd) => match cmd {
-                HandoffCommand::OpenPaths(paths) => self.open_handoff_paths(paths),
-                HandoffCommand::NewWindow => {
-                    if let Ok((_, hwnd)) = self.open_window(None, None) {
-                        hwnd.bring_to_front();
-                    }
-                }
-            },
+            PlatformEvent::Launch { paths } => {
+                let _ = self.launch(paths, true);
+            }
             PlatformEvent::SizeMoveChanged {
                 window_id,
                 entering,

@@ -1,8 +1,8 @@
 use crate::color::transparent_black;
-use crate::geom::Edges;
+use crate::geom::{Edges, round_half_up};
 use crate::gfx::{TextStyle, TextSystem};
 use crate::ids::{Focus, Frame, HitId, MenuKind, Node, UiState};
-use crate::keytips::{self, KeyTip, round_half_up};
+use crate::keytips::{self, KeyTip};
 use crate::platform::CursorStyle;
 use crate::theme::{Palette, theme_shadow};
 use crate::ui::controls::{

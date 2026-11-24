@@ -21,7 +21,7 @@ pub(crate) use fs::{
     HIDDEN_FILE_ATTRIBUTE, ReplaceFileError, documents_dir, file_hard_link_count, replace_file,
 };
 pub(crate) use input::{Key, KeyEvent, Modifiers, MouseButton};
-pub(crate) use instance::{Arbitration, HandoffCommand, arbitrate as arbitrate_instance};
+pub(crate) use instance::{Arbitration, InstanceLock, arbitrate as arbitrate_instance};
 pub(crate) use jobs::{Jobs, TimerHandle};
 pub(crate) use os::{
     WindowHwnd, WindowPlacement, cursor_screen_pos, monitor_work_area_and_scale,
@@ -256,10 +256,11 @@ pub(crate) struct Platform {
     wake_hwnd: HWND,
     vsync: Arc<VsyncPacer>,
     com_initialized: bool,
+    _instance_lock: Option<InstanceLock>,
 }
 
 impl Platform {
-    pub(crate) fn new() -> Result<Self> {
+    pub(crate) fn new(instance_lock: Option<InstanceLock>) -> Result<Self> {
         unsafe {
             let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         }
@@ -296,11 +297,18 @@ impl Platform {
         set_cached_settings(SystemSettings::query());
         let vsync = VsyncPacer::spawn(wake_hwnd.0 as isize);
 
-        Ok(Self {
+        let platform = Self {
             wake_hwnd,
             vsync,
             com_initialized,
-        })
+            _instance_lock: instance_lock,
+        };
+        if let Some(lock) = &platform._instance_lock {
+            HANDOFF_ACCEPTING.with(|flag| flag.set(true));
+            let wide = HSTRING::from(lock.window_title.as_str());
+            let _ = unsafe { SetWindowTextW(platform.wake_hwnd, &wide) };
+        }
+        Ok(platform)
     }
 
     pub(crate) fn settings(&self) -> SystemSettings {
@@ -311,13 +319,7 @@ impl Platform {
         window::set_block_shutdown(reason);
     }
 
-    pub(crate) fn enable_handoff(&self, title: &str) {
-        HANDOFF_ACCEPTING.with(|flag| flag.set(true));
-        let wide = HSTRING::from(title);
-        let _ = unsafe { SetWindowTextW(self.wake_hwnd, &wide) };
-    }
-
-    fn disable_handoff(&self) {
+    pub(super) fn disable_handoff(&self) {
         HANDOFF_ACCEPTING.with(|flag| flag.set(false));
         let _ = unsafe { SetWindowTextW(self.wake_hwnd, w!("")) };
     }
@@ -441,10 +443,10 @@ fn wake_wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> 
                 return LRESULT(0);
             }
             let cds = unsafe { &*(lparam.0 as *const COPYDATASTRUCT) };
-            let Some(cmd) = instance::decode_copydata(cds) else {
+            let Some(paths) = instance::decode_copydata(cds) else {
                 return LRESULT(0);
             };
-            window::dispatch(PlatformEvent::Handoff(cmd));
+            window::dispatch(PlatformEvent::Launch { paths });
             LRESULT(1)
         }
         _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },

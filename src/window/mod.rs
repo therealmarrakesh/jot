@@ -18,6 +18,7 @@ use crate::platform::{NativeWindow, WindowAppearance, WindowHwnd, WindowId, clip
 use crate::shell::{Cx, Effect, Shell, SlotTimers, WindowTimer};
 use crate::tabs::{self, Removal, TabData, TabSet};
 use crate::tooltip::TooltipProbe;
+use crate::ui::OverlayAnchor;
 
 use chrome::{CAPTION_WIDTH, HEADER_WIDTH, MinSizeCache, STRIP_TOP};
 
@@ -234,10 +235,17 @@ impl MainWindow {
         point(HEADER_WIDTH + tabs::LIST_PAD + grab.x, STRIP_TOP + grab.y)
     }
 
-    pub(crate) fn key_tip_request(&self, shell: &Shell) -> (ScreenPoint, f32, Vec<KeyTip>) {
+    fn overlay_anchor(&self) -> OverlayAnchor {
+        OverlayAnchor {
+            window: self.id(),
+            origin: self.native.hwnd().client_origin(),
+            scale: self.native.scale_factor(),
+        }
+    }
+
+    pub(crate) fn key_tip_request(&self, shell: &Shell) -> (OverlayAnchor, Vec<KeyTip>) {
         (
-            self.native.hwnd().client_origin(),
-            self.native.scale_factor(),
+            self.overlay_anchor(),
             self.menu_bar
                 .key_tips(self.focus, self.ui.frame(), &shell.text_system),
         )
@@ -252,10 +260,8 @@ impl MainWindow {
 
     pub(crate) fn tooltip_probe(&self) -> TooltipProbe<'_> {
         TooltipProbe {
-            window: self.id(),
+            anchor: self.overlay_anchor(),
             pointer: self.ui.pointer(),
-            origin: self.native.hwnd().client_origin(),
-            scale: self.native.scale_factor(),
             frame: self.ui.frame(),
         }
     }

@@ -204,6 +204,12 @@ impl<E: Send + 'static> Jobs<E> {
         self.bg.push(event);
     }
 
+    #[cfg(test)]
+    pub(crate) fn wake_poster(&self) -> impl Fn(E) + Send + Sync + 'static + use<E> {
+        let bg = self.bg.clone();
+        move |event| bg.push(event)
+    }
+
     pub(crate) fn after(&self, delay: Duration, event: E) -> TimerHandle {
         self.timers
             .borrow_mut()

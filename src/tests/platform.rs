@@ -125,7 +125,7 @@ fn hwnd_registry_cleanup_reentrant_queue_and_modal_size_move_timer() {
 
 #[test]
 fn real_win32_message_loop_wakes_timers_and_quits_cleanly() {
-    let platform = Rc::new(Platform::new().expect("Platform::new failed"));
+    let platform = Rc::new(Platform::new(None).expect("Platform::new failed"));
     let gpu = Gpu::new().expect("Gpu::new failed");
     let app = Rc::new(RefCell::new(App::new(platform, gpu)));
     let mut _timer = None;

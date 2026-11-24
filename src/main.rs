@@ -65,7 +65,7 @@ fn main() {
         Arbitration::Primary(lock) => lock,
     };
 
-    let platform = match Platform::new() {
+    let platform = match Platform::new(lock) {
         Ok(p) => Rc::new(p),
         Err(err) => {
             diag::show_error_dialog(APP_NAME, &format!("Jot couldn't start.\n\n{err}"));
@@ -79,24 +79,12 @@ fn main() {
             return;
         }
     };
-    if let Some(ref lock) = lock {
-        platform.enable_handoff(&lock.window_title);
-    }
     let app = Rc::new(RefCell::new(App::new(platform, gpu)));
 
-    Platform::run(app, move |app| match app.open_window(None, None) {
-        Ok((id, _)) => {
-            if !paths.is_empty() {
-                app.open_paths_in_window(id, paths);
-            }
-        }
-        Err(err) => {
-            diag::show_error_dialog(
-                APP_NAME,
-                &format!("Jot couldn't open a window.\n\n{}", err.message),
-            );
+    Platform::run(app, move |app| {
+        if let Err(message) = app.launch(paths, false) {
+            diag::show_error_dialog(APP_NAME, &format!("Jot couldn't open a window.\n\n{message}"));
             app.request_quit();
         }
     });
-    drop(lock);
 }
