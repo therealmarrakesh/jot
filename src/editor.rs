@@ -166,8 +166,8 @@ pub(crate) struct Editor {
     reveal: Option<RevealRequest>,
     input_bounds: Rect,
     frame: Option<FrameLayout>,
-    caret_height: f32,
-    caret_hidden: bool,
+    pub(crate) caret_height: f32,
+    pub(crate) caret_hidden: bool,
     placeholder: SharedStr,
 }
 
@@ -224,14 +224,6 @@ impl Editor {
 
     pub(crate) fn caret_bounds(&self) -> Option<Rect> {
         self.fresh_frame().map(|f| f.caret_rect)
-    }
-
-    pub(crate) fn set_caret_height(&mut self, height: f32) {
-        self.caret_height = height;
-    }
-
-    pub(crate) fn set_caret_hidden(&mut self, hidden: bool) {
-        self.caret_hidden = hidden;
     }
 
     #[cfg(test)]

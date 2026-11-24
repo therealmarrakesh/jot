@@ -1853,8 +1853,8 @@ impl MainWindow {
             scale,
             caret_width_px,
         };
-        self.active_editor_mut().set_caret_height(caret_height);
-        self.active_editor_mut().set_caret_hidden(caret_hidden);
+        self.active_editor_mut().caret_height = caret_height;
+        self.active_editor_mut().caret_hidden = caret_hidden;
         let mut editor_needs_redraw =
             self.active_editor_mut()
                 .prepare(estimated_editor_rect, active_params, ts);
