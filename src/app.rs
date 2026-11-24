@@ -1,10 +1,6 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
-};
 use std::time::Instant;
 
 use crate::APP_NAME;
@@ -13,13 +9,12 @@ use crate::editor::{EditorTimer, Rope};
 use crate::files::{self, WorkflowGen};
 use crate::geom::{Rect, ScreenPoint, Size, point, size};
 use crate::gfx::{Direct2DDevices, TextSystem};
-use crate::instance::HandoffCommand;
 use crate::keytips::KeyTips;
 use crate::platform::{
-    Jobs, MouseButton, NativeWindow, Platform, PlatformEvent, PlatformHandler, SaveDialogResult,
-    WindowAppearance, WindowBackdrop, WindowHwnd, WindowId, WindowKind, WindowOptions,
-    WindowsDisplay, client_area_animations_enabled, cursor_screen_pos, high_contrast_colors,
-    system_accent_color,
+    HandoffCommand, Jobs, MouseButton, NativeWindow, Platform, PlatformEvent, PlatformHandler,
+    SaveDialogResult, WindowAppearance, WindowBackdrop, WindowHwnd, WindowId, WindowKind,
+    WindowOptions, WindowsDisplay, client_area_animations_enabled, cursor_screen_pos,
+    high_contrast_colors, system_accent_color,
 };
 use crate::tab_drag::TabDragState;
 use crate::tabs::{TabData, TabId};
@@ -68,7 +63,6 @@ pub(crate) enum AppEvent {
     },
     TooltipHideTimer,
     TabDragPoll,
-    Handoff(HandoffCommand),
     OpenDialogDone {
         window: WindowId,
         result: crate::types::Result<Option<Vec<PathBuf>>>,
@@ -139,11 +133,10 @@ pub(crate) struct App {
     pub(crate) tooltips: Tooltips,
     in_flight_loads: HashSet<String>,
     cascade_step: u32,
-    pipe_accepting: Option<Arc<AtomicBool>>,
     #[cfg(test)]
     pub(crate) headless: bool,
     quit: bool,
-    // Declared last so windows, overlays, and COM objects drop before OLE/COM uninitialize.
+    // Declared last so windows, overlays, and COM objects drop before COM uninitialize.
     pub(crate) platform: Rc<Platform>,
 }
 
@@ -175,7 +168,6 @@ impl App {
             tooltips: Tooltips::default(),
             in_flight_loads: HashSet::new(),
             cascade_step: 0,
-            pipe_accepting: None,
             #[cfg(test)]
             headless: false,
             quit: false,
@@ -329,16 +321,9 @@ impl App {
         Ok((id, hwnd))
     }
 
-    pub(crate) fn set_pipe_accepting(&mut self, flag: Arc<AtomicBool>) {
-        self.pipe_accepting = Some(flag);
-    }
-
     pub(crate) fn request_quit(&mut self) {
         if !self.quit {
             self.quit = true;
-            if let Some(flag) = &self.pipe_accepting {
-                flag.store(false, Ordering::Release);
-            }
             self.platform.post_quit();
         }
     }
@@ -786,6 +771,14 @@ impl PlatformHandler for App {
                     self.open_paths_in_window(window_id, paths);
                 }
             }
+            PlatformEvent::Handoff(cmd) => match cmd {
+                HandoffCommand::OpenPaths(paths) => self.open_handoff_paths(paths),
+                HandoffCommand::NewWindow => {
+                    if let Ok((_, hwnd)) = self.open_window(None, None) {
+                        hwnd.bring_to_front();
+                    }
+                }
+            },
             PlatformEvent::SizeMoveChanged {
                 window_id,
                 entering,
@@ -865,14 +858,6 @@ impl PlatformHandler for App {
                     self.tooltips.on_hide_timer();
                 }
                 AppEvent::TabDragPoll => self.tab_drag_poll(),
-                AppEvent::Handoff(cmd) => match cmd {
-                    HandoffCommand::OpenPaths(paths) => self.open_handoff_paths(paths),
-                    HandoffCommand::NewWindow => {
-                        if let Ok((_, hwnd)) = self.open_window(None, None) {
-                            hwnd.bring_to_front();
-                        }
-                    }
-                },
                 AppEvent::OpenDialogDone { window, result } => {
                     if let Some(ix) = self.window_ix(window) {
                         self.windows[ix].open_dialog_active = false;

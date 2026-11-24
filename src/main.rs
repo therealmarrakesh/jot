@@ -11,7 +11,6 @@ mod files;
 mod find;
 mod geom;
 mod gfx;
-mod instance;
 mod keytips;
 mod menu;
 mod platform;
@@ -31,9 +30,8 @@ use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
 
-use app::{App, AppEvent};
-use instance::Arbitration;
-use platform::Platform;
+use app::App;
+use platform::{Arbitration, Platform, arbitrate_instance};
 
 pub(crate) const APP_NAME: &str = "Jot";
 const NOTICES_FLAG: &str = "--notices";
@@ -52,9 +50,9 @@ fn main() {
         }
     }
 
-    let server = match instance::arbitrate(&paths) {
+    let lock = match arbitrate_instance(&paths) {
         Arbitration::HandedOff => return,
-        Arbitration::Primary(server) => server,
+        Arbitration::Primary(lock) => lock,
     };
 
     let platform = match Platform::new() {
@@ -64,15 +62,10 @@ fn main() {
             return;
         }
     };
-    let app = Rc::new(RefCell::new(App::new(platform)));
-
-    if let Some(ref server) = server {
-        let poster = app.borrow().jobs.poster();
-        app.borrow_mut().set_pipe_accepting(server.accepting_flag());
-        server.attach_handler(move |cmd| {
-            poster.post(AppEvent::Handoff(cmd));
-        });
+    if let Some(ref lock) = lock {
+        platform.enable_handoff(&lock.window_title);
     }
+    let app = Rc::new(RefCell::new(App::new(platform)));
 
     Platform::run(app, move |app| match app.open_window(None, None) {
         Ok((id, _)) => {
@@ -88,5 +81,5 @@ fn main() {
             app.request_quit();
         }
     });
-    drop(server);
+    drop(lock);
 }

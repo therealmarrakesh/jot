@@ -873,7 +873,6 @@ fn hwnd_registry_cleanup_reentrant_queue_and_modal_size_move_timer() {
     h.app
         .borrow()
         .jobs
-        .poster()
         .post(AppEvent::TestFlag(ran.clone()));
 
     unsafe {
@@ -1084,7 +1083,6 @@ fn stale_file_events_do_not_advance_unrelated_discard_workflow() {
     h.app
         .borrow()
         .jobs
-        .poster()
         .post(AppEvent::FileSaved {
             window: wid,
             wf_gen: stale_gen,
@@ -1165,7 +1163,7 @@ fn close_save_keeps_window_open_when_edited_mid_write_and_migrated_save_cleans_t
         let app = &mut *app_guard;
         let data = app.windows[0].take_tab(tab_id, &app.jobs).unwrap();
         let _ = app.open_window(Some(data), Some(size(600.0, 400.0))).unwrap();
-        app.jobs.poster().post(AppEvent::FileSaved {
+        app.jobs.post(AppEvent::FileSaved {
             window: wid1,
             wf_gen: crate::files::WorkflowGen::next(),
             tab: tab_id,

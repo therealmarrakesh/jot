@@ -1,10 +1,9 @@
 pub(crate) mod clipboard;
 pub(crate) mod dialogs;
-mod drop_target;
 pub(crate) mod input;
+mod instance;
 pub(crate) mod jobs;
 pub(crate) mod os;
-pub(crate) mod pipe;
 pub(crate) mod window;
 
 pub(crate) use dialogs::{
@@ -12,6 +11,7 @@ pub(crate) use dialogs::{
     run_save_dialog,
 };
 pub(crate) use input::{Key, KeyEvent, Modifiers, MouseButton};
+pub(crate) use instance::{Arbitration, HandoffCommand, arbitrate as arbitrate_instance};
 pub(crate) use jobs::{Jobs, TimerHandle};
 pub(crate) use os::{
     AnsiCodePage, HIDDEN_FILE_ATTRIBUTE, HighContrastColors, ReplaceFileError, WindowHwnd,
@@ -20,9 +20,6 @@ pub(crate) use os::{
     format_local_time_date, high_contrast_colors, menu_show_delay_ms, monitor_work_area_and_scale,
     mouse_hover_time_ms, primary_mouse_button_down, release_mouse_capture, replace_file,
     system_accent_color, top_visible_window_at,
-};
-pub(crate) use pipe::{
-    PipeClaim, PipeServer, current_process_identity, send_framed_handoff, try_claim_pipe_server,
 };
 pub(crate) use window::{
     CursorStyle, NativeWindow, PlatformEvent, PlatformHandler, WindowAppearance, WindowBackdrop,
@@ -45,9 +42,9 @@ use windows::Win32::{
     },
     System::{
         Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize},
+        DataExchange::COPYDATASTRUCT,
         Diagnostics::Debug::OutputDebugStringW,
         LibraryLoader::GetModuleHandleW,
-        Ole::{OleInitialize, OleUninitialize},
         Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW},
     },
     UI::{
@@ -58,8 +55,8 @@ use windows::Win32::{
         WindowsAndMessaging::{
             CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW,
             HWND_MESSAGE, MB_ICONERROR, MB_OK, MSG, MessageBoxW, PostMessageW, PostQuitMessage,
-            RegisterClassW, TranslateMessage, USER_DEFAULT_SCREEN_DPI, WM_APP, WINDOW_EX_STYLE,
-            WINDOW_STYLE, WNDCLASSW,
+            RegisterClassW, SetWindowTextW, TranslateMessage, USER_DEFAULT_SCREEN_DPI, WM_APP,
+            WM_COPYDATA, WINDOW_EX_STYLE, WINDOW_STYLE, WNDCLASSW,
         },
     },
 };
@@ -71,7 +68,7 @@ use crate::types::{Error, Result};
 
 const WM_APP_WAKE: u32 = WM_APP + 1;
 const WM_APP_VSYNC: u32 = WM_APP + 2;
-const WAKE_CLASS_NAME: PCWSTR = w!("JotWakeWindow");
+pub(super) const WAKE_CLASS_NAME: PCWSTR = w!("JotWakeWindow");
 
 pub(crate) fn output_debug_string(message: &str) {
     let wide = HSTRING::from(message);
@@ -162,6 +159,7 @@ thread_local! {
     pub(super) static ACTIVE_HANDLER: RefCell<Option<Rc<RefCell<dyn PlatformHandler>>>> =
         const { RefCell::new(None) };
     static WAKE_PENDING: Cell<bool> = const { Cell::new(false) };
+    static HANDOFF_ACCEPTING: Cell<bool> = const { Cell::new(false) };
 }
 
 pub(super) fn take_wake_pending() -> bool {
@@ -233,7 +231,6 @@ pub(crate) struct Platform {
     wake_hwnd: HWND,
     vsync: Arc<VsyncPacer>,
     com_initialized: bool,
-    ole_initialized: bool,
 }
 
 impl Platform {
@@ -243,7 +240,6 @@ impl Platform {
         }
         let com_initialized =
             unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }.is_ok();
-        let ole_initialized = unsafe { OleInitialize(None) }.is_ok();
         window::register_window_class()?;
 
         let hinstance = unsafe { GetModuleHandleW(None)? };
@@ -282,8 +278,18 @@ impl Platform {
             wake_hwnd,
             vsync,
             com_initialized,
-            ole_initialized,
         })
+    }
+
+    pub(crate) fn enable_handoff(&self, title: &str) {
+        HANDOFF_ACCEPTING.with(|flag| flag.set(true));
+        let wide = HSTRING::from(title);
+        let _ = unsafe { SetWindowTextW(self.wake_hwnd, &wide) };
+    }
+
+    fn disable_handoff(&self) {
+        HANDOFF_ACCEPTING.with(|flag| flag.set(false));
+        let _ = unsafe { SetWindowTextW(self.wake_hwnd, w!("")) };
     }
 
     pub(crate) fn devices(&self) -> Direct2DDevices {
@@ -341,6 +347,7 @@ impl Platform {
     }
 
     pub(crate) fn post_quit(&self) {
+        self.disable_handoff();
         unsafe { PostQuitMessage(0) };
     }
 
@@ -388,11 +395,9 @@ impl Platform {
 
 impl Drop for Platform {
     fn drop(&mut self) {
+        self.disable_handoff();
         unsafe {
             let _ = DestroyWindow(self.wake_hwnd);
-            if self.ole_initialized {
-                OleUninitialize();
-            }
             if self.com_initialized {
                 CoUninitialize();
             }
@@ -440,6 +445,17 @@ fn wake_wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> 
                 }
             }
             LRESULT(0)
+        }
+        WM_COPYDATA => {
+            if !HANDOFF_ACCEPTING.with(Cell::get) {
+                return LRESULT(0);
+            }
+            let cds = unsafe { &*(lparam.0 as *const COPYDATASTRUCT) };
+            let Some(cmd) = instance::decode_copydata(cds) else {
+                return LRESULT(0);
+            };
+            window::dispatch_or_queue_event(PlatformEvent::Handoff(cmd));
+            LRESULT(1)
         }
         _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
     }

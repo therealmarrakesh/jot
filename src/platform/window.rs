@@ -1,5 +1,7 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
+use std::ffi::OsString;
+use std::os::windows::ffi::OsStringExt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -16,7 +18,6 @@ use windows::Win32::{
     },
     System::{
         LibraryLoader::GetModuleHandleW,
-        Ole::{IDropTarget, RegisterDragDrop, RevokeDragDrop},
         Shutdown::{ShutdownBlockReasonCreate, ShutdownBlockReasonDestroy},
     },
     UI::{
@@ -32,6 +33,7 @@ use windows::Win32::{
                 TrackMouseEvent,
             },
         },
+        Shell::{DragAcceptFiles, DragFinish, DragQueryFileW, HDROP},
         WindowsAndMessaging::{
             CS_DBLCLKS, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW,
             DestroyWindow, GetClientRect, GetCursorPos, GetWindowRect, HTCAPTION, HTCLIENT,
@@ -42,18 +44,17 @@ use windows::Win32::{
             SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOZORDER, SetCursor, SetLayeredWindowAttributes,
             SetTimer, SetWindowPos, SetWindowTextW, ShowWindow, USER_DEFAULT_SCREEN_DPI,
             USER_TIMER_MINIMUM, WM_ACTIVATE, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_DPICHANGED,
-            WM_ENDSESSION, WM_ENTERMENULOOP, WM_ENTERSIZEMOVE, WM_ERASEBKGND, WM_EXITMENULOOP,
-            WM_EXITSIZEMOVE, WM_GETMINMAXINFO, WM_IME_COMPOSITION, WM_IME_ENDCOMPOSITION,
-            WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN,
-            WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE,
-            WM_MOUSEWHEEL, WM_MOVE, WM_NCCALCSIZE, WM_NCHITTEST, WM_NCLBUTTONDBLCLK,
+            WM_DROPFILES, WM_ENDSESSION, WM_ENTERMENULOOP, WM_ENTERSIZEMOVE, WM_ERASEBKGND,
+            WM_EXITMENULOOP, WM_EXITSIZEMOVE, WM_GETMINMAXINFO, WM_IME_COMPOSITION,
+            WM_IME_ENDCOMPOSITION, WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDBLCLK,
+            WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL,
+            WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_MOVE, WM_NCCALCSIZE, WM_NCHITTEST, WM_NCLBUTTONDBLCLK,
             WM_NCLBUTTONDOWN, WM_NCLBUTTONUP, WM_NCMOUSELEAVE, WM_NCMOUSEMOVE, WM_PAINT,
-            WM_QUERYENDSESSION, WM_RBUTTONDBLCLK,
-            WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCHAR,
-            WM_SYSCOMMAND, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_THEMECHANGED, WM_TIMER, WNDCLASSW,
-            WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP,
-            WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_MAXIMIZEBOX, WS_MINIMIZEBOX,
-            WS_POPUP, WS_SYSMENU, WS_THICKFRAME, WindowFromPoint,
+            WM_QUERYENDSESSION, WM_RBUTTONDBLCLK, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR,
+            WM_SETTINGCHANGE, WM_SIZE, WM_SYSCHAR, WM_SYSCOMMAND, WM_SYSKEYDOWN, WM_SYSKEYUP,
+            WM_THEMECHANGED, WM_TIMER, WNDCLASSW, WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
+            WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT,
+            WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU, WS_THICKFRAME, WindowFromPoint,
         },
     },
 };
@@ -63,11 +64,11 @@ use crate::geom::{Point, Rect, Size, point, size};
 use crate::gfx::{D2DRenderer, Direct2DDevices};
 use crate::types::{Result, SharedStr};
 
-use super::drop_target::JotDropTarget;
 use super::input::{
     ClickTracker, Key, KeyEvent, Modifiers, MouseButton, current_modifiers, is_syskey_passthrough,
     read_ime_string, set_ime_candidate_pos, translate_vk,
 };
+use super::instance::HandoffCommand;
 use super::os::{WindowHwnd, wheel_scroll_amount};
 use super::{ACTIVE_HANDLER, DisplayId, WindowsDisplay};
 
@@ -240,6 +241,7 @@ pub(crate) enum PlatformEvent {
         window_id: WindowId,
         paths: Vec<PathBuf>,
     },
+    Handoff(HandoffCommand),
     SizeMoveChanged {
         window_id: WindowId,
         entering: bool,
@@ -433,7 +435,6 @@ pub(crate) struct NativeWindow {
     pub(crate) active: bool,
     pub(crate) in_size_move: bool,
     renderer: Option<D2DRenderer>,
-    drop_registered: bool,
     destroyed: bool,
 }
 
@@ -569,12 +570,9 @@ impl NativeWindow {
         let scale_factor = final_dpi as f32 / USER_DEFAULT_SCREEN_DPI as f32;
         with_entry_mut(hwnd, |e| e.scale_factor = scale_factor);
 
-        let drop_registered = if !is_overlay {
-            let target: IDropTarget = JotDropTarget::new(id).into();
-            unsafe { RegisterDragDrop(hwnd, &target) }.is_ok()
-        } else {
-            false
-        };
+        if !is_overlay {
+            unsafe { DragAcceptFiles(hwnd, true) };
+        }
 
         let (phys_w, phys_h) = query_physical_size(hwnd);
         let (logical_size, origin) = query_client_metrics(hwnd, scale_factor);
@@ -584,9 +582,6 @@ impl NativeWindow {
                 HWND_REGISTRY.with(|map| {
                     map.borrow_mut().remove(&(hwnd.0 as isize));
                 });
-                if drop_registered {
-                    let _ = unsafe { RevokeDragDrop(hwnd) };
-                }
                 let _ = unsafe { DestroyWindow(hwnd) };
                 return Err(err);
             }
@@ -602,7 +597,6 @@ impl NativeWindow {
             active: options.show && options.focus,
             in_size_move: false,
             renderer: Some(renderer),
-            drop_registered,
             destroyed: false,
         };
         if options.show {
@@ -714,10 +708,6 @@ impl NativeWindow {
         });
         if in_size_move {
             let _ = unsafe { KillTimer(Some(self.hwnd), SIZE_MOVE_TIMER_ID) };
-        }
-        if self.drop_registered {
-            let _ = unsafe { RevokeDragDrop(self.hwnd) };
-            self.drop_registered = false;
         }
         let _ = unsafe { DestroyWindow(self.hwnd) };
     }
@@ -1605,6 +1595,18 @@ fn window_wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
             LRESULT(0)
         }
 
+        WM_DROPFILES => {
+            let hdrop = HDROP(wparam.0 as *mut _);
+            let paths = collect_drop_paths(hdrop);
+            unsafe { DragFinish(hdrop) };
+            if !paths.is_empty()
+                && let Some(window_id) = with_entry(hwnd, |e| e.window_id)
+            {
+                dispatch_or_queue_event(PlatformEvent::FilesDropped { window_id, paths });
+            }
+            LRESULT(0)
+        }
+
         WM_CLOSE => {
             if let Some(window_id) = with_entry(hwnd, |e| e.window_id) {
                 dispatch_or_queue_event(PlatformEvent::CloseRequested { window_id });
@@ -1614,4 +1616,21 @@ fn window_wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
 
         _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
     }
+}
+
+fn collect_drop_paths(hdrop: HDROP) -> Vec<PathBuf> {
+    let file_count = unsafe { DragQueryFileW(hdrop, 0xFFFF_FFFF, None) };
+    let mut paths = Vec::with_capacity(file_count as usize);
+    for ix in 0..file_count {
+        let len = unsafe { DragQueryFileW(hdrop, ix, None) } as usize;
+        if len == 0 {
+            continue;
+        }
+        let mut buffer = vec![0u16; len + 1];
+        let written = unsafe { DragQueryFileW(hdrop, ix, Some(buffer.as_mut_slice())) } as usize;
+        if written > 0 {
+            paths.push(PathBuf::from(OsString::from_wide(&buffer[..written])));
+        }
+    }
+    paths
 }

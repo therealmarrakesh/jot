@@ -231,24 +231,6 @@ impl<E> JobsInner<E> {
     }
 }
 
-pub(crate) struct EventPoster<E> {
-    inner: Arc<JobsInner<E>>,
-}
-
-impl<E> Clone for EventPoster<E> {
-    fn clone(&self) -> Self {
-        Self {
-            inner: self.inner.clone(),
-        }
-    }
-}
-
-impl<E> EventPoster<E> {
-    pub(crate) fn post(&self, event: E) {
-        self.inner.push(event, None);
-    }
-}
-
 #[derive(Default)]
 pub(crate) struct TimerHandle {
     cancelled: Option<Arc<AtomicBool>>,
@@ -288,10 +270,9 @@ impl<E: Send + 'static> Jobs<E> {
         *self.inner.wake.lock().unwrap_or_else(|e| e.into_inner()) = Some(wake);
     }
 
-    pub(crate) fn poster(&self) -> EventPoster<E> {
-        EventPoster {
-            inner: self.inner.clone(),
-        }
+    #[cfg(test)]
+    pub(crate) fn post(&self, event: E) {
+        self.inner.push(event, None);
     }
 
     pub(crate) fn after(&self, delay: Duration, event: E) -> TimerHandle {
