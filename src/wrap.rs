@@ -1277,6 +1277,33 @@ mod tests {
         TextStyle::regular("Arial", 14.)
     }
 
+    /// A long unwrapped line is shaped only around the viewport, but always across all of it.
+    #[test]
+    fn huge_unwrapped_lines_are_shaped_across_the_viewport() {
+        let ts = TextSystem::new().unwrap();
+        let text = Rope::from(format!("short\n{}\nend", "x".repeat(20_000)).as_str());
+        let mut wrap = WrapIndex::new(test_style(), None);
+        wrap.sync_layout(&text, &test_style(), None, &ts);
+        for scroll_x in [0.0, -5_000.0, -40_000.0] {
+            let size = size(300., 100.);
+            let view = Viewport {
+                size,
+                scroll_x,
+                scroll_y: 0.0,
+            };
+            let (layout, windowed) = wrap.layout_visible(&text, view, 0, false, 20., &ts);
+            assert!(windowed);
+            let VisualRow::Windowed { start_x, line, .. } = &layout.lines[1].layout.rows[0] else {
+                panic!("the long line isn't windowed");
+            };
+            let (left, right) = (*start_x, start_x + line.width);
+            assert!(
+                left <= -scroll_x && right >= -scroll_x + size.width,
+                "{left}..{right} at {scroll_x}"
+            );
+        }
+    }
+
     #[test]
     fn incremental_splice_longest_row_and_ascii_fast_fit() {
         let mut index = WrapIndex::new(test_style(), Some(10.));

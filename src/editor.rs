@@ -2076,6 +2076,75 @@ mod tests {
 
     use super::*;
 
+    /// Drawing and clicking agree: clicking the middle of the drawn caret lands on the caret,
+    /// clicking inside a drawn selection box lands inside the selection, and the IME underline
+    /// covers the composition. Runs over wrapped, scrolled and horizontally windowed lines.
+    #[test]
+    fn clicks_land_where_the_caret_and_selection_are_drawn() {
+        let ts = TextSystem::new().unwrap();
+        let palette = Palette::resolve(false, None, None);
+        let style = EditorPaintStyle {
+            text: TextStyle::regular("Arial", 14.),
+            line_height: 20.,
+            color: palette.text_primary,
+        };
+        let params = EditorPaintParams {
+            style: &style,
+            palette,
+            window_active: true,
+            focused: true,
+            show_selection: true,
+            scale: 1.0,
+            caret_width_px: 1,
+        };
+        let bounds = Rect::new(point(10., 20.), size(300., 120.));
+        let words = "lorem ipsum dolor sit amet ".repeat(30);
+        let text = format!("short line\n{words}\n\tindented {words}\n{}\nend", "x".repeat(6000));
+        for soft_wrap in [true, false] {
+            let paddings = Edges::ZERO;
+            let opts = DocOptions { soft_wrap, paddings };
+            let mut ed = Editor::document(Rope::from(text.as_str()), opts);
+            for offset in (0..=text.len()).step_by(37) {
+                ed.set_selected_range(offset..offset);
+                ed.prepare(bounds, params, &ts);
+                let caret = ed.caret_bounds().unwrap();
+                assert!(bounds.contains(caret.center()), "caret {caret:?} off screen at {offset}");
+                let (hit, _) = ed.hit_test_point(caret.center());
+                assert_eq!(hit, offset, "caret at {offset}, wrap {soft_wrap}");
+            }
+
+            // A click between a wheel scroll and the next layout still lands on the text under it.
+            ed.set_selected_range(1700..1700);
+            ed.prepare(bounds, params, &ts);
+            let caret = ed.caret_bounds().unwrap();
+            let before = ed.scroll_offset();
+            let wheel = if soft_wrap { point(0., 1.) } else { point(-1., 0.) };
+            ed.on_scroll_wheel(wheel, false, Modifiers::default(), 20.);
+            let moved = ed.scroll_offset() - before;
+            assert!(moved != Point::ZERO, "wheel {wheel:?} didn't scroll");
+            assert_eq!(ed.hit_test_point(caret.center() + moved).0, 1700);
+
+
+            let selection = 15..90;
+            ed.set_selected_range(selection.clone());
+            ed.prepare(bounds, params, &ts);
+            let rects = ed.frame.as_ref().unwrap().selection_rects.clone();
+            assert!(!rects.is_empty());
+            for rect in rects {
+                let (hit, _) = ed.hit_test_point(rect.center());
+                assert!(selection.contains(&hit) || hit == selection.end, "box {rect:?} hit {hit}");
+            }
+
+            ed.set_selected_range(40..40);
+            ed.handle_ime_composition("にほん", 2, &ts);
+            ed.prepare(bounds, params, &ts);
+            let composing = ed.model().composition().map(|c| c.start..c.end);
+            assert_eq!(ed.frame.as_ref().unwrap().marked_range, composing);
+            let caret = ed.caret_bounds().unwrap();
+            assert_eq!(ed.hit_test_point(caret.center()).0, ed.model().cursor());
+        }
+    }
+
     #[test]
     fn editor_direct_typing_undo_redo_and_word_navigation() {
         let ts = TextSystem::new().unwrap();
