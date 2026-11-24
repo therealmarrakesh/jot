@@ -615,7 +615,7 @@ impl Editor {
     }
 
     pub(crate) fn selected_string(&self) -> Option<String> {
-        (!self.model.selection().is_empty()).then(|| self.model.selected_text().to_string())
+        (!self.model.selection().is_empty()).then(|| self.model.text().slice(self.model.selection().range()).to_string())
     }
 
     pub(crate) fn prepare_cut(&mut self) -> Option<String> {
@@ -688,16 +688,17 @@ impl Editor {
                     self.commit_edit(Some(change), ts, timers);
                 }
             }
+            EditCommand::IndentInline | EditCommand::Indent | EditCommand::Outdent
+                if !self.model.is_multi_line() =>
+            {
+                return false;
+            }
             EditCommand::IndentInline | EditCommand::Indent => {
-                let Some(change) = self.model.indent(matches!(command, EditCommand::Indent)) else {
-                    return false;
-                };
+                let change = self.model.indent(matches!(command, EditCommand::Indent));
                 self.commit_edit(change, ts, timers);
             }
             EditCommand::Outdent => {
-                let Some(change) = self.model.outdent() else {
-                    return false;
-                };
+                let change = self.model.outdent();
                 self.commit_edit(change, ts, timers);
             }
             EditCommand::SelectAll => self.select_all(),
@@ -1150,7 +1151,7 @@ impl Editor {
             && !self.caret_hidden
             && (self.model.selection().is_empty() || self.model.composition().is_some());
         frame.marked_range = (!is_empty_field)
-            .then(|| self.model.composition_range())
+            .then(|| self.model.composition().map(|c| c.start..c.end))
             .flatten();
         if params.window_active
             && params.show_selection
@@ -3342,7 +3343,7 @@ mod tests {
             &ts,
             &mut timers,
         ));
-        assert_eq!(ed.model().selected_text().to_string(), "world");
+        assert_eq!(ed.model().text().slice(ed.model().selection().range()).to_string(), "world");
 
         let copied = ed.selected_string();
         assert_eq!(copied.as_deref(), Some("world"));

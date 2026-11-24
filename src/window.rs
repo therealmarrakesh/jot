@@ -816,7 +816,8 @@ impl MainWindow {
 
 impl MainWindow {
     fn open_find(&mut self, replace: bool, shell: &Shell) {
-        let selected = self.active_editor().model().selected_text().to_string();
+        let model = self.active_editor().model();
+        let selected = model.text().slice(model.selection().range()).to_string();
         self.find.open(replace, &selected, &shell.text_system);
         self.set_focus(Focus::Editor(EditorSlot::FindQuery), shell);
         self.dirty = true;

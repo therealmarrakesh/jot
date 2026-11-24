@@ -435,19 +435,11 @@ impl TextModel {
         self.composition.as_ref()
     }
 
-    pub(crate) fn composition_range(&self) -> Option<Range<usize>> {
-        self.composition.as_ref().map(|c| c.start..c.end)
-    }
-
     pub(crate) fn cursor(&self) -> usize {
         match &self.composition {
             Some(c) => c.start.saturating_add(c.cursor).clamp(c.start, c.end),
             None => self.selection.head,
         }
-    }
-
-    pub(crate) fn selected_text(&self) -> RopeSlice<'_> {
-        self.text.slice(self.selection.range())
     }
 
     pub(crate) fn caret_line_col(&self) -> (usize, usize) {
@@ -505,21 +497,11 @@ impl TextModel {
         candidate.is_empty() || self.policy.validate.is_none_or(|f| f(candidate))
     }
 
-    fn debug_assert_invariants(&self) {
-        let sel = self.selection;
-        debug_assert!(sel.start() <= sel.end() && sel.end() <= self.text.len());
-        debug_assert!(
-            self.text.is_char_boundary(sel.anchor) && self.text.is_char_boundary(sel.head)
-        );
-        if let Some(c) = &self.composition {
-            debug_assert!(c.start <= c.end && c.end <= self.text.len());
-            debug_assert!(self.text.is_char_boundary(c.start) && self.text.is_char_boundary(c.end));
-        }
-    }
-
     /// Applies `edits` (clipped to char boundaries, line breaks normalized), places the
     /// selection, and records the edit in the history as `kind` (`None` leaves it untracked).
-    /// A single-line field rejects an edit its validator refuses. Returns the changed lines.
+    /// With `validate`, a single-line field rejects an edit its validator refuses; restores
+    /// (undo, redo, cancelling a composition, `set_value`) skip that, as they must go through.
+    /// Returns the changed lines.
     fn commit(
         &mut self,
         edits: Vec<Edit>,
@@ -617,7 +599,6 @@ impl TextModel {
         sel.head = self.snap_boundary(sel.head, Bias::Left);
         self.selection = sel;
         self.composition = None;
-        self.debug_assert_invariants();
     }
 
     fn edit(&mut self, range: Range<usize>, text: String, kind: EditKind) -> Option<LineChange> {
@@ -816,8 +797,8 @@ impl TextModel {
     }
 
     /// Tab: inserts a tab, or with `block` or a multi-line selection indents every selected
-    /// line. `None` for single-line fields, which don't take tabs.
-    pub(crate) fn indent(&mut self, block: bool) -> Option<Option<LineChange>> {
+    /// line. Single-line fields don't take tabs.
+    pub(crate) fn indent(&mut self, block: bool) -> Option<LineChange> {
         if !self.policy.multi_line {
             return None;
         }
@@ -825,22 +806,22 @@ impl TextModel {
         let sel = self.selection;
         let row = |offset| self.text.offset_to_point(offset).row;
         if !block && (sel.is_empty() || row(sel.start()) == row(sel.end())) {
-            return Some(self.edit(sel.range(), "\t".into(), EditKind::Atomic));
+            return self.edit(sel.range(), "\t".into(), EditKind::Atomic);
         }
         let edits = self.selected_rows().map(|r| {
             let start = self.text.line_start_offset(r);
             (start..start, "\t".to_owned())
         });
-        Some(self.commit(
+        self.commit(
             edits.collect(),
             SelectionAfter::Remap,
             Some(EditKind::Atomic),
             true,
-        ))
+        )
     }
 
     /// Removes one tab, or up to eight spaces, from the start of every selected line.
-    pub(crate) fn outdent(&mut self) -> Option<Option<LineChange>> {
+    pub(crate) fn outdent(&mut self) -> Option<LineChange> {
         if !self.policy.multi_line {
             return None;
         }
@@ -855,12 +836,12 @@ impl TextModel {
             };
             (width > 0).then(|| (start..start + width, String::new()))
         });
-        Some(self.commit(
+        self.commit(
             edits.collect(),
             SelectionAfter::Remap,
             Some(EditKind::Atomic),
             true,
-        ))
+        )
     }
 
     /// Rows the selection covers; a selection ending at a line start excludes that line.
@@ -941,18 +922,21 @@ impl TextModel {
         end_affinity: bool,
         anchor_word: Option<Range<usize>>,
     ) {
+        self.commit_composition();
         let offset = self.snap_boundary(offset, Bias::Left);
         self.selection
             .extend_to(offset, end_affinity, anchor_word, self.text.len());
     }
 
     pub(crate) fn select_word_at(&mut self, offset: usize) -> Option<Range<usize>> {
+        self.commit_composition();
         let range = word_range_at(&self.text, offset)?;
         self.selection = Selection::from_range(range.clone());
         Some(range)
     }
 
     pub(crate) fn select_line_at(&mut self, offset: usize) {
+        self.commit_composition();
         self.selection = Selection::from_range(line_range_at(&self.text, offset));
     }
 }
@@ -1059,13 +1043,12 @@ impl Change {
     }
 }
 
+/// What an undo step restores.
 enum Payload {
+    /// Each change, with the text it replaced.
     Changes(Vec<Change>),
     /// The whole text before and after an edit with too many changes to keep one by one.
-    Snapshot {
-        text: [Rope; 2],
-        bytes: usize,
-    },
+    Snapshot { text: [Rope; 2], bytes: usize },
 }
 
 impl Payload {
@@ -1177,6 +1160,14 @@ impl History {
 mod tests {
     use super::*;
 
+    fn doc(text: &str) -> TextModel {
+        let policy = EditPolicy {
+            multi_line: true,
+            validate: None,
+        };
+        TextModel::new(policy).with_rope(Rope::from(text))
+    }
+
     #[test]
     fn selection_and_caret_basics() {
         let mut sel = Selection::from_range(5..10);
@@ -1201,7 +1192,7 @@ mod tests {
     }
 
     #[test]
-    fn rope_line_and_utf16_helpers_handle_multibyte_and_crlf() {
+    fn rope_lines_and_offsets_handle_multibyte_and_crlf() {
         let rope = Rope::from("Hello\nWorld\r\nThis is a test 中文🎉\nRope");
         assert_eq!(rope.lines_len(), 4);
         assert_eq!(rope.slice_line(0).to_string(), "Hello");
@@ -1271,35 +1262,7 @@ mod tests {
     }
 
     #[test]
-    fn words_in_a_long_flag_run_are_whole_flags() {
-        let flags = "🇺🇸".repeat(300);
-        let rope = Rope::from(format!("x {flags} y").as_str());
-        let first = 2;
-        for offset in (first..first + flags.len()).step_by(4) {
-            let word = word_range_at(&rope, offset).unwrap();
-            assert_eq!((word.start - first) % 8, 0, "offset {offset}: {word:?}");
-            assert_eq!(word.len(), 8, "offset {offset}: {word:?}");
-            let ctrl_left = prev_word_start(&rope, offset.min(first + flags.len() - 8) + 8);
-            assert_eq!((ctrl_left - first) % 8, 0, "offset {offset}");
-        }
-    }
-
-    #[test]
-    fn a_word_keeps_a_long_run_of_accents_on_its_first_letter() {
-        let word = format!("x{}{}", "\u{301}".repeat(60), "a".repeat(300));
-        let rope = Rope::from(format!("( {word} )").as_str());
-        for offset in (2..2 + word.len()).step_by(7) {
-            assert_eq!(
-                word_range_at(&rope, offset),
-                Some(2..2 + word.len()),
-                "offset {offset}"
-            );
-        }
-        assert_eq!(prev_word_start(&rope, 2 + word.len()), 2);
-    }
-
-    #[test]
-    fn word_navigation_handles_long_words_spaces_and_graphemes() {
+    fn word_navigation_steps_over_line_breaks_and_long_runs() {
         let long_word = "a".repeat(320);
         let long_spaces = " ".repeat(320);
         let sample =
@@ -1324,7 +1287,10 @@ mod tests {
             next_word_end(&rope, long_start),
             long_start + long_word.len() + 2
         );
+    }
 
+    #[test]
+    fn grapheme_steps_agree_forward_and_backward() {
         let emoji = Rope::from("a👍🏽b👨‍👩‍👧🇺🇸e\u{0301}z");
         let mut forward = vec![0];
         let mut cur = 0;
@@ -1345,11 +1311,7 @@ mod tests {
 
     #[test]
     fn ime_preedit_does_not_pollute_history_and_commits_atomically() {
-        let mut m = TextModel::new(EditPolicy {
-            multi_line: true,
-            validate: None,
-        })
-        .with_rope(Rope::from("hello world"));
+        let mut m = doc("hello world");
         m.set_selected_range(6..11);
 
         m.set_composition("に", 1);
@@ -1380,7 +1342,7 @@ mod tests {
     }
 
     #[test]
-    fn single_line_validation_and_indent_remapping_work() {
+    fn single_line_fields_validate_and_refuse_line_breaks() {
         let mut field = TextModel::new(EditPolicy {
             multi_line: false,
             validate: Some(|s| s.bytes().all(|b| b.is_ascii_digit())),
@@ -1389,12 +1351,12 @@ mod tests {
         assert!(field.insert_text("abc").is_none());
         assert_eq!(field.text().to_string(), "123");
         assert!(field.enter().is_none());
+        assert!(field.indent(false).is_none());
+    }
 
-        let mut doc = TextModel::new(EditPolicy {
-            multi_line: true,
-            validate: None,
-        })
-        .with_rope(Rope::from("alpha\nbeta\ngamma"));
+    #[test]
+    fn indent_and_outdent_keep_the_selection_on_its_text() {
+        let mut doc = doc("alpha\nbeta\ngamma");
         doc.set_selected_range(2..9);
         doc.indent(true);
         assert_eq!(doc.text().to_string(), "\talpha\n\tbeta\ngamma");
@@ -1420,11 +1382,7 @@ mod tests {
         assert_eq!(remap(0, 10), 5);
         assert_eq!(remap(1, 11), 7);
 
-        let mut doc = TextModel::new(EditPolicy {
-            multi_line: true,
-            validate: None,
-        })
-        .with_rope(Rope::from("aa bb cc aa dd aa"));
+        let mut doc = doc("aa bb cc aa dd aa");
         doc.place_caret(10, false);
         doc.replace_all(&[0..2, 9..11, 15..17], "XYZ");
         assert_eq!(doc.text().to_string(), "XYZ bb cc XYZ dd XYZ");

@@ -257,7 +257,7 @@ impl FindBar {
         let is_match = self.matcher.as_ref().is_some_and(|m| {
             sel_len > 0
                 && sel_len <= m.max_match_bytes()
-                && m.is_match(&editor.model().selected_text().to_string())
+                && m.is_match(&editor.model().text().slice(editor.model().selection().range()).to_string())
         });
         if is_match {
             let replacement = self.replacement.model().text().to_string();
