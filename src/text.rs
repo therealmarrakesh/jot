@@ -159,19 +159,19 @@ fn is_horizontal_ws(ch: char) -> bool {
     ch.is_whitespace() && !matches!(ch, '\n' | '\r')
 }
 
-/// The far end of the run of horizontal whitespace at `from`, stopping at `limit` (scanning
-/// backwards when `limit` is before `from`).
-fn skip_spaces(text: &Rope, mut from: usize, limit: usize) -> usize {
+/// The far end of the run of characters matching `keep` at `from`, stopping at `limit`
+/// (scanning backwards when `limit` is before `from`).
+fn skip_while(text: &Rope, mut from: usize, limit: usize, keep: fn(char) -> bool) -> usize {
     if limit < from {
         for ch in text.chars_at(from).reversed() {
-            if from <= limit || !is_horizontal_ws(ch) {
+            if from <= limit || !keep(ch) {
                 break;
             }
             from -= ch.len_utf8();
         }
     } else {
         for ch in text.chars_at(from) {
-            if from >= limit || !is_horizontal_ws(ch) {
+            if from >= limit || !keep(ch) {
                 break;
             }
             from += ch.len_utf8();
@@ -180,7 +180,14 @@ fn skip_spaces(text: &Rope, mut from: usize, limit: usize) -> usize {
     from
 }
 
-/// Whether a Unicode word segment is a word rather than a run of horizontal whitespace.
+/// No word spans a space or tab, so word segmentation (`unicode-segmentation`) only needs the
+/// run of text between them. (A mark or format character right after a space belongs to the
+/// space's segment; here it starts the run instead.)
+fn in_run(ch: char) -> bool {
+    !matches!(ch, ' ' | '\t')
+}
+
+/// Whether a word segment is a word rather than a run of horizontal whitespace.
 fn is_word(segment: &str) -> bool {
     !segment.chars().all(is_horizontal_ws)
 }
@@ -195,13 +202,15 @@ fn word_range_at(text: &Rope, offset: usize) -> Option<Range<usize>> {
     if !line.contains(&pos) {
         return None;
     }
+    let run = |keep| skip_while(text, pos, line.start, keep)..skip_while(text, pos, line.end, keep);
     if text.char_at(pos).is_some_and(is_horizontal_ws) {
-        return Some(skip_spaces(text, pos, line.start)..skip_spaces(text, pos, line.end));
+        return Some(run(is_horizontal_ws));
     }
-    let words: Cow<str> = text.slice(line.clone()).into();
+    let run = run(in_run);
+    let words: Cow<str> = text.slice(run.clone()).into();
     let mut words = words.split_word_bound_indices();
-    let (i, word) = words.find(|(i, w)| line.start + i + w.len() > pos)?;
-    Some(line.start + i..line.start + i + word.len())
+    let (i, word) = words.find(|(i, w)| run.start + i + w.len() > pos)?;
+    Some(run.start + i..run.start + i + word.len())
 }
 
 /// Ctrl+Left: the start of the word before `offset`, skipping spaces; a line start steps back
@@ -212,11 +221,13 @@ pub(crate) fn prev_word_start(text: &Rope, offset: usize) -> usize {
         return offset.saturating_sub(1);
     }
     let line_start = text.line_start_offset(text.offset_to_point(offset).row);
-    let before: Cow<str> = text.slice(line_start..offset).into();
+    let end = skip_while(text, offset, line_start, is_horizontal_ws);
+    let start = skip_while(text, end, line_start, in_run);
+    let before: Cow<str> = text.slice(start..end).into();
     let mut words = before.split_word_bound_indices();
     words
         .rfind(|(_, w)| is_word(w))
-        .map_or(line_start, |(i, _)| line_start + i)
+        .map_or(line_start, |(i, _)| start + i)
 }
 
 /// Ctrl+Right: the end of the word after `offset` plus the spaces that follow it; a line end
@@ -228,14 +239,15 @@ pub(crate) fn next_word_end(text: &Rope, offset: usize) -> usize {
     }
     let line_end = text.line_end_offset(text.offset_to_point(offset).row);
     if text.char_at(offset).is_some_and(is_horizontal_ws) {
-        return skip_spaces(text, offset, line_end);
+        return skip_while(text, offset, line_end, is_horizontal_ws);
     }
-    let after: Cow<str> = text.slice(offset..line_end).into();
+    let end = skip_while(text, offset, line_end, in_run);
+    let after: Cow<str> = text.slice(offset..end).into();
     let mut words = after.split_word_bound_indices();
     let word_end = words
         .find(|(_, w)| is_word(w))
-        .map_or(line_end, |(i, w)| offset + i + w.len());
-    skip_spaces(text, word_end, line_end)
+        .map_or(end, |(i, w)| offset + i + w.len());
+    skip_while(text, word_end, line_end, is_horizontal_ws)
 }
 
 /// A selection from `anchor` to `head` (the caret). `end_affinity` keeps a caret at a soft-wrap
