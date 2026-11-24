@@ -427,6 +427,10 @@ impl MainWindow {
                     self.press_dialog_button(ix, cx);
                     true
                 }
+                DialogKey::Cancel => {
+                    self.cancel_dialog(cx);
+                    true
+                }
                 DialogKey::EditGoToLine => edit_shortcut(ev)
                     .is_some_and(|cmd| self.run_edit_command(EditorSlot::GoToLine, cmd, cx.shell)),
                 DialogKey::Consumed => true,

@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 use std::time::Duration;
 
 use crate::editor::{Editor, FieldOptions};
-use crate::files::Prompt;
+use crate::files::{Prompt, PromptId};
 use crate::ids::{AnimKey, CustomDraw, EditorSlot, Focus, HitId, Node, TabId, UiState};
 use crate::platform::{CursorStyle, Key, KeyEvent};
 use crate::theme::{Palette, theme_shadow};
@@ -40,6 +40,7 @@ pub(crate) enum DialogKey {
     PassThrough,
     Focus(Focus),
     PressButton(usize),
+    Cancel,
     EditGoToLine,
     Consumed,
 }
@@ -54,16 +55,31 @@ pub(crate) enum DialogKind {
 impl DialogKind {
     fn referenced_tab(&self) -> Option<TabId> {
         match self {
-            Self::Prompt(p) => p.tab,
+            Self::Prompt(p) => p.tab(),
             Self::GoTo | Self::LineOutOfRange => None,
         }
     }
 
-    fn buttons(&self) -> &'static [&'static str] {
+    fn prompt_id(&self) -> Option<PromptId> {
         match self {
-            Self::GoTo => GO_TO_BUTTONS,
-            Self::LineOutOfRange => OK_BUTTONS,
-            Self::Prompt(p) => p.buttons,
+            Self::Prompt(p) => p.reply.map(|(id, _)| id),
+            Self::GoTo | Self::LineOutOfRange => None,
+        }
+    }
+
+    fn button_count(&self) -> usize {
+        match self {
+            Self::GoTo => GO_TO_BUTTONS.len(),
+            Self::LineOutOfRange => OK_BUTTONS.len(),
+            Self::Prompt(p) => p.choices.len(),
+        }
+    }
+
+    fn button_labels(&self) -> Vec<&'static str> {
+        match self {
+            Self::GoTo => GO_TO_BUTTONS.to_vec(),
+            Self::LineOutOfRange => OK_BUTTONS.to_vec(),
+            Self::Prompt(p) => p.choices.iter().map(|&(label, _)| label).collect(),
         }
     }
 
@@ -128,10 +144,6 @@ impl Dialogs {
         self.open.iter().rev().find(|d| d.transition.is_open())
     }
 
-    fn active_button_count(&self) -> usize {
-        self.active().map_or(0, |d| d.kind.buttons().len())
-    }
-
     pub(crate) fn enqueue(&mut self, kind: DialogKind) -> Option<Focus> {
         if self.is_open() {
             self.pending.push_back(kind);
@@ -176,6 +188,24 @@ impl Dialogs {
         self.pending.retain(|d| d.referenced_tab() != Some(id));
     }
 
+    pub(crate) fn drain_prompt_ids(&mut self) -> Vec<PromptId> {
+        let mut ids = Vec::new();
+        for d in &mut self.open {
+            if d.transition.is_open()
+                && let Some(pid) = d.kind.prompt_id()
+            {
+                ids.push(pid);
+                d.transition.close();
+            }
+        }
+        for d in self.pending.drain(..) {
+            if let Some(pid) = d.prompt_id() {
+                ids.push(pid);
+            }
+        }
+        ids
+    }
+
     pub(crate) fn take_active(&mut self) -> Option<DialogKind> {
         let ix = self.open.iter().rposition(|d| d.transition.is_open())?;
         Some(self.open[ix].kind.clone())
@@ -200,7 +230,7 @@ impl Dialogs {
                 }
             }
             (false, false, false, false, Key::Escape) => {
-                return DialogKey::PressButton(self.active_button_count().saturating_sub(1));
+                return DialogKey::Cancel;
             }
             (false, false, false, false, Key::Tab) => {
                 return self
@@ -223,7 +253,7 @@ impl Dialogs {
 
     fn next_focus_step(&self, current: Focus, delta: isize) -> Option<Focus> {
         let dialog = self.active()?;
-        let count = dialog.kind.buttons().len();
+        let count = dialog.kind.button_count();
         let mut ring = Vec::with_capacity(count + 1);
         if dialog.kind.is_go_to() {
             ring.push(Focus::Editor(EditorSlot::GoToLine));
@@ -265,7 +295,7 @@ impl Dialogs {
             Focus::DialogButton(ix) => Some(ix),
             _ => None,
         };
-        let labels = dialog.kind.buttons();
+        let labels = dialog.kind.button_labels();
         let closing = dialog.transition.is_closing();
         let buttons: Vec<Node> = labels
             .iter()
@@ -452,7 +482,7 @@ mod tests {
         );
         assert_eq!(
             dialogs.on_key(key(Key::Escape, plain), initial),
-            DialogKey::PressButton(1)
+            DialogKey::Cancel
         );
         assert_eq!(
             dialogs.on_key(key(Key::Char('a'), plain), initial),

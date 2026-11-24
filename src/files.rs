@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashSet, VecDeque};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -27,13 +27,27 @@ impl PromptId {
     }
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(crate) enum PromptAnswer {
+    Save,
+    Discard,
+    Continue,
+    Cancel,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct Prompt {
-    pub(crate) id: Option<PromptId>,
     pub(crate) title: SharedStr,
     pub(crate) message: SharedStr,
-    pub(crate) buttons: &'static [&'static str],
-    pub(crate) tab: Option<TabId>,
+    pub(crate) choices: &'static [(&'static str, PromptAnswer)],
+    pub(crate) cancel: PromptAnswer,
+    pub(crate) reply: Option<(PromptId, TabId)>,
+}
+
+impl Prompt {
+    pub(crate) fn tab(&self) -> Option<TabId> {
+        self.reply.map(|(_, tab)| tab)
+    }
 }
 
 const UNTITLED_FILE_NAME: &str = "Untitled.txt";
@@ -42,9 +56,16 @@ const TEXT_FILE_TYPE: (&str, &str) = ("Text documents (*.txt)", "*.txt");
 const ALL_FILE_TYPE: (&str, &str) = ("All files", "*.*");
 const TEXT_EXTENSION: &str = "txt";
 const ENCODING_LABEL: &str = "Encoding:";
-const OK_BUTTONS: &[&str] = &["OK"];
-const DISCARD_BUTTONS: &[&str] = &["Save", "Don't save", "Cancel"];
-const LOSSY_BUTTONS: &[&str] = &["OK", "Cancel"];
+const OK_CHOICES: &[(&str, PromptAnswer)] = &[("OK", PromptAnswer::Cancel)];
+const DISCARD_CHOICES: &[(&str, PromptAnswer)] = &[
+    ("Save", PromptAnswer::Save),
+    ("Don't save", PromptAnswer::Discard),
+    ("Cancel", PromptAnswer::Cancel),
+];
+const LOSSY_CHOICES: &[(&str, PromptAnswer)] = &[
+    ("OK", PromptAnswer::Continue),
+    ("Cancel", PromptAnswer::Cancel),
+];
 const LOSSY_ANSI_WARNING: &str = "This file contains characters in Unicode format which will be lost if you save this file as an ANSI encoded text file. To keep the Unicode information, click Cancel below and then select one of the Unicode options from the Encoding drop down list. Continue?";
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
@@ -191,51 +212,50 @@ pub(crate) trait DocHost {
     fn show_prompt(&mut self, window: WindowId, prompt: Prompt);
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum Step {
-    SaveTab { id: TabId, activate: bool },
-    SaveTabAs(TabId),
-    ConfirmDiscard { id: TabId, activate: bool },
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Finish {
-    None,
-    RemoveTab(TabId),
-    CloseWindow(WindowId),
+enum Goal {
+    Save(Option<TabId>),
+    SaveAs(Option<TabId>),
+    SaveAll(VecDeque<TabId>),
+    CloseTab(TabId),
+    CloseWindow(VecDeque<TabId>),
 }
 
 enum Awaiting {
-    Nothing,
+    Idle,
     DiscardPrompt { prompt: PromptId, tab: TabId },
     SaveDialog { tab: TabId, format: Format },
-    QueuedWrite,
+    QueuedWrite { tab: TabId, path: PathBuf, format: Format },
     Write(SaveJob),
     LossyPrompt { prompt: PromptId, job: SaveJob },
+}
+
+enum NextAction {
+    Save { tab: TabId, activate: bool },
+    SaveAs(TabId),
+    ConfirmDiscard { tab: TabId, activate: bool },
+    RemoveTab(TabId),
+    CloseWindow(WindowId),
+    Done,
 }
 
 struct Workflow {
     id: WorkflowId,
     origin: WindowId,
-    queue: VecDeque<Step>,
+    goal: Goal,
+    save_next: Option<TabId>,
     approved: Vec<(TabId, u64)>,
-    finish: Finish,
     awaiting: Awaiting,
 }
 
 impl Workflow {
-    fn new(
-        origin: WindowId,
-        steps: impl IntoIterator<Item = Step>,
-        finish: Finish,
-    ) -> Self {
+    fn new(origin: WindowId, goal: Goal) -> Self {
         Self {
             id: WorkflowId::next(),
             origin,
-            queue: steps.into_iter().collect(),
+            goal,
+            save_next: None,
             approved: Vec::new(),
-            finish,
-            awaiting: Awaiting::Nothing,
+            awaiting: Awaiting::Idle,
         }
     }
 
@@ -249,18 +269,85 @@ impl Workflow {
             .iter()
             .any(|&(id, rev)| id == tab && rev == revision)
     }
-}
 
-struct PendingSave {
-    wf: WorkflowId,
-    path: PathBuf,
-    format: Format,
+    fn next_step(&mut self, host: &impl DocHost) -> NextAction {
+        if let Some(tab) = self.save_next.take() {
+            return NextAction::Save {
+                tab,
+                activate: false,
+            };
+        }
+        match &mut self.goal {
+            Goal::Save(slot) => match slot.take() {
+                Some(tab) => NextAction::Save {
+                    tab,
+                    activate: false,
+                },
+                None => NextAction::Done,
+            },
+            Goal::SaveAs(slot) => match slot.take() {
+                Some(tab) => NextAction::SaveAs(tab),
+                None => NextAction::Done,
+            },
+            Goal::SaveAll(queue) => match queue.pop_front() {
+                Some(tab) => NextAction::Save {
+                    tab,
+                    activate: true,
+                },
+                None => NextAction::Done,
+            },
+            Goal::CloseTab(tab) => {
+                let tab = *tab;
+                let Some(info) = host.tab_info(tab) else {
+                    return NextAction::Done;
+                };
+                if info.dirty && !self.is_discard_approved(tab, info.revision) {
+                    NextAction::ConfirmDiscard {
+                        tab,
+                        activate: false,
+                    }
+                } else {
+                    NextAction::RemoveTab(tab)
+                }
+            }
+            Goal::CloseWindow(pending) => loop {
+                if let Some(tab) = pending.pop_front() {
+                    if let Some(info) = host.tab_info(tab)
+                        && info.dirty
+                        && !self.approved.iter().any(|&(id, rev)| id == tab && rev == info.revision)
+                    {
+                        return NextAction::ConfirmDiscard {
+                            tab,
+                            activate: true,
+                        };
+                    }
+                    continue;
+                }
+                let remaining: VecDeque<TabId> = host
+                    .window_dirty_tabs(self.origin)
+                    .into_iter()
+                    .filter(|&id| {
+                        host.tab_info(id).is_some_and(|t| {
+                            !self
+                                .approved
+                                .iter()
+                                .any(|&(aid, rev)| aid == id && rev == t.revision)
+                        })
+                    })
+                    .collect();
+                if remaining.is_empty() {
+                    return NextAction::CloseWindow(self.origin);
+                }
+                *pending = remaining;
+            },
+        }
+    }
 }
 
 #[derive(Default)]
 pub(crate) struct FileOps {
     flows: Vec<Workflow>,
-    saving: HashMap<TabId, Option<PendingSave>>,
+    writing: HashSet<TabId>,
     loading: HashSet<PathKey>,
     open_dialogs: HashSet<WindowId>,
     writes: WriteTracker,
@@ -283,8 +370,28 @@ impl FileOps {
         self.flows.iter().any(|f| f.origin == window)
     }
 
-    pub(crate) fn on_window_closed(&mut self, window: WindowId) {
+    pub(crate) fn on_window_closed(&mut self, window: WindowId, cancelled_prompts: &[PromptId]) {
         self.open_dialogs.remove(&window);
+        let mut freed_tabs = Vec::new();
+        self.flows.retain(|f| {
+            let prompt_cancelled = match &f.awaiting {
+                Awaiting::DiscardPrompt { prompt, .. } | Awaiting::LossyPrompt { prompt, .. } => {
+                    cancelled_prompts.contains(prompt)
+                }
+                _ => false,
+            };
+            let drop_flow = prompt_cancelled
+                || (f.origin == window && !matches!(f.awaiting, Awaiting::Write(_)));
+            if drop_flow
+                && let Awaiting::LossyPrompt { job, .. } = &f.awaiting
+            {
+                freed_tabs.push(job.tab);
+            }
+            !drop_flow
+        });
+        for tab in freed_tabs {
+            self.writing.remove(&tab);
+        }
     }
 
     pub(crate) fn request(
@@ -312,64 +419,28 @@ impl FileOps {
                 if info.path.is_some() && !info.dirty && !info.format.lossy_decode {
                     return;
                 }
-                self.start_workflow(
-                    Workflow::new(
-                        window,
-                        [Step::SaveTab {
-                            id: tab,
-                            activate: false,
-                        }],
-                        Finish::None,
-                    ),
-                    host,
-                    io,
-                );
+                self.start_workflow(Workflow::new(window, Goal::Save(Some(tab))), host, io);
             }
             FileRequest::SaveAs { window, tab } => {
-                self.start_workflow(
-                    Workflow::new(window, [Step::SaveTabAs(tab)], Finish::None),
-                    host,
-                    io,
-                );
+                self.start_workflow(Workflow::new(window, Goal::SaveAs(Some(tab))), host, io);
             }
             FileRequest::SaveAll { window } => {
                 let dirty = host.window_dirty_tabs(window);
                 if dirty.is_empty() {
                     return;
                 }
-                self.start_workflow(
-                    Workflow::new(
-                        window,
-                        dirty
-                            .into_iter()
-                            .map(|id| Step::SaveTab { id, activate: true }),
-                        Finish::None,
-                    ),
-                    host,
-                    io,
-                );
+                self.start_workflow(Workflow::new(window, Goal::SaveAll(dirty.into())), host, io);
             }
             FileRequest::CloseTab { window, tab } => {
                 let Some(info) = host.tab_info(tab) else {
                     return;
                 };
                 if !info.dirty {
-                    host.remove_tab(tab);
+                    self.remove_tab_and_prune(tab, host);
                     return;
                 }
                 host.activate_tab(info.window, tab, false);
-                self.start_workflow(
-                    Workflow::new(
-                        window,
-                        [Step::ConfirmDiscard {
-                            id: tab,
-                            activate: false,
-                        }],
-                        Finish::RemoveTab(tab),
-                    ),
-                    host,
-                    io,
-                );
+                self.start_workflow(Workflow::new(window, Goal::CloseTab(tab)), host, io);
             }
             FileRequest::CloseWindow { window } => {
                 let dirty = host.window_dirty_tabs(window);
@@ -380,18 +451,12 @@ impl FileOps {
                 if self
                     .flows
                     .iter()
-                    .any(|f| f.origin == window && f.finish == Finish::CloseWindow(window))
+                    .any(|f| f.origin == window && matches!(f.goal, Goal::CloseWindow(_)))
                 {
                     return;
                 }
                 self.start_workflow(
-                    Workflow::new(
-                        window,
-                        dirty
-                            .into_iter()
-                            .map(|id| Step::ConfirmDiscard { id, activate: true }),
-                        Finish::CloseWindow(window),
-                    ),
+                    Workflow::new(window, Goal::CloseWindow(dirty.into())),
                     host,
                     io,
                 );
@@ -402,7 +467,7 @@ impl FileOps {
     pub(crate) fn on_prompt(
         &mut self,
         prompt_id: PromptId,
-        button: usize,
+        answer: PromptAnswer,
         host: &mut impl DocHost,
         io: &mut Vec<FileIo>,
     ) {
@@ -415,28 +480,25 @@ impl FileOps {
             return;
         };
         let wf_id = self.flows[ix].id;
-        let awaiting = std::mem::replace(&mut self.flows[ix].awaiting, Awaiting::Nothing);
+        let awaiting = std::mem::replace(&mut self.flows[ix].awaiting, Awaiting::Idle);
         match awaiting {
-            Awaiting::DiscardPrompt { tab, .. } => match button {
-                0 => {
-                    self.flows[ix].queue.push_front(Step::SaveTab {
-                        id: tab,
-                        activate: false,
-                    });
+            Awaiting::DiscardPrompt { tab, .. } => match answer {
+                PromptAnswer::Save => {
+                    self.flows[ix].save_next = Some(tab);
                     self.advance(wf_id, host, io);
                 }
-                1 => {
+                PromptAnswer::Discard => {
                     if let Some(info) = host.tab_info(tab) {
                         self.flows[ix].approve_discard(tab, info.revision);
                     }
                     self.advance(wf_id, host, io);
                 }
-                _ => {
+                PromptAnswer::Continue | PromptAnswer::Cancel => {
                     self.flows.remove(ix);
                 }
             },
-            Awaiting::LossyPrompt { job, .. } => match button {
-                0 => {
+            Awaiting::LossyPrompt { job, .. } => match answer {
+                PromptAnswer::Continue => {
                     self.flows[ix].awaiting = Awaiting::Write(job.clone());
                     io.push(FileIo::WriteFile {
                         wf: wf_id,
@@ -444,10 +506,11 @@ impl FileOps {
                         force_lossy: true,
                     });
                 }
-                _ => {
+                PromptAnswer::Cancel | PromptAnswer::Save | PromptAnswer::Discard => {
                     let tab = job.tab;
-                    self.clear_saving(tab);
+                    self.writing.remove(&tab);
                     self.begin_save_as(wf_id, tab, host, io);
+                    self.wake_queued_write(tab, host, io);
                 }
             },
             _ => {}
@@ -470,18 +533,21 @@ impl FileOps {
                     Ok(Some(paths)) => self.open_paths(target, paths, host, io),
                     Ok(None) => {}
                     Err(err) => {
-                        host.show_prompt(target, dialog_error_prompt("Can't open file", err.to_string()));
+                        host.show_prompt(
+                            target,
+                            dialog_error_prompt("Can't open file", err.to_string()),
+                        );
                     }
                 }
             }
             FileEvent::FilesLoaded { window, results } => {
                 for (doc_path, res) in results {
-                    self.loading.remove(&doc_path.key);
+                    self.loading.remove(doc_path.key());
                     let dup = res
                         .as_ref()
                         .ok()
-                        .and_then(|loaded| host.find_tab_by_key(&loaded.doc_path.key))
-                        .or_else(|| host.find_tab_by_key(&doc_path.key));
+                        .and_then(|loaded| host.find_tab_by_key(loaded.doc_path.key()))
+                        .or_else(|| host.find_tab_by_key(doc_path.key()));
                     if let Some((win, tab)) = dup {
                         host.activate_tab(win, tab, true);
                         continue;
@@ -490,7 +556,10 @@ impl FileOps {
                         match res {
                             Ok(loaded) => host.adopt_loaded(target, loaded),
                             Err(err) => {
-                                host.show_prompt(target, load_error_prompt(doc_path.as_path(), err));
+                                host.show_prompt(
+                                    target,
+                                    load_error_prompt(doc_path.as_path(), err),
+                                );
                             }
                         }
                     }
@@ -502,13 +571,13 @@ impl FileOps {
                 };
                 let origin = self.flows[ix].origin;
                 let Awaiting::SaveDialog { tab, format } =
-                    std::mem::replace(&mut self.flows[ix].awaiting, Awaiting::Nothing)
+                    std::mem::replace(&mut self.flows[ix].awaiting, Awaiting::Idle)
                 else {
                     return;
                 };
                 match resolve_save_dialog(format, result) {
                     Ok(Some((path, next_format))) => {
-                        let key = PathKey::quick(&path);
+                        let key = PathKey::new(&path);
                         let conflict = host
                             .find_tab_by_key(&key)
                             .is_some_and(|(_, existing)| existing != tab);
@@ -537,23 +606,24 @@ impl FileOps {
                 };
                 let origin = self.flows[ix].origin;
                 let Awaiting::Write(job) =
-                    std::mem::replace(&mut self.flows[ix].awaiting, Awaiting::Nothing)
+                    std::mem::replace(&mut self.flows[ix].awaiting, Awaiting::Idle)
                 else {
                     return;
                 };
                 match outcome {
                     WriteOutcome::Saved { doc_path, format } => {
-                        let pending = self.saving.remove(&job.tab).flatten();
-                        host.mark_saved(job.tab, job.snapshot, doc_path, format);
+                        let tab = job.tab;
+                        self.writing.remove(&tab);
+                        host.mark_saved(tab, job.snapshot, doc_path, format);
                         self.advance(wf, host, io);
-                        if let Some(next) = pending {
-                            self.begin_write(next.wf, job.tab, next.path, next.format, host, io);
-                        }
+                        self.wake_queued_write(tab, host, io);
                     }
                     WriteOutcome::NeedsLossyConfirm => {
                         let Some(target) = self.prompt_window(job.tab, origin, host) else {
-                            self.clear_saving(job.tab);
+                            let tab = job.tab;
+                            self.writing.remove(&tab);
                             self.remove_flow(wf);
+                            self.wake_queued_write(tab, host, io);
                             return;
                         };
                         let prompt_id = PromptId::next();
@@ -565,14 +635,11 @@ impl FileOps {
                         host.show_prompt(target, prompt);
                     }
                     WriteOutcome::Error(err) => {
-                        self.clear_saving(job.tab);
-                        self.show_prompt_for(
-                            job.tab,
-                            origin,
-                            save_error_prompt(&job.path, &err),
-                            host,
-                        );
+                        let tab = job.tab;
+                        self.writing.remove(&tab);
+                        self.show_prompt_for(tab, origin, save_error_prompt(&job.path, &err), host);
                         self.remove_flow(wf);
+                        self.wake_queued_write(tab, host, io);
                     }
                 }
             }
@@ -592,18 +659,17 @@ impl FileOps {
         let mut to_load: Vec<DocPath> = Vec::new();
         let mut last_existing = None;
         for raw in paths {
-            let path = std::path::absolute(&raw).unwrap_or(raw);
-            let doc_path = DocPath::quick(path);
-            if let Some(found) = host.find_tab_by_key(&doc_path.key) {
+            let doc_path = DocPath::new(raw);
+            if let Some(found) = host.find_tab_by_key(doc_path.key()) {
                 last_existing = Some(found);
                 continue;
             }
-            if self.loading.contains(&doc_path.key)
-                || to_load.iter().any(|q| q.key == doc_path.key)
+            if self.loading.contains(doc_path.key())
+                || to_load.iter().any(|q| q.key() == doc_path.key())
             {
                 continue;
             }
-            self.loading.insert(doc_path.key.clone());
+            self.loading.insert(doc_path.key().clone());
             to_load.push(doc_path);
         }
         if to_load.is_empty() {
@@ -639,10 +705,32 @@ impl FileOps {
         }
     }
 
-    fn clear_saving(&mut self, tab: TabId) {
-        if let Some(Some(pending)) = self.saving.remove(&tab) {
-            self.remove_flow(pending.wf);
+    fn remove_tab_and_prune(&mut self, tab: TabId, host: &mut impl DocHost) {
+        host.remove_tab(tab);
+        self.flows.retain(|f| match &f.awaiting {
+            Awaiting::DiscardPrompt { tab: t, .. } | Awaiting::LossyPrompt { job: SaveJob { tab: t, .. }, .. } => {
+                *t != tab
+            }
+            _ => true,
+        });
+    }
+
+    fn wake_queued_write(&mut self, tab: TabId, host: &mut impl DocHost, io: &mut Vec<FileIo>) {
+        if self.writing.contains(&tab) {
+            return;
         }
+        let Some(ix) = self.flows.iter().position(|f| {
+            matches!(&f.awaiting, Awaiting::QueuedWrite { tab: t, .. } if *t == tab)
+        }) else {
+            return;
+        };
+        let wf = self.flows[ix].id;
+        let Awaiting::QueuedWrite { tab, path, format } =
+            std::mem::replace(&mut self.flows[ix].awaiting, Awaiting::Idle)
+        else {
+            unreachable!();
+        };
+        self.begin_write(wf, tab, path, format, host, io);
     }
 
     fn prompt_window(&self, tab: TabId, origin: WindowId, host: &impl DocHost) -> Option<WindowId> {
@@ -664,100 +752,54 @@ impl FileOps {
     }
 
     fn advance(&mut self, wf: WorkflowId, host: &mut impl DocHost, io: &mut Vec<FileIo>) {
-        loop {
-            let Some(ix) = self.flow_ix(wf) else {
-                return;
-            };
-            let next = self.flows[ix].queue.pop_front();
-            let Some(step) = next else {
-                let finished = self.flows.remove(ix);
-                match finished.finish {
-                    Finish::None => {}
-                    Finish::RemoveTab(tab) => {
-                        if let Some(info) = host.tab_info(tab) {
-                            if info.dirty && !finished.is_discard_approved(tab, info.revision) {
-                                let mut retry = Workflow::new(
-                                    finished.origin,
-                                    [Step::ConfirmDiscard {
-                                        id: tab,
-                                        activate: false,
-                                    }],
-                                    Finish::RemoveTab(tab),
-                                );
-                                retry.approved = finished.approved;
-                                self.start_workflow(retry, host, io);
-                            } else {
-                                host.remove_tab(tab);
-                            }
-                        }
-                    }
-                    Finish::CloseWindow(window) => {
-                        let remaining: Vec<TabId> = host
-                            .window_dirty_tabs(window)
-                            .into_iter()
-                            .filter(|&id| {
-                                host.tab_info(id)
-                                    .is_some_and(|t| !finished.is_discard_approved(id, t.revision))
-                            })
-                            .collect();
-                        if remaining.is_empty() {
-                            host.mark_window_close(window);
-                        } else {
-                            let mut retry = Workflow::new(
-                                window,
-                                remaining
-                                    .into_iter()
-                                    .map(|id| Step::ConfirmDiscard { id, activate: true }),
-                                Finish::CloseWindow(window),
-                            );
-                            retry.approved = finished.approved;
-                            self.start_workflow(retry, host, io);
-                        }
-                    }
+        let Some(ix) = self.flow_ix(wf) else {
+            return;
+        };
+        match self.flows[ix].next_step(host) {
+            NextAction::Done => {
+                self.flows.remove(ix);
+            }
+            NextAction::RemoveTab(tab) => {
+                self.flows.remove(ix);
+                self.remove_tab_and_prune(tab, host);
+            }
+            NextAction::CloseWindow(window) => {
+                self.flows.remove(ix);
+                host.mark_window_close(window);
+            }
+            NextAction::Save { tab, activate } => {
+                let Some(info) = host.tab_info(tab) else {
+                    self.flows.remove(ix);
+                    return;
+                };
+                if activate {
+                    host.activate_tab(info.window, tab, false);
                 }
-                return;
-            };
-
-            match step {
-                Step::SaveTab { id, activate } => {
-                    let Some(info) = host.tab_info(id) else {
-                        self.remove_flow(wf);
-                        return;
+                match info.path {
+                    Some(path) => self.begin_write(wf, tab, path, info.format, host, io),
+                    None => self.begin_save_as(wf, tab, host, io),
+                }
+            }
+            NextAction::SaveAs(tab) => {
+                self.begin_save_as(wf, tab, host, io);
+            }
+            NextAction::ConfirmDiscard { tab, activate } => {
+                let Some(info) = host.tab_info(tab) else {
+                    self.advance(wf, host, io);
+                    return;
+                };
+                if activate {
+                    host.activate_tab(info.window, tab, false);
+                }
+                let prompt_id = PromptId::next();
+                let prompt = discard_prompt(prompt_id, tab, &info.name);
+                if let Some(ix) = self.flow_ix(wf) {
+                    self.flows[ix].awaiting = Awaiting::DiscardPrompt {
+                        prompt: prompt_id,
+                        tab,
                     };
-                    if activate {
-                        host.activate_tab(info.window, id, false);
-                    }
-                    match info.path {
-                        Some(path) => self.begin_write(wf, id, path, info.format, host, io),
-                        None => self.begin_save_as(wf, id, host, io),
-                    }
-                    return;
                 }
-                Step::SaveTabAs(id) => {
-                    self.begin_save_as(wf, id, host, io);
-                    return;
-                }
-                Step::ConfirmDiscard { id, activate } => {
-                    let Some(info) = host.tab_info(id) else {
-                        continue;
-                    };
-                    if !info.dirty {
-                        continue;
-                    }
-                    if activate {
-                        host.activate_tab(info.window, id, false);
-                    }
-                    let prompt_id = PromptId::next();
-                    let prompt = discard_prompt(prompt_id, id, &info.name);
-                    if let Some(ix) = self.flow_ix(wf) {
-                        self.flows[ix].awaiting = Awaiting::DiscardPrompt {
-                            prompt: prompt_id,
-                            tab: id,
-                        };
-                    }
-                    host.show_prompt(info.window, prompt);
-                    return;
-                }
+                host.show_prompt(info.window, prompt);
             }
         }
     }
@@ -796,13 +838,9 @@ impl FileOps {
         host: &mut impl DocHost,
         io: &mut Vec<FileIo>,
     ) {
-        if let Some(pending) = self.saving.get_mut(&tab) {
-            let replaced = pending.replace(PendingSave { wf, path, format });
+        if self.writing.contains(&tab) {
             if let Some(ix) = self.flow_ix(wf) {
-                self.flows[ix].awaiting = Awaiting::QueuedWrite;
-            }
-            if let Some(old) = replaced {
-                self.remove_flow(old.wf);
+                self.flows[ix].awaiting = Awaiting::QueuedWrite { tab, path, format };
             }
             return;
         }
@@ -818,7 +856,7 @@ impl FileOps {
             path,
             format,
         };
-        self.saving.insert(tab, None);
+        self.writing.insert(tab);
         if let Some(ix) = self.flow_ix(wf) {
             self.flows[ix].awaiting = Awaiting::Write(job.clone());
         }
@@ -956,7 +994,7 @@ pub(crate) fn spawn_file_io<E: Send + 'static>(
                     }
                     match document::write_rope(&job.path, &job.text, job.format) {
                         Ok(()) => WriteOutcome::Saved {
-                            doc_path: DocPath::canonical(job.path),
+                            doc_path: DocPath::new(job.path),
                             format: Format {
                                 mixed_line_endings: false,
                                 lossy_decode: false,
@@ -1009,11 +1047,11 @@ fn friendly_io_error(error: &io::Error) -> String {
 
 fn info_prompt(title: SharedStr, message: SharedStr) -> Prompt {
     Prompt {
-        id: None,
         title,
         message,
-        buttons: OK_BUTTONS,
-        tab: None,
+        choices: OK_CHOICES,
+        cancel: PromptAnswer::Cancel,
+        reply: None,
     }
 }
 
@@ -1055,21 +1093,21 @@ fn already_open_save_prompt(path: &Path) -> Prompt {
 
 fn discard_prompt(id: PromptId, tab: TabId, name: &str) -> Prompt {
     Prompt {
-        id: Some(id),
         title: APP_NAME.into(),
         message: format!("Do you want to save changes to {name}?").into(),
-        buttons: DISCARD_BUTTONS,
-        tab: Some(tab),
+        choices: DISCARD_CHOICES,
+        cancel: PromptAnswer::Cancel,
+        reply: Some((id, tab)),
     }
 }
 
 fn lossy_ansi_prompt(id: PromptId, tab: TabId, path: &Path) -> Prompt {
     Prompt {
-        id: Some(id),
         title: APP_NAME.into(),
         message: format!("{}\n{LOSSY_ANSI_WARNING}", path.display()).into(),
-        buttons: LOSSY_BUTTONS,
-        tab: Some(tab),
+        choices: LOSSY_CHOICES,
+        cancel: PromptAnswer::Cancel,
+        reply: Some((id, tab)),
     }
 }
 
@@ -1089,7 +1127,7 @@ mod tests {
 
     impl FakeTab {
         fn new(window: WindowId, path: Option<&str>, text: &str, dirty: bool) -> Self {
-            let doc_path = path.map(|p| DocPath::quick(PathBuf::from(p)));
+            let doc_path = path.map(|p| DocPath::new(PathBuf::from(p)));
             let rev = if dirty { 1 } else { 0 };
             Self {
                 id: TabId::next(),
@@ -1147,7 +1185,7 @@ mod tests {
             Some(TabSnapshot {
                 window: t.window,
                 name: display_name(t.doc_path.as_ref().map(DocPath::as_path)),
-                path: t.doc_path.as_ref().map(|p| p.path.clone()),
+                path: t.doc_path.as_ref().map(|p| p.as_path().to_path_buf()),
                 format: t.format,
                 dirty: t.is_dirty(),
                 revision: t.rev,
@@ -1166,7 +1204,7 @@ mod tests {
             self.tabs
                 .iter()
                 .find(|t| t.window == window)
-                .and_then(|t| t.doc_path.as_ref().map(|p| p.path.clone()))
+                .and_then(|t| t.doc_path.as_ref().map(|p| p.as_path().to_path_buf()))
         }
 
         fn fallback_window(&self, preferred: WindowId) -> Option<WindowId> {
@@ -1180,7 +1218,7 @@ mod tests {
         fn find_tab_by_key(&self, key: &PathKey) -> Option<(WindowId, TabId)> {
             self.tabs
                 .iter()
-                .find(|t| t.doc_path.as_ref().is_some_and(|p| &p.key == key))
+                .find(|t| t.doc_path.as_ref().is_some_and(|p| p.key() == key))
                 .map(|t| (t.window, t.id))
         }
 
@@ -1239,10 +1277,10 @@ mod tests {
 
         ops.request(FileRequest::CloseWindow { window: w1 }, &mut host, &mut io);
         let (_, p1) = host.pop_prompt();
-        assert_eq!(p1.tab, Some(t1));
+        assert_eq!(p1.tab(), Some(t1));
 
         // User chooses Save on t1; then edits t1 while write is in flight.
-        ops.on_prompt(p1.id.unwrap(), 0, &mut host, &mut io);
+        ops.on_prompt(p1.reply.unwrap().0, PromptAnswer::Save, &mut host, &mut io);
         let FileIo::WriteFile { wf, job, .. } = io.pop().unwrap() else {
             panic!("expected WriteFile");
         };
@@ -1254,7 +1292,7 @@ mod tests {
             FileEvent::WriteDone {
                 wf: WorkflowId::next(),
                 outcome: WriteOutcome::Saved {
-                    doc_path: DocPath::quick(PathBuf::from(r"C:\a.txt")),
+                    doc_path: DocPath::new(PathBuf::from(r"C:\a.txt")),
                     format: Format::default(),
                 },
             },
@@ -1268,7 +1306,7 @@ mod tests {
             FileEvent::WriteDone {
                 wf,
                 outcome: WriteOutcome::Saved {
-                    doc_path: DocPath::quick(job.path),
+                    doc_path: DocPath::new(job.path),
                     format: job.format,
                 },
             },
@@ -1276,16 +1314,26 @@ mod tests {
             &mut io,
         );
         let (_, p2) = host.pop_prompt();
-        assert_eq!(p2.tab, Some(t2));
+        assert_eq!(p2.tab(), Some(t2));
 
         // User chooses Don't save on t2 -> window must NOT close yet because t1 was edited mid-write.
-        ops.on_prompt(p2.id.unwrap(), 1, &mut host, &mut io);
+        ops.on_prompt(
+            p2.reply.unwrap().0,
+            PromptAnswer::Discard,
+            &mut host,
+            &mut io,
+        );
         assert!(host.closed_windows.is_empty());
         let (_, p3) = host.pop_prompt();
-        assert_eq!(p3.tab, Some(t1));
+        assert_eq!(p3.tab(), Some(t1));
 
         // User chooses Don't save on re-prompted t1 -> window closes.
-        ops.on_prompt(p3.id.unwrap(), 1, &mut host, &mut io);
+        ops.on_prompt(
+            p3.reply.unwrap().0,
+            PromptAnswer::Discard,
+            &mut host,
+            &mut io,
+        );
         assert_eq!(host.closed_windows, vec![w1]);
         assert!(!ops.has_active_workflow_for(w1));
     }
@@ -1301,7 +1349,7 @@ mod tests {
         let t1 = host.add_tab(FakeTab::new(w1, Some(r"C:\doc.txt"), "v1", true));
         let t2 = host.add_tab(FakeTab::new(w2, Some(r"C:\other.txt"), "other", false));
 
-        // Start save on w1, coalesce a second save mid-flight, then migrate tab to w2.
+        // Start save on w1, queue a second save mid-flight, then migrate tab to w2.
         ops.request(FileRequest::Save { window: w1, tab: t1 }, &mut host, &mut io);
         let FileIo::WriteFile { wf: wf1, job: job1, .. } = io.pop().unwrap() else {
             panic!("expected WriteFile");
@@ -1322,10 +1370,15 @@ mod tests {
         );
         let (prompt_win, lossy_prompt) = host.pop_prompt();
         assert_eq!(prompt_win, w2);
-        assert_eq!(lossy_prompt.tab, Some(t1));
+        assert_eq!(lossy_prompt.tab(), Some(t1));
 
         // Confirm OK -> writes with force_lossy=true.
-        ops.on_prompt(lossy_prompt.id.unwrap(), 0, &mut host, &mut io);
+        ops.on_prompt(
+            lossy_prompt.reply.unwrap().0,
+            PromptAnswer::Continue,
+            &mut host,
+            &mut io,
+        );
         let FileIo::WriteFile {
             wf: wf1_again,
             force_lossy,
@@ -1337,12 +1390,12 @@ mod tests {
         assert_eq!(wf1_again, wf1);
         assert!(force_lossy);
 
-        // First write completes -> immediately triggers queued second save with new snapshot.
+        // First write completes -> immediately wakes queued second save with new snapshot.
         ops.on_event(
             FileEvent::WriteDone {
                 wf: wf1,
                 outcome: WriteOutcome::Saved {
-                    doc_path: DocPath::quick(job1.path),
+                    doc_path: DocPath::new(job1.path),
                     format: job1.format,
                 },
             },
@@ -1357,7 +1410,7 @@ mod tests {
             FileEvent::WriteDone {
                 wf: wf2,
                 outcome: WriteOutcome::Saved {
-                    doc_path: DocPath::quick(job2.path),
+                    doc_path: DocPath::new(job2.path),
                     format: job2.format,
                 },
             },
@@ -1382,7 +1435,7 @@ mod tests {
         assert!(io.is_empty());
         let (conflict_win, conflict_prompt) = host.pop_prompt();
         assert_eq!(conflict_win, w2);
-        assert!(conflict_prompt.id.is_none());
+        assert!(conflict_prompt.reply.is_none());
         let _ = t2;
     }
 }

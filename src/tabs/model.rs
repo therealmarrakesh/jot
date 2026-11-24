@@ -24,7 +24,7 @@ impl TabData {
 
     #[inline]
     pub(crate) fn path_key(&self) -> Option<&PathKey> {
-        self.doc_path.as_ref().map(|p| &p.key)
+        self.doc_path.as_ref().map(DocPath::key)
     }
 
     pub(crate) fn is_dirty(&self) -> bool {

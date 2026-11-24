@@ -149,8 +149,8 @@ impl App {
                 Effect::File(req) => {
                     self.run_file_ops(|ops, host, io| ops.request(req, host, io));
                 }
-                Effect::PromptResponse { id, button } => {
-                    self.run_file_ops(|ops, host, io| ops.on_prompt(id, button, host, io));
+                Effect::PromptResponse { id, answer } => {
+                    self.run_file_ops(|ops, host, io| ops.on_prompt(id, answer, host, io));
                 }
             }
         }
@@ -165,17 +165,23 @@ impl App {
         }
     }
 
-    fn notify_closed(&mut self, closed: Vec<WindowId>) {
-        for wid in closed {
+    fn notify_closed(&mut self, closed: Vec<(WindowId, Vec<crate::files::PromptId>)>) {
+        for (wid, prompts) in closed {
             self.keytips.hide_owner(wid);
             self.tooltips.window_closed(wid, &self.shell.jobs);
-            self.file_ops.on_window_closed(wid);
+            self.file_ops.on_window_closed(wid, &prompts);
         }
     }
 
     fn drive_drag(
         &mut self,
-        f: impl FnOnce(&mut TabDrag, &mut Windows, &FileOps, &Shell, &mut Vec<WindowId>) -> bool,
+        f: impl FnOnce(
+            &mut TabDrag,
+            &mut Windows,
+            &FileOps,
+            &Shell,
+            &mut Vec<(WindowId, Vec<crate::files::PromptId>)>,
+        ) -> bool,
     ) {
         let Some(drag) = &mut self.tab_drag else {
             return;

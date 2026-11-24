@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-use crate::files::FileOps;
+use crate::files::{FileOps, PromptId};
 use crate::geom::{Point, ScreenPoint};
 use crate::ids::TabId;
 use crate::platform::{
@@ -10,6 +10,8 @@ use crate::platform::{
 use crate::shell::{AppEvent, Shell};
 
 use super::windows::Windows;
+
+pub(super) type ClosedWindow = (WindowId, Vec<PromptId>);
 
 const DRAG_THRESHOLD: f32 = 10.;
 const DETACH_MAGNETISM: f32 = 15.;
@@ -92,7 +94,7 @@ impl TabDrag {
         windows: &mut Windows,
         file_ops: &FileOps,
         shell: &Shell,
-        closed: &mut Vec<WindowId>,
+        closed: &mut Vec<ClosedWindow>,
     ) -> bool {
         if self.owner != window_id {
             return false;
@@ -115,7 +117,7 @@ impl TabDrag {
         windows: &mut Windows,
         file_ops: &FileOps,
         shell: &Shell,
-        closed: &mut Vec<WindowId>,
+        closed: &mut Vec<ClosedWindow>,
     ) -> bool {
         if !pressed_left {
             return self.on_release(windows);
@@ -186,7 +188,7 @@ impl TabDrag {
         &mut self,
         windows: &mut Windows,
         shell: &Shell,
-        closed: &mut Vec<WindowId>,
+        closed: &mut Vec<ClosedWindow>,
     ) {
         self.poll_timer.cancel();
         release_mouse_capture();
@@ -241,7 +243,7 @@ impl TabDrag {
         windows: &mut Windows,
         file_ops: &FileOps,
         shell: &Shell,
-        closed: &mut Vec<WindowId>,
+        closed: &mut Vec<ClosedWindow>,
     ) -> bool {
         let Some(hwnd) = windows.hwnd(self.owner) else {
             return true;
@@ -273,7 +275,7 @@ impl TabDrag {
         windows: &mut Windows,
         file_ops: &FileOps,
         shell: &Shell,
-        closed: &mut Vec<WindowId>,
+        closed: &mut Vec<ClosedWindow>,
     ) -> bool {
         self.poll_timer.cancel();
         let Some(hwnd) = windows.hwnd(self.owner) else {
@@ -308,7 +310,7 @@ impl TabDrag {
         pt: ScreenPoint,
         windows: &mut Windows,
         shell: &Shell,
-        closed: &mut Vec<WindowId>,
+        closed: &mut Vec<ClosedWindow>,
     ) {
         let Some(target_hwnd) = windows.hwnd(target_id) else {
             return;
@@ -340,7 +342,7 @@ impl TabDrag {
         pt: ScreenPoint,
         windows: &mut Windows,
         shell: &Shell,
-        closed: &mut Vec<WindowId>,
+        closed: &mut Vec<ClosedWindow>,
     ) {
         if !alone {
             let source_win = self.owner;
@@ -398,7 +400,7 @@ impl TabDrag {
         &mut self,
         windows: &mut Windows,
         shell: &Shell,
-        closed: &mut Vec<WindowId>,
+        closed: &mut Vec<ClosedWindow>,
     ) {
         self.phase = Phase::Dragging;
         let pt = ScreenPoint {

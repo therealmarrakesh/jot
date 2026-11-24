@@ -208,38 +208,35 @@ impl Format {
 pub(crate) struct PathKey(String);
 
 impl PathKey {
-    pub(crate) fn quick(path: &Path) -> Self {
-        let abs = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
-        Self(normalize_path_key(&abs))
-    }
-
-    pub(crate) fn canonical(path: &Path) -> Self {
-        match fs::canonicalize(path) {
-            Ok(c) => Self(normalize_path_key(&c)),
-            Err(_) => Self::quick(path),
-        }
+    pub(crate) fn new(path: &Path) -> Self {
+        let resolved = fs::canonicalize(path)
+            .or_else(|_| std::path::absolute(path))
+            .unwrap_or_else(|_| path.to_path_buf());
+        Self(normalize_path_key(&resolved))
     }
 }
 
 #[derive(Clone, Debug)]
 pub(crate) struct DocPath {
-    pub(crate) path: PathBuf,
-    pub(crate) key: PathKey,
+    path: PathBuf,
+    key: PathKey,
 }
 
 impl DocPath {
-    pub(crate) fn quick(path: PathBuf) -> Self {
-        let key = PathKey::quick(&path);
+    pub(crate) fn new(path: PathBuf) -> Self {
+        let path = std::path::absolute(&path).unwrap_or(path);
+        let key = PathKey::new(&path);
         Self { path, key }
     }
 
-    pub(crate) fn canonical(path: PathBuf) -> Self {
-        let key = PathKey::canonical(&path);
-        Self { path, key }
-    }
-
+    #[inline]
     pub(crate) fn as_path(&self) -> &Path {
         &self.path
+    }
+
+    #[inline]
+    pub(crate) fn key(&self) -> &PathKey {
+        &self.key
     }
 }
 
@@ -270,7 +267,7 @@ pub(crate) fn load(path: &Path) -> Result<Loaded, LoadError> {
     }
     let decoded = load_reader_with_page(&mut file, IO_CHUNK, AnsiCodePage::current())?;
     Ok(Loaded {
-        doc_path: DocPath::canonical(path.to_path_buf()),
+        doc_path: DocPath::new(path.to_path_buf()),
         text: decoded.text,
         format: decoded.format,
     })
@@ -1041,16 +1038,16 @@ mod tests {
     #[test]
     fn same_path_ignores_windows_casing_and_separators() {
         assert_eq!(
-            PathKey::canonical(Path::new(r"C:\Notes\Todo.txt")),
-            PathKey::canonical(Path::new(r"c:/notes/todo.txt")),
+            PathKey::new(Path::new(r"C:\Notes\Todo.txt")),
+            PathKey::new(Path::new(r"c:/notes/todo.txt")),
         );
         assert_eq!(
             normalize_path_key(Path::new(r"\\?\C:\Notes\Todo.txt")),
             normalize_path_key(Path::new(r"c:\notes\todo.txt")),
         );
         assert_ne!(
-            PathKey::canonical(Path::new(r"C:\Notes\Todo.txt")),
-            PathKey::canonical(Path::new(r"C:\Notes\Other.txt")),
+            PathKey::new(Path::new(r"C:\Notes\Todo.txt")),
+            PathKey::new(Path::new(r"C:\Notes\Other.txt")),
         );
     }
 

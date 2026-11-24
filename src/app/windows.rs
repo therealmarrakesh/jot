@@ -173,15 +173,15 @@ impl Windows {
         }
     }
 
-    pub(crate) fn sweep_closed(&mut self) -> Vec<WindowId> {
+    pub(crate) fn sweep_closed(&mut self) -> Vec<(WindowId, Vec<crate::files::PromptId>)> {
         if !self.list.iter().any(MainWindow::is_pending_close) {
             return Vec::new();
         }
-        let closed: Vec<WindowId> = self
+        let closed: Vec<(WindowId, Vec<crate::files::PromptId>)> = self
             .list
-            .iter()
+            .iter_mut()
             .filter(|w| w.is_pending_close())
-            .map(MainWindow::id)
+            .map(|w| (w.id(), w.drain_cancelled_prompts()))
             .collect();
         self.list.retain(|w| !w.is_pending_close());
         if let Some(active) = self.active

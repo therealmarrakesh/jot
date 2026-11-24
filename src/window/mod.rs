@@ -794,6 +794,10 @@ impl MainWindow {
         }
     }
 
+    pub(crate) fn drain_cancelled_prompts(&mut self) -> Vec<crate::files::PromptId> {
+        self.dialogs.drain_prompt_ids()
+    }
+
     pub(super) fn press_dialog_button(&mut self, ix: usize, cx: &mut Cx<'_>) {
         let Some(kind) = self.dialogs.take_active() else {
             return;
@@ -804,8 +808,28 @@ impl MainWindow {
             DialogKind::LineOutOfRange => self.show_go_to(None, cx.shell),
             DialogKind::Prompt(prompt) => {
                 self.close_dialogs(cx.shell);
-                if let Some(id) = prompt.id {
-                    cx.emit(Effect::PromptResponse { id, button: ix });
+                if let Some((id, _)) = prompt.reply {
+                    let answer = prompt.choices.get(ix).map_or(prompt.cancel, |&(_, a)| a);
+                    cx.emit(Effect::PromptResponse { id, answer });
+                }
+            }
+        }
+    }
+
+    pub(super) fn cancel_dialog(&mut self, cx: &mut Cx<'_>) {
+        let Some(kind) = self.dialogs.take_active() else {
+            return;
+        };
+        match kind {
+            DialogKind::GoTo => self.close_dialogs(cx.shell),
+            DialogKind::LineOutOfRange => self.show_go_to(None, cx.shell),
+            DialogKind::Prompt(prompt) => {
+                self.close_dialogs(cx.shell);
+                if let Some((id, _)) = prompt.reply {
+                    cx.emit(Effect::PromptResponse {
+                        id,
+                        answer: prompt.cancel,
+                    });
                 }
             }
         }

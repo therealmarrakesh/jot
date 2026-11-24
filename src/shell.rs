@@ -1,7 +1,7 @@
 use std::rc::Rc;
 
 use crate::editor::EditorTimer;
-use crate::files::{FileEvent, FileRequest, PromptId};
+use crate::files::{FileEvent, FileRequest, PromptAnswer, PromptId};
 use crate::geom::Point;
 use crate::gfx::{Gpu, TextSystem};
 use crate::ids::{EditorSlot, HitId, TabId};
@@ -70,7 +70,7 @@ pub(crate) enum Effect {
     File(FileRequest),
     PromptResponse {
         id: PromptId,
-        button: usize,
+        answer: PromptAnswer,
     },
 }
 
