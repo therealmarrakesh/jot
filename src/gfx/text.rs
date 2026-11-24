@@ -1,6 +1,5 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
 use std::ops::Range;
 
 use windows::Win32::Graphics::DirectWrite::{
@@ -9,7 +8,8 @@ use windows::Win32::Graphics::DirectWrite::{
     DWRITE_LINE_SPACING_METHOD_UNIFORM, DWRITE_TEXT_ALIGNMENT_CENTER,
     DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_TEXT_METRICS, DWRITE_TRIMMING,
     DWRITE_TRIMMING_GRANULARITY_CHARACTER, DWRITE_WORD_WRAPPING_NO_WRAP, DWRITE_WORD_WRAPPING_WRAP,
-    DWriteCreateFactory, IDWriteFactory5, IDWriteTextFormat, IDWriteTextLayout,
+    DWriteCreateFactory, IDWriteFactory5, IDWriteTextAnalyzer, IDWriteTextFormat,
+    IDWriteTextLayout,
 };
 use windows::core::{BOOL, HSTRING};
 
@@ -18,40 +18,28 @@ use crate::geom::{Point, Rect, Size, point, size};
 use crate::types::SharedStr;
 
 use super::d2d::{D2DRenderer, fill};
-use super::wrap::AdvanceTable;
+use super::wrap::{AdvanceTable, analyze_break_opportunities};
 
 const MAX_LAYOUT_CACHE: usize = 512;
 const MAX_SHAPED_CACHE_BYTES: usize = 4 * 1024 * 1024;
 const MAX_CACHEABLE_LINE_BYTES: usize = 16 * 1024;
 pub(super) const TAB_STOP_COLUMNS: f32 = 8.0;
 
-#[derive(Copy, Clone, Debug, PartialOrd)]
-pub(crate) struct FontWeight(pub(crate) f32);
-
-impl Default for FontWeight {
-    fn default() -> Self {
-        Self::NORMAL
-    }
-}
-
-impl PartialEq for FontWeight {
-    #[inline]
-    fn eq(&self, other: &Self) -> bool {
-        self.0.to_bits() == other.0.to_bits()
-    }
-}
-
-impl Eq for FontWeight {}
-
-impl Hash for FontWeight {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.0.to_bits().hash(state);
-    }
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub(crate) enum FontWeight {
+    #[default]
+    Normal,
+    Semibold,
 }
 
 impl FontWeight {
-    pub(crate) const NORMAL: Self = Self(400.0);
-    pub(crate) const SEMIBOLD: Self = Self(600.0);
+    #[inline]
+    fn to_dwrite(self) -> DWRITE_FONT_WEIGHT {
+        match self {
+            Self::Normal => DWRITE_FONT_WEIGHT(400),
+            Self::Semibold => DWRITE_FONT_WEIGHT(600),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -64,7 +52,7 @@ impl Default for Font {
     fn default() -> Self {
         Self {
             family: SharedStr::new_static("Segoe UI Variable Text"),
-            weight: FontWeight::NORMAL,
+            weight: FontWeight::Normal,
         }
     }
 }
@@ -72,7 +60,7 @@ impl Default for Font {
 pub(crate) fn font(family: impl Into<SharedStr>) -> Font {
     Font {
         family: family.into(),
-        weight: FontWeight::NORMAL,
+        weight: FontWeight::Normal,
     }
 }
 
@@ -82,21 +70,37 @@ pub(crate) struct TextStyle {
     size_hundredths: u32,
 }
 
+impl Default for TextStyle {
+    fn default() -> Self {
+        Self::new(Font::default(), 14.0)
+    }
+}
+
 impl TextStyle {
-    pub(crate) fn new(font: Font, size: f32) -> Self {
+    #[inline]
+    fn quantize_size(size: f32) -> u32 {
         let safe = if size.is_finite() {
             size.clamp(1.0, 4096.0)
         } else {
             14.0
         };
+        (safe * 100.0).round().max(1.0) as u32
+    }
+
+    pub(crate) fn new(font: Font, size: f32) -> Self {
         Self {
             font,
-            size_hundredths: (safe * 100.0).round().max(1.0) as u32,
+            size_hundredths: Self::quantize_size(size),
         }
     }
 
     pub(crate) fn regular(family: impl Into<SharedStr>, size: f32) -> Self {
         Self::new(font(family), size)
+    }
+
+    #[inline]
+    pub(crate) fn set_size(&mut self, size: f32) {
+        self.size_hundredths = Self::quantize_size(size);
     }
 
     #[inline]
@@ -360,6 +364,7 @@ struct LabelCacheKey {
 }
 
 pub(crate) struct TextSystem {
+    analyzer: Option<IDWriteTextAnalyzer>,
     state: RefCell<TextSystemState>,
 }
 
@@ -386,7 +391,9 @@ impl TextSystem {
         let factory: IDWriteFactory5 =
             unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED) }
                 .expect("failed to create DirectWrite factory");
+        let analyzer = unsafe { factory.CreateTextAnalyzer() }.ok();
         Self {
+            analyzer,
             state: RefCell::new(TextSystemState {
                 factory,
                 fonts: HashMap::new(),
@@ -396,6 +403,13 @@ impl TextSystem {
                 curr_labels: HashMap::new(),
             }),
         }
+    }
+
+    pub(crate) fn break_opportunities(&self, text: &str) -> Vec<usize> {
+        let Some(analyzer) = &self.analyzer else {
+            return Vec::new();
+        };
+        analyze_break_opportunities(analyzer, text)
     }
 
     pub(crate) fn finish_frame(&self) {
@@ -628,7 +642,7 @@ fn create_font_entry(factory: &IDWriteFactory5, style: &TextStyle) -> FontEntry 
     let safe_size = style.size();
     let family = HSTRING::from(style.font.family.as_str());
     let locale = HSTRING::from("");
-    let dw_weight = DWRITE_FONT_WEIGHT(style.font.weight.0.round().clamp(1.0, 999.0) as i32);
+    let dw_weight = style.font.weight.to_dwrite();
     let format = unsafe {
         factory
             .CreateTextFormat(
@@ -744,7 +758,6 @@ pub(crate) fn utf16_to_utf8_offset(text: &str, utf16_offset: u32, is_ascii: bool
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gfx::wrap::break_opportunities;
 
     #[test]
     fn utf8_utf16_roundtrip_handles_ascii_cjk_and_surrogate_emoji() {
@@ -766,10 +779,10 @@ mod tests {
         let hit = shaped.closest_index_for_x(mid_x);
         assert!(hit <= shaped.len);
 
-        let breaks = break_opportunities("hello world");
+        let breaks = ts.break_opportunities("hello world");
         assert!(breaks.contains(&6));
-        assert!(break_opportunities("foo\u{00A0}bar").is_empty());
-        assert_eq!(break_opportunities("foo-bar"), vec![4]);
+        assert!(ts.break_opportunities("foo\u{00A0}bar").is_empty());
+        assert_eq!(ts.break_opportunities("foo-bar"), vec![4]);
     }
 
     #[test]

@@ -2,7 +2,7 @@ use std::time::Instant;
 
 use crate::editor::{EditorPaintParams, EditorPaintStyle};
 use crate::geom::{Rect, point, size};
-use crate::gfx::{fill, font};
+use crate::gfx::{TextStyle, fill};
 use crate::ids::{CustomDraw, EditorSlot, Focus, Frame};
 use crate::shell::Shell;
 use crate::ui::controls::{BODY_LINE, BODY_SIZE, TEXT_FONT};
@@ -61,14 +61,12 @@ impl MainWindow {
         self.update_min_size(status_metrics, &frame, p, ts);
 
         let editor_style = EditorPaintStyle {
-            font: font("Consolas"),
-            font_size: EDITOR_FONT_SIZE * self.zoom(),
+            text: TextStyle::regular("Consolas", EDITOR_FONT_SIZE * self.zoom()),
             line_height: self.line_height(),
             color: p.text_primary,
         };
         let field_style = EditorPaintStyle {
-            font: font(TEXT_FONT),
-            font_size: BODY_SIZE,
+            text: TextStyle::regular(TEXT_FONT, BODY_SIZE),
             line_height: BODY_LINE + 2.,
             color: p.text_primary,
         };

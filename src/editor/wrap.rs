@@ -5,9 +5,7 @@ use ropey::Rope;
 
 use crate::color::Rgba;
 use crate::geom::{Point, Size, point, size};
-use crate::gfx::{
-    AdvanceTable, D2DRenderer, Font, ShapedRow, TextStyle, TextSystem, break_opportunities,
-};
+use crate::gfx::{AdvanceTable, D2DRenderer, ShapedRow, TextStyle, TextSystem};
 
 use super::buffer::{RopeExt, TextPoint};
 use super::model::LineChange;
@@ -618,6 +616,7 @@ fn wrap_line(
     line: &str,
     wrap_width: f32,
     advances: &mut AdvanceTable,
+    ts: &TextSystem,
     out: &mut Vec<usize>,
 ) -> f32 {
     out.clear();
@@ -631,7 +630,7 @@ fn wrap_line(
         return if out.is_empty() { 0.0 } else { indent_px };
     }
 
-    let break_offsets = break_opportunities(line);
+    let break_offsets = ts.break_opportunities(line);
     let mut row_start = 0usize;
     let mut row_width = 0.0f32;
     let mut last_break_ix = 0usize;
@@ -702,18 +701,16 @@ pub(crate) fn horizontal_slice(
 }
 
 pub(crate) struct WrapIndex {
-    font: Font,
-    font_size: f32,
+    style: TextStyle,
     wrap_width: Option<f32>,
     chunks: LineChunks,
     initialized: bool,
 }
 
 impl WrapIndex {
-    pub(crate) fn new(font: Font, font_size: f32, wrap_width: Option<f32>) -> Self {
+    pub(crate) fn new(style: TextStyle, wrap_width: Option<f32>) -> Self {
         Self {
-            font,
-            font_size,
+            style,
             wrap_width,
             chunks: LineChunks::default(),
             initialized: false,
@@ -764,12 +761,8 @@ impl WrapIndex {
         Some((range, soft_end))
     }
 
-    pub(crate) fn font(&self) -> &Font {
-        &self.font
-    }
-
-    pub(crate) fn font_size(&self) -> f32 {
-        self.font_size
+    pub(crate) fn style(&self) -> &TextStyle {
+        &self.style
     }
 
     pub(crate) fn wrap_width(&self) -> Option<f32> {
@@ -789,15 +782,15 @@ impl WrapIndex {
     pub(crate) fn sync_layout(
         &mut self,
         text: &Rope,
-        font: Font,
-        font_size: f32,
+        style: &TextStyle,
         wrap_width: Option<f32>,
         ts: &TextSystem,
     ) {
-        let font_changed = self.font != font || self.font_size != font_size;
+        let style_changed = self.style != *style;
         let width_changed = self.wrap_width != wrap_width;
-        self.font = font;
-        self.font_size = font_size;
+        if style_changed {
+            self.style = style.clone();
+        }
         self.wrap_width = wrap_width;
 
         if !self.initialized {
@@ -808,7 +801,7 @@ impl WrapIndex {
         if wrap_width.is_none() && !width_changed {
             return;
         }
-        if font_changed || width_changed {
+        if style_changed || width_changed {
             self.rebuild_all(text, ts);
         }
     }
@@ -849,7 +842,7 @@ impl WrapIndex {
             return;
         };
 
-        let style = TextStyle::new(self.font.clone(), self.font_size);
+        let style = self.style.clone();
         ts.with_advances(&style, |advances| {
             let max_ascii = advances.max_printable_ascii();
             let ascii_fit_len = if max_ascii > 0.0 {
@@ -862,7 +855,7 @@ impl WrapIndex {
                 old_lines,
                 new_lines,
                 ascii_fit_len,
-                &mut |line_str, width, out| wrap_line(line_str, width, advances, out),
+                &mut |line_str, width, out| wrap_line(line_str, width, advances, ts, out),
             );
         });
     }
@@ -1000,15 +993,14 @@ impl WrapIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gfx::font;
 
-    fn test_font() -> Font {
-        font("Arial")
+    fn test_style() -> TextStyle {
+        TextStyle::regular("Arial", 14.)
     }
 
     #[test]
     fn incremental_splice_longest_row_and_ascii_fast_fit() {
-        let mut index = WrapIndex::new(test_font(), 14., Some(10.));
+        let mut index = WrapIndex::new(test_style(), Some(10.));
         let mut text = Rope::from("aa\nbbbb\nc");
         let mut fake = |line: &str, _: f32, out: &mut Vec<usize>| -> f32 {
             if line.len() > 2 {
@@ -1038,7 +1030,7 @@ mod tests {
         assert_eq!(index.line(0).unwrap().ranges.get(0), Some(0..0));
         assert_eq!(index.line(0).unwrap().ranges.len(), 1);
 
-        let mut fast = WrapIndex::new(test_font(), 14., Some(100.));
+        let mut fast = WrapIndex::new(test_style(), Some(100.));
         let sample = Rope::from("short ascii\nlonger ascii line\n日本語\n");
         let mut called = Vec::new();
         fast.splice_line_range(&sample, 0..0, 0..sample.lines_len(), 12, &mut |line, _, _| {
@@ -1059,7 +1051,7 @@ mod tests {
             }
         }
         let mut text = Rope::from(lines.join("\n"));
-        let mut index = WrapIndex::new(test_font(), 14., Some(10.));
+        let mut index = WrapIndex::new(test_style(), Some(10.));
         let mut fake = |line: &str, _: f32, out: &mut Vec<usize>| -> f32 {
             if line.len() > 2 {
                 out.push(2);
@@ -1093,7 +1085,7 @@ mod tests {
     #[test]
     fn wrap_boundary_affinity_and_hanging_indent_geometry() {
         let text = Rope::from("first line\nthis one wraps");
-        let mut index = WrapIndex::new(test_font(), 14., None);
+        let mut index = WrapIndex::new(test_style(), None);
         index.chunks = LineChunks::from_vec(vec![
             WrappedLine {
                 byte_len: 10,

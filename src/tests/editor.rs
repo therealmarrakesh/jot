@@ -1,6 +1,6 @@
 use crate::document;
 use crate::geom::point;
-use crate::gfx::font;
+use crate::gfx::TextStyle;
 use crate::ids::HitId;
 use crate::platform::{MouseButton, PlatformEvent, PlatformHandler};
 
@@ -160,14 +160,15 @@ fn wrap_handles_tabs_emoji_combining_marks_and_u2028_single_line() {
     let ts = TextSystem::new();
     let sample = "\tindented e\u{0301} 👨‍👩‍👧\u{2028}after_lsep more words to wrap cleanly across rows";
     let rope = crate::editor::Rope::from(sample);
-    let mut wrap = WrapIndex::new(font("Consolas"), 14.0, Some(180.0));
-    wrap.sync_layout(&rope, font("Consolas"), 14.0, Some(180.0), &ts);
+    let style = TextStyle::regular("Consolas", 14.0);
+    let mut wrap = WrapIndex::new(style.clone(), Some(180.0));
+    wrap.sync_layout(&rope, &style, Some(180.0), &ts);
     assert!(wrap.visual_row_count() >= 2);
 
-    let mut wrap_zero = WrapIndex::new(font("Consolas"), 14.0, Some(0.0));
-    wrap_zero.sync_layout(&rope, font("Consolas"), 14.0, Some(0.0), &ts);
+    let mut wrap_zero = WrapIndex::new(style.clone(), Some(0.0));
+    wrap_zero.sync_layout(&rope, &style, Some(0.0), &ts);
     assert!(wrap_zero.visual_row_count() >= 1);
 
-    let shaped = ts.shape_row(sample.into(), &crate::gfx::TextStyle::regular("Consolas", 14.0));
+    let shaped = ts.shape_row(sample.into(), &style);
     assert!(shaped.width > 0.0);
 }

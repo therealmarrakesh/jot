@@ -16,7 +16,7 @@ use std::time::Duration;
 use ropey::RopeSlice;
 
 use crate::geom::{Axis, Edges, Point, Rect};
-use crate::gfx::{Font, TextSystem};
+use crate::gfx::{TextStyle, TextSystem};
 use crate::platform::TimerHandle;
 use crate::types::SharedStr;
 use crate::ui::{Node, box_, custom, row};
@@ -145,7 +145,7 @@ struct DocumentView {
 impl DocumentView {
     fn new() -> Self {
         Self {
-            wrap: WrapIndex::new(Font::default(), 14.0, None),
+            wrap: WrapIndex::new(TextStyle::default(), None),
             soft_wrap: true,
             scroll_y: 0.0,
             content_height_f64: 0.0,

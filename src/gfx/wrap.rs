@@ -4,12 +4,11 @@ use std::rc::Rc;
 
 use windows::Win32::Graphics::DirectWrite::{
     DWRITE_BREAK_CONDITION_CAN_BREAK, DWRITE_BREAK_CONDITION_MAY_NOT_BREAK,
-    DWRITE_BREAK_CONDITION_MUST_BREAK, DWRITE_FACTORY_TYPE_SHARED, DWRITE_LINE_BREAKPOINT,
-    DWRITE_LINE_METRICS, DWRITE_READING_DIRECTION, DWRITE_READING_DIRECTION_LEFT_TO_RIGHT,
-    DWRITE_SCRIPT_ANALYSIS, DWRITE_TEXT_METRICS, DWRITE_WORD_WRAPPING_WRAP, DWriteCreateFactory,
-    IDWriteFactory5, IDWriteNumberSubstitution, IDWriteTextAnalysisSink,
-    IDWriteTextAnalysisSink_Impl, IDWriteTextAnalysisSource, IDWriteTextAnalysisSource_Impl,
-    IDWriteTextAnalyzer, IDWriteTextFormat,
+    DWRITE_BREAK_CONDITION_MUST_BREAK, DWRITE_LINE_BREAKPOINT, DWRITE_LINE_METRICS,
+    DWRITE_READING_DIRECTION, DWRITE_READING_DIRECTION_LEFT_TO_RIGHT, DWRITE_SCRIPT_ANALYSIS,
+    DWRITE_TEXT_METRICS, DWRITE_WORD_WRAPPING_WRAP, IDWriteFactory5, IDWriteNumberSubstitution,
+    IDWriteTextAnalysisSink, IDWriteTextAnalysisSink_Impl, IDWriteTextAnalysisSource,
+    IDWriteTextAnalysisSource_Impl, IDWriteTextAnalyzer, IDWriteTextFormat,
 };
 use windows::core::{HSTRING, implement};
 
@@ -287,31 +286,14 @@ impl IDWriteTextAnalysisSink_Impl for BreakSink_Impl {
     }
 }
 
-thread_local! {
-    static TEXT_ANALYZER: RefCell<Option<IDWriteTextAnalyzer>> = const { RefCell::new(None) };
-}
-
-pub(crate) fn break_opportunities(text: &str) -> Vec<usize> {
+pub(super) fn analyze_break_opportunities(
+    analyzer: &IDWriteTextAnalyzer,
+    text: &str,
+) -> Vec<usize> {
     let mut out = Vec::new();
     if text.is_empty() {
         return out;
     }
-    let analyzer = TEXT_ANALYZER.with(|slot| {
-        let mut slot = slot.borrow_mut();
-        if slot.is_none() {
-            let created = unsafe {
-                DWriteCreateFactory::<IDWriteFactory5>(DWRITE_FACTORY_TYPE_SHARED)
-                    .and_then(|factory| factory.CreateTextAnalyzer())
-            };
-            if let Ok(a) = created {
-                *slot = Some(a);
-            }
-        }
-        slot.clone()
-    });
-    let Some(analyzer) = analyzer else {
-        return out;
-    };
 
     let utf16: Rc<Vec<u16>> = Rc::new(text.encode_utf16().collect());
     let len = utf16.len();

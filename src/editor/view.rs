@@ -6,7 +6,7 @@ use ropey::Rope;
 
 use crate::color::Rgba;
 use crate::geom::{Axis, Edges, Point, Rect, Size, point, size};
-use crate::gfx::{D2DRenderer, Font, TextStyle, TextSystem, fill};
+use crate::gfx::{D2DRenderer, TextStyle, TextSystem, fill};
 use crate::ids::{EditorSlot, Node, UiState};
 use crate::platform::{Modifiers, MouseButton, TimerHandle};
 use crate::theme::Palette;
@@ -24,8 +24,7 @@ const HORIZONTAL_WINDOW_PAD: f32 = 256.0;
 
 #[derive(Clone, Debug)]
 pub(crate) struct EditorPaintStyle {
-    pub(crate) font: Font,
-    pub(crate) font_size: f32,
+    pub(crate) text: TextStyle,
     pub(crate) line_height: f32,
     pub(crate) color: Rgba,
 }
@@ -200,8 +199,7 @@ pub(super) struct LongestLineCache {
     revision: u64,
     row: usize,
     len: usize,
-    font: Font,
-    font_size: f32,
+    style: TextStyle,
     wrap_width: Option<f32>,
 }
 
@@ -864,16 +862,16 @@ impl Editor {
 
     fn prepare_field(&mut self, input_bounds: Rect, params: EditorPaintParams<'_>, ts: &TextSystem) {
         let style = params.style;
-        let text_style = TextStyle::new(style.font.clone(), style.font_size);
+        let text_style = &style.text;
         let line_height = style.line_height.max(1.0);
-        let space_width = ts.measure(" ", &text_style);
+        let space_width = ts.measure(" ", text_style);
         let is_empty = self.model.text().len() == 0;
         let (display_str, text_color): (SharedStr, Rgba) = if is_empty {
             (self.placeholder.clone(), params.palette.text_secondary)
         } else {
             (self.model.value().into(), style.color)
         };
-        let shaped = ts.shape_row(display_str, &text_style);
+        let shaped = ts.shape_row(display_str, text_style);
         let row_layout = RowLayout::from_shaped(vec![shaped]);
         let head = self.cursor();
         let head_pt = row_layout
@@ -913,11 +911,9 @@ impl Editor {
         ts: &TextSystem,
     ) -> EditorPaintOutcome {
         let style = params.style;
-        let font = &style.font;
-        let font_size = style.font_size;
-        let text_style = TextStyle::new(font.clone(), font_size);
+        let text_style = &style.text;
         let line_height = style.line_height.max(1.0);
-        let space_width = ts.measure(" ", &text_style);
+        let space_width = ts.measure(" ", text_style);
         let text = self.model.text();
         let reveal_req = self.reveal.take();
         let prev_content_width = self.content_width;
@@ -931,8 +927,7 @@ impl Editor {
         let soft_wrap = doc.soft_wrap;
         let wrap_width = soft_wrap.then_some((input_bounds.size.width - RIGHT_MARGIN).max(1.0));
 
-        let reflowing = doc.wrap.font() != font
-            || doc.wrap.font_size() != font_size
+        let reflowing = doc.wrap.style() != text_style
             || doc.wrap.wrap_width() != wrap_width
             || (doc.last_line_height - line_height).abs() > 0.01;
         let anchor = if reflowing && reveal_req.is_none() {
@@ -941,8 +936,7 @@ impl Editor {
             None
         };
 
-        doc.wrap
-            .sync_layout(text, font.clone(), font_size, wrap_width, ts);
+        doc.wrap.sync_layout(text, text_style, wrap_width, ts);
         doc.last_line_height = line_height;
 
         if let Some(anchor) = anchor {
@@ -1009,7 +1003,7 @@ impl Editor {
                 visible_lines: &visible_lines,
                 visible_byte_offsets: &visible_byte_offsets,
                 shape_rows: &shape_rows,
-                text_style: &text_style,
+                text_style,
                 scroll_x: self.scroll_x,
                 viewport_width: input_bounds.size.width,
                 caret: head,
@@ -1033,8 +1027,7 @@ impl Editor {
                 revision: self.model.revision(),
                 row: longest_row,
                 len: slice.len(),
-                font: font.clone(),
-                font_size,
+                style: text_style.clone(),
                 wrap_width,
             };
             max_line_w = match &doc.longest_line_cache {
@@ -1042,11 +1035,11 @@ impl Editor {
                 _ => {
                     let s: Cow<str> = slice.into();
                     let w = if s.len() > HUGE_UNWRAPPED_LINE_BYTES && can_wrap_with_advances(&s) {
-                        ts.with_advances(&text_style, |adv| {
+                        ts.with_advances(text_style, |adv| {
                             horizontal_slice(&s, 0.0, 0.0, adv).3
                         })
                     } else {
-                        ts.measure(&s, &text_style)
+                        ts.measure(&s, text_style)
                     };
                     doc.longest_line_cache = Some((key, w));
                     w

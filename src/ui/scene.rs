@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 use crate::color::{Rgba, black, transparent_black};
 use crate::geom::{Corners, Edges, Point, Rect, Shadows, Size, point};
 use crate::gfx::{
-    D2DRenderer, Font, FontWeight, Label, LabelLayout, PaintQuad, TextAlign, TextStyle, TextSystem,
+    D2DRenderer, FontWeight, Label, LabelLayout, PaintQuad, TextAlign, TextStyle, TextSystem,
 };
 use crate::platform::{CursorStyle, MouseButton, WindowControlArea};
 use crate::types::SharedStr;
@@ -44,8 +44,7 @@ struct TextOverrides {
 
 #[derive(Clone)]
 struct ResolvedTextStyle {
-    font: Font,
-    size: f32,
+    style: TextStyle,
     line_height: f32,
     color: Rgba,
     align: TextAlign,
@@ -56,8 +55,7 @@ struct ResolvedTextStyle {
 impl Default for ResolvedTextStyle {
     fn default() -> Self {
         Self {
-            font: Font::default(),
-            size: 14.0,
+            style: TextStyle::default(),
             line_height: 20.0,
             color: black(),
             align: TextAlign::Left,
@@ -71,13 +69,13 @@ impl ResolvedTextStyle {
     fn merge(&self, o: &TextOverrides) -> Self {
         let mut out = self.clone();
         if let Some(fam) = &o.family {
-            out.font.family = fam.clone();
+            out.style.font.family = fam.clone();
         }
         if let Some(w) = o.weight {
-            out.font.weight = w;
+            out.style.font.weight = w;
         }
         if let Some(s) = o.size {
-            out.size = s;
+            out.style.set_size(s);
         }
         if let Some(lh) = o.line_height {
             out.line_height = lh;
@@ -310,7 +308,7 @@ impl<H, C> Node<H, C> {
         scale(sx: f32, sy: f32) => |s| { s.scale = (sx, sy); }
         inert() => |s| { s.inert = true; }
         anchored(anchor: Anchor<H>) => |s| { s.anchor = Some(anchor); }
-        font_semibold() => |s| { s.text.weight = Some(FontWeight::SEMIBOLD); }
+        font_semibold() => |s| { s.text.weight = Some(FontWeight::Semibold); }
         text_size(size: f32) => |s| { s.text.size = Some(size); }
         line_height(lh: f32) => |s| { s.text.line_height = Some(lh); }
         text_color(color: Rgba) => |s| { s.text.color = Some(color); }
@@ -494,7 +492,7 @@ impl<H: Copy + Eq, C: Copy> Frame<H, C> {
             };
             let shaped = text_system.shape_label(
                 content.clone(),
-                &TextStyle::new(style.font.clone(), style.size),
+                &style.style,
                 LabelLayout {
                     line_height: style.line_height,
                     wrap_width,
