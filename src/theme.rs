@@ -1,5 +1,4 @@
-use crate::color::{Rgba, black, rgb, rgba, transparent_black};
-use crate::geom::{BoxShadow, Shadows, point};
+use crate::geom::{BoxShadow, Rgba, Shadows, black, point, rgb, rgba, transparent_black};
 use crate::platform::HighContrastColors;
 
 pub(crate) const TEXT_FONT: &str = "Segoe UI Variable Text";

@@ -63,8 +63,7 @@ use windows::Win32::{
 use windows::core::{BOOL, HRESULT, HSTRING, Interface, implement};
 use windows_numerics::{Matrix3x2, Vector2};
 
-use crate::color::Rgba;
-use crate::geom::{Corners, Edges, Point, Rect, Shadows, Size, point, size};
+use crate::geom::{Corners, Edges, Point, Rect, Rgba, Shadows, Size, point, size};
 use crate::platform::NativeWindow;
 use crate::types::{Error, Result, SharedStr};
 

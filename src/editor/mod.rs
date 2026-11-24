@@ -17,8 +17,7 @@ use model::{EditPolicy, LineChange, ValidateFn};
 use scrollbar::{ScrollbarState, ScrollbarViewport};
 use wrap::{LineRanges, WrapIndex};
 
-use crate::color::Rgba;
-use crate::geom::{Axis, Edges, Point, Rect, Size, point, size};
+use crate::geom::{Axis, Edges, Point, Rect, Rgba, Size, point, size};
 use crate::gfx::{Canvas, TextStyle, TextSystem};
 use crate::ids::{AppNode, AppUi, EditorSlot};
 use crate::platform::{Modifiers, MouseButton, TimerHandle};

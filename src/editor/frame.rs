@@ -2,8 +2,7 @@ use std::ops::Range;
 
 use ropey::Rope;
 
-use crate::color::Rgba;
-use crate::geom::{Point, Rect, Size, point, size};
+use crate::geom::{Point, Rect, Rgba, Size, point, size};
 use crate::gfx::{Canvas, ShapedRow, TextStyle, fill};
 use crate::theme::Palette;
 

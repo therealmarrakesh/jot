@@ -1,19 +1,18 @@
 use std::time::Duration;
 
-use crate::color::transparent_black;
 use crate::command::{AppCommand, Command, shortcut_label};
 use crate::editor::EditCommand;
-use crate::geom::{Edges, Point, Rect, Size, point};
+use crate::geom::{Edges, Point, Rect, Size, point, transparent_black};
 use crate::gfx::TextSystem;
 use crate::ids::{
     AnimKey, AppFrame, AppNode, AppUi, EditorSlot, FindHit, Focus, HitId, MenuHit, MenuKind,
 };
-use crate::tooltip::{self, KeyTip};
 use crate::platform::{CursorStyle, Key, KeyEvent, TimerHandle};
 use crate::shell::{WindowTimer, WindowTimers};
 use crate::theme::{
     CONTROL_RADIUS, ICON_FONT, OVERLAY_RADIUS, Palette, SMALL_FONT, TEXT_FONT, theme_shadow,
 };
+use crate::tooltip::{self, KeyTip};
 use crate::types::SharedStr;
 use crate::ui::{Anchor, AnimStatus, Curve, Easing, Transform, Transition, box_, row, text};
 use crate::widgets::{focus_ring, subtle_brushes};

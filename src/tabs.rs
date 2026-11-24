@@ -2,11 +2,10 @@ use std::ops::Index;
 use std::path::Path;
 use std::time::Duration;
 
-use crate::color::transparent_black;
 use crate::command::{AppCommand, shortcut_tooltip};
 use crate::document::{self, DocPath, Format, PathKey};
 use crate::editor::{DocOptions, Editor, Rope};
-use crate::geom::{Edges, size};
+use crate::geom::{Edges, size, transparent_black};
 use crate::ids::{AnimKey, AppNode, AppUi, EditorSlot, HitId, TabHit, TabId};
 use crate::platform::{CursorStyle, TimerHandle};
 use crate::theme::{OVERLAY_RADIUS, Palette, SMALL_FONT};
@@ -919,7 +918,7 @@ fn render_tab(
 fn tab_face(
     p: Palette,
     active: bool,
-    bg: crate::color::Rgba,
+    bg: crate::geom::Rgba,
     trailing: f32,
     name: impl Into<SharedStr>,
 ) -> AppNode {

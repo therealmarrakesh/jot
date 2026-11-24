@@ -8,9 +8,9 @@ use std::time::{Duration, Instant};
 use anim::AnimSample;
 use layout::{Dim, Flex, FlexStyle, LayoutEngine, LayoutId};
 
-use crate::color::{Rgba, black, transparent_black};
 use crate::geom::{
-    Corners, Edges, Point, Rect, ScreenPoint, ScreenRect, Shadows, Size, point, size,
+    Corners, Edges, Point, Rect, Rgba, ScreenPoint, ScreenRect, Shadows, Size, black, point, size,
+    transparent_black,
 };
 use crate::gfx::{
     Canvas, FontWeight, Gpu, Label, LabelLayout, PaintQuad, Scope, TextStyle, TextSystem,
@@ -1041,7 +1041,7 @@ impl OverlaySurface {
 
 #[cfg(test)]
 mod tests {
-    use crate::color::{rgb, white};
+    use crate::geom::{rgb, white};
     use crate::geom::point;
 
     use super::*;

@@ -1,6 +1,5 @@
-use crate::color::{black, transparent_black, white};
 use crate::editor::Editor;
-use crate::geom::{Edges, Size};
+use crate::geom::{Edges, Size, black, transparent_black, white};
 use crate::ids::{AppNode, AppUi, CustomDraw, EditorSlot, HitId};
 use crate::platform::CursorStyle;
 use crate::theme::{

@@ -29,7 +29,7 @@ fn overlay_window_resizes_from_1x1_and_renders() {
         ws.window.logical_size().width > 10.0 && ws.window.logical_size().height > 10.0,
         "overlay must sync resized client rect before drawing"
     );
-    let needs_retry = ws.surface.draw(crate::color::transparent_black(), |_| {});
+    let needs_retry = ws.surface.draw(crate::geom::transparent_black(), |_| {});
     assert!(!needs_retry);
 }
 

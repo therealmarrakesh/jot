@@ -9,19 +9,18 @@ use crate::files::{FileIo, FileOps, FileRequest, spawn_file_io};
 use crate::geom::Size;
 use crate::gfx::{Gpu, TextSystem};
 use crate::ids::EditorSlot;
-use crate::tooltip::KeyTips;
 use crate::platform::{
     Key, MouseButton, Platform, PlatformEvent, PlatformHandler, WindowHandle, WindowId,
 };
 use crate::shell::{AppEvent, Cx, Effect, Shell, WindowTimer};
 use crate::tabs::TabData;
-use crate::tooltip::{TooltipTarget, Tooltips};
+use crate::tooltip::{KeyTips, TooltipTarget, Tooltips};
 use crate::window::{InputMode, MainWindow};
 
 use tab_drag::TabDrag;
-use windows::{OpenWindowError, Windows};
 #[cfg(test)]
 pub(crate) use windows::WindowLaunch;
+use windows::{OpenWindowError, Windows};
 
 pub(crate) struct App {
     pub(crate) windows: Windows,
