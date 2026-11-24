@@ -474,25 +474,14 @@ impl FindBar {
             ui,
         );
 
+        let action = |btn| box_().flex_none().ml(ACTION_GAP).w(ACTION_WIDTH).child(btn);
         row()
             .items_center()
             .mt(ROW_GAP)
             .child(box_().flex_none().w(ICON_BUTTON_SIZE + ICON_GAP))
             .child(box_().flex_1().min_w_0().child(replace_field))
-            .child(
-                box_()
-                    .flex_none()
-                    .ml(ACTION_GAP)
-                    .w(ACTION_WIDTH)
-                    .child(replace_btn),
-            )
-            .child(
-                box_()
-                    .flex_none()
-                    .ml(ACTION_GAP)
-                    .w(ACTION_WIDTH)
-                    .child(replace_all_btn),
-            )
+            .child(action(replace_btn))
+            .child(action(replace_all_btn))
     }
 }
 
