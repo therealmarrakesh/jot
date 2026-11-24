@@ -10,12 +10,12 @@ use crate::editor::{
     Clipboard, Editor, EditorPaintParams, EditorPaintStyle, EditorTimer, EditorTimers, RopeExt as _,
 };
 use crate::files::FileRequest;
-use crate::find::FindBar;
+use crate::find::{self, FindBar, FindOutcome};
 use crate::geom::{Edges, Point, Rect, Size, point, size};
 use crate::gfx::{Surface, TextSystem, fill, font};
 use crate::ids::{CustomDraw, EditorSlot, Frame, HitId, Node, UiState};
 use crate::keytips::KeyTip;
-use crate::menu::{MenuBar, MenuOutcome};
+use crate::menu::{Entry, MenuBar, MenuOutcome};
 use crate::platform::{
     Jobs, Key, KeyEvent, Modifiers, MouseButton, NativeWindow, SystemSettings, TimerHandle,
     WindowControlArea, WindowId, clipboard, format_local_time_date,
@@ -746,12 +746,21 @@ impl MainWindow {
         self.dirty = true;
     }
 
+    fn apply_find_outcome(&mut self, out: FindOutcome, jobs: &Jobs<AppEvent>) {
+        if out.arm_notice {
+            let window = self.id();
+            self.find.set_notice_timer(
+                jobs.after(find::NOTICE_DURATION, AppEvent::FindNoticeDismiss { window }),
+            );
+        }
+    }
+
     fn find_step(&mut self, forward: bool, ts: &TextSystem, jobs: &Jobs<AppEvent>) {
-        let wid = self.id();
-        let searched = self
+        let out = self
             .find
-            .step(&mut self.tabs[self.active].data.editor, forward, wid, jobs);
-        if !searched {
+            .step(&mut self.tabs[self.active].data.editor, forward);
+        self.apply_find_outcome(out, jobs);
+        if !out.searched {
             self.open_find(false, ts, jobs);
             return;
         }
@@ -762,18 +771,19 @@ impl MainWindow {
     }
 
     fn replace_next(&mut self, ts: &TextSystem, jobs: &Jobs<AppEvent>) {
-        let wid = self.id();
-        self.find
-            .replace_next(&mut self.tabs[self.active].data.editor, wid, ts, jobs);
+        let out = self
+            .find
+            .replace_next(&mut self.tabs[self.active].data.editor, ts);
+        self.apply_find_outcome(out, jobs);
         self.dirty = true;
     }
 
     fn replace_all(&mut self, ts: &TextSystem, jobs: &Jobs<AppEvent>) {
-        let wid = self.id();
-        if self
+        let out = self
             .find
-            .replace_all(&mut self.tabs[self.active].data.editor, wid, ts, jobs)
-        {
+            .replace_all(&mut self.tabs[self.active].data.editor, ts);
+        self.apply_find_outcome(out, jobs);
+        if out.replaced {
             self.refocus_find(jobs);
         } else {
             self.dirty = true;
@@ -1151,7 +1161,18 @@ impl MainWindow {
             Some(HitId::FindNext) => self.find_step(true, cx.ts, cx.jobs),
             Some(HitId::FindPrev) => self.find_step(false, cx.ts, cx.jobs),
             Some(HitId::FindOptions) => {
-                let entries = self.find.options_entries();
+                let entries = vec![
+                    Entry::toggle(
+                        "Match case",
+                        self.find.match_case,
+                        AppCommand::ToggleMatchCase,
+                    ),
+                    Entry::toggle(
+                        "Wrap around",
+                        self.find.wrap_around,
+                        AppCommand::ToggleWrapAround,
+                    ),
+                ];
                 let out = self.menu_bar.open_flyout(
                     entries,
                     HitId::FindOptions,
