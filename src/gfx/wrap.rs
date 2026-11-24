@@ -1,6 +1,5 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
 
 use windows::Win32::Graphics::DirectWrite::{
@@ -207,18 +206,16 @@ impl IDWriteTextAnalysisSource_Impl for BreakSource_Impl {
         textstring: *mut *mut u16,
         textlength: *mut u32,
     ) -> windows::core::Result<()> {
-        let _ = catch_unwind(AssertUnwindSafe(|| {
-            let pos = textposition as usize;
-            unsafe {
-                if pos >= self.utf16.len() {
-                    *textstring = std::ptr::null_mut();
-                    *textlength = 0;
-                } else {
-                    *textstring = self.utf16.as_ptr().add(pos) as *mut u16;
-                    *textlength = (self.utf16.len() - pos) as u32;
-                }
+        let pos = textposition as usize;
+        unsafe {
+            if pos >= self.utf16.len() {
+                *textstring = std::ptr::null_mut();
+                *textlength = 0;
+            } else {
+                *textstring = self.utf16.as_ptr().add(pos) as *mut u16;
+                *textlength = (self.utf16.len() - pos) as u32;
             }
-        }));
+        }
         Ok(())
     }
 
@@ -228,18 +225,16 @@ impl IDWriteTextAnalysisSource_Impl for BreakSource_Impl {
         textstring: *mut *mut u16,
         textlength: *mut u32,
     ) -> windows::core::Result<()> {
-        let _ = catch_unwind(AssertUnwindSafe(|| {
-            let pos = (textposition as usize).min(self.utf16.len());
-            unsafe {
-                if pos == 0 {
-                    *textstring = std::ptr::null_mut();
-                    *textlength = 0;
-                } else {
-                    *textstring = self.utf16.as_ptr() as *mut u16;
-                    *textlength = pos as u32;
-                }
+        let pos = (textposition as usize).min(self.utf16.len());
+        unsafe {
+            if pos == 0 {
+                *textstring = std::ptr::null_mut();
+                *textlength = 0;
+            } else {
+                *textstring = self.utf16.as_ptr() as *mut u16;
+                *textlength = pos as u32;
             }
-        }));
+        }
         Ok(())
     }
 
@@ -253,13 +248,11 @@ impl IDWriteTextAnalysisSource_Impl for BreakSource_Impl {
         textlength: *mut u32,
         localename: *mut *mut u16,
     ) -> windows::core::Result<()> {
-        let _ = catch_unwind(AssertUnwindSafe(|| {
-            let pos = (textposition as usize).min(self.utf16.len());
-            unsafe {
-                *textlength = (self.utf16.len() - pos) as u32;
-                *localename = self.locale.as_ptr() as *mut u16;
-            }
-        }));
+        let pos = (textposition as usize).min(self.utf16.len());
+        unsafe {
+            *textlength = (self.utf16.len() - pos) as u32;
+            *localename = self.locale.as_ptr() as *mut u16;
+        }
         Ok(())
     }
 
@@ -269,13 +262,11 @@ impl IDWriteTextAnalysisSource_Impl for BreakSource_Impl {
         textlength: *mut u32,
         numbersubstitution: windows::core::OutRef<'_, IDWriteNumberSubstitution>,
     ) -> windows::core::Result<()> {
-        let _ = catch_unwind(AssertUnwindSafe(|| {
-            let pos = (textposition as usize).min(self.utf16.len());
-            unsafe {
-                *textlength = (self.utf16.len() - pos) as u32;
-            }
-            let _ = numbersubstitution.write(None);
-        }));
+        let pos = (textposition as usize).min(self.utf16.len());
+        unsafe {
+            *textlength = (self.utf16.len() - pos) as u32;
+        }
+        let _ = numbersubstitution.write(None);
         Ok(())
     }
 }
@@ -301,18 +292,16 @@ impl IDWriteTextAnalysisSink_Impl for BreakSink_Impl {
         textlength: u32,
         linebreakpoints: *const DWRITE_LINE_BREAKPOINT,
     ) -> windows::core::Result<()> {
-        let _ = catch_unwind(AssertUnwindSafe(|| {
-            let start = textposition as usize;
-            let len = textlength as usize;
-            if len == 0 || linebreakpoints.is_null() {
-                return;
-            }
-            let mut dst = self.out.borrow_mut();
-            if start.saturating_add(len) <= dst.len() {
-                let src = unsafe { std::slice::from_raw_parts(linebreakpoints, len) };
-                dst[start..start + len].copy_from_slice(src);
-            }
-        }));
+        let start = textposition as usize;
+        let len = textlength as usize;
+        if len == 0 || linebreakpoints.is_null() {
+            return Ok(());
+        }
+        let mut dst = self.out.borrow_mut();
+        if start.saturating_add(len) <= dst.len() {
+            let src = unsafe { std::slice::from_raw_parts(linebreakpoints, len) };
+            dst[start..start + len].copy_from_slice(src);
+        }
         Ok(())
     }
 

@@ -1,12 +1,9 @@
 mod actions;
 mod buffer;
 mod view;
-#[cfg(test)]
 pub(crate) mod wrap;
-#[cfg(not(test))]
-mod wrap;
 
-pub(crate) use buffer::{Position, RopeExt};
+pub(crate) use buffer::RopeExt;
 pub(crate) use ropey::Rope;
 pub(crate) use view::EditorPaintStyle;
 
@@ -16,7 +13,7 @@ use std::time::Duration;
 use ropey::RopeSlice;
 
 use crate::command::Command;
-use crate::geom::{Axis, Edges, Point, Rect, Size};
+use crate::geom::{Edges, Point, Rect, Size};
 use crate::gfx::{Font, TextSystem};
 use crate::platform::{Key, KeyEvent, TimerHandle};
 use crate::scrollbar::ScrollbarState;
@@ -40,7 +37,7 @@ pub(super) enum MoveDirection {
 pub(super) struct Composition {
     pub(super) start: usize,
     pub(super) end: usize,
-    pub(super) cursor_utf16: usize,
+    pub(super) cursor: usize,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -75,31 +72,6 @@ impl EditorTimers for NoopTimers {
 
     fn every(&mut self, _delay: Duration, _interval: Duration, _kind: EditorTimer) -> TimerHandle {
         TimerHandle::default()
-    }
-}
-
-#[derive(Debug, Copy, Clone)]
-pub(crate) struct TabSize {
-    pub(crate) tab_size: usize,
-    pub(crate) hard_tabs: bool,
-}
-
-impl Default for TabSize {
-    fn default() -> Self {
-        Self {
-            tab_size: 8,
-            hard_tabs: true,
-        }
-    }
-}
-
-impl TabSize {
-    pub(super) fn as_str(self) -> SharedStr {
-        if self.hard_tabs {
-            "\t".into()
-        } else {
-            " ".repeat(self.tab_size).into()
-        }
     }
 }
 
@@ -162,7 +134,6 @@ pub(crate) struct Editor {
     multi_line: bool,
     text: Rope,
     wrap: WrapIndex,
-    tab_size: TabSize,
     history: History,
     revision: u64,
     soft_wrap: bool,
@@ -208,7 +179,6 @@ impl Editor {
             multi_line,
             text: Rope::new(),
             wrap: WrapIndex::new(Font::default(), 14.0, None),
-            tab_size: TabSize::default(),
             history: History::new(),
             revision: 0,
             soft_wrap: true,
@@ -304,14 +274,8 @@ impl Editor {
         self.soft_wrap
     }
 
-    #[cfg(test)]
     #[inline]
     pub(crate) fn scroll_offset(&self) -> Point {
-        crate::geom::point(self.scroll_x, self.scroll_y as f32)
-    }
-
-    #[inline]
-    pub(super) fn scroll_offset_point(&self) -> Point {
         crate::geom::point(self.scroll_x, self.scroll_y as f32)
     }
 
@@ -394,9 +358,7 @@ impl Editor {
             let start = comp.start.min(self.text.len());
             let end = comp.end.min(self.text.len());
             if start <= end {
-                let base_u16 = self.text.offset_to_offset_utf16(start);
-                let target_u16 = base_u16.saturating_add(comp.cursor_utf16);
-                return self.text.offset_utf16_to_offset(target_u16).clamp(start, end);
+                return start.saturating_add(comp.cursor).clamp(start, end);
             }
         }
         self.selection.head().min(self.text.len())
@@ -412,16 +374,6 @@ impl Editor {
         let start = self.text.clip_offset(range.start, buffer::Bias::Left);
         let end = self.text.clip_offset(range.end, buffer::Bias::Right);
         self.text.slice(start..end)
-    }
-
-    #[inline]
-    pub(crate) fn range_to_utf16(&self, range: &Range<usize>) -> Range<usize> {
-        self.text.offset_to_offset_utf16(range.start)..self.text.offset_to_offset_utf16(range.end)
-    }
-
-    #[inline]
-    pub(super) fn range_from_utf16(&self, range: &Range<usize>) -> Range<usize> {
-        self.text.offset_utf16_to_offset(range.start)..self.text.offset_utf16_to_offset(range.end)
     }
 
     pub(crate) fn can_undo(&self) -> bool {
@@ -485,11 +437,7 @@ impl Editor {
             .when(!self.multi_line, |b| b.row().min_h_full().items_center())
             .child(text_leaf)
             .when(self.multi_line, |b| {
-                b.child(
-                    custom(CustomDraw::Scrollbar(Axis::Vertical))
-                        .absolute()
-                        .size_full(),
-                )
+                b.child(custom(CustomDraw::Scrollbar).absolute().size_full())
             })
     }
 }
@@ -497,34 +445,6 @@ impl Editor {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn tab_size_formats_spaces_or_hard_tab() {
-        assert_eq!(
-            TabSize {
-                tab_size: 2,
-                hard_tabs: false
-            }
-            .as_str(),
-            "  "
-        );
-        assert_eq!(
-            TabSize {
-                tab_size: 4,
-                hard_tabs: false
-            }
-            .as_str(),
-            "    "
-        );
-        assert_eq!(
-            TabSize {
-                tab_size: 4,
-                hard_tabs: true
-            }
-            .as_str(),
-            "\t"
-        );
-    }
 
     #[test]
     fn editor_direct_typing_undo_redo_and_word_navigation() {

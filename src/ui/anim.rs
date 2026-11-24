@@ -374,11 +374,6 @@ impl<K: Copy + Eq + Hash> AnimTracks<K> {
         sample.value
     }
 
-    pub(crate) fn remove(&mut self, key: K) {
-        self.scalars.remove(&key);
-        self.colors.remove(&key);
-    }
-
     #[cfg(test)]
     pub(crate) fn track_count(&self) -> usize {
         self.scalars.len() + self.colors.len()

@@ -1,7 +1,7 @@
 use std::time::{Duration, Instant};
 
 use crate::color::{Rgba, black, rgba, transparent_black};
-use crate::geom::{Axis, Corners, Edges, Point, Rect, Shadows, Size};
+use crate::geom::{Corners, Edges, Point, Rect, Shadows, Size};
 use crate::gfx::{
     D2DRenderer, Font, FontWeight, PaintQuad, TextAlign, TextSystem, WrappedLine,
 };
@@ -28,7 +28,7 @@ pub(crate) enum EditorSlot {
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum CustomDraw {
     Editor(EditorSlot),
-    Scrollbar(Axis),
+    Scrollbar,
     StatusSpacer,
 }
 
@@ -840,15 +840,6 @@ impl Frame {
 
     pub(crate) fn control_areas(&self) -> Vec<(Rect, Option<WindowControlArea>)> {
         self.control_areas.clone()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn hit_test_control_area(&self, pos: Point) -> Option<WindowControlArea> {
-        self.control_areas
-            .iter()
-            .rev()
-            .find(|(rect, _)| rect.contains(pos))
-            .and_then(|(_, area)| *area)
     }
 
     fn top_hit(&self, pos: Point) -> Option<&HitEntry> {

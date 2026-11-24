@@ -2,13 +2,9 @@ use std::borrow::Cow;
 use std::ops::{Range, RangeInclusive};
 
 use ropey::Rope;
-#[cfg(test)]
-use unicode_segmentation::UnicodeSegmentation as _;
 
 use crate::geom::{Point, Size, point, size};
 use crate::gfx::{Boundary, D2DRenderer, Font, ShapedLine, TextAlign, TextSystem};
-#[cfg(test)]
-use crate::gfx::{MAX_WRAP_INDENT, line_break_opportunities};
 
 use super::buffer::{RopeExt, TextPoint};
 
@@ -565,81 +561,6 @@ pub(crate) fn can_wrap_with_char_widths(text: &str) -> bool {
     })
 }
 
-#[cfg(test)]
-fn measured_wrap_breaks(
-    text: &str,
-    width: f32,
-    preserve_indent: bool,
-    mut measure: impl FnMut(&str) -> f32,
-    out: &mut Vec<Boundary>,
-) {
-    let indent = if preserve_indent {
-        text.chars()
-            .take_while(|&c| c == ' ')
-            .count()
-            .min(MAX_WRAP_INDENT as usize)
-    } else {
-        0
-    };
-    let indent_width = if indent > 0 {
-        measure(&text[..indent])
-    } else {
-        0.0
-    };
-    let grapheme_ends: Vec<usize> = text
-        .grapheme_indices(true)
-        .map(|(ix, g)| ix + g.len())
-        .collect();
-    let opportunities: Vec<usize> = line_break_opportunities(text)
-        .into_iter()
-        .filter(|ix| grapheme_ends.binary_search(ix).is_ok())
-        .collect();
-
-    let mut first = 0;
-    let mut start = 0;
-    while first < grapheme_ends.len() {
-        let available = if start == 0 {
-            width
-        } else {
-            width - indent_width
-        };
-        let remaining = grapheme_ends.len() - first;
-        let mut lo = 0;
-        let mut hi = 1;
-        while measure(&text[start..grapheme_ends[first + hi - 1]]) <= available {
-            lo = hi;
-            if hi == remaining {
-                break;
-            }
-            hi = (hi * 2).min(remaining);
-        }
-        while lo + 1 < hi {
-            let mid = (lo + hi) / 2;
-            if measure(&text[start..grapheme_ends[first + mid - 1]]) <= available {
-                lo = mid;
-            } else {
-                hi = mid;
-            }
-        }
-        let fitting_end = grapheme_ends[first + lo.max(1) - 1];
-        if fitting_end == text.len() {
-            break;
-        }
-        let idx = opportunities.partition_point(|&ix| ix <= fitting_end);
-        let chosen = idx
-            .checked_sub(1)
-            .map(|i| opportunities[i])
-            .filter(|&ix| ix > start && (start != 0 || ix > indent))
-            .unwrap_or(fitting_end);
-        out.push(Boundary {
-            ix: chosen,
-            next_indent: indent as u32,
-        });
-        first = grapheme_ends.partition_point(|&ix| ix <= chosen);
-        start = chosen;
-    }
-}
-
 pub(crate) struct WrapIndex {
     text: Rope,
     font: Font,
@@ -938,33 +859,6 @@ mod tests {
 
     fn test_font() -> Font {
         font("Arial")
-    }
-
-    #[test]
-    fn measured_wrap_preserves_words_graphemes_cjk_and_indentation() {
-        let wrap = |text: &str, width, preserve_indent| {
-            let mut out = Vec::new();
-            measured_wrap_breaks(
-                text,
-                width,
-                preserve_indent,
-                |s| s.graphemes(true).count() as f32,
-                &mut out,
-            );
-            out.into_iter().map(|b| b.ix).collect::<Vec<_>>()
-        };
-
-        assert_eq!(wrap("hello world", 8., false), vec![6]);
-        assert_eq!(wrap("a👩‍💻b", 2., false), vec!["a👩‍💻".len()]);
-        assert_eq!(wrap("  abcdefgh", 5., true), vec![5, 8]);
-        assert_eq!(wrap("  abcdefgh", 5., false), vec![2, 7]);
-        assert!(wrap("", 0., false).is_empty());
-        assert_eq!(wrap("abc", 0., false), vec![1, 2]);
-        assert_eq!(wrap("你好，世界", 2., false), vec![3, 9]);
-        assert!(line_break_opportunities("foo\u{00A0}bar").is_empty());
-        assert_eq!(line_break_opportunities("foo-bar"), vec![4]);
-        assert_eq!(wrap("👨‍👩‍👧‍👦 word", 4., false), vec!["👨‍👩‍👧‍👦 ".len()]);
-        assert_eq!(wrap("你好😀世界", 3., false), vec!["你好😀".len()]);
     }
 
     #[test]

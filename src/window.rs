@@ -9,13 +9,13 @@ use crate::command::{Command, window_shortcut};
 use crate::dialog::{DialogKind, Dialogs};
 use crate::document::{self, Format};
 use crate::editor::{
-    Editor, EditorPaintStyle, EditorTimer, EditorTimers, Position, RopeExt as _, key_to_command,
+    Editor, EditorPaintStyle, EditorTimer, EditorTimers, RopeExt as _, key_to_command,
 };
 use crate::files::{
     self, FilePrompt, FileWorkflow, WorkflowFinish, WorkflowGen, WorkflowStep,
 };
 use crate::find::FindBar;
-use crate::geom::{Axis, Edges, Point, Rect, Size, point, size};
+use crate::geom::{Edges, Point, Rect, Size, point, size};
 use crate::gfx::{TextSystem, fill, font};
 use crate::keytips::KeyTip;
 use crate::menu::{MenuBar, MenuKind, MenuOutcome};
@@ -89,7 +89,6 @@ pub(crate) enum WindowAction {
         index: usize,
         grab: Point,
         position: Point,
-        alone: bool,
     },
     CancelTabDrag,
     ForgetTabDrag(TabId),
@@ -966,8 +965,7 @@ impl MainWindow {
         match value.parse::<usize>() {
             Ok(line) if (1..=lines).contains(&line) => {
                 self.close_dialogs(jobs);
-                self.active_editor_mut()
-                    .set_cursor_position(Position::new((line - 1) as u32, 0));
+                self.active_editor_mut().go_to_line(line - 1);
                 self.dirty = true;
             }
             _ => {
@@ -1394,7 +1392,6 @@ impl MainWindow {
                             index: ix,
                             grab,
                             position: pos,
-                            alone: self.tabs.len() == 1,
                         });
                     }
                     return None;
@@ -2235,10 +2232,9 @@ impl MainWindow {
                             editor_needs_vsync |= outcome.needs_vsync;
                         }
                     },
-                    CustomDraw::Scrollbar(Axis::Vertical) => {
+                    CustomDraw::Scrollbar => {
                         self.tabs[self.active].data.editor.paint_scrollbar(renderer);
                     }
-                    CustomDraw::Scrollbar(Axis::Horizontal) => {}
                     CustomDraw::StatusSpacer => {
                         let width = rect.size.width;
                         if width < STATUS_DIVIDER_WIDTH + 0.5 {
@@ -2255,7 +2251,7 @@ impl MainWindow {
             match renderer.end_frame() {
                 Ok(lost) => lost,
                 Err(err) => {
-                    crate::platform::debug_log(&format!("D2D end_frame failed: {err}"));
+                    crate::diag::debug_log(&format!("D2D end_frame failed: {err}"));
                     true
                 }
             }

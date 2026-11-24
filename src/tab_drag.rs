@@ -68,7 +68,6 @@ impl App {
         index: usize,
         grab: Point,
         position: Point,
-        _alone: bool,
     ) {
         let Some(hwnd) = self.window_hwnd(window_id) else {
             return;

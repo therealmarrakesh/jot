@@ -14,6 +14,7 @@ use crate::find;
 use crate::geom::{Point, Rect, ScreenRect, point, size};
 use crate::gfx::font;
 use crate::menu::MenuKind;
+use crate::platform::window::hit_test_control_areas;
 use crate::platform::{
     Key, KeyEvent, Modifiers, MouseButton, NativeWindow, Platform, PlatformEvent, PlatformHandler,
     WindowAppearance, WindowBackdrop, WindowControlArea, WindowId, WindowKind, WindowOptions,
@@ -617,16 +618,17 @@ fn theme_zoom_editing_undo_scrollbar_and_caption_hit_tests() {
     let max_pt = h.hit_rect(HitId::CaptionMax).unwrap().center();
     let min_pt = h.hit_rect(HitId::CaptionMin).unwrap().center();
     h.read(|w, _| {
+        let areas = w.ui.frame.control_areas();
         assert_eq!(
-            w.ui.frame.hit_test_control_area(close_pt),
+            hit_test_control_areas(&areas, close_pt),
             Some(WindowControlArea::Close)
         );
         assert_eq!(
-            w.ui.frame.hit_test_control_area(max_pt),
+            hit_test_control_areas(&areas, max_pt),
             Some(WindowControlArea::Max)
         );
         assert_eq!(
-            w.ui.frame.hit_test_control_area(min_pt),
+            hit_test_control_areas(&areas, min_pt),
             Some(WindowControlArea::Min)
         );
     });
@@ -693,7 +695,6 @@ fn overlay_window_resizes_from_1x1_and_renders() {
     let opts = WindowOptions {
         bounds: Some(Rect::new(point(0., 0.), size(1., 1.))),
         title: "".into(),
-        hide_titlebar: true,
         focus: false,
         show: false,
         kind: WindowKind::Overlay,
@@ -1007,7 +1008,6 @@ fn tab_drag_pop_out_and_reattach_does_not_panic() {
                 1,
                 point(20.0, 12.0),
                 tab_rect.center(),
-                false,
             );
             app.tab_drag_detach_for_test();
         }
@@ -1396,7 +1396,7 @@ fn keyboard_system_chords_altgr_menu_gate_popup_occlusion_and_fractional_borders
     let close_pt = h.hit_rect(HitId::CaptionClose).unwrap().center();
     h.read(|w, _| {
         assert_eq!(
-            w.ui.frame.hit_test_control_area(close_pt),
+            hit_test_control_areas(&w.ui.frame.control_areas(), close_pt),
             None,
             "modal dialog backdrop must occlude caption buttons"
         );

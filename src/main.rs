@@ -3,6 +3,7 @@
 mod app;
 mod color;
 mod command;
+mod diag;
 mod dialog;
 mod document;
 mod editor;
@@ -38,7 +39,7 @@ pub(crate) const APP_NAME: &str = "Jot";
 const NOTICES_FLAG: &str = "--notices";
 
 fn main() {
-    platform::install_panic_hook();
+    diag::install_panic_hook();
 
     let (flags, mut paths): (Vec<_>, Vec<_>) = std::env::args_os()
         .skip(1)
@@ -47,7 +48,7 @@ fn main() {
     if !flags.is_empty() {
         match document::write_notices() {
             Ok(path) => paths.push(path),
-            Err(err) => platform::debug_log(&format!("Failed to write notices file: {err}")),
+            Err(err) => diag::debug_log(&format!("Failed to write notices file: {err}")),
         }
     }
 
@@ -59,7 +60,7 @@ fn main() {
     let platform = match Platform::new() {
         Ok(p) => Rc::new(p),
         Err(err) => {
-            platform::show_error_dialog(APP_NAME, &format!("Jot couldn't start.\n\n{err}"));
+            diag::show_error_dialog(APP_NAME, &format!("Jot couldn't start.\n\n{err}"));
             return;
         }
     };
@@ -80,7 +81,7 @@ fn main() {
             }
         }
         Err(err) => {
-            platform::show_error_dialog(
+            diag::show_error_dialog(
                 APP_NAME,
                 &format!("Jot couldn't open a window.\n\n{}", err.message),
             );

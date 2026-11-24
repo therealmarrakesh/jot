@@ -9,7 +9,7 @@ use crate::gfx::TextSystem;
 use crate::platform::clipboard;
 
 use super::buffer::{
-    Bias, CaretSelection, Position, RopeExt as _, line_range_at, next_grapheme_boundary,
+    Bias, CaretSelection, RopeExt as _, line_range_at, next_grapheme_boundary,
     next_word_end, prev_grapheme_boundary, prev_word_start, snap_grapheme_boundary, word_range_at,
 };
 use super::history::{EditKind, EditRecord, ReplayPayload};
@@ -133,22 +133,21 @@ impl Editor {
         self.replace_text_in_range(None, text, None, ts, Some(timers));
     }
 
-    pub(crate) fn handle_ime_composition(&mut self, text: &str, cursor: usize, ts: &TextSystem) {
+    pub(crate) fn handle_ime_composition(&mut self, text: &str, cursor_utf16: usize, ts: &TextSystem) {
         if text.is_empty() && self.composition.is_none() {
             return;
         }
         if text.is_empty() {
-            self.replace_and_mark_text_in_range(None, "", None, ts);
+            self.replace_and_mark_text_in_range("", None, ts);
         } else {
-            let clamped = cursor.min(text.encode_utf16().count());
-            self.replace_and_mark_text_in_range(None, text, Some(clamped..clamped), ts);
+            let byte_pos = utf16_offset_to_byte(text, cursor_utf16);
+            self.replace_and_mark_text_in_range(text, Some(byte_pos..byte_pos), ts);
         }
     }
 
     pub(crate) fn ime_caret_bounds(&self) -> Option<Rect> {
         let bounds = self.content_bounds?;
-        let sel_utf16 = self.range_to_utf16(&self.selected_range());
-        self.bounds_for_utf16_range(sel_utf16, bounds)
+        self.bounds_for_range(self.selected_range(), bounds)
             .or(self.caret_bounds)
     }
 
@@ -156,8 +155,8 @@ impl Editor {
         self.commit_composition();
         self.reset_pointer_selection_state();
         self.history.set_ignoring(true);
-        let full_utf16 = 0..self.text.len_utf16();
-        self.replace_text_in_range(Some(full_utf16), value, Some(EditKind::Atomic), ts, None);
+        let full = 0..self.text.len();
+        self.replace_text_in_range(Some(full), value, Some(EditKind::Atomic), ts, None);
         self.history.set_ignoring(false);
 
         if self.multi_line {
@@ -232,9 +231,9 @@ impl Editor {
         self.debug_assert_invariants();
     }
 
-    pub(crate) fn set_cursor_position(&mut self, position: Position) {
+    pub(crate) fn go_to_line(&mut self, line: usize) {
         self.commit_composition();
-        let offset = self.text.position_to_offset(&position);
+        let offset = self.text.line_start_offset(line);
         self.history.break_coalescing();
         let offset = self.cursor_boundary(offset, Bias::Left);
         self.line_end_affinity = false;
@@ -715,17 +714,15 @@ impl Editor {
         let Some(raw) = clipboard::read_clipboard_text().filter(|s| !s.is_empty()) else {
             return;
         };
-        let text: Cow<'_, str> = if !self.multi_line {
-            Cow::Borrowed(raw.split(['\r', '\n']).next().unwrap_or(""))
-        } else if raw.contains('\r') {
-            Cow::Owned(raw.replace("\r\n", "\n").replace('\r', "\n"))
+        let text = if self.multi_line {
+            raw.as_str()
         } else {
-            Cow::Borrowed(&raw)
+            raw.split(['\r', '\n']).next().unwrap_or("")
         };
         if text.is_empty() {
             return;
         }
-        self.replace_text_in_range(None, &text, Some(EditKind::Atomic), ts, Some(timers));
+        self.replace_text_in_range(None, text, Some(EditKind::Atomic), ts, Some(timers));
     }
 
     fn apply_indent(
@@ -740,7 +737,7 @@ impl Editor {
         }
         self.commit_composition();
         self.pause_blink(timers);
-        let indent_str = self.tab_size.as_str();
+        let indent_str = "\t";
         let before = self.selection;
 
         let spans_multiple_lines = !before.is_empty()
@@ -749,7 +746,7 @@ impl Editor {
         if !block && op == IndentOp::Indent && !spans_multiple_lines {
             self.replace_text_in_range(
                 None,
-                indent_str.as_str(),
+                indent_str,
                 Some(EditKind::Atomic),
                 ts,
                 None,
@@ -820,9 +817,8 @@ impl Editor {
         if self.text.char_at(line_start) == Some('\t') {
             return 1;
         }
-        let max_spaces = self.tab_size.tab_size.max(1);
         let mut spaces = 0usize;
-        for ch in self.text.slice(line_start..).chars().take(max_spaces) {
+        for ch in self.text.slice(line_start..).chars().take(8) {
             if ch == ' ' {
                 spaces += 1;
             } else {
@@ -861,9 +857,8 @@ impl Editor {
                     } else {
                         (Range::from(edit.old_range), edit.new_text.as_str())
                     };
-                    let range_utf16 = self.range_to_utf16(&range);
                     self.replace_text_in_range(
-                        Some(range_utf16),
+                        Some(range),
                         text,
                         Some(EditKind::Atomic),
                         ts,
@@ -1030,7 +1025,7 @@ impl Editor {
 
     pub(crate) fn replace_text_in_range(
         &mut self,
-        range_utf16: Option<Range<usize>>,
+        range: Option<Range<usize>>,
         new_text: &str,
         requested: Option<EditKind>,
         ts: &TextSystem,
@@ -1048,9 +1043,7 @@ impl Editor {
         let normalized = self.normalize_text(new_text);
         let new_text: &str = &normalized;
 
-        let range = range_utf16
-            .as_ref()
-            .map(|r| self.range_from_utf16(r))
+        let range = range
             .or_else(|| {
                 active_comp.map(|c| {
                     let len = self.text.len();
@@ -1103,9 +1096,8 @@ impl Editor {
 
     pub(crate) fn replace_and_mark_text_in_range(
         &mut self,
-        range_utf16: Option<Range<usize>>,
         new_text: &str,
-        new_selected_utf16: Option<Range<usize>>,
+        new_selected: Option<Range<usize>>,
         ts: &TextSystem,
     ) {
         let selection_before = self.selection;
@@ -1119,14 +1111,11 @@ impl Editor {
         let normalized = self.normalize_text(new_text);
         let new_text: &str = &normalized;
 
-        let range = range_utf16
-            .as_ref()
-            .map(|r| self.range_from_utf16(r))
-            .or_else(|| {
-                self.composition.map(|c| {
-                    let len = self.text.len();
-                    c.start.min(len)..c.end.min(len)
-                })
+        let range = self
+            .composition
+            .map(|c| {
+                let len = self.text.len();
+                c.start.min(len)..c.end.min(len)
             })
             .unwrap_or_else(|| self.selected_range());
 
@@ -1150,20 +1139,19 @@ impl Editor {
             self.set_cursor_to(range.start);
             self.composition = None;
         } else {
-            let cursor_utf16 = new_selected_utf16
+            let cursor = new_selected
                 .as_ref()
-                .map_or_else(|| new_text.encode_utf16().count(), |r| r.end);
+                .map_or(new_text.len(), |r| r.end.min(new_text.len()));
             self.composition = Some(Composition {
                 start: range.start,
                 end: range.start + new_text.len(),
-                cursor_utf16,
+                cursor,
             });
-            let sel = new_selected_utf16
+            let sel = new_selected
                 .as_ref()
                 .map(|r| {
-                    let rope = Rope::from(new_text);
-                    range.start + rope.offset_utf16_to_offset(r.start)
-                        ..range.start + rope.offset_utf16_to_offset(r.end)
+                    range.start + r.start.min(new_text.len())
+                        ..range.start + r.end.min(new_text.len())
                 })
                 .unwrap_or_else(|| range.start + new_text.len()..range.start + new_text.len());
             self.selection.start = sel.start;
@@ -1189,10 +1177,9 @@ impl Editor {
         self.debug_assert_invariants();
     }
 
-    fn bounds_for_utf16_range(&self, range_utf16: Range<usize>, bounds: Rect) -> Option<Rect> {
+    fn bounds_for_range(&self, range: Range<usize>, bounds: Rect) -> Option<Rect> {
         let layout = self.layout.as_ref()?;
         let line_height = layout.line_height;
-        let range = self.range_from_utf16(&range_utf16);
 
         let mut start_pos = None;
         let mut end_pos = None;
@@ -1238,4 +1225,15 @@ impl Editor {
             bounds.origin + point(end_pos.x, end_pos.y + line_height),
         ))
     }
+}
+
+fn utf16_offset_to_byte(text: &str, target_utf16: usize) -> usize {
+    let mut u16_pos = 0usize;
+    for (byte_ix, ch) in text.char_indices() {
+        if u16_pos >= target_utf16 {
+            return byte_ix;
+        }
+        u16_pos += ch.len_utf16();
+    }
+    text.len()
 }

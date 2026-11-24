@@ -395,7 +395,7 @@ impl Editor {
             && self.multi_line
             && let Some(next) = self
                 .scrollbar
-                .on_mouse_down(position, self.scroll_offset_point())
+                .on_mouse_down(position, self.scroll_offset())
         {
             self.reveal = None;
             self.clamp_and_set_scroll_f64(next.x, f64::from(next.y));
@@ -458,7 +458,7 @@ impl Editor {
             let outcome = self.scrollbar.on_mouse_move(
                 position,
                 dragging_left,
-                self.scroll_offset_point(),
+                self.scroll_offset(),
                 |delay| timers.after(delay, EditorTimer::ScrollbarDrag),
             );
             if let Some(next) = outcome.new_offset {
@@ -498,7 +498,7 @@ impl Editor {
         if self.multi_line
             && let Some(next) = self
                 .scrollbar
-                .on_mouse_up(position, self.scroll_offset_point())
+                .on_mouse_up(position, self.scroll_offset())
         {
             self.reveal = None;
             self.clamp_and_set_scroll_f64(next.x, f64::from(next.y));
@@ -569,7 +569,7 @@ impl Editor {
         let moved = self.clamp_and_set_scroll_f64(self.scroll_x + dx, self.scroll_y + dy);
         if moved {
             self.scrollbar
-                .on_wheel(self.scroll_offset_point(), Instant::now());
+                .on_wheel(self.scroll_offset(), Instant::now());
         }
         moved
     }
@@ -858,7 +858,7 @@ impl Editor {
             let vp = scrollbar_viewport(input_bounds, content_size, self.paddings, self.soft_wrap);
             needs_vsync = self.scrollbar.prepare(
                 vp,
-                self.scroll_offset_point(),
+                self.scroll_offset(),
                 reduce_motion,
                 p,
                 now,

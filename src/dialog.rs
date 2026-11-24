@@ -154,14 +154,7 @@ impl OpenDialog {
         let growth = OPEN_SCALE - 1.;
         self.scale = 1. + growth * (1. - shown) + growth * hidden.value;
         self.opacity = faded_in * fade_out.value;
-        let done = self.closing && fade_out.status == AnimStatus::Finished;
-        if done {
-            ui.anims.remove(AnimKey::DialogShow(self.serial));
-            ui.anims.remove(AnimKey::DialogFadeIn(self.serial));
-            ui.anims.remove(AnimKey::DialogHide(self.serial));
-            ui.anims.remove(AnimKey::DialogFadeOut(self.serial));
-        }
-        done
+        self.closing && fade_out.status == AnimStatus::Finished
     }
 }
 

@@ -97,7 +97,7 @@ impl KeyTips {
         self.create_failed = false;
         if let Some(overlay) = &mut self.overlay {
             if let Err(err) = overlay.recreate_renderer(devices) {
-                crate::platform::debug_log(&format!("keytips recreate_renderer failed: {err}"));
+                crate::diag::debug_log(&format!("keytips recreate_renderer failed: {err}"));
             }
             if self.owner.is_some() {
                 self.dirty = true;
@@ -132,7 +132,6 @@ impl KeyTips {
             let opts = WindowOptions {
                 bounds: Some(Rect::new(point(0., 0.), size(1., 1.))),
                 title: "".into(),
-                hide_titlebar: true,
                 focus: false,
                 show: false,
                 kind: WindowKind::Overlay,
@@ -146,7 +145,7 @@ impl KeyTips {
                 Ok(win) => self.overlay = Some(win),
                 Err(err) => {
                     self.create_failed = true;
-                    crate::platform::debug_log(&format!("keytips overlay create failed: {err}"));
+                    crate::diag::debug_log(&format!("keytips overlay create failed: {err}"));
                     return;
                 }
             }
@@ -192,7 +191,7 @@ impl KeyTips {
                 match renderer.end_frame() {
                     Ok(lost) => lost,
                     Err(err) => {
-                        crate::platform::debug_log(&format!("keytips end_frame failed: {err}"));
+                        crate::diag::debug_log(&format!("keytips end_frame failed: {err}"));
                         true
                     }
                 }

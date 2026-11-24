@@ -283,7 +283,6 @@ impl App {
         WindowOptions {
             bounds: Some(bounds),
             title: APP_NAME.into(),
-            hide_titlebar: true,
             focus,
             show,
             kind: WindowKind::Normal,
@@ -315,7 +314,7 @@ impl App {
                 Ok(n) => n,
                 Err(err) => {
                     let message = err.to_string();
-                    crate::platform::debug_log(&format!("NativeWindow::create failed: {message}"));
+                    crate::diag::debug_log(&format!("NativeWindow::create failed: {message}"));
                     return Err(Box::new(OpenWindowError {
                         tab: initial,
                         message,
@@ -460,9 +459,8 @@ impl App {
                 index,
                 grab,
                 position,
-                alone,
             } => {
-                self.tab_drag_press(window_id, tab, index, grab, position, alone);
+                self.tab_drag_press(window_id, tab, index, grab, position);
             }
             WindowAction::CancelTabDrag => {
                 self.tab_drag_cancel();
@@ -509,7 +507,7 @@ impl App {
                 self.platform.replace_devices(new_devices.clone());
                 for w in &mut self.windows {
                     if let Err(err) = w.native.recreate_renderer(new_devices.clone()) {
-                        crate::platform::debug_log(&format!(
+                        crate::diag::debug_log(&format!(
                             "recreate_renderer failed for window {:?}: {err}",
                             w.id()
                         ));
@@ -520,7 +518,7 @@ impl App {
                 self.tooltips.recreate_renderer(new_devices);
             }
             Err(err) => {
-                crate::platform::debug_log(&format!("Direct2DDevices recovery failed: {err}"));
+                crate::diag::debug_log(&format!("Direct2DDevices recovery failed: {err}"));
             }
         }
     }
@@ -562,7 +560,7 @@ impl App {
         ) {
             Ok(res) => (res.needs_vsync, res.device_lost),
             Err(err) => {
-                crate::platform::debug_log(&format!("render_frame error: {err}"));
+                crate::diag::debug_log(&format!("render_frame error: {err}"));
                 (false, true)
             }
         };

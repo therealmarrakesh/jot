@@ -30,12 +30,8 @@ pub(crate) use window::{
 };
 
 use std::cell::{Cell, RefCell};
-use std::collections::VecDeque;
-use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
-#[cfg(not(test))]
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use windows::Win32::{
@@ -76,67 +72,17 @@ use crate::types::{Error, Result};
 const WM_APP_WAKE: u32 = WM_APP + 1;
 const WM_APP_VSYNC: u32 = WM_APP + 2;
 const WAKE_CLASS_NAME: PCWSTR = w!("JotWakeWindow");
-const DEBUG_RING_CAPACITY: usize = 64;
 
-fn debug_ring() -> &'static Mutex<VecDeque<String>> {
-    static RING: OnceLock<Mutex<VecDeque<String>>> = OnceLock::new();
-    RING.get_or_init(|| Mutex::new(VecDeque::with_capacity(DEBUG_RING_CAPACITY)))
-}
-
-pub(crate) fn debug_log(message: &str) {
-    {
-        let mut ring = debug_ring().lock().unwrap_or_else(|e| e.into_inner());
-        if ring.len() >= DEBUG_RING_CAPACITY {
-            ring.pop_front();
-        }
-        ring.push_back(message.to_owned());
-    }
-    let wide = HSTRING::from(format!("[Jot] {message}\n"));
+pub(crate) fn output_debug_string(message: &str) {
+    let wide = HSTRING::from(message);
     unsafe { OutputDebugStringW(&wide) };
 }
 
-pub(crate) fn show_error_dialog(title: &str, message: &str) {
+pub(crate) fn message_box_error(title: &str, message: &str) {
     let title_w = HSTRING::from(title);
     let msg_w = HSTRING::from(message);
     unsafe {
         let _ = MessageBoxW(None, &msg_w, &title_w, MB_OK | MB_ICONERROR);
-    }
-}
-
-pub(crate) fn install_panic_hook() {
-    let prev = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        let msg = if let Some(s) = info.payload().downcast_ref::<&str>() {
-            (*s).to_owned()
-        } else if let Some(s) = info.payload().downcast_ref::<String>() {
-            s.clone()
-        } else {
-            "unknown panic".to_owned()
-        };
-        let loc = info
-            .location()
-            .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
-            .unwrap_or_else(|| "<unknown>".to_owned());
-        debug_log(&format!("PANIC at {loc}: {msg}"));
-        prev(info);
-    }));
-}
-
-pub(super) fn report_caught_ffi_panic(context: &str, payload: &(dyn std::any::Any + Send)) {
-    let msg = jobs::panic_message(payload);
-    debug_log(&format!("Caught panic at Win32 boundary ({context}): {msg}"));
-    #[cfg(not(test))]
-    {
-        static SHOWN: AtomicBool = AtomicBool::new(false);
-        if !SHOWN.swap(true, Ordering::AcqRel) {
-            show_error_dialog(
-                "Jot",
-                &format!(
-                    "Jot encountered an unexpected error and prevented a crash.\n\n\
-                     Please save any open documents and restart Jot.\n\nDetails: {msg}"
-                ),
-            );
-        }
     }
 }
 
@@ -460,15 +406,9 @@ unsafe extern "system" fn wake_wnd_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
-    match catch_unwind(AssertUnwindSafe(|| {
+    crate::diag::ffi_guard("wake_wnd_proc", LRESULT(0), || {
         wake_wnd_proc_inner(hwnd, msg, wparam, lparam)
-    })) {
-        Ok(res) => res,
-        Err(payload) => {
-            report_caught_ffi_panic("wake_wnd_proc", &*payload);
-            LRESULT(0)
-        }
-    }
+    })
 }
 
 fn wake_wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {

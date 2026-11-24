@@ -25,19 +25,6 @@ impl TextPoint {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) struct Position {
-    pub(crate) line: u32,
-    pub(crate) character: u32,
-}
-
-impl Position {
-    #[inline]
-    pub(crate) fn new(line: u32, character: u32) -> Self {
-        Self { line, character }
-    }
-}
-
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Default)]
 pub(crate) struct Selection {
     pub(crate) start: usize,
@@ -178,9 +165,6 @@ pub(crate) trait RopeExt {
     fn char_at(&self, offset: usize) -> Option<char>;
     fn offset_to_point(&self, offset: usize) -> TextPoint;
     fn point_to_offset(&self, point: TextPoint) -> usize;
-    fn position_to_offset(&self, pos: &Position) -> usize;
-    fn offset_utf16_to_offset(&self, utf16_offset: usize) -> usize;
-    fn offset_to_offset_utf16(&self, byte_offset: usize) -> usize;
     fn clip_offset(&self, offset: usize, bias: Bias) -> usize;
     fn replace(&mut self, range: Range<usize>, text: &str);
 }
@@ -235,29 +219,6 @@ impl RopeExt for Rope {
             return self.len();
         }
         self.line_to_byte_idx(point.row, LineType::LF) + point.column
-    }
-
-    fn position_to_offset(&self, pos: &Position) -> usize {
-        let row = pos.line as usize;
-        let line = self.slice_line(row);
-        let char_col = (pos.character as usize).min(line.len_chars());
-        self.line_start_offset(row) + line.char_to_byte_idx(char_col)
-    }
-
-    #[inline]
-    fn offset_utf16_to_offset(&self, utf16_offset: usize) -> usize {
-        if utf16_offset >= self.len_utf16() {
-            return self.len();
-        }
-        self.utf16_to_byte_idx(utf16_offset)
-    }
-
-    #[inline]
-    fn offset_to_offset_utf16(&self, byte_offset: usize) -> usize {
-        if byte_offset >= self.len() {
-            return self.len_utf16();
-        }
-        self.byte_to_utf16_idx(byte_offset)
     }
 
     fn clip_offset(&self, offset: usize, bias: Bias) -> usize {
@@ -579,12 +540,6 @@ mod tests {
         assert_eq!(rope.char_at(99), None);
 
         let sample = Rope::from("hello 中文🎉 test\nRope");
-        assert_eq!(sample.offset_to_offset_utf16("hello 中文🎉".len()), 10);
-        assert_eq!(sample.offset_utf16_to_offset(10), "hello 中文🎉".len());
-        assert_eq!(
-            sample.position_to_offset(&Position::new(0, 9)),
-            "hello 中文🎉".len()
-        );
         assert_eq!(
             sample.offset_to_point("hello 中文🎉\nR".len()),
             TextPoint::new(0, "hello 中文🎉\nR".len())

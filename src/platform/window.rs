@@ -1,6 +1,5 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
-use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -95,9 +94,8 @@ pub(crate) enum WindowAppearance {
 
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) enum WindowBackdrop {
-    #[default]
-    Opaque,
     Transparent,
+    #[default]
     MicaAlt,
 }
 
@@ -116,6 +114,17 @@ pub(crate) enum WindowControlArea {
     Close,
 }
 
+pub(crate) fn hit_test_control_areas(
+    areas: &[(Rect, Option<WindowControlArea>)],
+    pos: Point,
+) -> Option<WindowControlArea> {
+    areas
+        .iter()
+        .rev()
+        .find(|(rect, _)| rect.contains(pos))
+        .and_then(|(_, area)| *area)
+}
+
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) enum CursorStyle {
     #[default]
@@ -127,7 +136,6 @@ pub(crate) enum CursorStyle {
 pub(crate) struct WindowOptions {
     pub(crate) bounds: Option<Rect>,
     pub(crate) title: SharedStr,
-    pub(crate) hide_titlebar: bool,
     pub(crate) focus: bool,
     pub(crate) show: bool,
     pub(crate) kind: WindowKind,
@@ -143,7 +151,6 @@ impl Default for WindowOptions {
         Self {
             bounds: None,
             title: SharedStr::new_static("Jot"),
-            hide_titlebar: true,
             focus: true,
             show: true,
             kind: WindowKind::Normal,
@@ -258,7 +265,6 @@ pub(crate) trait PlatformHandler {
 struct HwndEntry {
     window_id: WindowId,
     is_overlay: bool,
-    hide_titlebar: bool,
     is_resizable: bool,
     scale_factor: f32,
     min_size: Option<Size>,
@@ -493,7 +499,6 @@ impl NativeWindow {
                 HwndEntry {
                     window_id: id,
                     is_overlay,
-                    hide_titlebar: options.hide_titlebar,
                     is_resizable: options.is_resizable && !is_overlay,
                     scale_factor: init_scale,
                     min_size: if is_overlay { None } else { options.min_size },
@@ -866,15 +871,9 @@ unsafe extern "system" fn window_wnd_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
-    match catch_unwind(AssertUnwindSafe(|| {
+    crate::diag::ffi_guard("window_wnd_proc", LRESULT(0), || {
         window_wnd_proc_inner(hwnd, msg, wparam, lparam)
-    })) {
-        Ok(res) => res,
-        Err(payload) => {
-            super::report_caught_ffi_panic("window_wnd_proc", &*payload);
-            LRESULT(0)
-        }
-    }
+    })
 }
 
 fn window_wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
@@ -893,13 +892,8 @@ fn window_wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
         }
 
         WM_NCCALCSIZE if wparam.0 != 0 => {
-            let (is_overlay, hide_titlebar) =
-                with_entry(hwnd, |e| (e.is_overlay, e.hide_titlebar)).unwrap_or((false, true));
-            if is_overlay {
+            if with_entry(hwnd, |e| e.is_overlay).unwrap_or(false) {
                 return LRESULT(0);
-            }
-            if !hide_titlebar {
-                return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
             }
             let params = unsafe { &mut *(lparam.0 as *mut NCCALCSIZE_PARAMS) };
             let saved_top = params.rgrc[0].top;
@@ -953,13 +947,7 @@ fn window_wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
                     }
                 }
                 let local = screen_to_client_point(hwnd, lparam, e.scale_factor);
-                let area = e
-                    .control_areas
-                    .iter()
-                    .rev()
-                    .find(|(rect, _)| rect.contains(local))
-                    .and_then(|(_, a)| *a);
-                match area {
+                match hit_test_control_areas(&e.control_areas, local) {
                     Some(WindowControlArea::Close) => HTCLOSE,
                     Some(WindowControlArea::Max) => HTMAXBUTTON,
                     Some(WindowControlArea::Min) => HTMINBUTTON,

@@ -351,7 +351,7 @@ impl<E: Send + 'static> Jobs<E> {
         WorkerPool::global().submit(Box::new(move || {
             let ev = match catch_unwind(AssertUnwindSafe(work)) {
                 Ok(ev) => ev,
-                Err(payload) => on_panic(panic_message(&*payload)),
+                Err(payload) => on_panic(crate::diag::panic_message(&*payload)),
             };
             target.push(ev, None);
         }));
@@ -378,7 +378,7 @@ impl<E: Send + 'static> Jobs<E> {
                     else {
                         return;
                     };
-                    handler(panic_message(&*payload))
+                    handler(crate::diag::panic_message(&*payload))
                 }
             };
             thread_target.push(ev, None);
@@ -392,16 +392,6 @@ impl<E: Send + 'static> Jobs<E> {
 
     pub(crate) fn pop(&self) -> Option<E> {
         self.inner.pop()
-    }
-}
-
-pub(crate) fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
-    if let Some(s) = payload.downcast_ref::<&str>() {
-        (*s).to_owned()
-    } else if let Some(s) = payload.downcast_ref::<String>() {
-        s.clone()
-    } else {
-        "Internal error".to_owned()
     }
 }
 

@@ -8,5 +8,3 @@ pub(crate) use text::{
     font,
 };
 pub(crate) use wrap::{Boundary, MAX_WRAP_INDENT};
-#[cfg(test)]
-pub(crate) use wrap::line_break_opportunities;

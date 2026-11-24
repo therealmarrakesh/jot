@@ -284,7 +284,7 @@ impl Tooltips {
         self.create_failed = false;
         if let Some(popup) = &mut self.popup {
             if let Err(err) = popup.recreate_renderer(devices) {
-                crate::platform::debug_log(&format!("tooltip recreate_renderer failed: {err}"));
+                crate::diag::debug_log(&format!("tooltip recreate_renderer failed: {err}"));
             }
             if self.visible {
                 self.dirty = true;
@@ -375,7 +375,6 @@ impl Tooltips {
             let opts = WindowOptions {
                 bounds: Some(Rect::new(point(0., 0.), size(1., 1.))),
                 title: "".into(),
-                hide_titlebar: true,
                 focus: false,
                 show: false,
                 kind: WindowKind::Overlay,
@@ -389,7 +388,7 @@ impl Tooltips {
                 Ok(win) => self.popup = Some(win),
                 Err(err) => {
                     self.create_failed = true;
-                    crate::platform::debug_log(&format!("tooltip overlay create failed: {err}"));
+                    crate::diag::debug_log(&format!("tooltip overlay create failed: {err}"));
                     return;
                 }
             }
@@ -481,7 +480,7 @@ impl Tooltips {
                 match renderer.end_frame() {
                     Ok(lost) => lost,
                     Err(err) => {
-                        crate::platform::debug_log(&format!("tooltip end_frame failed: {err}"));
+                        crate::diag::debug_log(&format!("tooltip end_frame failed: {err}"));
                         true
                     }
                 }
