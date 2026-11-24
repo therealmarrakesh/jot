@@ -2,6 +2,7 @@ mod actions;
 mod buffer;
 mod history;
 mod model;
+mod scrollbar;
 mod view;
 pub(crate) mod wrap;
 
@@ -17,11 +18,11 @@ use ropey::RopeSlice;
 use crate::geom::{Axis, Edges, Point, Rect};
 use crate::gfx::{Font, TextSystem};
 use crate::platform::TimerHandle;
-use crate::scrollbar::ScrollbarState;
 use crate::types::SharedStr;
 use crate::ui::{Node, box_, custom, row};
 
 use model::{EditEffects, EditPolicy, LineChange, TextModel, ValidateFn};
+use scrollbar::ScrollbarState;
 use view::{AutoScroll, BlinkState, FrameLayout, LongestLineCache};
 use wrap::WrapIndex;
 

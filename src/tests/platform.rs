@@ -6,10 +6,11 @@ use std::sync::{
 };
 use std::time::Duration;
 
-use crate::app::{App, AppEvent};
+use crate::app::App;
 use crate::geom::ScreenRect;
 use crate::gfx::{Gpu, Surface};
 use crate::platform::{NativeWindow, Platform, PlatformHandler};
+use crate::shell::AppEvent;
 
 use super::TestHarness;
 

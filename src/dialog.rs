@@ -1,11 +1,10 @@
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use crate::editor::Editor;
-use crate::ids::{AnimKey, CustomDraw, EditorSlot, Focus, HitId, Node, UiState};
+use crate::files::Prompt;
+use crate::ids::{AnimKey, CustomDraw, EditorSlot, Focus, HitId, Node, TabId, UiState};
 use crate::platform::{CursorStyle, Key, KeyEvent};
-use crate::tabs::TabId;
 use crate::theme::{Palette, theme_shadow};
 use crate::types::SharedStr;
 use crate::ui::controls::{
@@ -35,25 +34,6 @@ const OUT_OF_RANGE_MESSAGE: &str = "The line number is beyond the total number o
 const OK_BUTTONS: &[&str] = &["OK"];
 const BORDER: f32 = 1.;
 const BODY_BASELINE_SNAP: f32 = -1.;
-
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct PromptId(u64);
-
-impl PromptId {
-    pub(crate) fn next() -> Self {
-        static NEXT: AtomicU64 = AtomicU64::new(1);
-        Self(NEXT.fetch_add(1, Ordering::Relaxed))
-    }
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct Prompt {
-    pub(crate) id: Option<PromptId>,
-    pub(crate) title: SharedStr,
-    pub(crate) message: SharedStr,
-    pub(crate) buttons: &'static [&'static str],
-    pub(crate) tab: Option<TabId>,
-}
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub(crate) enum DialogKey {

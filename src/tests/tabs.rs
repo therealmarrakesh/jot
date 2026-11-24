@@ -5,7 +5,7 @@ use std::time::Duration;
 use crate::geom::point;
 use crate::ids::HitId;
 use crate::platform::{Platform, PlatformEvent, PlatformHandler};
-use crate::tabs::TabId;
+use crate::ids::TabId;
 
 use super::TestHarness;
 

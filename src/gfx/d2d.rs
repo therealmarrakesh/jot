@@ -255,7 +255,7 @@ impl Surface {
             && let Err(err) = renderer.resize(self.width, self.height, self.scale)
             && renderer.needs_recreate
         {
-            crate::diag::debug_log(&format!("surface resize lost device: {err}"));
+            crate::platform::diag::debug_log(&format!("surface resize lost device: {err}"));
             self.state = SurfaceState::Lost;
         }
     }
@@ -273,7 +273,7 @@ impl Surface {
             match Self::build_state(self.hwnd, self.width, self.height, self.scale, generation, devices) {
                 Ok(ready) => self.state = ready,
                 Err(err) => {
-                    crate::diag::debug_log(&format!("surface recreate failed: {err}"));
+                    crate::platform::diag::debug_log(&format!("surface recreate failed: {err}"));
                     return false;
                 }
             }
@@ -307,13 +307,13 @@ impl Surface {
                         }
                     }
                     Err(err) => {
-                        crate::diag::debug_log(&format!("GPU recovery failed: {err}"));
+                        crate::platform::diag::debug_log(&format!("GPU recovery failed: {err}"));
                     }
                 }
                 true
             }
             Err(err) => {
-                crate::diag::debug_log(&format!("D2D end_frame failed: {err}"));
+                crate::platform::diag::debug_log(&format!("D2D end_frame failed: {err}"));
                 false
             }
         }

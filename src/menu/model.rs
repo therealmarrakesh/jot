@@ -1,6 +1,7 @@
 use crate::command::{AppCommand, Command, shortcut_label};
 use crate::editor::EditCommand;
 use crate::gfx::{TextStyle, TextSystem};
+use crate::ids::MenuKind;
 use crate::types::SharedStr;
 use crate::ui::controls::{SMALL_FONT, TEXT_FONT};
 
@@ -128,24 +129,7 @@ impl Entry {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(crate) enum MenuKind {
-    File,
-    Edit,
-    View,
-}
-
 impl MenuKind {
-    pub(crate) const ALL: [Self; 3] = [Self::File, Self::Edit, Self::View];
-
-    pub(crate) fn title(self) -> &'static str {
-        match self {
-            Self::File => "File",
-            Self::Edit => "Edit",
-            Self::View => "View",
-        }
-    }
-
     pub(super) fn access_key(self) -> Option<char> {
         self.title().chars().next()
     }

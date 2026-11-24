@@ -1,4 +1,4 @@
-use crate::app::{Cx, Effect};
+use crate::shell::{Cx, Effect};
 use crate::command::{AppCommand, Command};
 use crate::files::FileRequest;
 use crate::geom::point;

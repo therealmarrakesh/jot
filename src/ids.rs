@@ -1,6 +1,35 @@
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use crate::geom::Axis;
-use crate::menu::MenuKind;
-use crate::tabs::TabId;
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct TabId(u64);
+
+impl TabId {
+    pub(crate) fn next() -> Self {
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        Self(NEXT.fetch_add(1, Ordering::Relaxed))
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum MenuKind {
+    File,
+    Edit,
+    View,
+}
+
+impl MenuKind {
+    pub(crate) const ALL: [Self; 3] = [Self::File, Self::Edit, Self::View];
+
+    pub(crate) fn title(self) -> &'static str {
+        match self {
+            Self::File => "File",
+            Self::Edit => "Edit",
+            Self::View => "View",
+        }
+    }
+}
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum EditorSlot {
@@ -45,8 +74,8 @@ pub(crate) enum HitId {
     ThemeToggle,
     EditorArea,
     Editor(EditorSlot),
-    ScrollTrack(Axis),
-    ScrollThumb(Axis),
+    ScrollTrack(EditorSlot, Axis),
+    ScrollThumb(EditorSlot, Axis),
     FieldClear(EditorSlot),
     FindCard,
     FindToggleReplace,
@@ -77,8 +106,8 @@ pub(crate) enum AnimKey {
     DialogFadeOut(usize),
     FindShow(usize),
     FindHide(usize),
-    ScrollOpacity,
-    ScrollThickness(Axis),
+    ScrollOpacity(EditorSlot),
+    ScrollThickness(EditorSlot, Axis),
 }
 
 impl From<HitId> for AnimKey {

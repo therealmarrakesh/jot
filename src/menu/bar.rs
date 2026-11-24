@@ -1,10 +1,10 @@
 use crate::command::Command;
 use crate::geom::Point;
 use crate::gfx::TextSystem;
-use crate::ids::{EditorSlot, HitId, UiState};
+use crate::ids::{EditorSlot, HitId, MenuKind, UiState};
 use crate::platform::{Key, KeyEvent};
 
-use super::model::{Entry, MenuKind, MenuState, Panel, context_menu_items};
+use super::model::{Entry, MenuState, Panel, context_menu_items};
 use super::popup::{Motion, OpenMenu, OpenSubmenu, PopupKind};
 
 const MIN_WIDTH: f32 = 232.;

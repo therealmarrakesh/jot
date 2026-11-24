@@ -1,5 +1,4 @@
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use crate::color::transparent_black;
@@ -7,22 +6,12 @@ use crate::command::{AppCommand, shortcut_tooltip};
 use crate::document::{self, DocPath, Format, PathKey};
 use crate::editor::{Editor, Rope};
 use crate::geom::Edges;
-use crate::ids::{AnimKey, HitId, Node, UiState};
+use crate::ids::{AnimKey, HitId, Node, TabId, UiState};
 use crate::platform::{CursorStyle, TimerHandle};
 use crate::theme::Palette;
 use crate::types::SharedStr;
 use crate::ui::controls::{CONTROL_RADIUS, IconButtonStyle, OVERLAY_RADIUS, SMALL_FONT, icon_button};
 use crate::ui::{AnimStatus, Brushes, Easing, box_, row, text};
-
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct TabId(u64);
-
-impl TabId {
-    pub(crate) fn next() -> Self {
-        static NEXT: AtomicU64 = AtomicU64::new(1);
-        Self(NEXT.fetch_add(1, Ordering::Relaxed))
-    }
-}
 
 pub(crate) const TAB_WIDTH: f32 = 240.;
 pub(crate) const TAB_MIN_WIDTH: f32 = 80.;

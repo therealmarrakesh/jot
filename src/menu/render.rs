@@ -1,7 +1,7 @@
 use crate::color::transparent_black;
 use crate::geom::Edges;
 use crate::gfx::{TextStyle, TextSystem};
-use crate::ids::{Frame, HitId, Node, UiState};
+use crate::ids::{Frame, HitId, MenuKind, Node, UiState};
 use crate::keytips::{self, KeyTip, round_half_up};
 use crate::platform::CursorStyle;
 use crate::theme::{Palette, theme_shadow};
@@ -12,7 +12,7 @@ use crate::ui::{Anchor, box_, row, text};
 
 use super::bar::MenuBar;
 use super::model::{
-    BORDER, CHECK_COLUMN, CommandButton, Entry, LABEL_SIZE, MenuKind, PADDING_Y, Panel, ROW_INSET,
+    BORDER, CHECK_COLUMN, CommandButton, Entry, LABEL_SIZE, PADDING_Y, Panel, ROW_INSET,
     ROW_PADDING, ROW_SEPARATOR, SHORTCUT_SIZE,
 };
 use super::popup::{COMMAND_ROW, OpenMenu, OpenSubmenu};

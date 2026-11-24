@@ -1,4 +1,4 @@
-use crate::app::{AppEvent, Cx, Effect};
+use crate::shell::{AppEvent, Cx, Effect};
 use crate::command::{AppCommand, app_shortcut, edit_shortcut};
 use crate::dialog::DialogKey;
 use crate::files::FileRequest;
@@ -45,7 +45,7 @@ impl MainWindow {
         let dragging_left = pressed_button == Some(MouseButton::Left);
         let active_slot = self.active_slot();
         if let Some(axis) = self.active_editor().scrollbar_drag_axis() {
-            let track_rect = self.ui.frame().rect_of(HitId::ScrollTrack(axis));
+            let track_rect = self.ui.frame().rect_of(HitId::ScrollTrack(active_slot, axis));
             if let Some(Some(notify)) = self.with_editor(active_slot, cx.jobs, |ed, timers| {
                 ed.on_scrollbar_mouse_move(pos, dragging_left, track_rect, timers)
             }) {
@@ -205,15 +205,19 @@ impl MainWindow {
                     }
                     return;
                 }
-                Some(HitId::ScrollThumb(axis)) if self.active_editor().scrollbar_interactive(axis) => {
-                    if let Some(track) = self.ui.frame().rect_of(HitId::ScrollTrack(axis)) {
+                Some(HitId::ScrollThumb(slot, axis))
+                    if slot == self.active_slot() && self.active_editor().scrollbar_interactive(axis) =>
+                {
+                    if let Some(track) = self.ui.frame().rect_of(HitId::ScrollTrack(slot, axis)) {
                         self.active_editor_mut()
                             .on_scrollbar_mouse_down(axis, true, pos, track);
                     }
                     return;
                 }
-                Some(HitId::ScrollTrack(axis)) if self.active_editor().scrollbar_interactive(axis) => {
-                    if let Some(track) = self.ui.frame().rect_of(HitId::ScrollTrack(axis)) {
+                Some(HitId::ScrollTrack(slot, axis))
+                    if slot == self.active_slot() && self.active_editor().scrollbar_interactive(axis) =>
+                {
+                    if let Some(track) = self.ui.frame().rect_of(HitId::ScrollTrack(slot, axis)) {
                         self.active_editor_mut()
                             .on_scrollbar_mouse_down(axis, false, pos, track);
                     }
@@ -275,7 +279,7 @@ impl MainWindow {
 
         let active_slot = self.active_slot();
         if let Some(axis) = self.active_editor().scrollbar_drag_axis() {
-            let track_rect = self.ui.frame().rect_of(HitId::ScrollTrack(axis));
+            let track_rect = self.ui.frame().rect_of(HitId::ScrollTrack(active_slot, axis));
             self.active_editor_mut()
                 .on_scrollbar_mouse_up(pos, track_rect);
         }

@@ -1,6 +1,6 @@
 use std::time::Instant;
 
-use crate::app::Cx;
+use crate::shell::Cx;
 use crate::editor::{EditorPaintParams, EditorPaintStyle};
 use crate::geom::{Rect, point, size};
 use crate::gfx::{fill, font};

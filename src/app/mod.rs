@@ -1,73 +1,29 @@
+mod tab_drag;
+
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use crate::APP_NAME;
-use crate::dialog::{Prompt, PromptId};
 use crate::document::{self, DocPath, Format, PathKey};
-use crate::editor::{EditorTimer, Rope};
+use crate::editor::Rope;
 use crate::files::{
-    DocHost, FileEvent, FileIo, FileOps, FileRequest, TabSnapshot, spawn_file_io,
+    DocHost, FileIo, FileOps, FileRequest, Prompt, TabSnapshot, spawn_file_io,
 };
 use crate::geom::{Point, Rect, ScreenPoint, Size, point, size};
-use crate::gfx::{Gpu, TextSystem};
-use crate::ids::{EditorSlot, HitId};
+use crate::gfx::Gpu;
+use crate::ids::{EditorSlot, TabId};
 use crate::keytips::KeyTips;
 use crate::platform::{
-    HandoffCommand, Jobs, Key, MainWindowConfig, MouseButton, NativeWindow, Platform,
-    PlatformEvent, PlatformHandler, SystemSettings, WindowAppearance, WindowHwnd, WindowId,
-    WindowsDisplay, cursor_screen_pos, system_settings,
+    HandoffCommand, Key, MainWindowConfig, MouseButton, NativeWindow, Platform, PlatformEvent,
+    PlatformHandler, WindowHwnd, WindowId, WindowsDisplay, cursor_screen_pos, diag,
 };
-use crate::tab_drag::TabDragState;
-use crate::tabs::{TabData, TabId};
-use crate::theme::Palette;
+use crate::shell::{AppEvent, Cx, Effect, Shell};
+use crate::tabs::TabData;
 use crate::tooltip::{TooltipTarget, Tooltips};
 use crate::window::{InputMode, MainWindow, WINDOW_HEIGHT, WINDOW_MAX_SCREEN_SHARE, WINDOW_WIDTH};
 
-#[derive(Copy, Clone, Debug)]
-pub(crate) struct ViewSettings {
-    pub(crate) status_bar: bool,
-    pub(crate) word_wrap: bool,
-}
-
-impl Default for ViewSettings {
-    fn default() -> Self {
-        Self {
-            status_bar: true,
-            word_wrap: true,
-        }
-    }
-}
-
-pub(crate) enum AppEvent {
-    EditorTimer {
-        window: WindowId,
-        slot: EditorSlot,
-        kind: EditorTimer,
-    },
-    TabScrollRepeat {
-        window: WindowId,
-        step: f32,
-    },
-    MenuSubmenuTimer {
-        window: WindowId,
-        target: Option<usize>,
-    },
-    FindNoticeDismiss {
-        window: WindowId,
-    },
-    TooltipShowTimer {
-        window: WindowId,
-        hit: HitId,
-    },
-    TooltipHideTimer,
-    TabDragPoll,
-    File(FileEvent),
-    #[cfg(test)]
-    TestCloseWindow(WindowId),
-    #[cfg(test)]
-    TestFlag(std::sync::Arc<std::sync::atomic::AtomicBool>),
-}
+use tab_drag::TabDragState;
 
 pub(crate) struct OpenWindowError {
     pub(crate) tab: Option<TabData>,
@@ -80,66 +36,6 @@ impl std::fmt::Debug for OpenWindowError {
             .field("has_tab", &self.tab.is_some())
             .field("message", &self.message)
             .finish()
-    }
-}
-
-pub(crate) enum Effect {
-    NewWindow,
-    Exit,
-    ToggleStatusBar,
-    ToggleTheme,
-    ToggleWordWrap,
-    StartTabDrag {
-        window: WindowId,
-        tab: TabId,
-        index: usize,
-        grab: Point,
-        position: Point,
-    },
-    File(FileRequest),
-    PromptResponse {
-        id: PromptId,
-        button: usize,
-    },
-}
-
-pub(crate) struct Cx<'a> {
-    pub(crate) ts: &'a TextSystem,
-    pub(crate) jobs: &'a Jobs<AppEvent>,
-    pub(crate) view: ViewSettings,
-    pub(crate) palette: Palette,
-    pub(crate) settings: SystemSettings,
-    fx: &'a mut Vec<Effect>,
-}
-
-impl Cx<'_> {
-    #[inline]
-    pub(crate) fn emit(&mut self, effect: Effect) {
-        self.fx.push(effect);
-    }
-}
-
-pub(crate) struct Shell {
-    pub(crate) text_system: TextSystem,
-    pub(crate) jobs: Jobs<AppEvent>,
-    appearance_override: Option<WindowAppearance>,
-    appearance: WindowAppearance,
-    pub(crate) palette: Palette,
-    pub(crate) settings: SystemSettings,
-    pub(crate) view: ViewSettings,
-    pub(crate) gpu: Rc<Gpu>,
-}
-
-impl Shell {
-    fn cx<'a>(&'a self, fx: &'a mut Vec<Effect>) -> Cx<'a> {
-        Cx {
-            ts: &self.text_system,
-            jobs: &self.jobs,
-            view: self.view,
-            palette: self.palette,
-            settings: self.settings,
-            fx,
-        }
     }
 }
 
@@ -277,13 +173,7 @@ pub(crate) struct App {
 
 impl App {
     pub(crate) fn new(platform: Rc<Platform>, gpu: Rc<Gpu>) -> Self {
-        let jobs = Jobs::new();
-        jobs.attach_platform(&platform);
-        let settings = system_settings();
-        let appearance = settings.appearance;
-        let dark = matches!(appearance, WindowAppearance::Dark);
-        let palette = Palette::resolve(dark, settings.accent(dark), settings.high_contrast);
-
+        let shell = Shell::new(&platform, gpu);
         Self {
             windows: Vec::new(),
             active_window: None,
@@ -295,16 +185,7 @@ impl App {
             #[cfg(test)]
             headless: false,
             quit: false,
-            shell: Shell {
-                text_system: TextSystem::new(),
-                jobs,
-                appearance_override: None,
-                appearance,
-                palette,
-                settings,
-                view: ViewSettings::default(),
-                gpu,
-            },
+            shell,
             platform,
         }
     }
@@ -376,13 +257,8 @@ impl App {
                     self.mark_all_dirty();
                 }
                 Effect::ToggleTheme => {
-                    let next = if self.shell.palette.dark {
-                        WindowAppearance::Light
-                    } else {
-                        WindowAppearance::Dark
-                    };
-                    self.shell.appearance_override = Some(next);
-                    self.sync_theme();
+                    self.shell.toggle_theme();
+                    self.apply_theme_to_windows();
                 }
                 Effect::ToggleWordWrap => {
                     self.shell.view.word_wrap = !self.shell.view.word_wrap;
@@ -526,7 +402,7 @@ impl App {
     ) -> std::result::Result<(WindowId, WindowHwnd), Box<OpenWindowError>> {
         let config = self.window_config(window_size, target_point);
         let (native, surface) =
-            match NativeWindow::create_main(&config, self.shell.appearance).and_then(|n| {
+            match NativeWindow::create_main(&config, self.shell.appearance()).and_then(|n| {
                 let (w, h) = n.physical_size();
                 let s = crate::gfx::Surface::new(
                     self.shell.gpu.clone(),
@@ -540,7 +416,7 @@ impl App {
                 Ok(created) => created,
                 Err(err) => {
                     let message = err.to_string();
-                    crate::diag::debug_log(&format!("window/surface create failed: {message}"));
+                    diag::debug_log(&format!("window/surface create failed: {message}"));
                     return Err(Box::new(OpenWindowError {
                         tab: initial,
                         message,
@@ -606,17 +482,15 @@ impl App {
     }
 
     fn sync_theme(&mut self) {
-        let settings = system_settings();
-        self.shell.settings = settings;
-        let next = self
-            .shell
-            .appearance_override
-            .unwrap_or(settings.appearance);
-        let dark = matches!(next, WindowAppearance::Dark);
-        self.shell.appearance = next;
-        self.shell.palette = Palette::resolve(dark, settings.accent(dark), settings.high_contrast);
+        self.shell.sync_theme();
+        self.apply_theme_to_windows();
+    }
+
+    fn apply_theme_to_windows(&mut self) {
+        let appearance = self.shell.appearance();
+        let settings = self.shell.settings;
         for w in &mut self.windows {
-            w.native.set_appearance(next);
+            w.native.set_appearance(appearance);
             w.set_blink_timing(settings.caret_blink_interval, settings.caret_blink_timeout);
             w.dirty = true;
         }

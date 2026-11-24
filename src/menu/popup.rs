@@ -1,12 +1,12 @@
 use std::time::Duration;
 
 use crate::geom::Point;
-use crate::ids::{AnimKey, EditorSlot, HitId, UiState};
+use crate::ids::{AnimKey, EditorSlot, HitId, MenuKind, UiState};
 use crate::ui::{Anchor, AnimStatus, Easing};
 
 use super::MENU_BAR_HEIGHT;
 use super::bar::FocusRequest;
-use super::model::{CommandButton, Entry, MenuKind, PADDING_Y, Panel, cycle};
+use super::model::{CommandButton, Entry, PADDING_Y, Panel, cycle};
 
 const OPEN_DURATION: Duration = Duration::from_millis(250);
 const FADE_DURATION: Duration = Duration::from_millis(83);

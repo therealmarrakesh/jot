@@ -2,9 +2,9 @@ use std::ops::Index;
 
 use crate::document::{self, DocPath, Format, PathKey};
 use crate::editor::Editor;
-use crate::ids::{EditorSlot, Node, UiState};
+use crate::ids::{EditorSlot, Node, TabId, UiState};
 use crate::platform::TimerHandle;
-use crate::tabs::{StripFrame, Tab, TabData, TabId, TabStrip};
+use crate::tabs::{StripFrame, Tab, TabData, TabStrip};
 use crate::theme::Palette;
 
 pub(super) enum RemoveOutcome {

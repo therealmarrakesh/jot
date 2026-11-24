@@ -1061,7 +1061,7 @@ unsafe extern "system" fn window_wnd_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
-    crate::diag::ffi_guard("window_wnd_proc", LRESULT(0), || {
+    super::diag::ffi_guard("window_wnd_proc", LRESULT(0), || {
         window_wnd_proc_inner(hwnd, msg, wparam, lparam)
     })
 }

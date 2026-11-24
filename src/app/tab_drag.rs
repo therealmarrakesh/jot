@@ -1,12 +1,15 @@
 use std::time::{Duration, Instant};
 
-use crate::app::{App, AppEvent};
 use crate::geom::{Point, ScreenPoint, point};
+use crate::ids::TabId;
 use crate::platform::{
     TimerHandle, WindowHwnd, WindowId, WindowPlacement, cursor_screen_pos,
     primary_mouse_button_down, release_mouse_capture, top_visible_window_at,
 };
-use crate::tabs::{CAPTION_WIDTH, STRIP_LEFT, STRIP_TOP, TAB_HEIGHT, TabId};
+use crate::shell::AppEvent;
+use crate::tabs::{CAPTION_WIDTH, STRIP_LEFT, STRIP_TOP, TAB_HEIGHT};
+
+use super::App;
 
 const DRAG_THRESHOLD: f32 = 10.;
 const DETACH_MAGNETISM: f32 = 15.;

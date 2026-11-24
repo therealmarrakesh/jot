@@ -1,7 +1,7 @@
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use crate::app::AppEvent;
+use crate::shell::AppEvent;
 use crate::geom::{ScreenPoint, ScreenRect};
 use crate::gfx::{Gpu, TextSystem};
 use crate::ids::{Frame, HitId};

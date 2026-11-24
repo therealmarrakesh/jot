@@ -3,7 +3,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 #[cfg(not(test))]
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::platform::{message_box_error, output_debug_string};
+use super::{message_box_error, output_debug_string};
 
 pub(crate) fn debug_log(message: &str) {
     output_debug_string(&format!("[Jot] {message}\n"));
@@ -26,13 +26,7 @@ pub(crate) fn panic_message(payload: &(dyn Any + Send)) -> String {
 pub(crate) fn install_panic_hook() {
     let prev = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        let msg = if let Some(s) = info.payload().downcast_ref::<&str>() {
-            (*s).to_owned()
-        } else if let Some(s) = info.payload().downcast_ref::<String>() {
-            s.clone()
-        } else {
-            "unknown panic".to_owned()
-        };
+        let msg = panic_message(info.payload());
         let loc = info
             .location()
             .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))

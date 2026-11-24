@@ -1,7 +1,7 @@
 use std::time::{Duration, Instant};
 
 use crate::geom::{Axis, Point, Rect, Size};
-use crate::ids::{AnimKey, HitId, Node, UiState};
+use crate::ids::{AnimKey, EditorSlot, HitId, Node, UiState};
 use crate::platform::{CursorStyle, TimerHandle};
 use crate::theme::Palette;
 use crate::ui::{Easing, box_};
@@ -107,6 +107,7 @@ impl TrackMetrics {
 pub(crate) struct ScrollbarViewport {
     pub(crate) size: Size,
     pub(crate) content_size: Size,
+    pub(crate) scroll_offset: Point,
     pub(crate) horizontal_left: f32,
     pub(crate) horizontal: bool,
 }
@@ -192,13 +193,14 @@ impl ScrollbarState {
 
     pub(crate) fn render(
         &mut self,
+        slot: EditorSlot,
         vp: ScrollbarViewport,
-        scroll_offset: Point,
         p: Palette,
         now: Instant,
         ui: &mut UiState,
         schedule_idle: impl FnOnce(Duration) -> TimerHandle,
     ) -> Vec<Node> {
+        let scroll_offset = vp.scroll_offset;
         if scroll_offset != self.last_offset {
             self.last_offset = scroll_offset;
             self.last_activity = Some(now);
@@ -206,7 +208,8 @@ impl ScrollbarState {
         }
 
         let is_axis_hovered = |axis: Axis, ui: &UiState| {
-            ui.is_hovered(HitId::ScrollTrack(axis)) || ui.is_hovered(HitId::ScrollThumb(axis))
+            ui.is_hovered(HitId::ScrollTrack(slot, axis))
+                || ui.is_hovered(HitId::ScrollThumb(slot, axis))
         };
         let hovered =
             is_axis_hovered(Axis::Vertical, ui) || is_axis_hovered(Axis::Horizontal, ui);
@@ -248,7 +251,7 @@ impl ScrollbarState {
         };
         let opacity = ui
             .animate_f32_from(
-                AnimKey::ScrollOpacity,
+                AnimKey::ScrollOpacity(slot),
                 0.0,
                 if visible { 1.0 } else { 0.0 },
                 fade_dur,
@@ -282,7 +285,7 @@ impl ScrollbarState {
             });
 
             let is_dragged = self.drag.is_some_and(|d| d.axis == axis);
-            let is_thumb_hovered = interactive && ui.is_hovered(HitId::ScrollThumb(axis));
+            let is_thumb_hovered = interactive && ui.is_hovered(HitId::ScrollThumb(slot, axis));
             let (thumb_color, target_thickness, target_radius) = if is_dragged {
                 (p.text_primary, THUMB_ACTIVE_THICKNESS, THUMB_ACTIVE_RADIUS)
             } else if is_thumb_hovered {
@@ -292,7 +295,7 @@ impl ScrollbarState {
             };
             let thickness = ui
                 .animate_f32_from(
-                    AnimKey::ScrollThickness(axis),
+                    AnimKey::ScrollThickness(slot, axis),
                     THUMB_REST_THICKNESS,
                     target_thickness,
                     EXPAND_DURATION,
@@ -338,7 +341,7 @@ impl ScrollbarState {
                         .w(metrics.thumb_len),
                 };
                 thumb
-                    .hit(HitId::ScrollThumb(axis))
+                    .hit(HitId::ScrollThumb(slot, axis))
                     .cursor(CursorStyle::Arrow)
                     .child(pill)
             });
@@ -359,7 +362,7 @@ impl ScrollbarState {
             };
             nodes.push(
                 track
-                    .hit(HitId::ScrollTrack(axis))
+                    .hit(HitId::ScrollTrack(slot, axis))
                     .when(interactive, |n| n.cursor(CursorStyle::Arrow))
                     .when_some(thumb_node, |n, t| n.child(t)),
             );
@@ -453,6 +456,7 @@ impl ScrollbarState {
 mod tests {
     use super::*;
     use crate::geom::{point, size};
+    use crate::ids::TabId;
 
     #[test]
     fn thumb_radius_is_limited_by_its_actual_bounds() {
@@ -481,24 +485,26 @@ mod tests {
         let mut sb = ScrollbarState::new_at(t0);
         let mut ui = UiState::default();
         let p = Palette::resolve(false, None, None);
+        let slot = EditorSlot::Tab(TabId::next());
         let vp = ScrollbarViewport {
             size: size(400., 200.),
             content_size: size(400., 1000.),
+            scroll_offset: point(0., -40.),
             horizontal_left: 0.,
             horizontal: false,
         };
 
         sb.on_wheel(point(0., -40.), t0);
         ui.begin_frame(t0, false);
-        let nodes = sb.render(vp, point(0., -40.), p, t0, &mut ui, |_| TimerHandle::default());
+        let nodes = sb.render(slot, vp, p, t0, &mut ui, |_| TimerHandle::default());
         assert_eq!(nodes.len(), 1);
         assert!(sb.is_interactive(Axis::Vertical));
         assert!(ui.finish_frame(crate::ids::Frame::default()));
 
         ui.begin_frame(t0 + FADE_IN_DURATION, false);
         let _ = sb.render(
+            slot,
             vp,
-            point(0., -40.),
             p,
             t0 + FADE_IN_DURATION,
             &mut ui,
@@ -508,7 +514,7 @@ mod tests {
 
         let after_idle = t0 + IDLE_HOLD + Duration::from_millis(10);
         ui.begin_frame(after_idle, true);
-        let _ = sb.render(vp, point(0., -40.), p, after_idle, &mut ui, |_| {
+        let _ = sb.render(slot, vp, p, after_idle, &mut ui, |_| {
             TimerHandle::default()
         });
         assert!(!sb.is_interactive(Axis::Vertical));

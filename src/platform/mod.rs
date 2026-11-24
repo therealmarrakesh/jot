@@ -2,6 +2,7 @@
 
 pub(crate) mod clipboard;
 mod codepage;
+pub(crate) mod diag;
 pub(crate) mod dialogs;
 mod fs;
 pub(crate) mod input;
@@ -390,7 +391,7 @@ unsafe extern "system" fn wake_wnd_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
-    crate::diag::ffi_guard("wake_wnd_proc", LRESULT(0), || {
+    diag::ffi_guard("wake_wnd_proc", LRESULT(0), || {
         wake_wnd_proc_inner(hwnd, msg, wparam, lparam)
     })
 }

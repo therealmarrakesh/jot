@@ -1,6 +1,6 @@
 use std::time::Instant;
 
-use crate::app::AppEvent;
+use crate::shell::AppEvent;
 use crate::color::transparent_black;
 use crate::document::Format;
 use crate::geom::{Size, size};
@@ -199,7 +199,7 @@ impl MainWindow {
             .tabs
             .active_mut()
             .editor
-            .render_scrollbars(lh, p, now, &mut self.ui, &mut timers);
+            .render_scrollbars(slot, lh, p, now, &mut self.ui, &mut timers);
         let editor_view = self.tabs.active().editor.view_with_scrollbars(
             HitId::Editor(slot),
             CustomDraw::Editor(slot),

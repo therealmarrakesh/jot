@@ -7,18 +7,19 @@ mod tab_set;
 use std::time::Duration;
 
 use crate::APP_NAME;
-use crate::app::{AppEvent, Cx, Effect, ViewSettings};
-use crate::dialog::{DialogKind, Dialogs, Prompt};
+use crate::dialog::{DialogKind, Dialogs};
 use crate::document::{self, DocPath, Format, PathKey};
 use crate::editor::{Clipboard, Editor, EditorTimer, EditorTimers, RopeExt as _};
+use crate::files::Prompt;
 use crate::find::{self, FindBar, FindOutcome};
 use crate::geom::{Edges, Point};
 use crate::gfx::{Surface, TextSystem};
-use crate::ids::{EditorSlot, Focus, HitId, UiState};
+use crate::ids::{EditorSlot, Focus, HitId, TabId, UiState};
 use crate::keytips::KeyTip;
 use crate::menu::{FocusRequest, MenuBar, MenuOutcome, MenuState, SubmenuTimer};
 use crate::platform::{Jobs, NativeWindow, SystemSettings, TimerHandle, WindowId, clipboard};
-use crate::tabs::{TabData, TabId};
+use crate::shell::{AppEvent, Cx, Effect, ViewSettings};
+use crate::tabs::TabData;
 use crate::tooltip::TooltipProbe;
 
 use chrome::MinSizeCache;

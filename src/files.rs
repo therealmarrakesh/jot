@@ -6,17 +6,35 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::APP_NAME;
-use crate::dialog::{Prompt, PromptId};
 use crate::document::{
     self, DocPath, Encoding, Format, LoadError, PathKey, default_directory, display_name, file_name,
 };
 use crate::editor::Rope;
+use crate::ids::TabId;
 use crate::platform::{
     Jobs, OpenDialogOptions, SaveChoice, SaveDialogOptions, SaveDialogResult, WindowHwnd, WindowId,
     run_open_dialog, run_save_dialog,
 };
-use crate::tabs::TabId;
 use crate::types::{Error, SharedStr};
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct PromptId(u64);
+
+impl PromptId {
+    pub(crate) fn next() -> Self {
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        Self(NEXT.fetch_add(1, Ordering::Relaxed))
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct Prompt {
+    pub(crate) id: Option<PromptId>,
+    pub(crate) title: SharedStr,
+    pub(crate) message: SharedStr,
+    pub(crate) buttons: &'static [&'static str],
+    pub(crate) tab: Option<TabId>,
+}
 
 const UNTITLED_FILE_NAME: &str = "Untitled.txt";
 const SAVE_AS_TITLE: &str = "Save as";

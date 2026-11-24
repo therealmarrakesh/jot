@@ -3,7 +3,6 @@
 mod app;
 mod color;
 mod command;
-mod diag;
 mod dialog;
 mod document;
 mod editor;
@@ -15,8 +14,7 @@ mod ids;
 mod keytips;
 mod menu;
 mod platform;
-mod scrollbar;
-mod tab_drag;
+mod shell;
 mod tabs;
 mod theme;
 mod tooltip;
@@ -33,7 +31,7 @@ use std::rc::Rc;
 
 use app::App;
 use gfx::Gpu;
-use platform::{Arbitration, Platform, arbitrate_instance};
+use platform::{Arbitration, Platform, arbitrate_instance, diag};
 
 pub(crate) const APP_NAME: &str = "Jot";
 const NOTICES_FLAG: &str = "--notices";

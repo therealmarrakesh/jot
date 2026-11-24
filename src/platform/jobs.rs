@@ -245,7 +245,7 @@ impl<E: Send + 'static> Jobs<E> {
         let res = thread::Builder::new().name(name.into()).spawn(move || {
             let outcome = match catch_unwind(AssertUnwindSafe(work)) {
                 Ok(val) => Ok(val),
-                Err(payload) => Err(crate::diag::panic_message(&*payload)),
+                Err(payload) => Err(super::diag::panic_message(&*payload)),
             };
             if let Some(f) = thread_finish
                 .lock()

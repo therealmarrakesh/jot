@@ -1,7 +1,6 @@
 use crate::editor::RopeExt as _;
 use crate::geom::point;
-use crate::ids::{EditorSlot, Focus, Frame, HitId};
-use crate::menu::MenuKind;
+use crate::ids::{EditorSlot, Focus, Frame, HitId, MenuKind};
 use crate::platform::window::hit_test_control_areas;
 use crate::platform::{
     Key, KeyEvent, Modifiers, MouseButton, PlatformEvent, PlatformHandler, WindowControlArea,

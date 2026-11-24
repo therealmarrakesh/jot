@@ -7,13 +7,13 @@ use ropey::Rope;
 use crate::color::Rgba;
 use crate::geom::{Axis, Edges, Point, Rect, Size, point, size};
 use crate::gfx::{D2DRenderer, Font, TextStyle, TextSystem, fill};
-use crate::ids::{Node, UiState};
+use crate::ids::{EditorSlot, Node, UiState};
 use crate::platform::{Modifiers, MouseButton, TimerHandle};
-use crate::scrollbar::ScrollbarViewport;
 use crate::theme::Palette;
 use crate::types::SharedStr;
 
 use super::buffer::RopeExt as _;
+use super::scrollbar::ScrollbarViewport;
 use super::wrap::{LineRanges, RowLayout, VisualRow, can_wrap_with_advances, horizontal_slice};
 use super::{DocumentView, Editor, EditorTimer, EditorTimers, MoveDirection, ViewKind};
 
@@ -371,6 +371,7 @@ impl FrameLayout {
 fn scrollbar_viewport(
     input_size: Size,
     content_size: Size,
+    scroll_offset: Point,
     paddings: Edges<f32>,
     soft_wrap: bool,
 ) -> ScrollbarViewport {
@@ -383,6 +384,7 @@ fn scrollbar_viewport(
             content_size.width + paddings.right,
             content_size.height + paddings.top + paddings.bottom,
         ),
+        scroll_offset,
         horizontal_left: paddings.left,
         horizontal: !soft_wrap,
     }
@@ -568,6 +570,7 @@ impl Editor {
 
     pub(crate) fn render_scrollbars(
         &mut self,
+        slot: EditorSlot,
         line_height: f32,
         p: Palette,
         now: Instant,
@@ -589,10 +592,11 @@ impl Editor {
         let vp = scrollbar_viewport(
             input_size,
             size(content_width, content_h),
+            scroll,
             doc.paddings,
             doc.soft_wrap,
         );
-        doc.scrollbar.render(vp, scroll, p, now, ui, |delay| {
+        doc.scrollbar.render(slot, vp, p, now, ui, |delay| {
             timers.after(delay, EditorTimer::ScrollbarIdle)
         })
     }
