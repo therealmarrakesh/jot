@@ -439,7 +439,7 @@ impl<H: Copy + Eq, C: Copy> Frame<H, C> {
         scale: f32,
         text_system: &TextSystem,
     ) -> Self {
-        let mut engine = LayoutEngine::new();
+        let mut engine = LayoutEngine::default();
         let mut frame = Frame::default();
         let default_text = ResolvedTextStyle::default();
 
@@ -793,7 +793,7 @@ pub(crate) struct UiState<H: Copy + Eq + Hash, C: Copy, K: Copy + Eq + Hash> {
     pointer: Option<PointerState>,
     hovered_chain: Vec<H>,
     pressed: Option<H>,
-    last_input_was_keyboard: bool,
+    pub(crate) last_input_was_keyboard: bool,
     anims: AnimTracks<K>,
 }
 
@@ -819,21 +819,6 @@ impl<H: Copy + Eq + Hash, C: Copy, K: Copy + Eq + Hash> UiState<H, C, K> {
     #[inline]
     pub(crate) fn pointer(&self) -> Option<PointerState> {
         self.pointer
-    }
-
-    #[inline]
-    pub(crate) fn last_input_was_keyboard(&self) -> bool {
-        self.last_input_was_keyboard
-    }
-
-    #[inline]
-    pub(crate) fn mark_keyboard_input(&mut self) {
-        self.last_input_was_keyboard = true;
-    }
-
-    #[inline]
-    pub(crate) fn mark_pointer_input(&mut self) {
-        self.last_input_was_keyboard = false;
     }
 
     pub(crate) fn begin_frame(&mut self, now: Instant, reduce_motion: bool) {
@@ -1176,23 +1161,6 @@ pub(crate) enum Presence {
     Closing,
 }
 
-impl Presence {
-    #[inline]
-    pub(crate) fn is_visible(self) -> bool {
-        !matches!(self, Self::Hidden)
-    }
-
-    #[inline]
-    pub(crate) fn is_open(self) -> bool {
-        matches!(self, Self::Open)
-    }
-
-    #[inline]
-    pub(crate) fn is_closing(self) -> bool {
-        matches!(self, Self::Closing)
-    }
-}
-
 fn next_transition_serial() -> usize {
     static NEXT: AtomicUsize = AtomicUsize::new(1);
     NEXT.fetch_add(1, Ordering::Relaxed)
@@ -1213,14 +1181,14 @@ impl Transition {
     }
 
     pub(crate) fn open(&mut self) {
-        if !self.phase.is_open() {
+        if !self.is_open() {
             self.serial = next_transition_serial();
             self.phase = Presence::Open;
         }
     }
 
     pub(crate) fn close(&mut self) -> bool {
-        if !self.phase.is_open() {
+        if !self.is_open() {
             return false;
         }
         self.phase = Presence::Closing;
@@ -1238,17 +1206,17 @@ impl Transition {
 
     #[inline]
     pub(crate) fn is_visible(self) -> bool {
-        self.phase.is_visible()
+        self.phase != Presence::Hidden
     }
 
     #[inline]
     pub(crate) fn is_open(self) -> bool {
-        self.phase.is_open()
+        self.phase == Presence::Open
     }
 
     #[inline]
     pub(crate) fn is_closing(self) -> bool {
-        self.phase.is_closing()
+        self.phase == Presence::Closing
     }
 }
 
@@ -1404,22 +1372,7 @@ impl<K: Copy + Eq + Hash> AnimTracks<K> {
         duration: Duration,
         easing: Easing,
     ) -> AnimSample<f32> {
-        let frame = self.frame;
-        let now = self.now;
-        let reduce_motion = self.reduce_motion;
-        let track = self.scalars.entry(key).or_insert_with(|| AnimTrack {
-            from: initial,
-            target,
-            started_at: now,
-            reversing_scale: 1.0,
-            duration,
-            last_frame: frame,
-        });
-        let sample = track.sample_and_update(target, duration, easing, now, reduce_motion, frame);
-        if sample.status == AnimStatus::Running {
-            self.running_this_frame = true;
-        }
-        sample
+        self.animate(|t| &mut t.scalars, key, initial, target, duration, easing)
     }
 
     pub(crate) fn animate_color(
@@ -1429,11 +1382,21 @@ impl<K: Copy + Eq + Hash> AnimTracks<K> {
         duration: Duration,
         easing: Easing,
     ) -> Rgba {
-        let frame = self.frame;
-        let now = self.now;
-        let reduce_motion = self.reduce_motion;
-        let track = self.colors.entry(key).or_insert_with(|| AnimTrack {
-            from: target,
+        self.animate(|t| &mut t.colors, key, target, target, duration, easing).value
+    }
+
+    fn animate<T: Lerp>(
+        &mut self,
+        tracks: impl FnOnce(&mut Self) -> &mut HashMap<K, AnimTrack<T>>,
+        key: K,
+        from: T,
+        target: T,
+        duration: Duration,
+        easing: Easing,
+    ) -> AnimSample<T> {
+        let (frame, now, reduce_motion) = (self.frame, self.now, self.reduce_motion);
+        let track = tracks(self).entry(key).or_insert_with(|| AnimTrack {
+            from,
             target,
             started_at: now,
             reversing_scale: 1.0,
@@ -1441,10 +1404,8 @@ impl<K: Copy + Eq + Hash> AnimTracks<K> {
             last_frame: frame,
         });
         let sample = track.sample_and_update(target, duration, easing, now, reduce_motion, frame);
-        if sample.status == AnimStatus::Running {
-            self.running_this_frame = true;
-        }
-        sample.value
+        self.running_this_frame |= sample.status == AnimStatus::Running;
+        sample
     }
 
     #[cfg(test)]
@@ -1475,12 +1436,7 @@ fn round_stroke(logical: f32, scale: f32) -> f32 {
 #[inline]
 pub(crate) fn snap_border_edges(border: Edges<f32>, scale: f32) -> Edges<f32> {
     let s = scale.max(0.5);
-    Edges {
-        top: round_stroke(border.top, s) / s,
-        right: round_stroke(border.right, s) / s,
-        bottom: round_stroke(border.bottom, s) / s,
-        left: round_stroke(border.left, s) / s,
-    }
+    border.map(|v| round_stroke(v, s) / s)
 }
 
 #[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
@@ -1671,31 +1627,15 @@ impl Default for FlexStyle {
 
 impl FlexStyle {
     fn snap_for_scale(self, scale: f32) -> Self {
-        let snap_f = |e: Edges<f32>| Edges {
-            top: round_px(e.top, scale),
-            right: round_px(e.right, scale),
-            bottom: round_px(e.bottom, scale),
-            left: round_px(e.left, scale),
-        };
-        let snap_opt = |e: Edges<Option<f32>>| Edges {
-            top: e.top.map(|v| round_px(v, scale)),
-            right: e.right.map(|v| round_px(v, scale)),
-            bottom: e.bottom.map(|v| round_px(v, scale)),
-            left: e.left.map(|v| round_px(v, scale)),
-        };
+        let px = |v: f32| round_px(v, scale);
         Self {
-            inset: snap_opt(self.inset),
-            size: [self.size[0].snap(scale), self.size[1].snap(scale)],
-            min: [self.min[0].snap(scale), self.min[1].snap(scale)],
-            max: [self.max[0].snap(scale), self.max[1].snap(scale)],
-            margin: snap_f(self.margin),
-            padding: snap_f(self.padding),
-            border: Edges {
-                top: round_stroke(self.border.top, scale),
-                right: round_stroke(self.border.right, scale),
-                bottom: round_stroke(self.border.bottom, scale),
-                left: round_stroke(self.border.left, scale),
-            },
+            inset: self.inset.map(|v| v.map(px)),
+            size: self.size.map(|d| d.snap(scale)),
+            min: self.min.map(|d| d.snap(scale)),
+            max: self.max.map(|d| d.snap(scale)),
+            margin: self.margin.map(px),
+            padding: self.padding.map(px),
+            border: self.border.map(|v| round_stroke(v, scale)),
             gap: round_px(self.gap, scale),
             ..self
         }
@@ -1879,10 +1819,6 @@ pub(crate) struct LayoutEngine {
 }
 
 impl LayoutEngine {
-    pub(crate) fn new() -> Self {
-        Self::default()
-    }
-
     pub(crate) fn reserve_node(&mut self, style: FlexStyle, scale: f32, measured: bool) -> LayoutId {
         let id = LayoutId(self.nodes.len() as u32);
         self.nodes.push(LayoutNode {
@@ -2128,22 +2064,9 @@ impl<'a, F: FnMut(LayoutId, Option<f32>, Option<f32>, AvailSize) -> Size> Solver
         let pb_main = edge_sum(pb, m);
         let pb_cross = edge_sum(pb, c);
         let inherent = req.sizing_mode == SizingMode::InherentSize;
-        let b_main = AxisBounds::resolve(
-            style.size[m],
-            style.min[m],
-            style.max[m],
-            req.parent[m],
-            pb_main,
-            inherent,
-        );
-        let b_cross = AxisBounds::resolve(
-            style.size[c],
-            style.min[c],
-            style.max[c],
-            req.parent[c],
-            pb_cross,
-            inherent,
-        );
+        let [b_main, b_cross] = [(m, pb_main), (c, pb_cross)].map(|(a, pb)| {
+            AxisBounds::resolve(style.size[a], style.min[a], style.max[a], req.parent[a], pb, inherent)
+        });
         let node_main = b_main.definite(req.known[m]);
         let node_cross = b_cross.definite(req.known[c]);
 
@@ -3145,7 +3068,7 @@ mod tests {
 
     impl Tree {
         fn new(scale: f32) -> Self {
-            Self { engine: LayoutEngine::new(), scale }
+            Self { engine: LayoutEngine::default(), scale }
         }
         fn leaf(&mut self, style: FlexStyle) -> LayoutId {
             self.engine.add_node(style, self.scale, &[], false)

@@ -29,7 +29,7 @@ fn menus_shortcuts_toggles_submenus_and_context_menu() {
     h.click_menu_submenu("Zoom");
     h.read(|w, _| {
         assert!(
-            !w.ui_state().last_input_was_keyboard(),
+            !w.ui_state().last_input_was_keyboard,
             "clicking submenu item must not activate keyboard focus rings"
         );
     });

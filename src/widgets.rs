@@ -35,7 +35,7 @@ pub(crate) fn button(
     focused: bool,
     ui: &mut AppUi,
 ) -> AppNode {
-    let ring = focused && ui.last_input_was_keyboard();
+    let ring = focused && ui.last_input_was_keyboard;
     let pressed = ui.is_pressed(hit);
     let accent = p.accent;
     let (fill, hover, pressed_fill, edge, bottom, text_color) = if accented {

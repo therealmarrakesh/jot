@@ -1381,7 +1381,7 @@ impl MainWindow {
     }
 
     pub(crate) fn on_key_down(&mut self, ev: KeyEvent, cx: &mut Cx<'_>) -> bool {
-        self.ui.mark_keyboard_input();
+        self.ui.last_input_was_keyboard = true;
 
         if self.mode() == InputMode::Dialog {
             if let Some(slot) = self.focused_editor_slot() {

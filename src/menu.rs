@@ -301,7 +301,7 @@ impl Menus {
         if let Some(HitId::Menu(MenuHit::Trigger(kind))) = top
             && self.open_kind().is_some_and(|open| open != kind)
         {
-            ui.mark_pointer_input();
+            ui.last_input_was_keyboard = false;
             return self.open_kind_menu(kind, state());
         }
 
@@ -364,7 +364,7 @@ impl Menus {
             }
         }
         self.hovered_target = hovered;
-        ui.mark_pointer_input();
+        ui.last_input_was_keyboard = false;
         self.submenu_timer = timer_target.map(|t| {
             timers.after(timers.menu_show_delay(), WindowTimer::Submenu(t))
         });
@@ -1641,7 +1641,7 @@ fn render_command_row(open: &OpenMenu, p: Palette, ui: &mut AppUi) -> AppNode {
 
 fn render_command_button(open: &OpenMenu, ix: usize, p: Palette, ui: &mut AppUi) -> AppNode {
     let CommandButton { command, glyph } = &open.kind.commands()[ix];
-    let focused = ui.last_input_was_keyboard() && open.focus == PopupFocus::Command(ix);
+    let focused = ui.last_input_was_keyboard && open.focus == PopupFocus::Command(ix);
     let enabled = command.enabled;
     let hit = HitId::Menu(MenuHit::Command {
         serial: open.motion.serial(),
@@ -1749,7 +1749,7 @@ fn render_panel_rows(
             !open.kind.commands().is_empty(),
         ),
     };
-    let focus_visible = ui.last_input_was_keyboard();
+    let focus_visible = ui.last_input_was_keyboard;
     let expanded = open.submenu.as_ref().filter(|_| !is_sub).map(|s| s.ix);
 
     let rows: Vec<AppNode> = panel
@@ -2014,7 +2014,7 @@ mod tests {
             ..Default::default()
         };
 
-        ui.mark_keyboard_input();
+        ui.last_input_was_keyboard = true;
         bar.open_context_menu(point(10., 10.), state);
         assert!(bar.is_open());
         // Hovering a context menu command clears keyboard focus modality on UiState.
@@ -2024,7 +2024,7 @@ mod tests {
             &mut ui,
             timers,
         );
-        assert!(!ui.last_input_was_keyboard());
+        assert!(!ui.last_input_was_keyboard);
         // Cut(0) and Copy(1) disabled; Paste(2) enabled -> focused command must be 2.
         let act = bar.on_key_down(key(Key::Enter), Focus::MenuBar, || state);
         assert_eq!(act.command, Some(EditCommand::Paste.into()));

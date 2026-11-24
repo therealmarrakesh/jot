@@ -200,6 +200,10 @@ pub(crate) struct Edges<T = f32> {
 }
 
 impl<T: Copy> Edges<T> {
+    pub(crate) fn map<U>(self, f: impl Fn(T) -> U) -> Edges<U> {
+        Edges { top: f(self.top), right: f(self.right), bottom: f(self.bottom), left: f(self.left) }
+    }
+
     pub(crate) const fn all(value: T) -> Self {
         Self {
             top: value,
