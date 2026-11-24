@@ -154,10 +154,6 @@ fn snap_grapheme_boundary(text: &Rope, offset: usize, bias: Bias) -> usize {
     }
 }
 
-/// Word segmentation needs contiguous text, so words are found in a window of the line that
-/// starts this wide and doubles as needed.
-const WORD_SCAN_WINDOW_BYTES: usize = 256;
-
 #[inline]
 fn is_horizontal_ws(ch: char) -> bool {
     ch.is_whitespace() && !matches!(ch, '\n' | '\r')
@@ -184,34 +180,73 @@ fn skip_spaces(text: &Rope, mut from: usize, limit: usize) -> usize {
     from
 }
 
-/// Finds a word segment (Unicode word boundaries) of `bounds` near `at`. A window around `at`
-/// is segmented and `pick` chooses a segment, given the window text and `at` within it. The
-/// window grows until the pick sits at least four characters clear of any edge where the window
-/// cut the text short, so its boundaries don't depend on text outside the window.
-fn word_segment(
+/// No word-boundary rule joins these to a neighbour or looks across them, so a line's word
+/// segmentation restarts at each one: horizontal whitespace (except the narrow no-break space,
+/// which joins words), ASCII brackets and operators, CJK ideographs and hiragana. Checked
+/// against the segmenter by `separators_restart_word_segmentation`.
+fn separates_words(ch: char) -> bool {
+    is_horizontal_ws(ch) && ch != '\u{202F}'
+        || matches!(
+            ch,
+            '(' | ')' | '[' | ']' | '{' | '}' | '<' | '>' | '=' | '+' | '-' | '*' | '/'
+        )
+        || matches!(
+            ch,
+            '!' | '?' | '|' | '&' | '%' | '#' | '~' | '^' | '`' | '\\' | '$' | '@'
+        )
+        || ('\u{4E00}'..='\u{9FFF}').contains(&ch)
+        || ('\u{3041}'..='\u{3096}').contains(&ch)
+}
+
+/// The word (Unicode word boundaries) of `bounds` that `pick` chooses near the character at
+/// `at`. Only the stretch from the separator before it to the one after it is segmented: the
+/// line's segmentation restarts at both, so the stretch's words are exactly the line's. `pick`
+/// gets the stretch's text and `at` within it.
+fn find_word(
     text: &Rope,
     bounds: Range<usize>,
     at: usize,
     pick: impl Fn(&str, usize) -> Option<Range<usize>>,
 ) -> Option<Range<usize>> {
-    let mut span = WORD_SCAN_WINDOW_BYTES;
-    loop {
-        let start = text.floor_char_boundary(at.saturating_sub(span).max(bounds.start));
-        let end = text.ceil_char_boundary(at.saturating_add(span).min(bounds.end));
-        let window: Cow<str> = text.slice(start..end).into();
-        if let Some(word) = pick(&window, at - start) {
-            let clear = |cut: bool, rest: &str| !cut || rest.chars().count() >= 4;
-            if clear(start > bounds.start, &window[..word.start])
-                && clear(end < bounds.end, &window[word.end..])
-            {
-                return Some(start + word.start..start + word.end);
-            }
+    let stretch = word_stretch(text, bounds, at);
+    let words: Cow<str> = text.slice(stretch.clone()).into();
+    let word = pick(&words, at - stretch.start)?;
+    Some(stretch.start + word.start..stretch.start + word.end)
+}
+
+/// The stretch of `bounds` around the character at `at` between the separators where the
+/// line's word segmentation restarts. Kept out of line: its three callers would each inline it.
+#[inline(never)]
+fn word_stretch(text: &Rope, bounds: Range<usize>, at: usize) -> Range<usize> {
+    // A separator only restarts segmentation if the next character doesn't attach to it; only
+    // whitespace and non-ASCII characters (marks, joiners, format characters) can.
+    let restarts_after = |sep: char, next: char| {
+        if next.is_ascii() && !is_horizontal_ws(next) {
+            return true;
         }
-        if start == bounds.start && end == bounds.end {
-            return None;
-        }
-        span = span.saturating_mul(2);
+        let mut pair = [0; 8];
+        let n = sep.encode_utf8(&mut pair).len();
+        let n = n + next.encode_utf8(&mut pair[n..]).len();
+        std::str::from_utf8(&pair[..n])
+            .is_ok_and(|pair| pair.split_word_bound_indices().count() == 2)
+    };
+    let mut behind = text.chars_at(at);
+    let mut ahead = behind.clone();
+    let mut next = ahead.next();
+    let (mut start, mut end) = (at, at + next.map_or(0, char::len_utf8));
+    while start > bounds.start
+        && let Some(ch) = behind.prev()
+        && !(separates_words(ch) && next.is_some_and(|next| restarts_after(ch, next)))
+    {
+        (start, next) = (start - ch.len_utf8(), Some(ch));
     }
+    while end < bounds.end
+        && let Some(ch) = ahead.next()
+        && !separates_words(ch)
+    {
+        end += ch.len_utf8();
+    }
+    start..end
 }
 
 /// The word, or run of spaces, under `offset` (double-click selection).
@@ -230,13 +265,12 @@ fn word_range_at(text: &Rope, offset: usize) -> Option<Range<usize>> {
             skip_spaces(text, pos, line.start)..skip_spaces(text, pos + ch.len_utf8(), line.end),
         );
     }
-    let containing = |window: &str, at: usize| {
-        let mut words = window
+    find_word(text, line, pos, |stretch, at| {
+        let mut words = stretch
             .split_word_bound_indices()
             .map(|(i, w)| i..i + w.len());
         words.find(|word| word.contains(&at))
-    };
-    Some(word_segment(text, line, pos, containing).unwrap_or(pos..pos + ch.len_utf8()))
+    })
 }
 
 /// Ctrl+Left: the start of the word before `offset`, skipping spaces; a line start steps back
@@ -248,13 +282,21 @@ pub(crate) fn prev_word_start(text: &Rope, offset: usize) -> usize {
     }
     let line_start = text.line_start_offset(text.offset_to_point(offset).row);
     let end = skip_spaces(text, offset, line_start);
-    let last = |window: &str, _| {
-        let mut words = window.split_word_bound_indices();
-        words
-            .rfind(|(_, w)| !w.chars().all(is_horizontal_ws))
-            .map(|(i, w)| i..i + w.len())
+    if end <= line_start {
+        return line_start;
+    }
+    let last = |stretch: &str, _| {
+        let mut words = stretch.split_word_bound_indices();
+        let word = words.rfind(|(_, w)| !w.chars().all(is_horizontal_ws));
+        word.map(|(i, w)| i..i + w.len())
     };
-    word_segment(text, line_start..end, end, last).map_or(line_start, |word| word.start)
+    find_word(
+        text,
+        line_start..end,
+        text.floor_char_boundary(end - 1),
+        last,
+    )
+    .map_or(line_start, |word| word.start)
 }
 
 /// Ctrl+Right: the end of the word after `offset` plus the spaces that follow it; a line end
@@ -268,13 +310,12 @@ pub(crate) fn next_word_end(text: &Rope, offset: usize) -> usize {
     if text.char_at(offset).is_some_and(is_horizontal_ws) {
         return skip_spaces(text, offset, line_end);
     }
-    let first = |window: &str, _| {
-        let mut words = window.split_word_bound_indices();
-        words
-            .find(|(_, w)| !w.chars().all(is_horizontal_ws))
-            .map(|(i, w)| i..i + w.len())
+    let first = |stretch: &str, _| {
+        let mut words = stretch.split_word_bound_indices();
+        let word = words.find(|(_, w)| !w.chars().all(is_horizontal_ws));
+        word.map(|(i, w)| i..i + w.len())
     };
-    let word_end = word_segment(text, offset..line_end, offset, first).map_or(line_end, |w| w.end);
+    let word_end = find_word(text, offset..line_end, offset, first).map_or(line_end, |w| w.end);
     skip_spaces(text, word_end, line_end)
 }
 
@@ -1314,9 +1355,107 @@ mod tests {
     }
 
     #[test]
-    fn bounded_word_navigation_matches_full_scan_everywhere() {
-        let long_word = "a".repeat(WORD_SCAN_WINDOW_BYTES + 64);
-        let long_spaces = " ".repeat(WORD_SCAN_WINDOW_BYTES + 64);
+    fn words_in_a_long_flag_run_are_whole_flags() {
+        let flags = "🇺🇸".repeat(300);
+        let rope = Rope::from(format!("x {flags} y").as_str());
+        let first = 2;
+        for offset in (first..first + flags.len()).step_by(4) {
+            let word = word_range_at(&rope, offset).unwrap();
+            assert_eq!((word.start - first) % 8, 0, "offset {offset}: {word:?}");
+            assert_eq!(word.len(), 8, "offset {offset}: {word:?}");
+            let ctrl_left = prev_word_start(&rope, offset.min(first + flags.len() - 8) + 8);
+            assert_eq!((ctrl_left - first) % 8, 0, "offset {offset}");
+        }
+    }
+
+    /// Every separator, between samples of each word-boundary class: segmentation always breaks
+    /// before it (after anything but whitespace) and, unless the next character attaches to it,
+    /// restarts after it exactly as if the text began there.
+    #[test]
+    fn separators_restart_word_segmentation() {
+        let units = [
+            "",
+            "a",
+            "é",
+            "1",
+            ":",
+            "'",
+            ".",
+            ",",
+            ";",
+            "_",
+            "\"",
+            "\u{5d0}",
+            "\u{30a2}",
+            "\u{1F1FA}",
+            "\u{301}",
+            "\u{200d}",
+            "\u{ad}",
+            "\u{1F600}",
+            " ",
+            "\u{3000}",
+            "中",
+            "ひ",
+            "\u{a0}",
+            "\u{202f}",
+            "\u{ff21}",
+            "x\u{301}",
+            "(",
+            "🇺🇸",
+        ];
+        let bounds = |s: &str| {
+            let mut b: Vec<usize> = s.split_word_bound_indices().map(|(i, _)| i).collect();
+            b.push(s.len());
+            b
+        };
+        let separators = (0..=0x10FFFF)
+            .filter_map(char::from_u32)
+            .filter(|&c| separates_words(c));
+        // A sample of ideographs keeps this quick; all of them were checked once with deeper contexts.
+        for sep in separators
+            .filter(|&c| !('\u{4E00}'..='\u{9FFF}').contains(&c) || (c as u32).is_multiple_of(997))
+        {
+            for l in units {
+                for r in units {
+                    let all = bounds(&format!("{l}{sep}{r}"));
+                    let cut = l.len() + sep.len_utf8();
+                    if r.chars()
+                        .next()
+                        .is_some_and(|n| format!("{sep}{n}").split_word_bounds().count() == 2)
+                    {
+                        let after: Vec<usize> = all.iter().copied().filter(|&b| b >= cut).collect();
+                        let fresh: Vec<usize> = bounds(r).into_iter().map(|b| b + cut).collect();
+                        assert_eq!(after, fresh, "restart after {sep:?} in {l:?}|{r:?}");
+                    }
+                    if !l.chars().next_back().is_some_and(is_horizontal_ws) {
+                        assert!(
+                            all.contains(&l.len()),
+                            "break before {sep:?} in {l:?}|{r:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_word_keeps_a_long_run_of_accents_on_its_first_letter() {
+        let word = format!("x{}{}", "\u{301}".repeat(60), "a".repeat(300));
+        let rope = Rope::from(format!("( {word} )").as_str());
+        for offset in (2..2 + word.len()).step_by(7) {
+            assert_eq!(
+                word_range_at(&rope, offset),
+                Some(2..2 + word.len()),
+                "offset {offset}"
+            );
+        }
+        assert_eq!(prev_word_start(&rope, 2 + word.len()), 2);
+    }
+
+    #[test]
+    fn word_navigation_handles_long_words_spaces_and_graphemes() {
+        let long_word = "a".repeat(320);
+        let long_spaces = " ".repeat(320);
         let sample =
             format!("  hello, don't 1,234.56 foo_bar\n日本語🎉 test{long_spaces}{long_word}  tail");
         let rope = Rope::from(sample.as_str());
