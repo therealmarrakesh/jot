@@ -82,7 +82,6 @@ pub(crate) struct TabSet {
 impl Index<usize> for TabSet {
     type Output = Tab;
 
-    #[inline]
     fn index(&self, index: usize) -> &Self::Output {
         &self.tabs[index]
     }
@@ -113,38 +112,31 @@ impl TabSet {
         set
     }
 
-    #[inline]
     pub(crate) fn len(&self) -> usize {
         self.tabs.len()
     }
 
-    #[inline]
     pub(crate) fn active_index(&self) -> usize {
         self.active
     }
 
-    #[inline]
     pub(crate) fn active(&self) -> &TabData {
         &self.tabs[self.active].data
     }
 
-    #[inline]
     pub(crate) fn active_mut(&mut self) -> &mut TabData {
         &mut self.tabs[self.active].data
     }
 
-    #[inline]
     pub(crate) fn active_id(&self) -> TabId {
         self.tabs[self.active].data.id
     }
 
-    #[inline]
     pub(crate) fn active_slot(&self) -> EditorSlot {
         EditorSlot::Tab(self.active_id())
     }
 
     #[cfg(test)]
-    #[inline]
     pub(crate) fn iter(&self) -> std::slice::Iter<'_, Tab> {
         self.tabs.iter()
     }
@@ -480,12 +472,10 @@ impl TabSet {
         true
     }
 
-    #[inline]
     pub(crate) fn overflow(&self) -> bool {
         self.overflow
     }
 
-    #[inline]
     pub(crate) fn is_frozen(&self) -> bool {
         self.frozen.is_some()
     }
@@ -516,12 +506,10 @@ pub(crate) struct TabData {
 }
 
 impl TabData {
-    #[inline]
     pub(crate) fn path(&self) -> Option<&Path> {
         self.doc_path.as_ref().map(DocPath::as_path)
     }
 
-    #[inline]
     pub(crate) fn path_key(&self) -> Option<&PathKey> {
         self.doc_path.as_ref().map(DocPath::key)
     }
