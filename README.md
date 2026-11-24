@@ -22,13 +22,13 @@ Jot is written in Rust directly against Win32, Direct2D 1.1, DirectWrite, and Di
 
 ### Code layout
 
-- `src/platform/`: Win32 event loop, main/overlay windows, borderless chrome, DPI/IME/`WM_DROPFILES`, native file dialogs, clipboard, system settings, single-instance `WM_COPYDATA` handoff, and UI-thread timer/job runner.
-- `src/gfx/`: Direct3D 11 / DirectComposition / Direct2D 1.1 `Gpu` & `Surface` renderer and DirectWrite `TextStyle`/`Label`/`ShapedRow` shaping and line-break analysis.
-- `src/ui/`: Flex layout solver with same-frame anchors and fit-content measurement, generic flat scene graph, key-based animation tracks, unified `OverlaySurface`, and Fluent controls.
-- `src/editor/`: Headless `TextModel`, transaction `History`, rope buffer & selection, prefix-sum soft-wrap index, and prepare/paint editor view.
-- `src/window/`, `src/app.rs`: Multi-window `Shell`/`Cx`/`Effect` lifecycle, `TabSet` invariants, explicit `InputMode` routing, and window chrome.
-- Shared primitives: `ids`, `diag`, `theme`, `color`, `geom`, `types`, and `command`.
-- Feature modules: `src/menu/` (`model`, `popup`, `bar`, `render`), `src/find/` (`matcher`, `bar`), `tabs`, `tab_drag`, `keytips`, `dialog`, `tooltip`, `scrollbar`, `files` (`FileOps` workflow & background I/O executor), and `document` (streaming codec & atomic save).
+- `src/platform/`: Single-TLS Win32 event pump (`pump`), `wndproc`, main/overlay `window`, typed `handle`, `display`, `event`, input/DPI/IME, native `dialogs`, `clipboard`, `settings`, `fs`, `codepage`, `diag`, single-instance `WM_COPYDATA` handoff (`instance`), and UI-thread `jobs`.
+- `src/gfx/`: Direct3D 11 / DirectComposition / Direct2D 1.1 `Gpu`, `Surface`, and `WindowSurface` renderer (`d2d`), plus DirectWrite `TextSystem`/`Label`/`ShapedRow` shaping (`text`) and line-break analysis (`line_breaks`).
+- `src/ui/`: Flex layout solver with same-frame anchors and fit-content measurement (`layout`), generic flat scene graph (`scene`), key-based animation tracks (`anim`), and unified `OverlaySurface` (`overlay`).
+- `src/editor/`: Headless `TextModel` (`model`), transaction `History` (`history`), rope buffer & selection (`buffer`), editing commands (`actions`), prefix-sum soft-wrap index (`wrap`), row/frame layout (`frame`), viewport shaping/paint (`layout`), scrolling & overlay scrollbars (`scroll`, `scrollbar`), pointer input (`pointer`), and caret blink/auto-scroll (`blink`).
+- `src/window/`, `src/app/`: Multi-window `App`/`Windows`/`TabDrag` orchestration, `Shell`/`Cx`/`Effect` (`shell.rs`), `MainWindow` split by concern (`tabs`, `dialogs`, `find`, `menu`, `input`, `commands`, `chrome`, `paint`), and explicit `InputMode` routing.
+- Shared primitives: `ids`, `theme`, `widgets`, `color`, `geom`, `types`, and `command`.
+- Feature modules: `src/menu/` (`model`, `popup`, `bar`, `render`), `src/find/` (`matcher`, `bar`), `src/tabs/` (`model`, `set`, `view`), `src/files/` (`workflow`, `io`, `prompt`), `src/document/` (`path`, `decode`, `encode`, `save`), `dialog`, `tooltip`, and `keytips`.
 - `build.rs`: Embeds `assets/jot.ico`, the Windows 11 manifest (`PerMonitorV2`, `SegmentHeap`, Common Controls v6), and version info via `rc.exe`, and generates third-party notices in `OUT_DIR` (embedded via `include_str!`).
 
 ## Building

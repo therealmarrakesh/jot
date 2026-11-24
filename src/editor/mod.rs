@@ -1,15 +1,19 @@
 mod actions;
+mod blink;
 mod buffer;
+mod frame;
 mod history;
+mod layout;
 mod model;
+mod pointer;
+mod scroll;
 mod scrollbar;
-mod view;
 pub(crate) mod wrap;
 
 pub(crate) use buffer::RopeExt;
+pub(crate) use frame::{EditorPaintParams, EditorPaintStyle};
 pub(crate) use model::TextModel;
 pub(crate) use ropey::Rope;
-pub(crate) use view::{EditorPaintParams, EditorPaintStyle};
 
 use std::ops::Range;
 use std::time::Duration;
@@ -20,10 +24,14 @@ use crate::platform::TimerHandle;
 use crate::types::SharedStr;
 use crate::ui::{Node, box_, custom, row};
 
+use blink::{AutoScroll, BlinkState};
+use frame::FrameLayout;
+use layout::LongestLineCache;
 use model::{EditPolicy, LineChange, ValidateFn};
 use scrollbar::ScrollbarState;
-use view::{AutoScroll, BlinkState, FrameLayout, LongestLineCache};
 use wrap::WrapIndex;
+
+pub(super) const RIGHT_MARGIN: f32 = 10.0;
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct DocOptions {
@@ -331,8 +339,8 @@ impl Editor {
                 .as_ref()
                 .and_then(|f| f.wrap_width)
                 .or_else(|| {
-                    (self.input_bounds.size.width > view::RIGHT_MARGIN)
-                        .then_some(self.input_bounds.size.width - view::RIGHT_MARGIN)
+                    (self.input_bounds.size.width > RIGHT_MARGIN)
+                        .then_some(self.input_bounds.size.width - RIGHT_MARGIN)
                 });
             doc.wrap.set_wrap_width(text, width, ts);
             self.scroll.x = 0.0;

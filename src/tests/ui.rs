@@ -4,9 +4,9 @@ use crate::geom::point;
 use crate::ids::{
     AppFrame, CaptionHit, DialogHit, EditorSlot, FindHit, Focus, HitId, MenuHit, MenuKind,
 };
-use crate::platform::window::hit_test_control_areas;
 use crate::platform::{
     Key, KeyEvent, Modifiers, MouseButton, PlatformEvent, PlatformHandler, WindowControlArea,
+    hit_test_control_areas,
 };
 use crate::theme::{SMALL_FONT, TEXT_FONT};
 use crate::ui::{AvailSize, Space, box_, row, snap_border_edges, text};

@@ -5,7 +5,8 @@ use crate::ids::Focus;
 use crate::platform::format_local_time_date;
 use crate::shell::{Cx, Effect};
 
-use super::{MainWindow, ZOOM_STEP, menu_state};
+use super::menu::menu_state;
+use super::{MainWindow, ZOOM_STEP};
 
 impl MainWindow {
     pub(crate) fn dispatch_command(&mut self, cmd: Command, cx: &mut Cx<'_>) -> bool {

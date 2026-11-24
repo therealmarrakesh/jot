@@ -19,7 +19,7 @@ use windows::core::{HSTRING, Interface, PCWSTR};
 
 use crate::types::{Result, SharedStr};
 
-use super::os::WindowHandle;
+use super::handle::WindowHandle;
 
 const ENCODING_COMBO_ID: u32 = 1001;
 

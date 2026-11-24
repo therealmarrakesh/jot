@@ -10,7 +10,8 @@ use crate::shell::{Cx, Effect, WindowTimer};
 use crate::tabs::{SCROLL_REPEAT_DELAY, SCROLL_REPEAT_INTERVAL, SCROLL_STEP, WHEEL_SHARE};
 
 use super::chrome::STRIP_TOP;
-use super::{InputMode, MainWindow, ZOOM_STEP, menu_state};
+use super::menu::menu_state;
+use super::{InputMode, MainWindow, ZOOM_STEP};
 
 impl MainWindow {
     pub(crate) fn on_mouse_move(

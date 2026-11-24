@@ -1,22 +1,23 @@
 mod chrome;
 mod commands;
+mod dialogs;
+mod find;
 mod input;
+mod menu;
 mod paint;
+mod tabs;
 
-use crate::APP_NAME;
-use crate::dialog::{DialogKind, Dialogs};
-use crate::document::{self, DocPath, Format};
-use crate::editor::{EditCommand, Editor, Rope, RopeExt as _};
-use crate::files::Prompt;
-use crate::find::{FindBar, FindOutcome};
+use crate::dialog::Dialogs;
+use crate::editor::{EditCommand, Editor};
+use crate::find::FindBar;
 use crate::geom::{Edges, Point, ScreenPoint, Size, point};
 use crate::gfx::WindowSurface;
 use crate::ids::{AppUi, CaptionHit, EditorSlot, Focus, HitId, TabHit, TabId};
 use crate::keytips::KeyTip;
-use crate::menu::{FocusRequest, MenuOutcome, MenuState, Menus};
+use crate::menu::Menus;
 use crate::platform::{WindowAppearance, WindowHandle, WindowId, clipboard};
-use crate::shell::{Cx, Effect, Shell, SlotTimers, WindowTimer};
-use crate::tabs::{self, Removal, TabData, TabSet};
+use crate::shell::{Shell, SlotTimers, WindowTimer};
+use crate::tabs::{self as tab_strip, TabData, TabSet};
 use crate::tooltip::TooltipProbe;
 use crate::ui::OverlayAnchor;
 
@@ -40,8 +41,8 @@ pub(crate) const EDITOR_PADDINGS: Edges<f32> = Edges {
 };
 const CARET_HEIGHT: f32 = 18.;
 pub(super) const ZOOM_STEP: f32 = 0.1;
-const ZOOM_MIN: f32 = 0.1;
-const ZOOM_MAX: f32 = 5.;
+pub(super) const ZOOM_MIN: f32 = 0.1;
+pub(super) const ZOOM_MAX: f32 = 5.;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub(crate) enum InputMode {
@@ -59,9 +60,9 @@ pub(crate) struct MainWindow {
     pub(super) find: FindBar,
     pub(super) dialogs: Dialogs,
     pub(super) focus: Focus,
-    dirty: bool,
+    pub(super) dirty: bool,
     has_painted: bool,
-    pending_close: bool,
+    pub(super) pending_close: bool,
     middle_pressed_tab: Option<TabId>,
     min_size: Option<Size>,
 }
@@ -218,9 +219,9 @@ impl MainWindow {
             );
         let (left, top, bottom) = self.ui.frame().rect_of(HitId::Tab(TabHit::List)).map_or(
             (
-                HEADER_WIDTH + tabs::LIST_PAD,
+                HEADER_WIDTH + tab_strip::LIST_PAD,
                 STRIP_TOP,
-                STRIP_TOP + tabs::TAB_HEIGHT,
+                STRIP_TOP + tab_strip::TAB_HEIGHT,
             ),
             |r| (r.left(), r.top(), r.bottom()),
         );
@@ -228,7 +229,7 @@ impl MainWindow {
     }
 
     pub(crate) fn strip_grab_offset(&self, grab: Point) -> Point {
-        point(HEADER_WIDTH + tabs::LIST_PAD + grab.x, STRIP_TOP + grab.y)
+        point(HEADER_WIDTH + tab_strip::LIST_PAD + grab.x, STRIP_TOP + grab.y)
     }
 
     fn overlay_anchor(&self) -> OverlayAnchor {
@@ -245,13 +246,6 @@ impl MainWindow {
             self.menus
                 .key_tips(self.focus, self.ui.frame(), &shell.text_system),
         )
-    }
-
-    pub(crate) fn begin_tab_save(&mut self, tab: TabId) -> Option<(u64, Rope)> {
-        let ed = self.tabs.editor_mut(tab)?;
-        let snapshot = ed.begin_save();
-        let text = ed.model().text().clone();
-        Some((snapshot, text))
     }
 
     pub(crate) fn tooltip_probe(&self) -> TooltipProbe<'_> {
@@ -304,16 +298,6 @@ impl MainWindow {
     #[cfg(test)]
     pub(crate) fn is_dialog_open(&self) -> bool {
         self.dialogs.is_open()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn is_active(&self) -> bool {
-        self.win.window.is_active()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn in_size_move(&self) -> bool {
-        self.win.window.in_size_move()
     }
 
     #[cfg(test)]
@@ -464,17 +448,6 @@ impl MainWindow {
         self.set_focus(Focus::Editor(self.active_slot()), shell);
     }
 
-    pub(crate) fn refresh_title(&self) {
-        self.win.window.set_title(&format!(
-            "{} - {APP_NAME}",
-            self.tabs.tab_name(self.tabs.active_index())
-        ));
-    }
-
-    pub(crate) fn zoom(&self) -> f32 {
-        self.tabs.active().zoom
-    }
-
     pub(super) fn line_height(&self) -> f32 {
         (EDITOR_LINE_HEIGHT * self.zoom()).round()
     }
@@ -485,367 +458,6 @@ impl MainWindow {
 
     pub(super) fn editor_min_height(&self) -> f32 {
         EDITOR_PADDING_TOP + EDITOR_PADDING_BOTTOM + self.line_height()
-    }
-
-    pub(crate) fn set_zoom(&mut self, zoom: f32) {
-        self.tabs.active_mut().zoom =
-            ((zoom / ZOOM_STEP).round() * ZOOM_STEP).clamp(ZOOM_MIN, ZOOM_MAX);
-        self.dirty = true;
-    }
-
-    pub(crate) fn set_word_wrap(&mut self, shell: &Shell) {
-        let word_wrap = shell.view.word_wrap;
-        self.tabs
-            .for_each_editor_mut(|ed| ed.set_soft_wrap(word_wrap, &shell.text_system));
-        self.dirty = true;
-    }
-
-    pub(crate) fn select_tab_only(&mut self, ix: usize) {
-        if self.tabs.active_index() != ix {
-            self.win.window.hwnd().complete_ime_composition();
-            self.active_editor_mut().on_blur();
-        }
-        self.tabs.select(ix);
-        self.find.clear_notice();
-        if self.find.is_open() && !self.has_text() {
-            self.find.close();
-        }
-        self.refresh_title();
-        self.dirty = true;
-    }
-
-    pub(crate) fn activate_tab(&mut self, ix: usize, shell: &Shell) {
-        self.select_tab_only(ix);
-        if !matches!(self.mode(), InputMode::Dialog | InputMode::Popup) {
-            self.focus_active_editor(shell);
-        }
-    }
-
-    pub(crate) fn add_tab(&mut self, shell: &Shell) {
-        let data = TabData::create(None, shell.view.word_wrap, EDITOR_PADDINGS);
-        self.push_tab(data, shell);
-    }
-
-    pub(crate) fn push_tab(&mut self, data: TabData, shell: &Shell) {
-        let ix = self.tabs.push(data);
-        self.activate_tab(ix, shell);
-    }
-
-    pub(crate) fn replace_tab(&mut self, ix: usize, data: TabData, shell: &Shell) {
-        self.tabs.replace(ix, data);
-        self.activate_tab(ix, shell);
-    }
-
-    pub(crate) fn remove_tab(&mut self, ix: usize, shell: &Shell) {
-        let pointer_in_strip = self.ui.pointer().is_some_and(|p| {
-            self.ui
-                .frame()
-                .rect_of(HitId::Tab(TabHit::Strip))
-                .is_some_and(|r| r.contains(p.pos))
-        });
-        match self.tabs.remove(ix, pointer_in_strip) {
-            Removal::LastTab => self.pending_close = true,
-            Removal::Removed {
-                id,
-                closed_active,
-                next_active,
-            } => {
-                self.dialogs.close_for_tab(id);
-                self.finish_removal(closed_active, next_active, shell);
-            }
-        }
-    }
-
-    fn finish_removal(&mut self, closed_active: bool, next_active: usize, shell: &Shell) {
-        let focus_in_find = matches!(
-            self.focus,
-            Focus::Editor(EditorSlot::FindQuery | EditorSlot::FindReplace)
-        );
-        if closed_active || !focus_in_find {
-            self.activate_tab(next_active, shell);
-        } else {
-            self.select_tab_only(next_active);
-        }
-    }
-
-    pub(crate) fn drag_tab(&mut self, id: TabId, x: f32, grab: f32, start: f32) {
-        self.tabs.drag(id, x - HEADER_WIDTH, grab, start - HEADER_WIDTH);
-        self.dirty = true;
-    }
-
-    pub(crate) fn release_tab(&mut self) {
-        if self.tabs.release_drag() {
-            self.dirty = true;
-        }
-    }
-
-    pub(crate) fn take_tab(&mut self, id: TabId, shell: &Shell) -> Option<TabData> {
-        let (data, outcome) = self.tabs.take(id)?;
-        match outcome {
-            Removal::LastTab => self.pending_close = true,
-            Removal::Removed {
-                closed_active,
-                next_active,
-                ..
-            } => self.finish_removal(closed_active, next_active, shell),
-        }
-        Some(data)
-    }
-
-    pub(crate) fn insert_dragged_tab(&mut self, data: TabData, x: f32, grab: f32, shell: &Shell) {
-        let ix = self.tabs.insert_dragged(data, x - HEADER_WIDTH, grab);
-        self.activate_tab(ix, shell);
-    }
-
-    pub(crate) fn restore_tab(&mut self, data: TabData, ix: usize, shell: &Shell) {
-        let ix = self.tabs.restore(data, ix);
-        self.activate_tab(ix, shell);
-    }
-
-    pub(crate) fn return_tab(&mut self, id: TabId, ix: usize, shell: &Shell) {
-        if let Some(ix) = self.tabs.return_tab(id, ix) {
-            self.activate_tab(ix, shell);
-        }
-        self.dirty = true;
-    }
-
-    pub(super) fn scroll_tabs(&mut self, delta: f32) -> bool {
-        let moved = self.tabs.scroll_by(delta);
-        self.dirty = true;
-        moved
-    }
-
-    pub(super) fn next_tab(&mut self, shell: &Shell) {
-        if self.tabs.len() <= 1 {
-            return;
-        }
-        let next = (self.tabs.active_index() + 1) % self.tabs.len();
-        self.activate_tab(next, shell);
-    }
-
-    pub(super) fn prev_tab(&mut self, shell: &Shell) {
-        if self.tabs.len() <= 1 {
-            return;
-        }
-        let prev = (self.tabs.active_index() + self.tabs.len() - 1) % self.tabs.len();
-        self.activate_tab(prev, shell);
-    }
-
-    pub(super) fn select_tab(&mut self, ix: usize, shell: &Shell) {
-        if ix >= self.tabs.len() || ix == self.tabs.active_index() {
-            return;
-        }
-        self.activate_tab(ix, shell);
-    }
-
-    pub(super) fn select_last_tab(&mut self, shell: &Shell) {
-        let last = self.tabs.len().saturating_sub(1);
-        if last == self.tabs.active_index() {
-            return;
-        }
-        self.activate_tab(last, shell);
-    }
-
-    pub(crate) fn adopt_loaded_file(&mut self, loaded: document::Loaded, shell: &Shell) {
-        let data = TabData::create(Some(loaded), shell.view.word_wrap, EDITOR_PADDINGS);
-        let active = self.tabs.active_index();
-        if self.tabs.is_blank(active) {
-            self.replace_tab(active, data, shell);
-        } else {
-            self.push_tab(data, shell);
-        }
-    }
-
-    pub(crate) fn mark_tab_saved(
-        &mut self,
-        tab: TabId,
-        snapshot: u64,
-        doc_path: DocPath,
-        format: Format,
-    ) {
-        if self.tabs.mark_saved(tab, snapshot, doc_path, format) {
-            self.refresh_title();
-            self.dirty = true;
-        }
-    }
-
-    pub(crate) fn show_prompt(&mut self, prompt: Prompt, shell: &Shell) {
-        if let Some(next_focus) = self.dialogs.enqueue(DialogKind::Prompt(prompt)) {
-            self.cancel_menu(shell);
-            self.set_focus(next_focus, shell);
-            self.dirty = true;
-        }
-    }
-
-    fn show_dialog_now(&mut self, kind: DialogKind, shell: &Shell) {
-        self.cancel_menu(shell);
-        let next_focus = self.dialogs.show_now(kind);
-        self.set_focus(next_focus, shell);
-        self.dirty = true;
-    }
-
-    fn close_dialogs(&mut self, shell: &Shell) {
-        if let Some(next_focus) = self.dialogs.dismiss() {
-            self.cancel_menu(shell);
-            self.set_focus(next_focus, shell);
-        } else {
-            self.focus_active_editor(shell);
-        }
-        self.dirty = true;
-    }
-
-    pub(crate) fn open_go_to(&mut self, shell: &Shell) {
-        let m = self.active_editor().model();
-        let row = m.text().offset_to_point(m.cursor()).row;
-        self.show_go_to(Some(row + 1), shell);
-    }
-
-    fn show_go_to(&mut self, line: Option<usize>, shell: &Shell) {
-        self.show_dialog_now(DialogKind::GoTo, shell);
-        if let Some(line) = line {
-            self.dialogs
-                .line
-                .set_value(&line.to_string(), &shell.text_system);
-        }
-        self.dialogs.line.select_all();
-        self.set_focus(Focus::Editor(EditorSlot::GoToLine), shell);
-        self.dirty = true;
-    }
-
-    fn submit_go_to(&mut self, shell: &Shell) {
-        let value = self.dialogs.line.model().value();
-        let lines = self.active_editor().model().text().lines_len();
-        match value.parse::<usize>() {
-            Ok(line) if (1..=lines).contains(&line) => {
-                self.close_dialogs(shell);
-                self.active_editor_mut().go_to_line(line - 1);
-                self.dirty = true;
-            }
-            _ => {
-                self.show_dialog_now(DialogKind::LineOutOfRange, shell);
-            }
-        }
-    }
-
-    pub(crate) fn drain_cancelled_prompts(&mut self) -> Vec<crate::files::PromptId> {
-        self.dialogs.drain_prompt_ids()
-    }
-
-    pub(super) fn finish_dialog(&mut self, button: Option<usize>, cx: &mut Cx<'_>) {
-        let Some(kind) = self.dialogs.take_active() else {
-            return;
-        };
-        match kind {
-            DialogKind::GoTo if button == Some(0) => self.submit_go_to(cx.shell),
-            DialogKind::GoTo => self.close_dialogs(cx.shell),
-            DialogKind::LineOutOfRange => self.show_go_to(None, cx.shell),
-            DialogKind::Prompt(prompt) => {
-                self.close_dialogs(cx.shell);
-                if let Some((id, _)) = prompt.reply {
-                    let answer = button
-                        .and_then(|ix| prompt.choices.get(ix))
-                        .map_or(prompt.cancel, |&(_, a)| a);
-                    cx.emit(Effect::PromptResponse { id, answer });
-                }
-            }
-        }
-    }
-
-    pub(super) fn open_find(&mut self, replace: bool, shell: &Shell) {
-        let selected = self.active_editor().model().selected_text().to_string();
-        self.find.open(replace, &selected, &shell.text_system);
-        self.set_focus(Focus::Editor(EditorSlot::FindQuery), shell);
-        self.dirty = true;
-    }
-
-    pub(super) fn close_find(&mut self, shell: &Shell) {
-        if self.find.close() {
-            self.focus_active_editor(shell);
-            self.dirty = true;
-        }
-    }
-
-    pub(super) fn refocus_find(&mut self, shell: &Shell) {
-        if self.find.is_open() {
-            let slot =
-                if self.find.is_replace() && self.focus == Focus::Editor(EditorSlot::FindReplace) {
-                    EditorSlot::FindReplace
-                } else {
-                    EditorSlot::FindQuery
-                };
-            self.set_focus(Focus::Editor(slot), shell);
-        }
-        self.dirty = true;
-    }
-
-    pub(super) fn find_step(&mut self, forward: bool, shell: &Shell) {
-        let timers = shell.window_timers(self.id());
-        let out = self
-            .find
-            .step(&mut self.tabs.active_mut().editor, forward, timers);
-        if matches!(out, FindOutcome::EmptyQuery) {
-            self.open_find(false, shell);
-            return;
-        }
-        if !self.find.is_open() {
-            self.focus_active_editor(shell);
-        }
-        self.dirty = true;
-    }
-
-    pub(super) fn replace_next(&mut self, shell: &Shell) {
-        let timers = shell.window_timers(self.id());
-        self.find.replace_next(
-            &mut self.tabs.active_mut().editor,
-            &shell.text_system,
-            timers,
-        );
-        self.dirty = true;
-    }
-
-    pub(super) fn replace_all(&mut self, shell: &Shell) {
-        let timers = shell.window_timers(self.id());
-        let out = self.find.replace_all(
-            &mut self.tabs.active_mut().editor,
-            &shell.text_system,
-            timers,
-        );
-        if matches!(out, FindOutcome::Replaced(_)) {
-            self.refocus_find(shell);
-        } else {
-            self.dirty = true;
-        }
-    }
-
-    pub(crate) fn key_tips_active(&self) -> bool {
-        self.menus.access_active(self.focus)
-    }
-
-    pub(crate) fn cancel_menu(&mut self, shell: &Shell) {
-        let out = self.menus.cancel(self.focus);
-        self.dirty |= out.dirty;
-        self.apply_focus_request(out.focus, shell);
-    }
-
-    fn apply_focus_request(&mut self, req: FocusRequest, shell: &Shell) {
-        match req {
-            FocusRequest::Keep => {}
-            FocusRequest::MenuBar => self.set_focus(Focus::MenuBar, shell),
-            FocusRequest::RestoreEditor => {
-                self.set_focus(Focus::Editor(self.active_slot()), shell)
-            }
-            FocusRequest::Editor(slot) => self.set_focus(Focus::Editor(slot), shell),
-        }
-    }
-
-    pub(super) fn apply_menu_outcome(&mut self, out: MenuOutcome, cx: &mut Cx<'_>) -> bool {
-        self.dirty |= out.dirty;
-        self.apply_focus_request(out.focus, cx.shell);
-        if let Some(cmd) = out.command {
-            self.dispatch_command(cmd, cx);
-            return true;
-        }
-        out.handled
     }
 
     pub(crate) fn on_activated(&mut self, active: bool, shell: &Shell) {
@@ -887,18 +499,5 @@ impl MainWindow {
                 }
             }
         }
-    }
-}
-
-pub(super) fn menu_state(tabs: &TabSet, shell: &Shell) -> MenuState {
-    let m = tabs.active().editor.model();
-    MenuState {
-        can_undo: m.can_undo(),
-        can_redo: m.can_redo(),
-        has_selection: !m.selected_range().is_empty(),
-        has_text: m.text().len() > 0,
-        clipboard_has_text: clipboard::clipboard_has_text(),
-        status_bar: shell.view.status_bar,
-        word_wrap: shell.view.word_wrap,
     }
 }

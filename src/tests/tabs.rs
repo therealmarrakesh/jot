@@ -151,71 +151,70 @@ fn tab_drag_pop_out_and_reattach_does_not_panic() {
 
     let mut h = TestHarness::new();
     let dyn_handler: Rc<RefCell<dyn PlatformHandler>> = h.app.clone();
-    Platform::set_active_handler_for_test(Some(dyn_handler));
+    Platform::with_test_handler(dyn_handler, || {
+        h.press_key("ctrl-n");
+        h.read(|w, _| assert_eq!(w.tabs().len(), 2));
 
-    h.press_key("ctrl-n");
-    h.read(|w, _| assert_eq!(w.tabs().len(), 2));
+        let (hwnd1, scale, tab_rect, tab_id) = h.read(|w, _| {
+            let id = w.tabs()[1].data.id;
+            let rect = w
+                .frame()
+                .rect_of(HitId::Tab(TabHit::Item(id)))
+                .expect("tab 1 rect");
+            (w.hwnd(), w.scale_factor(), rect, id)
+        });
 
-    let (hwnd1, scale, tab_rect, tab_id) = h.read(|w, _| {
-        let id = w.tabs()[1].data.id;
-        let rect = w
-            .frame()
-            .rect_of(HitId::Tab(TabHit::Item(id)))
-            .expect("tab 1 rect");
-        (w.hwnd(), w.scale_factor(), rect, id)
-    });
-
-    let cx = (tab_rect.center().x * scale).round() as i32;
-    let cy = (tab_rect.center().y * scale).round() as i32;
-    let down_lp = LPARAM((((cy as u16 as u32) << 16) | (cx as u16 as u32)) as isize);
-    unsafe {
-        let _ = SendMessageW(hwnd1.raw_hwnd(), WM_LBUTTONDOWN, Some(WPARAM(1)), Some(down_lp));
-    }
-
-    let move_y = ((tab_rect.center().y + 200.0) * scale).round() as i32;
-    let move_lp = LPARAM((((move_y as u16 as u32) << 16) | (cx as u16 as u32)) as isize);
-    unsafe {
-        let _ = SendMessageW(hwnd1.raw_hwnd(), WM_MOUSEMOVE, Some(WPARAM(1)), Some(move_lp));
-    }
-
-    let hwnd2 = {
-        let mut app = h.app.borrow_mut();
-        if app.windows.len() == 1 {
-            app.tab_drag_start_and_detach_for_test(
-                h.window_id,
-                tab_id,
-                1,
-                point(20.0, 12.0),
-                tab_rect.center(),
-            );
+        let cx = (tab_rect.center().x * scale).round() as i32;
+        let cy = (tab_rect.center().y * scale).round() as i32;
+        let down_lp = LPARAM((((cy as u16 as u32) << 16) | (cx as u16 as u32)) as isize);
+        unsafe {
+            let _ = SendMessageW(hwnd1.raw_hwnd(), WM_LBUTTONDOWN, Some(WPARAM(1)), Some(down_lp));
         }
-        app.drive_frames();
-        assert_eq!(app.windows.len(), 2, "popping out tab must create 2nd window");
-        assert_eq!(app.windows[0].tabs().len(), 1);
-        assert_eq!(app.windows[1].tabs().len(), 1);
-        app.windows[1].hwnd()
-    };
 
-    unsafe {
-        let _ = SendMessageW(hwnd1.raw_hwnd(), WM_MOUSELEAVE, Some(WPARAM(0)), Some(LPARAM(0)));
-        let _ = SendMessageW(hwnd1.raw_hwnd(), WM_NCMOUSELEAVE, Some(WPARAM(0)), Some(LPARAM(0)));
-        let _ = SendMessageW(hwnd2.raw_hwnd(), WM_NCHITTEST, Some(WPARAM(0)), Some(LPARAM(0)));
-    }
+        let move_y = ((tab_rect.center().y + 200.0) * scale).round() as i32;
+        let move_lp = LPARAM((((move_y as u16 as u32) << 16) | (cx as u16 as u32)) as isize);
+        unsafe {
+            let _ = SendMessageW(hwnd1.raw_hwnd(), WM_MOUSEMOVE, Some(WPARAM(1)), Some(move_lp));
+        }
 
-    {
-        let mut app = h.app.borrow_mut();
-        app.tab_drag_poll_for_test();
-        app.drive_frames();
-        app.tab_drag_cancel_for_test();
-        app.drive_frames();
-        assert_eq!(
-            app.windows.len(),
-            1,
-            "canceling detach must return tab to source"
-        );
-        assert_eq!(app.windows[0].tabs().len(), 2);
-    }
+        let hwnd2 = {
+            let mut app = h.app.borrow_mut();
+            if app.windows.len() == 1 {
+                app.tab_drag_start_and_detach_for_test(
+                    h.window_id,
+                    tab_id,
+                    1,
+                    point(20.0, 12.0),
+                    tab_rect.center(),
+                );
+            }
+            app.drive_frames();
+            assert_eq!(app.windows.len(), 2, "popping out tab must create 2nd window");
+            assert_eq!(app.windows[0].tabs().len(), 1);
+            assert_eq!(app.windows[1].tabs().len(), 1);
+            app.windows[1].hwnd()
+        };
 
-    h.close_all();
-    Platform::set_active_handler_for_test(None);
+        unsafe {
+            let _ = SendMessageW(hwnd1.raw_hwnd(), WM_MOUSELEAVE, Some(WPARAM(0)), Some(LPARAM(0)));
+            let _ = SendMessageW(hwnd1.raw_hwnd(), WM_NCMOUSELEAVE, Some(WPARAM(0)), Some(LPARAM(0)));
+            let _ = SendMessageW(hwnd2.raw_hwnd(), WM_NCHITTEST, Some(WPARAM(0)), Some(LPARAM(0)));
+        }
+
+        {
+            let mut app = h.app.borrow_mut();
+            app.tab_drag_poll_for_test();
+            app.drive_frames();
+            app.tab_drag_cancel_for_test();
+            app.drive_frames();
+            assert_eq!(
+                app.windows.len(),
+                1,
+                "canceling detach must return tab to source"
+            );
+            assert_eq!(app.windows[0].tabs().len(), 2);
+        }
+
+        h.close_all();
+    });
 }

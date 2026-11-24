@@ -23,7 +23,7 @@ use windows::Win32::{
 };
 use windows::core::{HSTRING, Owned, PCWSTR, PWSTR};
 
-use super::WAKE_CLASS_NAME;
+use super::pump::WAKE_CLASS_NAME;
 
 const COPYDATA_TAG: usize = 0x4A4F_5401;
 const MAX_PAYLOAD_BYTES: usize = 1024 * 1024;

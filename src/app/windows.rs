@@ -94,12 +94,6 @@ impl Windows {
         self.list.iter_mut()
     }
 
-    #[cfg(test)]
-    #[inline]
-    pub(crate) fn active_id(&self) -> Option<WindowId> {
-        self.active
-    }
-
     #[inline]
     pub(crate) fn set_active(&mut self, id: WindowId) {
         self.active = Some(id);
