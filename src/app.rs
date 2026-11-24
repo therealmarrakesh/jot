@@ -3,7 +3,6 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use crate::APP_NAME;
 use crate::document::{self, DocPath, Format, PathKey};
 use crate::editor::Rope;
 use crate::files::{
@@ -21,6 +20,7 @@ use crate::platform::{
 use crate::shell::{AppEvent, Cx, Effect, Shell, WindowTimer};
 use crate::tabs::TabData;
 use crate::tooltip::{KeyTips, TooltipTarget, Tooltips};
+use crate::types::APP_NAME;
 use crate::window::{InputMode, MainWindow, WINDOW_HEIGHT, WINDOW_MAX_SCREEN_SHARE, WINDOW_WIDTH};
 
 pub(crate) struct App {

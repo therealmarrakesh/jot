@@ -553,7 +553,7 @@ pub(crate) fn ffi_guard<R>(context: &str, fallback: R, f: impl FnOnce() -> R) ->
                 static SHOWN: AtomicBool = AtomicBool::new(false);
                 if !SHOWN.swap(true, Ordering::AcqRel) {
                     show_error_dialog(
-                        crate::APP_NAME,
+                        crate::types::APP_NAME,
                         &format!(
                             "Jot encountered an unexpected error and prevented a crash.\n\n\
                              Please save any open documents and restart Jot.\n\nDetails: {msg}"

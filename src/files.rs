@@ -4,7 +4,6 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-use crate::APP_NAME;
 use crate::document::{
     self, DocPath, Encoding, Format, LoadError, PathKey, SaveError, default_directory,
     display_name, file_name,
@@ -15,6 +14,7 @@ use crate::platform::{
     Jobs, OpenDialogOptions, SaveChoice, SaveDialogOptions, SaveDialogResult, WindowHandle,
     WindowId, run_open_dialog, run_save_dialog,
 };
+use crate::types::APP_NAME;
 use crate::types::{Error, SharedStr};
 
 crate::types::id_type!(PromptId);

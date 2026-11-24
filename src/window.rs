@@ -1,6 +1,5 @@
 use std::time::Instant;
 
-use crate::APP_NAME;
 use crate::command::{AppCommand, Command, app_shortcut, edit_shortcut};
 use crate::dialog::{DialogKey, DialogKind, Dialogs};
 use crate::document::{self, DocPath, Format};
@@ -25,6 +24,7 @@ use crate::tabs::{
 };
 use crate::theme::{BODY_LINE, BODY_SIZE, ICON_FONT, Palette, SMALL_FONT, TEXT_FONT};
 use crate::tooltip::{KeyTip, TooltipProbe};
+use crate::types::APP_NAME;
 use crate::ui::{AvailSize, Brushes, OverlayAnchor, box_, custom, row, text};
 use crate::widgets::icon_button;
 

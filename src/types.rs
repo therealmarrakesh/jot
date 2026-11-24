@@ -5,6 +5,8 @@ use std::hash::{Hash, Hasher};
 use std::ops::Deref;
 use std::sync::Arc;
 
+pub(crate) const APP_NAME: &str = "Jot";
+
 #[derive(Clone)]
 pub(crate) enum SharedStr {
     Static(&'static str),

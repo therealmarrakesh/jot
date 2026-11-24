@@ -33,8 +33,8 @@ use gfx::{Gpu, TextSystem};
 use platform::{
     Arbitration, Platform, arbitrate_instance, debug_log, install_panic_hook, show_error_dialog,
 };
+use types::APP_NAME;
 
-pub(crate) const APP_NAME: &str = "Jot";
 const NOTICES_FLAG: &str = "--notices";
 const NOTICES: &str = include_str!(concat!(env!("OUT_DIR"), "/notices.txt"));
 const NOTICES_FILE: &str = "THIRD-PARTY-NOTICES.txt";
