@@ -741,7 +741,6 @@ impl Windows {
         }
     }
 
-    #[inline]
     pub(crate) fn set_active(&mut self, id: WindowId) {
         self.active = Some(id);
     }

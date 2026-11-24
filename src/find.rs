@@ -523,7 +523,6 @@ fn render_notice(p: Palette, msg: SharedStr) -> AppNode {
 const BLOCK_SIZE: usize = 256 * 1024;
 const MAX_UTF8_LEN: usize = 4;
 
-#[inline]
 fn fold_char(c: char) -> char {
     if c.is_ascii() {
         return c.to_ascii_lowercase();
@@ -550,7 +549,6 @@ fn fold_char(c: char) -> char {
     }
 }
 
-#[inline]
 fn match_rest_folded(haystack: &str, start: usize, rest: &[char]) -> Option<usize> {
     if rest.is_empty() {
         return Some(start);

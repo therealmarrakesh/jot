@@ -114,17 +114,14 @@ impl MainWindow {
         }
     }
 
-    #[inline]
     pub(crate) fn id(&self) -> WindowId {
         self.win.window.id
     }
 
-    #[inline]
     pub(crate) fn hwnd(&self) -> WindowHandle {
         self.win.window.hwnd()
     }
 
-    #[inline]
     pub(crate) fn scale_factor(&self) -> f32 {
         self.win.window.scale_factor()
     }
@@ -141,12 +138,10 @@ impl MainWindow {
         }
     }
 
-    #[inline]
     pub(crate) fn tabs(&self) -> &TabSet {
         &self.tabs
     }
 
-    #[inline]
     pub(crate) fn has_pointer(&self) -> bool {
         self.ui.pointer().is_some()
     }
@@ -249,22 +244,18 @@ impl MainWindow {
         self.focus
     }
 
-    #[inline]
     pub(crate) fn active_tab_id(&self) -> TabId {
         self.tabs.active_id()
     }
 
-    #[inline]
     pub(crate) fn active_editor(&self) -> &Editor {
         &self.tabs.active().editor
     }
 
-    #[inline]
     pub(crate) fn active_editor_mut(&mut self) -> &mut Editor {
         &mut self.tabs.active_mut().editor
     }
 
-    #[inline]
     pub(crate) fn active_slot(&self) -> EditorSlot {
         self.tabs.active_slot()
     }

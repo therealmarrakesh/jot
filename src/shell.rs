@@ -65,12 +65,10 @@ impl<'a> WindowTimers<'a> {
         self.jobs.every(delay, interval, move || AppEvent::Window { window, timer })
     }
 
-    #[inline]
     pub(crate) fn menu_show_delay(&self) -> Duration {
         self.settings.menu_show_delay
     }
 
-    #[inline]
     pub(crate) fn for_editor(self, slot: EditorSlot) -> SlotTimers<'a> {
         SlotTimers(self, slot)
     }
@@ -123,17 +121,14 @@ pub(crate) struct Cx<'a> {
 }
 
 impl<'a> Cx<'a> {
-    #[inline]
     pub(crate) fn ts(&self) -> &'a TextSystem {
         &self.shell.text_system
     }
 
-    #[inline]
     pub(crate) fn timers(&self, window: WindowId) -> WindowTimers<'a> {
         self.shell.window_timers(window)
     }
 
-    #[inline]
     pub(crate) fn emit(&mut self, effect: Effect) {
         self.fx.push(effect);
     }
@@ -169,12 +164,10 @@ impl Shell {
         shell
     }
 
-    #[inline]
     pub(crate) fn appearance(&self) -> WindowAppearance {
         self.appearance
     }
 
-    #[inline]
     pub(crate) fn window_timers(&self, window: WindowId) -> WindowTimers<'_> {
         WindowTimers {
             jobs: &self.jobs,
