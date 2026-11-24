@@ -61,6 +61,3 @@ windows-numerics = "0.3"
 lto = true
 codegen-units = 1
 debug = "line-tables-only"
-
-[lints.clippy]
-undocumented_unsafe_blocks = "warn"

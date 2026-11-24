@@ -1,5 +1,3 @@
-//! Safe, typed wrappers around Win32 window, desktop, system-setting, shell, and ANSI APIs.
-
 use std::{
     ffi::OsString,
     io,
@@ -89,10 +87,8 @@ impl From<RECT> for ScreenRect {
     }
 }
 
-/// Queries a `u32` setting via `SystemParametersInfoW`.
 pub(crate) fn system_parameters_u32(action: u32) -> Option<u32> {
     let mut value = 0u32;
-    // SAFETY: Caller passes a `u32`-returning `SPI_*` action and `&mut value` is 4-byte aligned.
     unsafe {
         SystemParametersInfoW(
             SYSTEM_PARAMETERS_INFO_ACTION(action),
@@ -105,11 +101,9 @@ pub(crate) fn system_parameters_u32(action: u32) -> Option<u32> {
     .then_some(value)
 }
 
-/// Opaque snapshot of a Win32 window's placement state.
 #[derive(Copy, Clone)]
 pub(crate) struct WindowPlacement(WINDOWPLACEMENT);
 
-/// Opaque, typed handle to a Win32 window (`HWND`).
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct WindowHwnd(HWND);
 
@@ -128,13 +122,11 @@ impl WindowHwnd {
 
     pub(crate) fn client_origin(self) -> ScreenPoint {
         let mut origin = POINT::default();
-        // SAFETY: `origin` is a valid out-pointer; invalid HWNDs return FALSE safely.
         let _ = unsafe { ClientToScreen(self.0, &mut origin) };
         origin.into()
     }
 
     pub(crate) fn dpi_scale(self) -> f32 {
-        // SAFETY: `GetDpiForWindow` returns 0 on invalid HWNDs, handled by the `0 => 1.` arm.
         match unsafe { GetDpiForWindow(self.0) } {
             0 => 1.,
             dpi => dpi as f32 / USER_DEFAULT_SCREEN_DPI as f32,
@@ -143,30 +135,25 @@ impl WindowHwnd {
 
     pub(crate) fn client_rect(self) -> ScreenRect {
         let mut rect = RECT::default();
-        // SAFETY: `rect` is a valid stack `RECT` out-pointer.
         let _ = unsafe { GetClientRect(self.0, &mut rect) };
         rect.into()
     }
 
     pub(crate) fn window_rect(self) -> ScreenRect {
         let mut rect = RECT::default();
-        // SAFETY: `rect` is a valid stack `RECT` out-pointer.
         let _ = unsafe { GetWindowRect(self.0, &mut rect) };
         rect.into()
     }
 
     pub(crate) fn is_maximized(self) -> bool {
-        // SAFETY: `IsZoomed` safely validates the HWND and returns FALSE if invalid.
         unsafe { IsZoomed(self.0) }.as_bool()
     }
 
     pub(crate) fn is_enabled(self) -> bool {
-        // SAFETY: `IsWindowEnabled` safely validates the HWND and returns FALSE if invalid.
         unsafe { IsWindowEnabled(self.0) }.as_bool()
     }
 
     pub(crate) fn restore(self) {
-        // SAFETY: `ShowWindow` safely validates the HWND.
         let _ = unsafe { ShowWindow(self.0, SW_RESTORE) };
     }
 
@@ -174,7 +161,6 @@ impl WindowHwnd {
         if self.is_null() {
             return;
         }
-        // SAFETY: `self.0` is non-null; Win32 ignores destroyed HWNDs safely.
         unsafe {
             if IsIconic(self.0).as_bool() {
                 let _ = ShowWindow(self.0, SW_RESTORE);
@@ -184,12 +170,10 @@ impl WindowHwnd {
     }
 
     pub(crate) fn set_foreground(self) {
-        // SAFETY: `SetForegroundWindow` safely validates the HWND.
         let _ = unsafe { SetForegroundWindow(self.0) };
     }
 
     pub(crate) fn place_topmost_noactivate(self, rect: ScreenRect) {
-        // SAFETY: `SetWindowPos` safely validates the HWND and flags.
         let _ = unsafe {
             SetWindowPos(
                 self.0,
@@ -204,17 +188,14 @@ impl WindowHwnd {
     }
 
     pub(crate) fn show_noactivate(self) {
-        // SAFETY: `ShowWindow` safely validates the HWND.
         let _ = unsafe { ShowWindow(self.0, SW_SHOWNOACTIVATE) };
     }
 
     pub(crate) fn hide(self) {
-        // SAFETY: `ShowWindow` safely validates the HWND.
         let _ = unsafe { ShowWindow(self.0, SW_HIDE) };
     }
 
     pub(crate) fn move_noactivate(self, x: i32, y: i32) {
-        // SAFETY: `SetWindowPos` safely validates the HWND and coordinates.
         let _ = unsafe {
             SetWindowPos(
                 self.0,
@@ -229,13 +210,11 @@ impl WindowHwnd {
     }
 
     pub(crate) fn set_capture(self) {
-        // SAFETY: Called on the UI thread owning `self.0`.
         unsafe { SetCapture(self.0) };
     }
 
     pub(crate) fn begin_system_move(self, point: ScreenPoint) {
         let position = LPARAM((((point.y as u16 as u32) << 16) | point.x as u16 as u32) as isize);
-        // SAFETY: Releases mouse capture and posts standard `SC_MOVE | HTCAPTION` to `self.0`.
         unsafe {
             let _ = ReleaseCapture();
             let _ = PostMessageW(
@@ -248,7 +227,6 @@ impl WindowHwnd {
     }
 
     pub(crate) fn cancel_mode(self) {
-        // SAFETY: Posts standard `WM_CANCELMODE` to `self.0`.
         let _ = unsafe { PostMessageW(Some(self.0), WM_CANCELMODE, WPARAM(0), LPARAM(0)) };
     }
 
@@ -257,7 +235,6 @@ impl WindowHwnd {
             cbSize: size_of::<GUITHREADINFO>() as u32,
             ..Default::default()
         };
-        // SAFETY: `info.cbSize` is initialized and `&mut info` is valid for `GetGUIThreadInfo`.
         unsafe {
             let thread = GetWindowThreadProcessId(self.0, None);
             GetGUIThreadInfo(thread, &mut info).is_ok() && (info.flags & GUI_INMOVESIZE).0 != 0
@@ -269,14 +246,11 @@ impl WindowHwnd {
             length: size_of::<WINDOWPLACEMENT>() as u32,
             ..Default::default()
         };
-        // SAFETY: `placement.length` is initialized to `size_of::<WINDOWPLACEMENT>()`.
         unsafe { GetWindowPlacement(self.0, &mut placement) }
             .is_ok()
             .then_some(WindowPlacement(placement))
     }
 
-    /// Returns the window's restored (non-maximized) logical size so detaching a tab from a
-    /// maximized window uses its restored dimensions instead of full screen (W-4).
     pub(crate) fn restored_logical_size(self) -> Option<crate::geom::Size> {
         let placement = self.saved_placement()?;
         let rc = placement.0.rcNormalPosition;
@@ -287,30 +261,24 @@ impl WindowHwnd {
     }
 
     pub(crate) fn restore_placement(self, placement: WindowPlacement) {
-        // SAFETY: `placement.0` was populated by `GetWindowPlacement`.
         let _ = unsafe { SetWindowPlacement(self.0, &placement.0) };
     }
 
-    /// Creates/moves a hidden Win32 system caret so Windows Magnifier's "follow text cursor"
-    /// tracks Jot's custom-rendered caret (A11Y-1).
     pub(crate) fn sync_system_caret(self, rect_px: Option<(i32, i32, i32, i32)>) {
         if self.is_null() {
             return;
         }
         match rect_px {
-            // SAFETY: UI thread owns `self.0`; system caret creation/positioning is safe.
             Some((x, y, w, h)) => unsafe {
                 let _ = CreateCaret(self.0, None, w.max(1), h.max(1));
                 let _ = SetCaretPos(x, y);
             },
-            // SAFETY: `DestroyCaret` is a no-op if the calling thread owns no caret.
             None => unsafe {
                 let _ = DestroyCaret();
             },
         }
     }
 
-    /// Commits any active Windows IME composition string on focus/tab/pointer transitions (E-2).
     pub(crate) fn complete_ime_composition(self) {
         if !self.is_null() {
             super::input::complete_ime_composition(self.0);
@@ -318,7 +286,6 @@ impl WindowHwnd {
     }
 }
 
-/// OS system colors queried via `GetSysColor` when Windows High Contrast mode is active (A11Y-1).
 #[derive(Copy, Clone, Debug)]
 pub(crate) struct HighContrastColors {
     pub(crate) window: u32,
@@ -345,7 +312,6 @@ pub(crate) fn high_contrast_colors() -> Option<HighContrastColors> {
         cbSize: size_of::<HIGHCONTRASTW>() as u32,
         ..Default::default()
     };
-    // SAFETY: `hc.cbSize` is initialized and `&mut hc` matches `SPI_GETHIGHCONTRAST`.
     let ok = unsafe {
         SystemParametersInfoW(
             SPI_GETHIGHCONTRAST,
@@ -358,7 +324,6 @@ pub(crate) fn high_contrast_colors() -> Option<HighContrastColors> {
     if !ok || (hc.dwFlags & HCF_HIGHCONTRASTON).0 == 0 {
         return None;
     }
-    // SAFETY: `GetSysColor` is a pure OS color lookup for standard `COLOR_*` indices.
     let sys = |idx: SYS_COLOR_INDEX| colorref_to_rgb24(unsafe { GetSysColor(idx) });
     Some(HighContrastColors {
         window: sys(COLOR_WINDOW),
@@ -379,38 +344,31 @@ pub(crate) fn caret_width_px() -> u32 {
 
 pub(crate) fn cursor_screen_pos() -> ScreenPoint {
     let mut point = POINT::default();
-    // SAFETY: `point` is a valid stack `POINT` out-pointer.
     let _ = unsafe { GetCursorPos(&mut point) };
     point.into()
 }
 
 pub(crate) fn release_mouse_capture() {
-    // SAFETY: Releases capture on the calling thread if currently held.
     let _ = unsafe { ReleaseCapture() };
 }
 
 pub(crate) fn primary_mouse_button_down() -> bool {
-    // SAFETY: `GetSystemMetrics` and `GetAsyncKeyState` are pure OS state queries.
     let button = if unsafe { GetSystemMetrics(SM_SWAPBUTTON) } != 0 {
         VK_RBUTTON
     } else {
         VK_LBUTTON
     };
-    // SAFETY: Queries current asynchronous physical state of the primary mouse button.
     (unsafe { GetAsyncKeyState(button.0 as i32) }) < 0
 }
 
 pub(crate) fn monitor_work_area_and_scale(point: ScreenPoint) -> (ScreenRect, f32) {
-    // SAFETY: `MonitorFromPoint` accepts any screen coordinate with `MONITOR_DEFAULTTONEAREST`.
     let monitor = unsafe { MonitorFromPoint(point.into(), MONITOR_DEFAULTTONEAREST) };
     let mut info = MONITORINFO {
         cbSize: size_of::<MONITORINFO>() as u32,
         ..Default::default()
     };
-    // SAFETY: `info.cbSize` is initialized and `monitor` came from `MonitorFromPoint`.
     let _ = unsafe { GetMonitorInfoW(monitor, &mut info) };
     let (mut dpi_x, mut dpi_y) = (USER_DEFAULT_SCREEN_DPI, USER_DEFAULT_SCREEN_DPI);
-    // SAFETY: Out-pointers reference stack locals and `monitor` is valid.
     let _ = unsafe { GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y) };
     let scale = dpi_x as f32 / USER_DEFAULT_SCREEN_DPI as f32;
     (info.rcWork.into(), scale)
@@ -428,7 +386,6 @@ pub(crate) fn top_visible_window_at(
 
     fn is_shown(hwnd: HWND) -> bool {
         let mut cloaked = 0u32;
-        // SAFETY: Queries standard visibility/style/DWM cloaking state on an enumerated HWND.
         unsafe {
             IsWindowVisible(hwnd).as_bool()
                 && !IsIconic(hwnd).as_bool()
@@ -446,7 +403,6 @@ pub(crate) fn top_visible_window_at(
 
     fn extended_frame(hwnd: HWND) -> RECT {
         let mut frame = RECT::default();
-        // SAFETY: `frame` matches the `RECT` buffer expected by `DWMWA_EXTENDED_FRAME_BOUNDS`.
         let status = unsafe {
             DwmGetWindowAttribute(
                 hwnd,
@@ -456,20 +412,17 @@ pub(crate) fn top_visible_window_at(
             )
         };
         if status.is_err() {
-            // SAFETY: Fallback bounds query into valid stack `RECT`.
             let _ = unsafe { GetWindowRect(hwnd, &mut frame) };
         }
         frame
     }
 
     unsafe extern "system" fn visit(hwnd: HWND, data: LPARAM) -> BOOL {
-        // SAFETY: `data` is `&mut Search` passed synchronously to `EnumWindows` on this thread.
         let search = unsafe { &mut *(data.0 as *mut Search) };
         if search.exclude == Some(hwnd) || !is_shown(hwnd) {
             return BOOL(1);
         }
         let frame = extended_frame(hwnd);
-        // SAFETY: `&frame` is a valid `RECT` reference.
         if unsafe { PtInRect(&frame, search.point) }.as_bool() {
             search.found = Some(hwnd);
             return BOOL(0);
@@ -482,19 +435,15 @@ pub(crate) fn top_visible_window_at(
         exclude: exclude.map(WindowHwnd::raw),
         found: None,
     };
-    // SAFETY: `EnumWindows` invokes `visit` synchronously before returning, while `search` lives.
     let _ = unsafe { EnumWindows(Some(visit), LPARAM((&raw mut search) as isize)) };
     search.found.map(WindowHwnd::from_raw)
 }
 
 pub(crate) fn caret_blink_interval() -> Option<Duration> {
-    // SAFETY: `GetCaretBlinkTime` is a pure OS metric query.
     let millis = unsafe { GetCaretBlinkTime() };
     (millis != 0 && millis != u32::MAX).then(|| Duration::from_millis(millis.into()))
 }
 
-/// Queries Windows `SPI_GETCARETTIMEOUT` (default 5000 ms) so idle editors stop blinking and
-/// drop to 0% CPU when untouched (P-6). Returns `None` if infinite (`0` or `u32::MAX`).
 pub(crate) fn caret_blink_timeout() -> Option<Duration> {
     const SPI_GETCARETTIMEOUT_ACTION: u32 = 0x2022;
     let millis = system_parameters_u32(SPI_GETCARETTIMEOUT_ACTION).unwrap_or(5_000);
@@ -525,7 +474,6 @@ pub(crate) fn menu_show_delay_ms() -> Option<u32> {
 pub(crate) fn system_accent_color(dark: bool) -> Option<u32> {
     let mut shades = [0u8; 32];
     let mut len = shades.len() as u32;
-    // SAFETY: Reads binary accent palette into a 32-byte stack buffer with static registry strings.
     let status = unsafe {
         RegGetValueW(
             HKEY_CURRENT_USER,
@@ -543,11 +491,9 @@ pub(crate) fn system_accent_color(dark: bool) -> Option<u32> {
 }
 
 pub(crate) fn format_local_time_date() -> String {
-    // SAFETY: `GetLocalTime` returns a `SYSTEMTIME` by value.
     let now = unsafe { GetLocalTime() };
     let mut time = [0u16; 128];
     let mut date = [0u16; 128];
-    // SAFETY: `time` and `date` are valid mutable UTF-16 output slices for Win32 locale formatting.
     let (time_len, date_len) = unsafe {
         (
             GetTimeFormatEx(None, TIME_NOSECONDS, Some(&now), None, Some(&mut time)),
@@ -567,13 +513,10 @@ pub(crate) fn format_local_time_date() -> String {
 }
 
 pub(crate) fn documents_dir() -> Option<PathBuf> {
-    // SAFETY: `SHGetKnownFolderPath` allocates a NUL-terminated UTF-16 string freed below.
     let path = unsafe { SHGetKnownFolderPath(&FOLDERID_Documents, KF_FLAG_DEFAULT, None) }.ok()?;
     let documents = (!path.0.is_null()).then(|| {
-        // SAFETY: `path` is a non-null NUL-terminated UTF-16 string allocated by the Shell.
         PathBuf::from(OsString::from_wide(unsafe { path.as_wide() }))
     });
-    // SAFETY: Frees the CoTaskMem buffer returned by `SHGetKnownFolderPath`.
     unsafe { CoTaskMemFree(Some(path.0.cast())) };
     documents
 }
@@ -583,7 +526,6 @@ pub(crate) const HIDDEN_FILE_ATTRIBUTE: u32 = FILE_ATTRIBUTE_HIDDEN.0;
 pub(crate) fn file_hard_link_count(path: &Path) -> Option<u32> {
     let file = std::fs::File::open(path).ok()?;
     let mut info = BY_HANDLE_FILE_INFORMATION::default();
-    // SAFETY: `file` owns a valid open Win32 file handle for the duration of the call.
     unsafe { GetFileInformationByHandle(HANDLE(file.as_raw_handle()), &mut info) }.ok()?;
     Some(info.nNumberOfLinks)
 }
@@ -601,7 +543,6 @@ pub(crate) fn replace_file(
 ) -> Result<(), ReplaceFileError> {
     let wide = |path: &Path| -> Vec<u16> { path.as_os_str().encode_wide().chain(Some(0)).collect() };
     let (replaced, replacement_w, backed_up) = (wide(target), wide(replacement), wide(backup));
-    // SAFETY: All three path vectors are NUL-terminated UTF-16 buffers outliving `ReplaceFileW`.
     let res = unsafe {
         ReplaceFileW(
             PCWSTR(replaced.as_ptr()),
@@ -615,7 +556,6 @@ pub(crate) fn replace_file(
     let Err(err) = res else {
         return Ok(());
     };
-    // Inspect the returned HRESULT directly instead of re-reading `GetLastError()`.
     let code = err.code();
     let win32_err = (code.0 as u32) & 0xFFFF;
     let io_err = io::Error::from_raw_os_error(win32_err as i32);
@@ -631,7 +571,6 @@ pub(crate) fn replace_file(
     }
 }
 
-/// Active Windows ANSI code page (`GetACP`) or an injected code page for deterministic testing.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub(crate) struct AnsiCodePage(u32);
 
@@ -639,7 +578,6 @@ impl AnsiCodePage {
     pub(crate) const CP_1252: Self = Self(1252);
 
     pub(crate) fn current() -> Self {
-        // SAFETY: `GetACP` returns the process's active ANSI code page identifier.
         Self(unsafe { GetACP() })
     }
 
@@ -656,12 +594,9 @@ impl AnsiCodePage {
         if self.0 == CP_UTF8 || self.0 == 1252 {
             return false;
         }
-        // SAFETY: `IsDBCSLeadByteEx` is a pure code-page lookup.
         unsafe { IsDBCSLeadByteEx(self.0, byte) }.is_ok()
     }
 
-    /// Strictly decodes `bytes` under this code page (`MB_ERR_INVALID_CHARS`) into `out`,
-    /// returning `Ok(true)` on success, `Ok(false)` on invalid byte sequences, or `Err` on OOM.
     pub(crate) fn decode_chunk(self, bytes: &[u8], wide: &mut Vec<u16>, out: &mut String) -> io::Result<bool> {
         out.clear();
         if bytes.is_empty() {
@@ -670,7 +605,6 @@ impl AnsiCodePage {
         if i32::try_from(bytes.len()).is_err() {
             return Ok(false);
         }
-        // SAFETY: `bytes` is a valid slice; passing `None` queries the required UTF-16 buffer length.
         let length = unsafe { MultiByteToWideChar(self.0, MB_ERR_INVALID_CHARS, bytes, None) };
         let Ok(needed) = usize::try_from(length) else {
             return Ok(false);
@@ -684,7 +618,6 @@ impl AnsiCodePage {
                 .map_err(|_| io::Error::new(io::ErrorKind::OutOfMemory, "Out of memory decoding file."))?;
         }
         wide.resize(needed, 0);
-        // SAFETY: `bytes` and `wide` are valid slices sized to `needed` code units.
         let written = unsafe {
             MultiByteToWideChar(self.0, MB_ERR_INVALID_CHARS, bytes, Some(wide.as_mut_slice()))
         };
@@ -711,7 +644,6 @@ impl AnsiCodePage {
             return Ok(false);
         }
         let mut used_default = BOOL(0);
-        // SAFETY: `wide` is a valid UTF-16 slice and `&mut used_default` is a valid `BOOL` out-pointer.
         let written = unsafe {
             WideCharToMultiByte(
                 self.0,
@@ -733,14 +665,12 @@ impl AnsiCodePage {
         if wide.is_empty() {
             return Ok(());
         }
-        // SAFETY: Queries required byte count for `wide` with `None` output buffer.
         let length =
             unsafe { WideCharToMultiByte(self.0, WC_NO_BEST_FIT_CHARS, wide, None, None, None) };
         if length == 0 {
             return Err(io::Error::last_os_error());
         }
         out.resize(usize::try_from(length).unwrap_or(0), 0);
-        // SAFETY: `out` is sized to `length` bytes for `WideCharToMultiByte`.
         let written = unsafe {
             WideCharToMultiByte(self.0, WC_NO_BEST_FIT_CHARS, wide, Some(out), None, None)
         };

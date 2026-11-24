@@ -1,6 +1,3 @@
-//! Application root owning all open windows, shared theme/view settings, typed event/timer jobs,
-//! cross-window tab dragging, and the `PlatformHandler` implementation.
-
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -33,7 +30,6 @@ use crate::window::{
     MainWindow, WINDOW_HEIGHT, WINDOW_MAX_SCREEN_SHARE, WINDOW_WIDTH, WindowAction,
 };
 
-/// Shared app-wide view preferences mirrored across all open windows.
 #[derive(Copy, Clone, Debug)]
 pub(crate) struct ViewSettings {
     pub(crate) status_bar: bool,
@@ -49,7 +45,6 @@ impl Default for ViewSettings {
     }
 }
 
-/// Typed background/timer/cross-thread events delivered to `App::on_wake`.
 pub(crate) enum AppEvent {
     EditorTimer {
         window: WindowId,
@@ -148,7 +143,7 @@ pub(crate) struct App {
     #[cfg(test)]
     pub(crate) headless: bool,
     quit: bool,
-    // Declared last so every window, overlay, and COM object drops before OLE/COM uninitialize.
+    // Declared last so windows, overlays, and COM objects drop before OLE/COM uninitialize.
     pub(crate) platform: Rc<Platform>,
 }
 
@@ -267,7 +262,6 @@ impl App {
             || Rect::new(crate::geom::Point::ZERO, target_size),
             |d| d.centered_rect(target_size),
         );
-        // Cascade fresh secondary windows on the same monitor so they don't stack invisibly (W-4).
         if target_point.is_none() && !self.windows.is_empty() && window_size.is_none() {
             let step = (self.cascade_step % 8) as f32 * 28.0;
             self.cascade_step = self.cascade_step.wrapping_add(1);
@@ -350,8 +344,6 @@ impl App {
         }
     }
 
-    /// Deduplicates `paths` across all open windows and in-flight loads (F-6, F-8, DOC-2),
-    /// then spawns background loads targeting `window_id`.
     pub(crate) fn open_paths_in_window(&mut self, window_id: WindowId, paths: Vec<PathBuf>) {
         if paths.is_empty() {
             return;
@@ -514,8 +506,6 @@ impl App {
     fn recover_device_loss(&mut self) {
         match Direct2DDevices::new() {
             Ok(new_devices) => {
-                // Replace the shared Platform devices so future windows/overlays never inherit
-                // the removed D3D11/D2D1 device (G-3).
                 self.platform.replace_devices(new_devices.clone());
                 for w in &mut self.windows {
                     if let Err(err) = w.native.recreate_renderer(new_devices.clone()) {
@@ -825,8 +815,6 @@ impl PlatformHandler for App {
         while let Some(ev) = self.jobs.pop() {
             match ev {
                 AppEvent::EditorTimer { window, slot, kind } => {
-                    // Route tab-scoped editor timers by TabId across windows so timers never stick
-                    // after dragging a tab to another window (F-4, AR-1).
                     let target_ix = match slot {
                         EditorSlot::Tab(raw) => self
                             .find_tab_owner(TabId(raw))
@@ -911,7 +899,6 @@ impl PlatformHandler for App {
                     let mut forgotten = Vec::new();
                     for (path, quick_key, res) in results {
                         self.in_flight_loads.remove(&quick_key);
-                        // Check cross-window dedup against both the canonical key and quick key (F-6, F-8).
                         let dup = res
                             .as_ref()
                             .ok()
@@ -942,7 +929,6 @@ impl PlatformHandler for App {
                     result,
                 } => match files::resolve_save_dialog(format, result) {
                     Ok(Some((path, next_format))) => {
-                        // Reject saving over a path that is already open in a different tab (F-6).
                         let target_key = document::quick_path_key(&path);
                         let conflict = self
                             .find_open_tab_by_key(&target_key)

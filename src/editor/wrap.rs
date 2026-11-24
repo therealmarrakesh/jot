@@ -1,5 +1,3 @@
-//! Incremental soft-wrap index, chunked line tree, and shaped visual rows.
-
 use std::borrow::Cow;
 use std::ops::{Range, RangeInclusive};
 
@@ -16,8 +14,6 @@ use super::buffer::{RopeExt, TextPoint};
 
 const CHUNK_SIZE: usize = 256;
 
-/// One visual sub-row within a logical buffer line: shaped for visible/cursor rows, windowed for
-/// huge unwrapped lines (P-2), or placeholder otherwise.
 pub(crate) enum VisualRow {
     Shaped(ShapedLine),
     Windowed {
@@ -143,8 +139,6 @@ impl VisualRow {
     }
 }
 
-/// Shaped visual sub-rows for a visible logical buffer line (or a visible sub-row slice on
-/// huge wrapped lines, P-3).
 pub(crate) struct RowLayout {
     pub(crate) first_sub_row: usize,
     pub(crate) leading_bytes: usize,
@@ -289,7 +283,6 @@ impl RowLayout {
     }
 }
 
-/// Visual coordinate inside soft-wrapped text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct DisplayPos {
     pub(crate) row: usize,
@@ -304,7 +297,6 @@ impl DisplayPos {
     }
 }
 
-/// Inline single-range storage avoiding per-line heap allocations for non-wrapping lines (P-4).
 #[derive(Debug, Clone)]
 pub(crate) enum LineRanges {
     Single(usize),
@@ -337,7 +329,6 @@ impl LineRanges {
     }
 }
 
-/// Soft-wrap ranges for a single logical buffer line.
 #[derive(Debug, Clone)]
 pub(crate) struct WrappedLine {
     pub(crate) byte_len: usize,
@@ -512,7 +503,6 @@ impl LineChunks {
             rebuilt.push(LineChunk::new(iter.by_ref().take(CHUNK_SIZE).collect()));
         }
         self.chunks.splice(start_chunk..replace_end, rebuilt);
-        // Rebalance under-full neighboring chunks so repeated small edits never fragment (P-4).
         let mut idx = start_chunk.saturating_sub(1);
         while idx + 1 < self.chunks.len() && idx <= start_chunk + 2 {
             let combined = self.chunks[idx].items.len() + self.chunks[idx + 1].items.len();
@@ -650,7 +640,6 @@ fn measured_wrap_breaks(
     }
 }
 
-/// Incremental soft-wrap index mapping logical buffer lines to visual rows.
 pub(crate) struct WrapIndex {
     text: Rope,
     font: Font,
@@ -800,7 +789,6 @@ impl WrapIndex {
                     if can_wrap_with_char_widths(line_str) {
                         char_widths.wrap_line_into(line_str, width, dw, out);
                     } else {
-                        // Single-pass DirectWrite layout wrapping for complex scripts/emoji (P-1).
                         dw.wrap_line_breaks(line_str, &font, font_size, width, true, out);
                     }
                 },

@@ -1,6 +1,3 @@
-//! Declarative flexbox scene builder, flat laid-out frame arena, typed `HitId` hit-testing,
-//! per-window interaction/animation state, and Direct2D scene painting.
-
 use std::time::{Duration, Instant};
 
 use crate::color::{Rgba, black, rgba, transparent_black};
@@ -20,7 +17,6 @@ use super::layout::{
 
 pub(crate) const BRUSH_FADE_DURATION: Duration = Duration::from_millis(83);
 
-/// Identifies which owned `Editor` inside a `MainWindow` a node or hit targets.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum EditorSlot {
     Tab(u64),
@@ -29,7 +25,6 @@ pub(crate) enum EditorSlot {
     GoToLine,
 }
 
-/// Custom-painted leaf token resolved directly in the paint pass.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum CustomDraw {
     Editor(EditorSlot),
@@ -37,7 +32,6 @@ pub(crate) enum CustomDraw {
     StatusSpacer,
 }
 
-/// Typed identifier for interactive hit regions and measured layout anchors.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum HitId {
     CaptionMin,
@@ -74,7 +68,6 @@ pub(crate) enum HitId {
     DialogButton(usize),
 }
 
-/// Typed key for per-window animation tracks.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum AnimKey {
     Hit(HitId),
@@ -95,7 +88,6 @@ pub(crate) enum AnimKey {
     TooltipFade,
 }
 
-/// Rest / hover / pressed fill colors animated with premultiplied RGBA interpolation.
 #[derive(Copy, Clone, Debug)]
 pub(crate) struct Brushes {
     pub(crate) rest: Rgba,
@@ -113,7 +105,6 @@ impl Brushes {
     }
 }
 
-/// Inheritable text style overrides specified on containers or text leaves.
 #[derive(Clone, Default)]
 struct TextOverrides {
     family: Option<SharedStr>,
@@ -188,7 +179,6 @@ enum NodePayload {
     Custom(CustomDraw),
 }
 
-/// Declarative flexbox UI node built each frame and flattened into a [`Frame`].
 pub(crate) struct Node {
     flex: FlexStyle,
     bg: Rgba,
@@ -225,7 +215,6 @@ impl Node {
         }
     }
 
-    // -- Layout direction & positioning --
     pub(crate) fn row(mut self) -> Self {
         self.flex.direction = FlexDirection::Row;
         self
@@ -239,7 +228,6 @@ impl Node {
         self
     }
 
-    // -- Dimensions --
     pub(crate) fn w(mut self, v: f32) -> Self {
         self.flex.width = Dim::Px(v);
         self
@@ -288,7 +276,6 @@ impl Node {
         self
     }
 
-    // -- Flex item behavior --
     pub(crate) fn flex_1(mut self) -> Self {
         self.flex.flex_grow = 1.0;
         self.flex.flex_shrink = 1.0;
@@ -305,7 +292,6 @@ impl Node {
         self
     }
 
-    // -- Alignment --
     pub(crate) fn items_center(mut self) -> Self {
         self.flex.align_items = Some(AlignItems::Center);
         self
@@ -319,7 +305,6 @@ impl Node {
         self
     }
 
-    // -- Overflow --
     pub(crate) fn overflow_hidden(mut self) -> Self {
         self.flex.overflow_x = Overflow::Hidden;
         self.flex.overflow_y = Overflow::Hidden;
@@ -330,7 +315,6 @@ impl Node {
         self
     }
 
-    // -- Padding, margin, insets --
     pub(crate) fn p(mut self, v: f32) -> Self {
         self.flex.padding = Edges::all(Dim::Px(v));
         self
@@ -405,7 +389,6 @@ impl Node {
         self.top(0.0).right(0.0).bottom(0.0).left(0.0)
     }
 
-    // -- Visual style --
     pub(crate) fn bg(mut self, color: Rgba) -> Self {
         self.bg = color;
         self
@@ -465,7 +448,6 @@ impl Node {
         self
     }
 
-    // -- Text style (inherited by descendant `text(...)` nodes) --
     pub(crate) fn font_family(mut self, family: impl Into<SharedStr>) -> Self {
         self.text.family = Some(family.into());
         self
@@ -499,7 +481,6 @@ impl Node {
         self
     }
 
-    // -- Interaction metadata (pure data, zero closures) --
     pub(crate) fn hit(mut self, id: HitId) -> Self {
         self.hit = Some(id);
         self
@@ -517,7 +498,6 @@ impl Node {
         self
     }
 
-    // -- Children & conditionals --
     pub(crate) fn child(mut self, child: Node) -> Self {
         if let NodePayload::Box(children) = &mut self.payload {
             children.push(child);
@@ -540,8 +520,6 @@ impl Node {
         if let Some(v) = opt { f(self, v) } else { self }
     }
 
-    /// Strips interactive hit IDs, cursors, window control areas, and tooltips from this subtree.
-    /// Used on fading-out popups and dialogs so they stop intercepting pointer input immediately.
     pub(crate) fn strip_hits(mut self) -> Self {
         self.hit = None;
         self.cursor = None;
@@ -581,10 +559,6 @@ pub(crate) fn custom(token: CustomDraw) -> Node {
     node
 }
 
-// ---------------------------------------------------------------------------
-// Flattened laid-out frame arena
-// ---------------------------------------------------------------------------
-
 enum FlatKind {
     Box {
         children_start: usize,
@@ -616,14 +590,12 @@ struct FlatNode {
     kind: FlatKind,
 }
 
-/// Interactive hit region recorded in painter's order during frame layout.
 #[derive(Copy, Clone, Debug)]
 struct HitEntry {
     node_idx: usize,
     clipped_rect: Rect,
 }
 
-/// Laid-out, hit-testable, paintable frame produced from a declarative [`Node`] tree.
 #[derive(Default)]
 pub(crate) struct Frame {
     nodes: Vec<FlatNode>,
@@ -706,7 +678,6 @@ impl Frame {
         frame
     }
 
-    /// Measures the natural min-content size of a standalone subtree (e.g., status bar min width).
     pub(crate) fn measure_min_size(root_node: Node, scale: f32, text_system: &TextSystem) -> Size {
         let frame = Self::layout(root_node, AvailSize::MIN, scale, text_system);
         frame
@@ -844,7 +815,6 @@ impl Frame {
             if let Some(area) = self.nodes[idx].window_area {
                 self.control_areas.push((clipped, Some(area)));
             } else if self.nodes[idx].hit.is_some() {
-                // Interactive client surfaces painted above titlebar/caption areas occlude them (K-6).
                 self.control_areas.push((clipped, None));
             }
         }
@@ -888,7 +858,6 @@ impl Frame {
             .find(|entry| entry.clipped_rect.contains(pos))
     }
 
-    /// Returns the topmost hit at `pos` followed by all ancestor `HitId`s in its parent chain.
     pub(crate) fn hit_chain(&self, pos: Point) -> Vec<HitId> {
         let Some(top) = self.top_hit(pos) else {
             return Vec::new();
@@ -904,7 +873,6 @@ impl Frame {
         chain
     }
 
-    /// Returns the laid-out rect of the topmost node tagged with `id` (even if partially clipped).
     pub(crate) fn rect_of(&self, id: HitId) -> Option<Rect> {
         self.nodes
             .iter()
@@ -913,7 +881,6 @@ impl Frame {
             .map(|node| node.rect)
     }
 
-    /// Resolves the effective cursor at `pos` by walking up from the topmost hit node.
     pub(crate) fn cursor_at(&self, pos: Point) -> CursorStyle {
         let Some(top) = self.top_hit(pos) else {
             return CursorStyle::Arrow;
@@ -928,7 +895,6 @@ impl Frame {
         CursorStyle::Arrow
     }
 
-    /// Resolves the effective tooltip and its anchor rect at `pos`.
     pub(crate) fn tooltip_at(&self, pos: Point) -> Option<(HitId, SharedStr, Rect)> {
         let top = self.top_hit(pos)?;
         let mut cur = Some(top.node_idx);
@@ -943,7 +909,6 @@ impl Frame {
         None
     }
 
-    /// Paints the entire laid-out frame in exact painter's order into `renderer`.
     pub(crate) fn paint(
         &self,
         renderer: &mut D2DRenderer,
@@ -1032,7 +997,6 @@ impl Frame {
     }
 }
 
-/// Per-window UI interaction state, retained previous [`Frame`], and animation tracks.
 pub(crate) struct UiState {
     pub(crate) frame: Frame,
     hovered_chain: Vec<HitId>,
@@ -1064,7 +1028,6 @@ impl UiState {
         self.anims.begin_frame();
     }
 
-    /// Commits the new frame and prunes unused animation tracks. Returns `true` if animations run.
     pub(crate) fn finish_frame(&mut self, frame: Frame) -> bool {
         self.frame = frame;
         self.anims.end_frame()
@@ -1097,7 +1060,6 @@ impl UiState {
         top
     }
 
-    /// Ends a left-click press and returns `Some(hit)` if mouse-up landed on the same pressed target.
     pub(crate) fn on_mouse_up(&mut self, pos: Point, button: MouseButton) -> Option<HitId> {
         self.hovered_chain = self.frame.hit_chain(pos);
         if button == MouseButton::Left {
@@ -1221,7 +1183,6 @@ mod tests {
                             ),
                     )
                     .child(
-                        // Overflowing second tab starts at x=100..200, clipped at x=120!
                         row().w(100.).h(32.).flex_none().hit(HitId::Tab(2)),
                     ),
             )
@@ -1229,7 +1190,6 @@ mod tests {
 
         let frame = Frame::layout(tree, AvailSize::definite(200., 32.), 1.0, &ts);
 
-        // Hovering close button bubbles to Tab(1) and TabStrip!
         assert_eq!(
             frame.hit_chain(point(80., 16.)),
             vec![HitId::TabClose(1), HitId::Tab(1), HitId::TabStrip]
@@ -1239,10 +1199,8 @@ mod tests {
             Some(SharedStr::new_static("Close tab"))
         );
 
-        // At x=130 (past the 120px TabStrip clip), clipped Tab(2) must NOT block NewTab!
         assert_eq!(frame.hit_chain(point(130., 16.)), vec![HitId::NewTab]);
 
-        // Overlay backdrop placed after chrome completely occludes underlying hits.
         let modal = col()
             .size_full()
             .child(box_().w(100.).h(40.).hit(HitId::NewTab))

@@ -1,6 +1,3 @@
-//! Win11 Acrylic-style floating tooltip overlay with hover/reshow delay state machine,
-//! monitor work-area clamping, and smooth opacity fade.
-
 use std::time::{Duration, Instant};
 
 use crate::app::AppEvent;
@@ -185,7 +182,6 @@ impl Tooltips {
         self.apply_report(Report::NoneIn(window), jobs);
     }
 
-    /// Evaluates the currently hovered tooltip in `window` directly from its laid-out `Frame`.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn evaluate(
         &mut self,
@@ -435,7 +431,6 @@ impl Tooltips {
         }
     }
 
-    /// Paints the tooltip overlay if dirty. Returns `(needs_vsync, device_lost)`.
     pub(crate) fn paint(
         &mut self,
         p: Palette,

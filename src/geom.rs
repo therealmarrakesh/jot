@@ -1,5 +1,3 @@
-//! Logical (`f32` DIP) and physical (`i32` device pixel) geometry primitives.
-
 use std::ops::{Add, AddAssign, Mul, Neg, Sub, SubAssign};
 
 use crate::color::Rgba;
@@ -344,7 +342,6 @@ impl Corners {
         }
     }
 
-    /// Proportionally scales overlapping corner radii per CSS Backgrounds §5.5.
     #[inline]
     pub(crate) fn clamp_to(self, size: Size) -> Self {
         let tl = self.top_left.max(0.0);
@@ -382,7 +379,6 @@ pub(crate) struct BoxShadow {
     pub(crate) spread_radius: f32,
 }
 
-/// Up to two elevation shadow layers (ambient + directional) stored inline without allocation.
 #[derive(Copy, Clone, Debug, Default, PartialEq)]
 pub(crate) struct Shadows(pub(crate) [Option<BoxShadow>; 2]);
 
@@ -400,14 +396,12 @@ impl Shadows {
     }
 }
 
-/// Physical screen coordinates in Win32 device pixels.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct ScreenPoint {
     pub(crate) x: i32,
     pub(crate) y: i32,
 }
 
-/// Physical screen rectangle in Win32 device pixels.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct ScreenRect {
     pub(crate) left: i32,

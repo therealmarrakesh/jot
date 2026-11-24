@@ -1,5 +1,3 @@
-//! OLE `IDropTarget` implementation for dragging files onto Jot windows.
-
 use std::cell::Cell;
 use std::ffi::OsString;
 use std::os::windows::ffi::OsStringExt;
@@ -34,17 +32,14 @@ fn hdrop_format() -> FORMATETC {
 }
 
 fn collect_drop_paths(hdrop: HDROP) -> Vec<PathBuf> {
-    // SAFETY: `hdrop` is a valid HDROP handle obtained from an active `CF_HDROP` `STGMEDIUM`.
     let file_count = unsafe { DragQueryFileW(hdrop, DRAGDROP_GET_FILES_COUNT, None) };
     let mut paths = Vec::with_capacity(file_count as usize);
     for ix in 0..file_count {
-        // SAFETY: `hdrop` is valid and `ix < file_count`; querying filename length with `None`.
         let len = unsafe { DragQueryFileW(hdrop, ix, None) } as usize;
         if len == 0 {
             continue;
         }
         let mut buffer = vec![0u16; len + 1];
-        // SAFETY: `buffer` has `len + 1` code units to hold the filename and NUL terminator.
         let written = unsafe { DragQueryFileW(hdrop, ix, Some(buffer.as_mut_slice())) } as usize;
         if written == 0 {
             continue;
@@ -80,12 +75,10 @@ impl IDropTarget_Impl for JotDropTarget_Impl {
         let _ = catch_unwind(AssertUnwindSafe(|| {
             let format = hdrop_format();
             let has_files = pdataobj.as_ref().is_some_and(|obj| {
-                // SAFETY: `obj` is a valid COM `IDataObject` supplied by OLE for this drag.
                 unsafe { obj.QueryGetData(&format) }.is_ok()
             });
             self.accepts_drop.set(has_files);
             if !pdweffect.is_null() {
-                // SAFETY: OLE guarantees `pdweffect` is a valid writable pointer when non-null.
                 unsafe {
                     *pdweffect = if has_files {
                         DROPEFFECT_COPY
@@ -106,7 +99,6 @@ impl IDropTarget_Impl for JotDropTarget_Impl {
     ) -> windows::core::Result<()> {
         let _ = catch_unwind(AssertUnwindSafe(|| {
             if !pdweffect.is_null() {
-                // SAFETY: OLE guarantees `pdweffect` is a valid writable pointer when non-null.
                 unsafe {
                     *pdweffect = if self.accepts_drop.get() {
                         DROPEFFECT_COPY
@@ -135,7 +127,6 @@ impl IDropTarget_Impl for JotDropTarget_Impl {
             self.accepts_drop.set(false);
             let set_effect = |effect: DROPEFFECT| {
                 if !pdweffect.is_null() {
-                    // SAFETY: OLE guarantees `pdweffect` is a valid writable pointer when non-null.
                     unsafe {
                         *pdweffect = effect;
                     }
@@ -146,13 +137,10 @@ impl IDropTarget_Impl for JotDropTarget_Impl {
                 return;
             };
             let format = hdrop_format();
-            // SAFETY: `data_obj` is a valid COM `IDataObject` supplied by OLE; `medium` is freed below.
             let Ok(mut medium) = (unsafe { data_obj.GetData(&format) }) else {
                 set_effect(DROPEFFECT_NONE);
                 return;
             };
-            // SAFETY: `medium` was returned for `CF_HDROP` / `TYMED_HGLOBAL`, so `medium.u.hGlobal`
-            // is the `HDROP` handle directly; `ReleaseStgMedium` releases it before returning.
             let paths = unsafe {
                 let hglobal = medium.u.hGlobal;
                 let collected = if !hglobal.0.is_null() {

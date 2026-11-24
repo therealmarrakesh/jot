@@ -1,5 +1,3 @@
-//! DirectWrite text shaping, line layout, hit-testing, and generational UI-label cache.
-
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
@@ -106,7 +104,6 @@ struct UnderlineSpan {
     color: Rgba,
 }
 
-/// DirectWrite-backed shaped single-line text ready for hit-testing and Direct2D painting.
 #[derive(Clone)]
 pub(crate) struct ShapedLine {
     pub(crate) len: usize,
@@ -152,7 +149,6 @@ impl ShapedLine {
         let mut x = 0.0f32;
         let mut y = 0.0f32;
         let mut metrics = DWRITE_HIT_TEST_METRICS::default();
-        // SAFETY: `layout` is a valid `IDWriteTextLayout` and output pointers are stack locals.
         if unsafe { layout.HitTestTextPosition(utf16_pos, false, &mut x, &mut y, &mut metrics) }
             .is_ok()
         {
@@ -162,8 +158,6 @@ impl ShapedLine {
         }
     }
 
-    /// Returns horizontal highlight segments `(x0, x1)` covering `start..end` UTF-8 bytes,
-    /// using `HitTestTextRange` for accurate BiDi / RTL selection boxes (E-17).
     pub(crate) fn selection_spans(&self, start: usize, end: usize) -> Vec<(f32, f32)> {
         let start = start.min(self.len);
         let end = end.min(self.len);
@@ -186,7 +180,6 @@ impl ShapedLine {
         }
         let mut actual = 0u32;
         let mut buf = [DWRITE_HIT_TEST_METRICS::default(); 8];
-        // SAFETY: `layout` is a valid `IDWriteTextLayout` and `buf` is a writable metrics slice.
         let res = unsafe {
             layout.HitTestTextRange(u16_start, u16_len, 0.0, 0.0, Some(&mut buf), &mut actual)
         };
@@ -199,7 +192,6 @@ impl ShapedLine {
         }
         if actual > 0 {
             let mut heap = vec![DWRITE_HIT_TEST_METRICS::default(); actual as usize];
-            // SAFETY: `heap` has length `actual` reported by DirectWrite above.
             if unsafe {
                 layout.HitTestTextRange(u16_start, u16_len, 0.0, 0.0, Some(&mut heap), &mut actual)
             }
@@ -234,7 +226,6 @@ impl ShapedLine {
         let mut is_trailing = BOOL(0);
         let mut is_inside = BOOL(0);
         let mut metrics = DWRITE_HIT_TEST_METRICS::default();
-        // SAFETY: `layout` is a valid `IDWriteTextLayout` and output refs are stack locals.
         if unsafe { layout.HitTestPoint(x, 0.0, &mut is_trailing, &mut is_inside, &mut metrics) }
             .is_err()
         {
@@ -285,7 +276,6 @@ impl ShapedLine {
     }
 }
 
-/// Immutable multi-line wrapped DirectWrite layout (used by tooltips, dialogs, and UI text).
 #[derive(Clone)]
 pub(crate) struct WrappedLine {
     pub(crate) width: f32,
@@ -377,7 +367,6 @@ struct WrappedCacheKey {
     align: TextAlign,
 }
 
-/// Low-level DirectWrite helper passed into `with_char_widths` callbacks.
 pub(crate) struct DirectWriteCore {
     factory: IDWriteFactory5,
     formats: RefCell<HashMap<FormatKey, IDWriteTextFormat>>,
@@ -387,7 +376,6 @@ pub(crate) struct DirectWriteCore {
 
 impl DirectWriteCore {
     fn new() -> Self {
-        // SAFETY: Creating a shared DirectWrite factory requires no external preconditions.
         let factory: IDWriteFactory5 =
             unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED) }
                 .expect("failed to create DirectWrite factory");
@@ -418,10 +406,8 @@ impl DirectWriteCore {
             return existing.clone();
         }
         let family = HSTRING::from(font.family.as_str());
-        // Use user default locale ("") instead of hardcoded "en-us" (G-14).
         let locale = HSTRING::from("");
         let dw_weight = DWRITE_FONT_WEIGHT(font.weight.0.round().clamp(1.0, 999.0) as i32);
-        // SAFETY: `self.factory` is valid and `family`, `locale`, `safe_size` are valid inputs.
         let format = unsafe {
             self.factory
                 .CreateTextFormat(
@@ -447,12 +433,9 @@ impl DirectWriteCore {
                 })
         }
         .expect("CreateTextFormat fallback failed");
-        // SAFETY: `format` is a newly created `IDWriteTextFormat`.
         let _ = unsafe { format.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP) };
-        // Align incremental tab stops to 8 space columns (Notepad parity, G-5).
         let space_w = self.measure_utf16(&[b' ' as u16], &format);
         if space_w > 0.0 {
-            // SAFETY: `space_w * TAB_STOP_COLUMNS` is positive and finite.
             let _ = unsafe { format.SetIncrementalTabStop(space_w * TAB_STOP_COLUMNS) };
             self.space_widths.borrow_mut().insert(key.clone(), space_w);
         }
@@ -460,8 +443,6 @@ impl DirectWriteCore {
         format
     }
 
-    /// Returns cached `(ascent, descent)` of the primary font so fallback glyphs (emoji/CJK)
-    /// do not shift the row baseline vertically (G-7).
     fn primary_metrics(&self, font: &Font, font_size: f32) -> (f32, f32) {
         let safe_size = Self::sanitize_size(font_size);
         let key = FormatKey {
@@ -474,7 +455,6 @@ impl DirectWriteCore {
         }
         let format = self.text_format(font, safe_size);
         let sample = [b'H' as u16, b'g' as u16];
-        // SAFETY: `sample` and `format` are valid inputs to `CreateTextLayout`.
         let metrics = unsafe { self.factory.CreateTextLayout(&sample, &format, f32::MAX, f32::MAX) }
             .ok()
             .map_or((safe_size * 0.8, safe_size * 0.2), |l| {
@@ -489,14 +469,12 @@ impl DirectWriteCore {
         if utf16.is_empty() {
             return 0.0;
         }
-        // SAFETY: `utf16` and `format` are valid inputs to `CreateTextLayout`.
         let Ok(layout) =
             (unsafe { self.factory.CreateTextLayout(utf16, format, f32::MAX, f32::MAX) })
         else {
             return 0.0;
         };
         let mut metrics = DWRITE_TEXT_METRICS::default();
-        // SAFETY: `layout` is valid and `metrics` is a stack `DWRITE_TEXT_METRICS`.
         if unsafe { layout.GetMetrics(&mut metrics) }.is_ok() {
             metrics.widthIncludingTrailingWhitespace
         } else {
@@ -504,8 +482,6 @@ impl DirectWriteCore {
         }
     }
 
-    /// Computes soft-wrap break boundaries for a single logical line in O(1) DirectWrite layout
-    /// calls using `DWRITE_WORD_WRAPPING_WRAP` + `GetLineMetrics` (P-1).
     pub(crate) fn wrap_line_breaks(
         &self,
         text: &str,
@@ -541,24 +517,20 @@ impl DirectWriteCore {
         };
 
         let collect_breaks = |u16_slice: &[u16], max_w: f32| -> Vec<usize> {
-            // SAFETY: `u16_slice` and `format` are valid inputs for DirectWrite wrapping layout.
             let Ok(layout) = (unsafe {
                 self.factory
                     .CreateTextLayout(u16_slice, &format, max_w.max(1.0), f32::MAX)
             }) else {
                 return Vec::new();
             };
-            // SAFETY: `layout` is a valid `IDWriteTextLayout`.
             let _ = unsafe { layout.SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP) };
             let mut m = DWRITE_TEXT_METRICS::default();
-            // SAFETY: `m` is a stack `DWRITE_TEXT_METRICS` out-pointer.
             if unsafe { layout.GetMetrics(&mut m) }.is_err() || m.lineCount <= 1 {
                 return Vec::new();
             }
             let count = m.lineCount as usize;
             let mut metrics = vec![DWRITE_LINE_METRICS::default(); count];
             let mut actual = 0u32;
-            // SAFETY: `metrics` has length `count` matching `m.lineCount`.
             let _ = unsafe { layout.GetLineMetrics(Some(&mut metrics), &mut actual) };
             let n = (actual as usize).min(metrics.len());
             if n <= 1 {
@@ -590,7 +562,6 @@ impl DirectWriteCore {
             }
         }
 
-        // Convert sorted UTF-16 break offsets to UTF-8 byte offsets in one linear pass.
         let mut bi = 0usize;
         let mut u16_acc = 0usize;
         let mut last_byte = 0usize;
@@ -613,9 +584,6 @@ impl DirectWriteCore {
     }
 }
 
-/// Encodes a single logical editor line to UTF-16 while replacing Unicode/control line-breaking
-/// code points (`VT`, `FF`, `NEL`, `U+2028`, `U+2029`) with a 1-code-unit placeholder (`'□'`)
-/// so DirectWrite never splits one logical line into multiple vertical lines (G-8).
 pub(crate) fn encode_single_line_utf16(text: &str) -> Vec<u16> {
     let mut out = Vec::with_capacity(text.len());
     for ch in text.chars() {
@@ -629,7 +597,6 @@ pub(crate) fn encode_single_line_utf16(text: &str) -> Vec<u16> {
     out
 }
 
-/// High-level DirectWrite text system shared across Jot windows.
 pub(crate) struct TextSystem {
     state: RefCell<TextSystemState>,
 }
@@ -657,7 +624,6 @@ impl TextSystem {
         }
     }
 
-    /// Rotates the two-frame generational cache for UI-label DirectWrite layouts.
     pub(crate) fn finish_frame(&self) {
         let mut state = self.state.borrow_mut();
         state.prev_wrapped_cache = std::mem::take(&mut state.curr_wrapped_cache);
@@ -734,7 +700,6 @@ impl TextSystem {
             };
         }
 
-        // Skip caching huge lines to prevent unbounded memory growth (P-2).
         let single_uniform_run = runs.len() <= 1 && text.len() <= MAX_CACHEABLE_LINE_BYTES;
         let cache_key = single_uniform_run.then(|| ShapedCacheKey {
             text: text.clone(),
@@ -761,7 +726,6 @@ impl TextSystem {
         let (ascent, descent) = state.dw.primary_metrics(&base_font, safe_size);
         let utf16 = encode_single_line_utf16(text.as_str());
         let is_ascii = text.as_str().is_ascii();
-        // SAFETY: `utf16` and `format` are valid DirectWrite layout inputs.
         let layout = unsafe {
             state
                 .dw
@@ -773,7 +737,6 @@ impl TextSystem {
         let mut underlines = Vec::new();
 
         if let Some(layout) = &layout {
-            // SAFETY: Uniform line spacing locks baseline to primary font metrics (G-7).
             let _ = unsafe {
                 layout.SetLineSpacing(
                     DWRITE_LINE_SPACING_METHOD_UNIFORM,
@@ -799,11 +762,9 @@ impl TextSystem {
                     };
                     if run.font.family != base_font.family {
                         let fam = HSTRING::from(run.font.family.as_str());
-                        // SAFETY: `fam` is a valid NUL-terminated HSTRING and `range` is within layout.
                         let _ = unsafe { layout.SetFontFamilyName(&fam, range) };
                     }
                     if run.font.weight != base_font.weight {
-                        // SAFETY: `layout` is valid and `range` lies within its UTF-16 text span.
                         let _ = unsafe {
                             layout.SetFontWeight(
                                 DWRITE_FONT_WEIGHT(run.font.weight.0.round() as i32),
@@ -827,7 +788,6 @@ impl TextSystem {
 
         let width = layout.as_ref().map_or(0.0, |l| {
             let mut metrics = DWRITE_TEXT_METRICS::default();
-            // SAFETY: `l` is a valid `IDWriteTextLayout`.
             if unsafe { l.GetMetrics(&mut metrics) }.is_ok() {
                 metrics.widthIncludingTrailingWhitespace
             } else {
@@ -897,7 +857,6 @@ impl TextSystem {
         let (ascent, descent) = state.dw.primary_metrics(font, safe_size);
         let glyph_h = (ascent + descent).max(1.0);
         let ellipsis_sign = if line_clamp.is_some() {
-            // SAFETY: `format` is a valid `IDWriteTextFormat`.
             unsafe { state.dw.factory.CreateEllipsisTrimmingSign(&format) }.ok()
         } else {
             None
@@ -912,7 +871,6 @@ impl TextSystem {
             let utf16: Vec<u16> = segment.encode_utf16().collect();
             let box_w = wrap_width.map(|w| w.max(1.0));
             let max_w = box_w.unwrap_or(f32::MAX);
-            // SAFETY: `utf16` and `format` are valid DirectWrite layout inputs.
             let layout = unsafe {
                 state
                     .dw
@@ -922,7 +880,6 @@ impl TextSystem {
             .ok();
             let uniform_spacing = line_height.is_some();
             if let Some(layout) = &layout {
-                // SAFETY: Configures wrapping, optional uniform line spacing, and alignment on `layout`.
                 unsafe {
                     let _ = layout.SetWordWrapping(if wrap_width.is_some() {
                         DWRITE_WORD_WRAPPING_WRAP
@@ -948,7 +905,6 @@ impl TextSystem {
             }
             let (width, raw_lines) = layout.as_ref().map_or((0.0, 1), |l| {
                 let mut m = DWRITE_TEXT_METRICS::default();
-                // SAFETY: `l` is a valid `IDWriteTextLayout`.
                 let _ = unsafe { l.GetMetrics(&mut m) };
                 (m.widthIncludingTrailingWhitespace, m.lineCount.max(1) as usize)
             });
@@ -959,7 +915,6 @@ impl TextSystem {
                     let did_clamp = clamped_lines < raw_lines;
                     if did_clamp && let Some(layout) = &layout {
                         let effective_lh = line_height.unwrap_or(glyph_h);
-                        // SAFETY: Configures max height and optional ellipsis trimming sign on `layout`.
                         unsafe {
                             let _ = layout.SetMaxHeight(effective_lh * clamped_lines as f32);
                             if let Some(sign) = &ellipsis_sign {
@@ -1020,11 +975,9 @@ impl TextSystem {
 
 fn extract_single_line_metrics(layout: &IDWriteTextLayout, font_size: f32) -> (f32, f32, f32) {
     let mut metrics = DWRITE_TEXT_METRICS::default();
-    // SAFETY: `layout` is a valid `IDWriteTextLayout`.
     let _ = unsafe { layout.GetMetrics(&mut metrics) };
     let mut line_metrics = [DWRITE_LINE_METRICS::default(); 2];
     let mut count = 0u32;
-    // SAFETY: `line_metrics` is a valid 2-element stack buffer for `GetLineMetrics`.
     let (ascent, descent) =
         if unsafe { layout.GetLineMetrics(Some(&mut line_metrics), &mut count) }.is_ok()
             && count > 0

@@ -1,6 +1,3 @@
-//! Cached character widths (ASCII + on-demand non-ASCII + 8-column tab stops) and UAX #14
-//! DirectWrite line-break analysis.
-
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -26,12 +23,10 @@ pub(crate) struct Boundary {
     pub(crate) next_indent: u32,
 }
 
-/// Cached character width table (printable ASCII + on-demand non-ASCII + 8-column tab stops)
-/// for fast O(line_len) soft-wrapping.
 pub(crate) struct CharWidths {
     font: Font,
     font_size: f32,
-    ascii: [f32; 95], // 0x20..=0x7E
+    ascii: [f32; 95],
     max_ascii: f32,
     non_ascii: HashMap<char, f32>,
 }
@@ -95,8 +90,6 @@ impl CharWidths {
         w
     }
 
-    /// Wraps `line` into `out` using UAX #14 DirectWrite break opportunities + cached char widths
-    /// with 8-column tab-stop alignment (P-1, G-5, G-14).
     pub(crate) fn wrap_line_into(
         &mut self,
         line: &str,
@@ -165,8 +158,6 @@ impl CharWidths {
         }
     }
 
-    /// Computes a horizontal visible byte slice `(start_byte, end_byte, start_x, total_width)`
-    /// for a huge unwrapped line using cached character widths and 8-column tab stops (P-2).
     pub(crate) fn horizontal_slice(
         &mut self,
         line: &str,
@@ -218,8 +209,6 @@ impl IDWriteTextAnalysisSource_Impl for BreakSource_Impl {
     ) -> windows::core::Result<()> {
         let _ = catch_unwind(AssertUnwindSafe(|| {
             let pos = textposition as usize;
-            // SAFETY: DirectWrite passes valid output pointers; returned slice borrows `self.utf16`
-            // which outlives the synchronous `AnalyzeLineBreakpoints` call.
             unsafe {
                 if pos >= self.utf16.len() {
                     *textstring = std::ptr::null_mut();
@@ -241,7 +230,6 @@ impl IDWriteTextAnalysisSource_Impl for BreakSource_Impl {
     ) -> windows::core::Result<()> {
         let _ = catch_unwind(AssertUnwindSafe(|| {
             let pos = (textposition as usize).min(self.utf16.len());
-            // SAFETY: DirectWrite passes valid output pointers; `self.utf16` outlives the analysis.
             unsafe {
                 if pos == 0 {
                     *textstring = std::ptr::null_mut();
@@ -267,7 +255,6 @@ impl IDWriteTextAnalysisSource_Impl for BreakSource_Impl {
     ) -> windows::core::Result<()> {
         let _ = catch_unwind(AssertUnwindSafe(|| {
             let pos = (textposition as usize).min(self.utf16.len());
-            // SAFETY: DirectWrite passes valid output pointers; `self.locale` is NUL-terminated.
             unsafe {
                 *textlength = (self.utf16.len() - pos) as u32;
                 *localename = self.locale.as_ptr() as *mut u16;
@@ -284,7 +271,6 @@ impl IDWriteTextAnalysisSource_Impl for BreakSource_Impl {
     ) -> windows::core::Result<()> {
         let _ = catch_unwind(AssertUnwindSafe(|| {
             let pos = (textposition as usize).min(self.utf16.len());
-            // SAFETY: DirectWrite passes valid `textlength` output pointer.
             unsafe {
                 *textlength = (self.utf16.len() - pos) as u32;
             }
@@ -323,7 +309,6 @@ impl IDWriteTextAnalysisSink_Impl for BreakSink_Impl {
             }
             let mut dst = self.out.borrow_mut();
             if start.saturating_add(len) <= dst.len() {
-                // SAFETY: `len > 0` and `linebreakpoints` is non-null and valid for `len` entries.
                 let src = unsafe { std::slice::from_raw_parts(linebreakpoints, len) };
                 dst[start..start + len].copy_from_slice(src);
             }
@@ -355,7 +340,6 @@ thread_local! {
     static TEXT_ANALYZER: RefCell<Option<IDWriteTextAnalyzer>> = const { RefCell::new(None) };
 }
 
-/// Returns UTF-8 byte offsets strictly inside `text` where UAX #14 allows a line break.
 pub(crate) fn line_break_opportunities(text: &str) -> Vec<usize> {
     let mut out = Vec::new();
     if text.is_empty() {
@@ -364,7 +348,6 @@ pub(crate) fn line_break_opportunities(text: &str) -> Vec<usize> {
     let analyzer = TEXT_ANALYZER.with(|slot| {
         let mut slot = slot.borrow_mut();
         if slot.is_none() {
-            // SAFETY: Shared DirectWrite factory and text analyzer creation require no preconditions.
             let created = unsafe {
                 DWriteCreateFactory::<IDWriteFactory5>(DWRITE_FACTORY_TYPE_SHARED)
                     .and_then(|factory| factory.CreateTextAnalyzer())
@@ -392,7 +375,6 @@ pub(crate) fn line_break_opportunities(text: &str) -> Vec<usize> {
     }
     .into();
 
-    // SAFETY: `source` and `sink` are valid COM implementations covering `[0..len)`.
     if unsafe { analyzer.AnalyzeLineBreakpoints(&source, 0, len as u32, &sink) }.is_err() {
         return out;
     }

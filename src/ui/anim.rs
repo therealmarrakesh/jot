@@ -1,15 +1,9 @@
-//! Easing curves, linear interpolation, standalone transitions, and typed per-window animation tracks.
-
 use std::collections::HashMap;
 use std::hash::Hash;
 use std::time::{Duration, Instant};
 
 use crate::color::Rgba;
 
-/// Evaluates a standard CSS `cubic-bezier(x1, y1, x2, y2)` timing curve at normalized time `t`.
-///
-/// Uses Newton-Raphson root finding on `x(s) = t` with a bracketed bisection fallback when the
-/// slope flattens near vertical or cusp control points.
 pub(crate) fn cubic_bezier(x1: f32, y1: f32, x2: f32, y2: f32, t: f32) -> f32 {
     let t = t.clamp(0.0, 1.0);
     if t <= 0.0 {
@@ -102,7 +96,6 @@ impl Easing {
     }
 }
 
-/// Linearly interpolatable value for smooth UI transitions.
 pub(crate) trait Lerp: Copy + PartialEq {
     fn lerp(self, target: Self, t: f32) -> Self;
 }
@@ -115,7 +108,6 @@ impl Lerp for f32 {
 }
 
 impl Lerp for Rgba {
-    /// Premultiplied RGBA interpolation so fading from transparent does not flash dark fringes.
     #[inline]
     fn lerp(self, target: Self, t: f32) -> Self {
         let a = self.a + (target.a - self.a) * t;
@@ -149,7 +141,6 @@ pub(crate) struct AnimSample<T> {
     pub(crate) status: AnimStatus,
 }
 
-/// Standalone value transition driven by caller-supplied timestamps.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct TimedTransition<T> {
     pub(crate) from: T,
@@ -287,7 +278,6 @@ impl<T: Lerp> AnimTrack<T> {
     }
 }
 
-/// Typed, allocation-light per-window animation track store with automatic frame pruning.
 pub(crate) struct AnimTracks<K: Copy + Eq + Hash> {
     frame: u64,
     running_this_frame: bool,
@@ -525,7 +515,6 @@ mod tests {
         let dur = Duration::from_millis(100);
         let mut tracks: AnimTracks<u32> = AnimTracks::default();
 
-        // Frame 1: seed track 1 from 0 -> 100.
         tracks.begin_frame();
         let s0 = tracks.animate_f32_from(1, 0.0, 100.0, dur, Easing::Linear, t0, false);
         assert_eq!(s0.status, AnimStatus::Running);
@@ -533,7 +522,6 @@ mod tests {
         assert!(tracks.end_frame());
         assert_eq!(tracks.track_count(), 1);
 
-        // Frame 2: halfway through, reverse back to 0 -> duration scales to ~50ms.
         let t_mid = t0 + Duration::from_millis(50);
         tracks.begin_frame();
         let s1 = tracks.animate_f32_from(1, 0.0, 0.0, dur, Easing::Linear, t_mid, false);
@@ -541,7 +529,6 @@ mod tests {
         assert!((s1.value - 50.0).abs() < 1e-3);
         assert!(tracks.end_frame());
 
-        // Frame 3: 50ms later, reversed track has settled at 0.
         let t_done = t_mid + Duration::from_millis(50);
         tracks.begin_frame();
         let s2 = tracks.animate_f32_from(1, 0.0, 0.0, dur, Easing::Linear, t_done, false);
@@ -549,7 +536,6 @@ mod tests {
         assert_eq!(s2.value, 0.0);
         assert!(!tracks.end_frame());
 
-        // Frame 4: unqueried tracks are pruned automatically.
         tracks.begin_frame();
         assert!(!tracks.end_frame());
         assert_eq!(tracks.track_count(), 0);

@@ -1,6 +1,3 @@
-//! Cross-window tab drag, reorder, detach into new window, attach into another window's tab
-//! strip, event-driven Win32 modal move-loop tracking, and Escape cancellation.
-
 use std::time::{Duration, Instant};
 
 use crate::app::{App, AppEvent};
@@ -24,7 +21,6 @@ enum Phase {
     Moving { attaching: bool },
 }
 
-/// Cross-window tab drag state keyed strictly by `WindowId` (never caching raw HWNDs, W-3).
 pub(crate) struct TabDragState {
     owner: WindowId,
     source: WindowId,
@@ -77,8 +73,6 @@ impl App {
         let Some(hwnd) = self.window_hwnd(window_id) else {
             return;
         };
-        // Wait until DRAG_THRESHOLD is crossed before lifting even a sole tab so plain clicks
-        // never enter a Win32 modal move loop (W-5).
         self.tab_drag = Some(TabDragState {
             owner: window_id,
             source: window_id,
@@ -100,7 +94,6 @@ impl App {
         }
     }
 
-    /// Aborts any active drag whose owning window was closed (W-3).
     pub(crate) fn tab_drag_window_closed(&mut self, id: WindowId) {
         if self.tab_drag.as_ref().is_some_and(|d| d.owner == id) {
             self.tab_drag_end();
@@ -118,7 +111,6 @@ impl App {
         drag
     }
 
-    /// Drives move-loop phase transitions directly from `WM_ENTERSIZEMOVE` / `WM_EXITSIZEMOVE` (W-5).
     pub(crate) fn tab_drag_size_move_changed(&mut self, window_id: WindowId, entering: bool) {
         let Some(drag) = self.tab_drag.as_mut() else {
             return;
@@ -292,7 +284,6 @@ impl App {
             let source_win = drag.owner;
             let taken = self.window_ix(source_win).and_then(|ix| {
                 let native = &self.windows[ix].native;
-                // Use the source's restored size if it is maximized (W-4).
                 let sz = if native.is_maximized() {
                     native
                         .hwnd()
@@ -309,7 +300,6 @@ impl App {
                 return;
             };
             self.sweep_closed_windows();
-            // Create the detached window on the cursor's monitor & DPI (W-4).
             let (window, _hwnd) = match self.open_window_at(Some(data), Some(sz), Some(pt)) {
                 Ok(created) => created,
                 Err(err) => {
@@ -365,8 +355,6 @@ impl App {
         drag.poll_timer = self.jobs.every(MOVE_POLL, MOVE_POLL, || AppEvent::TabDragPoll);
     }
 
-    /// Checks whether the dragged window entered another window's tab strip during a native move
-    /// loop (and falls back cleanly if `WM_EXITSIZEMOVE` was never sent).
     pub(crate) fn tab_drag_poll(&mut self) {
         let Some(mut drag) = self.tab_drag.take() else {
             return;
@@ -442,8 +430,6 @@ impl App {
         }
         self.windows.iter().find_map(|w| {
             let w_hwnd = w.native.hwnd();
-            // Reject windows with open modals, active file workflows, pending close, or disabled
-            // by an STA native dialog so attached tabs are never silently closed (W-2, F-2).
             let accepts_attach = !w.dialogs.is_open()
                 && w.file_workflow.is_none()
                 && !w.pending_close

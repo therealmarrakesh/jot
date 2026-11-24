@@ -51,7 +51,6 @@ fn main() {
         }
     }
 
-    // Arbitrate single-instance ownership *before* D3D/D2D initialization (I-1, I-4).
     let server = match instance::arbitrate(&paths) {
         Arbitration::HandedOff => return,
         Arbitration::Primary(server) => server,

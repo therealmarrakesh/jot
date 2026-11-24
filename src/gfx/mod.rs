@@ -1,5 +1,3 @@
-//! Direct3D 11 + DirectComposition + Direct2D 1.1 rendering and DirectWrite text shaping.
-
 pub(crate) mod d2d;
 pub(crate) mod text;
 pub(crate) mod wrap;

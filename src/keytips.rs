@@ -1,5 +1,3 @@
-//! Win32 transparent topmost overlay displaying Windows Alt/F10 KeyTip badges.
-
 use crate::color::{rgb, transparent_black};
 use crate::geom::{Rect, ScreenPoint, ScreenRect, point, size};
 use crate::gfx::{Direct2DDevices, TextSystem};

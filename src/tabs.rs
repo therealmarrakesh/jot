@@ -1,5 +1,3 @@
-//! Animated tab strip, tab data, overflow scrolling, ghost close animations, and width freezing.
-
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -369,8 +367,6 @@ impl TabStrip {
         }
     }
 
-    /// Updates dragged tab position and reorders `tabs` when crossing `REORDER_THRESHOLD`.
-    /// Returns the updated active tab index.
     pub(crate) fn drag_tab(
         &mut self,
         tabs: &mut Vec<Tab>,

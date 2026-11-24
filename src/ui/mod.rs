@@ -1,5 +1,3 @@
-//! Declarative flexbox UI spine: animations, flex layout engine, scene arena, and controls.
-
 pub(crate) mod anim;
 pub(crate) mod controls;
 pub(crate) mod layout;

@@ -1,5 +1,3 @@
-//! Shared string and error types used across Jot.
-
 use std::borrow::Borrow;
 use std::cmp::Ordering;
 use std::fmt;
@@ -7,7 +5,6 @@ use std::hash::{Hash, Hasher};
 use std::ops::Deref;
 use std::sync::Arc;
 
-/// Immutable string backed by either a `&'static str` or a cheap-to-clone `Arc<str>`.
 #[derive(Clone)]
 pub(crate) enum SharedStr {
     Static(&'static str),
@@ -153,7 +150,6 @@ impl PartialEq<String> for SharedStr {
     }
 }
 
-/// Structured error for Win32, Direct2D, DirectWrite, and I/O operations.
 pub(crate) struct Error {
     message: String,
     hresult: Option<i32>,

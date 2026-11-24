@@ -1,5 +1,3 @@
-//! Editing, cursor motion, selection, clipboard, indentation, undo/redo, and IME on `Editor`.
-
 use std::borrow::Cow;
 use std::ops::Range;
 
@@ -24,8 +22,6 @@ enum IndentOp {
 }
 
 impl Editor {
-    // ---- Command dispatch ----
-
     pub(crate) fn handle_command(
         &mut self,
         command: Command,
@@ -119,8 +115,6 @@ impl Editor {
         true
     }
 
-    // ---- Direct text & IME input ----
-
     pub(crate) fn commit_composition(&mut self) {
         if let Some(comp) = self.composition.take() {
             let end = comp.end.min(self.text.len());
@@ -140,8 +134,6 @@ impl Editor {
     }
 
     pub(crate) fn handle_ime_composition(&mut self, text: &str, cursor: usize, ts: &TextSystem) {
-        // Ignore empty WM_IME_ENDCOMPOSITION when no composition is active so selection and
-        // history groups are never disturbed (E-2).
         if text.is_empty() && self.composition.is_none() {
             return;
         }
@@ -159,8 +151,6 @@ impl Editor {
         self.bounds_for_utf16_range(sel_utf16, bounds)
             .or(self.caret_bounds)
     }
-
-    // ---- Public programmatic edits & selection ----
 
     pub(crate) fn set_value(&mut self, value: &str, ts: &TextSystem) {
         self.commit_composition();
@@ -191,7 +181,6 @@ impl Editor {
         self.debug_assert_invariants();
     }
 
-    /// Applies an already-rebuilt `Rope` from a bulk Replace All in O(1) snapshot history (P-9, P-10).
     pub(crate) fn replace_all_bulk(&mut self, new_rope: Rope, cursor: usize, ts: &TextSystem) {
         self.commit_composition();
         self.reset_pointer_selection_state();
@@ -255,8 +244,6 @@ impl Editor {
         self.debug_assert_invariants();
     }
 
-    // ---- Grapheme / word / visual-line boundary helpers ----
-
     pub(super) fn cursor_boundary(&self, offset: usize, bias: Bias) -> usize {
         snap_grapheme_boundary(&self.text, offset, bias)
     }
@@ -313,8 +300,6 @@ impl Editor {
         self.selection.end = clamped;
         self.selection.reversed = false;
     }
-
-    // ---- Movement & selection ----
 
     pub(super) fn preferred_x_for(
         &self,
@@ -483,7 +468,6 @@ impl Editor {
             MoveDirection::Down
         };
         let sel = self.selection;
-        // Up with selection collapses to `sel.start`, Down to `sel.end` before stepping (E-8).
         let (base_offset, anchor, affinity) = if sel.is_empty() || !collapse {
             (sel.head(), sel.preferred_x, self.line_end_affinity)
         } else if delta_rows < 0 {
@@ -598,8 +582,6 @@ impl Editor {
         self.debug_assert_invariants();
     }
 
-    // ---- Deleting, clipboard, enter, escape ----
-
     fn delete_with(
         &mut self,
         collapsed_kind: EditKind,
@@ -683,7 +665,6 @@ impl Editor {
         }
     }
 
-    /// Cancels active IME composition and removes its preedit text cleanly (E-2).
     fn escape(&mut self, ts: &TextSystem) -> bool {
         let Some(comp) = self.composition.take() else {
             return false;
@@ -735,7 +716,6 @@ impl Editor {
             return;
         };
         let text: Cow<'_, str> = if !self.multi_line {
-            // Single-line fields truncate pasted multiline text at the first line break (E-17).
             Cow::Borrowed(raw.split(['\r', '\n']).next().unwrap_or(""))
         } else if raw.contains('\r') {
             Cow::Owned(raw.replace("\r\n", "\n").replace('\r', "\n"))
@@ -747,8 +727,6 @@ impl Editor {
         }
         self.replace_text_in_range(None, &text, Some(EditKind::Atomic), ts, Some(timers));
     }
-
-    // ---- Indentation ----
 
     fn apply_indent(
         &mut self,
@@ -765,8 +743,6 @@ impl Editor {
         let indent_str = self.tab_size.as_str();
         let before = self.selection;
 
-        // Notepad Tab convention (E-11): inline Tab on a single-line selection (or caret)
-        // inserts/replaces with a tab rather than indenting line start.
         let spans_multiple_lines = !before.is_empty()
             && self.text.offset_to_point(before.start).row
                 != self.text.offset_to_point(before.end).row;
@@ -783,7 +759,6 @@ impl Editor {
 
         let start_row = self.text.offset_to_point(before.start).row;
         let end_pt = self.text.offset_to_point(before.end);
-        // Exclude trailing line when selection ends right at column 0 of the next line (E-11).
         let end_row = if !before.is_empty() && end_pt.column == 0 && end_pt.row > start_row {
             end_pt.row - 1
         } else {
@@ -857,8 +832,6 @@ impl Editor {
         spaces
     }
 
-    // ---- Undo / Redo ----
-
     fn undo(&mut self, ts: &TextSystem, timers: &mut dyn EditorTimers) {
         self.replay_history(true, ts, timers);
     }
@@ -915,8 +888,6 @@ impl Editor {
         self.update_preferred_x();
         self.debug_assert_invariants();
     }
-
-    // ---- History & range-edit core ----
 
     fn collapse_for_kind(
         kind: EditKind,
@@ -1056,8 +1027,6 @@ impl Editor {
     fn accepts_text(&self, candidate: &str) -> bool {
         candidate.is_empty() || self.validate.is_none_or(|f| f(candidate))
     }
-
-    // ---- Text replacement & IME protocol ----
 
     pub(crate) fn replace_text_in_range(
         &mut self,

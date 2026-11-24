@@ -1,5 +1,3 @@
-//! Streaming file I/O, encoding/BOM/line-ending detection, lossy-ANSI checks, and atomic saves.
-
 use std::ffi::OsString;
 use std::fs;
 use std::io::{self, BufWriter, Read, Seek, SeekFrom, Write};
@@ -280,7 +278,6 @@ fn load_reader_with_page<R: Read + Seek>(
         head_len += n;
     }
     let head_slice = &head[..head_len];
-    // Reject UTF-32 LE/BE BOMs instead of mis-detecting FF FE 00 00 as UTF-16 LE (DOC-5).
     if head_slice.starts_with(UTF32_LE_BOM) || head_slice.starts_with(UTF32_BE_BOM) {
         return Err(LoadError::Undecodable);
     }
@@ -304,7 +301,6 @@ fn load_reader_with_page<R: Read + Seek>(
         }
         Some(BomKind::Utf8) => stream_utf8(reader, initial, chunk_size, true),
         None => {
-            // Sniff up to 64 bytes for BOM-less UTF-16 (DOC-5) before falling through to UTF-8/ANSI.
             let mut probe = Vec::with_capacity(64);
             probe.extend_from_slice(initial);
             let mut extra = [0u8; 60];
@@ -329,9 +325,7 @@ fn load_reader_with_page<R: Read + Seek>(
                 Err(LoadError::Undecodable) => {
                     reader.seek(SeekFrom::Start(0)).map_err(LoadError::Io)?;
                     if page.is_utf8() {
-                        // System ACP is UTF-8 (65001) and strict UTF-8 failed: fall back to strict
-                        // CP 1252 and flag `lossy_decode` so saving warns instead of silently
-                        // rewriting non-UTF-8 bytes as UTF-8 (DOC-1).
+                        // ACP 65001 failed strict UTF-8; fall back to CP 1252 and flag lossy_decode so save warns.
                         let mut loaded = stream_ansi(reader, chunk_size, AnsiCodePage::CP_1252)?;
                         loaded.format.lossy_decode = true;
                         Ok(loaded)
@@ -363,7 +357,6 @@ fn stream_ansi<R: Read>(
         if filled == 0 {
             break;
         }
-        // On DBCS code pages, avoid splitting a trailing lead byte across chunks.
         let mut decode_end = filled;
         if !eof && decode_end > 0 {
             let mut trailing_leads = 0usize;
@@ -723,7 +716,6 @@ pub(crate) fn write_rope(path: &Path, rope: &Rope, format: Format) -> io::Result
         Err(error) => return Err(error),
     };
 
-    // Preserve hard links by writing in place instead of breaking the link with ReplaceFileW (DOC-4).
     if existing && file_hard_link_count(&target).unwrap_or(1) > 1 {
         return write_in_place(&target, rope, format);
     }
@@ -731,7 +723,6 @@ pub(crate) fn write_rope(path: &Path, rope: &Rope, format: Format) -> io::Result
     let (temp, file) = match create_temp(&target) {
         Ok(pair) => pair,
         Err(err) if existing && err.kind() == io::ErrorKind::PermissionDenied => {
-            // Writable existing file in a read-only directory: fall back to in-place write (DOC-4).
             return write_in_place(&target, rope, format);
         }
         Err(err) => return Err(err),
@@ -769,7 +760,6 @@ fn resolve(path: &Path) -> io::Result<PathBuf> {
                 .or_else(|_| std::path::absolute(parent))?;
             Ok(resolved_parent.join(path.file_name().unwrap_or_default()))
         }
-        // Fallback for RAM disks / ImDisk / VeraCrypt / WinFsp where GetFinalPathNameByHandle fails (DOC-4).
         Err(_) => std::path::absolute(path),
     }
 }
@@ -818,8 +808,6 @@ fn replace(
             }
         }
     }
-    // Sharing/access persisted (e.g. target held open without FILE_SHARE_DELETE):
-    // clean up temp and fall back to an in-place write (DOC-4).
     fs::remove_file(temp).ok();
     write_in_place(target, rope, format).map_err(|_| last_err.unwrap_or_else(|| io::Error::other("replace failed")))
 }
@@ -856,13 +844,11 @@ pub(crate) fn write_notices() -> io::Result<PathBuf> {
     Ok(path)
 }
 
-/// Computes a normalized comparison key without hitting the filesystem (safe on the UI thread).
 pub(crate) fn quick_path_key(path: &Path) -> String {
     let abs = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
     path_key(&abs)
 }
 
-/// Canonicalizes `path` once (intended for background threads) with fallback to `quick_path_key`.
 pub(crate) fn canonical_path_key(path: &Path) -> String {
     match fs::canonicalize(path) {
         Ok(c) => path_key(&c),
@@ -964,12 +950,10 @@ mod tests {
             load_bytes(b"\xfe\xff\0h", 4).unwrap().format.encoding,
             Encoding::Utf16Be
         );
-        // UTF-32 LE BOM must be rejected rather than mis-detected as UTF-16 LE (DOC-5).
         assert!(matches!(
             load_bytes(b"\xff\xfe\x00\x00a\0\0\0", 4),
             Err(LoadError::Undecodable)
         ));
-        // BOM-less UTF-16 LE/BE detection (DOC-5).
         let bomless_le = load_bytes(b"a\0b\0c\0", 4).unwrap();
         assert_eq!(bomless_le.format.encoding, Encoding::Utf16Le);
         assert_eq!(bomless_le.text.to_string(), "abc");
@@ -985,7 +969,6 @@ mod tests {
 
     #[test]
     fn injected_ansi_code_pages_round_trip_and_flag_lossy() {
-        // 1. CP 1252: all 256 byte values decode cleanly and round-trip losslessly (DOC-1).
         let cp1252 = AnsiCodePage::from_raw(1252);
         let all_bytes: Vec<u8> = (0u8..=255u8)
             .filter(|&b| b != b'\r' && b != b'\n')
@@ -998,7 +981,6 @@ mod tests {
         stream_encode_with_page(&loaded.text, loaded.format, cp1252, &mut reencoded).unwrap();
         assert_eq!(reencoded, all_bytes);
 
-        // 2. is_lossy distinguishes representable "é" vs non-representable "😀" on CP 1252.
         let ansi_fmt = Format {
             encoding: Encoding::Ansi,
             ..Default::default()
@@ -1006,8 +988,6 @@ mod tests {
         assert!(!is_lossy_with_page(&Rope::from("café"), ansi_fmt, cp1252).unwrap());
         assert!(is_lossy_with_page(&Rope::from("hello 😀"), ansi_fmt, cp1252).unwrap());
 
-        // 3. Under UTF-8 ACP (65001), invalid UTF-8 bytes like Latin-1 `caf\xe9` are flagged
-        //    `lossy_decode = true` so saving prompts instead of silently rewriting (DOC-1).
         let cp65001 = AnsiCodePage::from_raw(65001);
         let latin1 = b"caf\xe9";
         let loaded_utf8_acp = load_bytes_with_page(latin1, 8, cp65001).unwrap();
@@ -1016,7 +996,6 @@ mod tests {
             is_lossy_with_page(&loaded_utf8_acp.text, loaded_utf8_acp.format, cp65001).unwrap()
         );
 
-        // 4. Under Shift-JIS (932), invalid DBCS lead byte fails strict decode (DOC-1).
         let cp932 = AnsiCodePage::from_raw(932);
         let invalid_sjis = [0x81u8, 0x00u8, 0xFFu8];
         assert!(matches!(
@@ -1126,7 +1105,6 @@ mod tests {
         let loaded = load(&file).unwrap();
         assert_eq!(loaded.text.to_string(), "second\nline");
 
-        // Ensure no leftover .jot-save / .jot-backup siblings remain (DOC-4).
         let entries: Vec<_> = fs::read_dir(&dir)
             .unwrap()
             .flatten()
@@ -1134,18 +1112,16 @@ mod tests {
             .collect();
         assert_eq!(entries.len(), 1);
 
-        // Long filename (>244 chars component) truncates sibling temp/backup name cleanly (DOC-4).
         let long_name = format!("{}.txt", "a".repeat(245));
         let long_sibling = sibling(&dir.join(&long_name), 3, BACKUP_SUFFIX);
         let sib_len = long_sibling.file_name().unwrap().to_string_lossy().len();
         assert!(sib_len < 240, "sibling filename too long: {sib_len}");
 
-        // Target held open without FILE_SHARE_DELETE falls back to in-place write (DOC-4).
         {
             use std::os::windows::fs::OpenOptionsExt as _;
             let _holder = fs::OpenOptions::new()
                 .read(true)
-                .share_mode(1 | 2) // FILE_SHARE_READ | FILE_SHARE_WRITE (no FILE_SHARE_DELETE)
+                .share_mode(1 | 2)
                 .open(&file)
                 .unwrap();
             write_rope(&file, &Rope::from("in-place fallback"), format).unwrap();

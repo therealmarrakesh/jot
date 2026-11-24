@@ -1,6 +1,3 @@
-//! Four-channel `[0.0, 1.0]` RGBA color representation and blending helpers.
-
-/// Four-channel `[0.0, 1.0]` RGBA color.
 #[derive(Copy, Clone, Debug, Default, PartialEq)]
 pub(crate) struct Rgba {
     pub(crate) r: f32,
@@ -44,7 +41,6 @@ impl Rgba {
     }
 }
 
-/// Construct an opaque `Rgba` from `0xRRGGBB`.
 #[inline]
 pub(crate) fn rgb(hex: u32) -> Rgba {
     Rgba {
@@ -55,7 +51,6 @@ pub(crate) fn rgb(hex: u32) -> Rgba {
     }
 }
 
-/// Construct an `Rgba` from `0xRRGGBBAA`.
 #[inline]
 pub(crate) fn rgba(hex: u32) -> Rgba {
     Rgba {

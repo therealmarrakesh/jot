@@ -1,6 +1,3 @@
-//! Streaming chunked Unicode-folded text matcher, animated Find & Replace bar,
-//! options flyout, and auto-dismissing wrap/not-found toast notice.
-
 use std::ops::Range;
 use std::time::Duration;
 
@@ -65,8 +62,8 @@ fn fold_char(c: char) -> char {
         return c.to_ascii_lowercase();
     }
     match c {
-        '\u{017F}' => 's',        // LATIN SMALL LETTER LONG S
-        '\u{03C2}' => '\u{03C3}', // GREEK SMALL LETTER FINAL SIGMA
+        '\u{017F}' => 's',
+        '\u{03C2}' => '\u{03C3}',
         '\u{03D0}' => '\u{03B2}',
         '\u{03D1}' => '\u{03B8}',
         '\u{03D5}' => '\u{03C6}',
@@ -75,9 +72,9 @@ fn fold_char(c: char) -> char {
         '\u{03F1}' => '\u{03C1}',
         '\u{03F5}' => '\u{03B5}',
         '\u{1E9B}' => '\u{1E61}',
-        '\u{2126}' => '\u{03C9}', // OHM SIGN
-        '\u{212A}' => 'k',        // KELVIN SIGN
-        '\u{212B}' => '\u{00E5}', // ANGSTROM SIGN
+        '\u{2126}' => '\u{03C9}',
+        '\u{212A}' => 'k',
+        '\u{212B}' => '\u{00E5}',
         _ => {
             let mut lower = c.to_lowercase();
             let first = lower.next().unwrap_or(c);
@@ -429,8 +426,6 @@ impl FindBar {
     }
 
     pub(crate) fn open(&mut self, replace: bool, selected: &str, ts: &TextSystem) {
-        // Cap seeded Find query length so pressing Ctrl+F with a huge single-line selection
-        // never copies megabytes into the single-line search box (P-10).
         if !selected.is_empty()
             && !selected.contains('\n')
             && selected.chars().take(MAX_SEED_QUERY_CHARS + 1).count() <= MAX_SEED_QUERY_CHARS
@@ -477,7 +472,6 @@ impl FindBar {
         self.matcher.as_ref().map(|_| query)
     }
 
-    /// Searches `editor` forward or backward. Returns `false` if query was empty (caller should open bar).
     pub(crate) fn step(
         &mut self,
         editor: &mut Editor,
@@ -524,8 +518,6 @@ impl FindBar {
         if self.prepare().is_none() {
             return;
         }
-        // Check selected byte length BEFORE materializing a String so a 50 MB selection never
-        // allocates just to fail a 3-char match check (P-10).
         let sel_len = editor.selected_range().len();
         let is_match = self.matcher.as_ref().is_some_and(|m| {
             sel_len > 0
@@ -927,7 +919,6 @@ fn cursor_after_replace_all(
     offset
 }
 
-/// Rebuilds the entire document in a single linear `RopeBuilder` pass for O(N) Replace All (P-10).
 fn rebuild_replaced_rope(text: &Rope, ranges: &[Range<usize>], replacement: &str) -> Rope {
     let mut builder = ropey::RopeBuilder::new();
     let mut cursor = 0usize;

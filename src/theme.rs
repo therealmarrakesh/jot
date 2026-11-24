@@ -1,5 +1,3 @@
-//! Light, dark, and Windows High Contrast color palettes and elevation shadow presets.
-
 use crate::color::{Rgba, black, rgb};
 use crate::geom::{BoxShadow, Shadows, point};
 use crate::platform::HighContrastColors;
@@ -85,7 +83,6 @@ impl Palette {
         palette
     }
 
-    /// Builds an opaque palette driven by Windows High Contrast system colors (A11Y-1).
     pub(crate) fn from_high_contrast(hc: HighContrastColors) -> Self {
         let r = ((hc.window >> 16) & 0xFF) as f32;
         let g = ((hc.window >> 8) & 0xFF) as f32;

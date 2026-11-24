@@ -1,13 +1,9 @@
-//! Coalescing undo/redo history with nested transactions, byte budget, bulk snapshots,
-//! and save-point tracking.
-
 use ropey::Rope;
 
 use super::buffer::{CaretSelection, Selection};
 
 const MAX_HISTORY_ENTRIES: usize = 1000;
 const MAX_CHANGES_PER_ENTRY: usize = 1000;
-/// Total undo+redo byte budget (P-9). Keeps at least 1 entry so even a huge paste can undo.
 const MAX_HISTORY_BYTES: usize = 32 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -49,7 +45,6 @@ impl EditRecord {
 #[derive(Debug)]
 enum HistoryPayload {
     Edits(Vec<EditRecord>),
-    /// O(1) structural-sharing Rope snapshot for bulk operations like Replace All (P-9).
     Snapshot { before: Rope, after: Rope },
 }
 
@@ -57,7 +52,6 @@ impl HistoryPayload {
     fn approx_bytes(&self) -> usize {
         match self {
             Self::Edits(edits) => edits.iter().map(EditRecord::approx_bytes).sum(),
-            // Structural sharing keeps snapshot memory proportional to modified chunks, not total rope.
             Self::Snapshot { .. } => 4096,
         }
     }

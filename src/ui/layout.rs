@@ -1,11 +1,5 @@
-//! Native single-line CSS Border-Box Flexbox layout engine with two-phase device-pixel snapping.
-//!
-//! Decoupled from Win32, `App`, and `Window`: operates directly on `FlexStyle` and accepts a
-//! caller-supplied measurement closure for text/custom leaves.
-
 use crate::geom::{Edges, Point, Rect, Size, point, size};
 
-/// Rounds to the nearest integer with exact `.5` ties rounded toward zero (global edge closure).
 #[inline]
 fn round_half_toward_zero(value: f32) -> f32 {
     (value.abs() - 0.5).ceil().copysign(value)
@@ -25,8 +19,6 @@ fn round_stroke_to_device_pixel(logical: f32, scale_factor: f32) -> f32 {
     }
 }
 
-/// Snaps logical border thicknesses to whole device pixels and returns the matching DIP values
-/// so `D2DRenderer::paint_quad` matches the physical border inset used by `LayoutEngine` (G-9).
 #[inline]
 pub(crate) fn snap_border_edges(border: Edges<f32>, scale_factor: f32) -> Edges<f32> {
     let s = scale_factor.max(0.5);
@@ -43,7 +35,6 @@ fn ceil_to_device_pixel(logical: f32, scale_factor: f32) -> f32 {
     (logical * scale_factor).ceil()
 }
 
-/// Dense handle to a layout node within [`LayoutEngine`].
 #[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
 pub(crate) struct LayoutId(pub(crate) u32);
 
@@ -54,7 +45,6 @@ impl LayoutId {
     }
 }
 
-/// Available layout space in logical DIPs.
 #[derive(Copy, Clone, Default, Debug, PartialEq)]
 pub(crate) enum AvailableSpace {
     Definite(f32),
@@ -156,7 +146,6 @@ pub(crate) enum JustifyContent {
     Center,
 }
 
-/// Direct flat layout style consumed by both the declarative UI builder and [`LayoutEngine`].
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub(crate) struct FlexStyle {
     pub(crate) direction: FlexDirection,
@@ -467,7 +456,6 @@ struct Node {
     cache: SizeCache,
 }
 
-/// Arena-backed single-line Flexbox solver with two-phase fractional-DPI edge closure.
 #[derive(Default)]
 pub(crate) struct LayoutEngine {
     nodes: Vec<Node>,
@@ -508,8 +496,6 @@ impl LayoutEngine {
         id
     }
 
-    /// Computes layout for `root` given `available` logical space, calling `measure` for leaf
-    /// nodes created with `measured == true`.
     pub(crate) fn compute(
         &mut self,
         root: LayoutId,
@@ -546,7 +532,6 @@ impl LayoutEngine {
         node.size = root_size;
     }
 
-    /// Returns the device-pixel-snapped logical border-box rect for `id`.
     pub(crate) fn bounds(&mut self, id: LayoutId, scale: f32) -> Rect {
         if let Some(b) = self.nodes[id.idx()].abs_bounds {
             return b;
@@ -590,7 +575,6 @@ impl LayoutEngine {
     }
 }
 
-/// Split-borrow view over `LayoutEngine` so container child slices never clone into temporary `Vec`s.
 struct Solver<'a> {
     nodes: &'a mut [Node],
     children: &'a [LayoutId],
@@ -967,7 +951,6 @@ impl<'a> Solver<'a> {
         };
         let inner_main = (container_main - pb_main).max(0.0);
 
-        // CSS Flexbox §9.7: resolve flexible lengths.
         if resolve_flex {
             let growing = total_hypothetical < inner_main;
             for item in &mut items {
@@ -1096,7 +1079,6 @@ impl<'a> Solver<'a> {
             }
         }
 
-        // Determine container cross size.
         let (pw_with_main, ph_with_main) = pair_from(Some(inner_main), inner_cross_opt, row);
         let container_cross = match node_cross {
             Some(c) => c,
@@ -1143,7 +1125,6 @@ impl<'a> Solver<'a> {
             return container_size;
         }
 
-        // Final PerformLayout pass & positioning of all in-flow children.
         let inner_cross = (container_cross - pb_cross).max(0.0);
         let (final_pw, final_ph) = pair_from(Some(inner_main), Some(inner_cross), row);
 

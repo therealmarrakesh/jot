@@ -1,9 +1,3 @@
-//! Single-instance arbitration and framed UTF-16 named-pipe handoff (I-1..I-5).
-//!
-//! Arbitration runs at startup *before* D3D/D2D/DWrite initialization so simultaneous multi-file
-//! Explorer launches never race into duplicate processes. No-argument launches also hand off a
-//! `NewWindow` command to the active same-user, same-session, same-elevation instance.
-
 use std::ffi::OsString;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::PathBuf;
@@ -18,7 +12,6 @@ const MAX_PAYLOAD_BYTES: usize = 1024 * 1024;
 const CMD_OPEN_PATHS: u8 = 1;
 const CMD_NEW_WINDOW: u8 = 2;
 
-/// Command delivered from a secondary Jot launch to the primary instance.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum HandoffCommand {
     OpenPaths(Vec<PathBuf>),
@@ -30,8 +23,6 @@ enum Dispatcher {
     Live(Box<dyn Fn(HandoffCommand) + Send>),
 }
 
-/// Active primary-instance server. Buffers any handoffs arriving during startup until
-/// [`attach_handler`](Self::attach_handler) connects `App`'s event poster.
 pub(crate) struct InstanceServer {
     pipe: PipeServer,
     dispatcher: Arc<Mutex<Dispatcher>>,
@@ -42,7 +33,6 @@ impl InstanceServer {
         self.pipe.accepting_flag()
     }
 
-    /// Attaches the live UI-thread event poster and immediately flushes any startup handoffs.
     pub(crate) fn attach_handler(&self, on_command: impl Fn(HandoffCommand) + Send + 'static) {
         let pending = {
             let mut guard = self.dispatcher.lock().unwrap_or_else(|e| e.into_inner());
@@ -63,21 +53,16 @@ impl InstanceServer {
     }
 }
 
-/// Result of early startup single-instance arbitration.
 pub(crate) enum Arbitration {
-    /// This process owns the pipe and should initialize and run the UI.
     Primary(Option<InstanceServer>),
-    /// An already-running instance accepted and acknowledged our handoff; this process should exit.
     HandedOff,
 }
 
-/// Computes the SID-, session-, and elevation-scoped named-pipe path (I-2, I-3).
 pub(crate) fn pipe_name() -> String {
     if let Some(id) = current_process_identity() {
         let elev = if id.elevated { "elev" } else { "std" };
         return format!(r"\\.\pipe\Jot.Tabs.S{}.{}.{}", id.session_id, elev, id.sid);
     }
-    // Fallback if token queries are restricted.
     let user = std::env::var("USERNAME").unwrap_or_else(|_| "default".into());
     let sanitized: String = user
         .chars()
@@ -150,7 +135,6 @@ fn decode_command(cmd: u8, body: &[u8]) -> Option<HandoffCommand> {
     }
 }
 
-/// Arbitrates single-instance ownership on the session pipe *before* platform/GPU init (I-1, I-4).
 pub(crate) fn arbitrate(paths: &[PathBuf]) -> Arbitration {
     let cmd = if paths.is_empty() {
         HandoffCommand::NewWindow
@@ -186,7 +170,6 @@ pub(crate) fn arbitrate_on(pipe: &str, cmd: &HandoffCommand) -> Arbitration {
                 if send_framed_handoff(pipe, raw_cmd, &body) {
                     return Arbitration::HandedOff;
                 }
-                // Existing primary may be shutting down; retry claiming briefly.
                 std::thread::sleep(Duration::from_millis(25));
             }
             PipeClaim::Failed => return Arbitration::Primary(None),
@@ -214,7 +197,6 @@ mod tests {
             decode_command(nw_cmd, &nw_body),
             Some(HandoffCommand::NewWindow)
         );
-        // Truncated payload must be rejected cleanly.
         assert_eq!(decode_command(cmd, &body[..body.len() - 1]), None);
     }
 
@@ -226,7 +208,6 @@ mod tests {
             panic!("first process must claim pipe ownership");
         };
 
-        // Fire a NewWindow handoff BEFORE attach_handler to verify startup buffering (I-1).
         assert!(matches!(
             arbitrate_on(&pipe, &HandoffCommand::NewWindow),
             Arbitration::HandedOff
@@ -241,7 +222,6 @@ mod tests {
             HandoffCommand::NewWindow
         );
 
-        // Concurrent multi-file launches (simulating Explorer multi-select, I-1) all deliver cleanly.
         let mut threads = Vec::new();
         for i in 0..5 {
             let p = pipe.clone();
@@ -273,7 +253,6 @@ mod tests {
             );
         }
 
-        // After stopping acceptance, handoff must be rejected cleanly (I-5).
         server.pipe.stop_accepting();
         let (raw_cmd, body) = encode_command(&HandoffCommand::NewWindow);
         assert!(

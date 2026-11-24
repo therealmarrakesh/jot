@@ -1,5 +1,3 @@
-//! Shared Windows 11 Fluent controls built directly on `ui::scene`.
-
 use crate::color::{Rgba, rgb, rgba};
 use crate::geom::Edges;
 use crate::platform::CursorStyle;

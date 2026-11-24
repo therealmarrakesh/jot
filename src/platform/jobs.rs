@@ -1,6 +1,3 @@
-//! Typed UI-thread event delivery for drop-canceling timers, background pool jobs, STA threads,
-//! and cross-thread posts.
-
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, VecDeque};
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -10,10 +7,6 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 type WakeCallback = Arc<dyn Fn() + Send + Sync>;
-
-// ---------------------------------------------------------------------------
-// Global Condvar-backed timer min-heap (0% CPU when idle)
-// ---------------------------------------------------------------------------
 
 struct ScheduledTimer {
     deadline: Instant,
@@ -120,8 +113,6 @@ impl TimerWheel {
                 }
             }
 
-            // Fire due callbacks outside the wheel lock and catch any panic so the wheel never
-            // poisons or dies.
             let mut reschedule = Vec::new();
             for mut entry in due.drain(..) {
                 if !entry.cancelled.load(Ordering::Acquire) {
@@ -146,10 +137,6 @@ impl TimerWheel {
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// Global 2-thread background worker pool (0% CPU when idle, panic-resilient)
-// ---------------------------------------------------------------------------
 
 type PoolJob = Box<dyn FnOnce() + Send + 'static>;
 
@@ -194,10 +181,6 @@ impl WorkerPool {
         self.condvar.notify_one();
     }
 }
-
-// ---------------------------------------------------------------------------
-// Typed job/timer queue owned by `App`
-// ---------------------------------------------------------------------------
 
 struct QueuedEvent<E> {
     event: E,
@@ -248,7 +231,6 @@ impl<E> JobsInner<E> {
     }
 }
 
-/// Thread-safe handle allowing background threads (e.g., named-pipe listener) to post typed events.
 pub(crate) struct EventPoster<E> {
     inner: Arc<JobsInner<E>>,
 }
@@ -267,7 +249,6 @@ impl<E> EventPoster<E> {
     }
 }
 
-/// RAII handle to a scheduled one-shot or repeating timer. Dropping cancels it unless `.detach()`ed.
 #[derive(Default)]
 pub(crate) struct TimerHandle {
     cancelled: Option<Arc<AtomicBool>>,
@@ -292,7 +273,6 @@ impl Drop for TimerHandle {
     }
 }
 
-/// Typed timer and background-job manager delivering `E` events to the UI thread.
 pub(crate) struct Jobs<E> {
     inner: Arc<JobsInner<E>>,
 }
@@ -362,8 +342,6 @@ impl<E: Send + 'static> Jobs<E> {
         }));
     }
 
-    /// Runs `work` on the background pool, catching panics so `on_panic` still delivers an error
-    /// event and workflows never hang.
     pub(crate) fn spawn_bg_guarded(
         &self,
         work: impl FnOnce() -> E + Send + 'static,
@@ -379,8 +357,6 @@ impl<E: Send + 'static> Jobs<E> {
         }));
     }
 
-    /// Runs `work` on a dedicated thread (for writes or STA dialogs), catching panics so `on_panic`
-    /// still delivers a completion event.
     pub(crate) fn spawn_dedicated_guarded(
         &self,
         name: &str,
@@ -489,7 +465,6 @@ mod tests {
         let jobs = Jobs::<TestEvent>::new();
         let mut handle = jobs.after(Duration::from_millis(5), TestEvent::Cancelled);
         thread::sleep(Duration::from_millis(25));
-        // Event is now sitting in `ready`; cancelling must still suppress it at pop().
         handle.cancel();
         assert_eq!(jobs.pop(), None);
     }

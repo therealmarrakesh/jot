@@ -1,10 +1,7 @@
-//! Typed application, menu, dialog, and editor commands plus single-source shortcut metadata.
-
 use crate::platform::{Key, KeyEvent};
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum Command {
-    // Window, tabs, and file workflows
     NewTab,
     NewWindow,
     Open,
@@ -19,7 +16,6 @@ pub(crate) enum Command {
     CloseWindow,
     Exit,
 
-    // View, search, zoom, and tools
     Find,
     FindNext,
     FindPrevious,
@@ -36,10 +32,8 @@ pub(crate) enum Command {
     ToggleWrapAround,
     ShowContextMenu,
 
-    // Shared cancellation
     Cancel,
 
-    // Editor editing, clipboard, history, and navigation
     Enter,
     Backspace,
     Delete,
@@ -82,11 +76,10 @@ pub(crate) enum Command {
     Escape,
 }
 
-/// Single declarative shortcut table binding keystrokes to commands and displayed menu labels (AR-5).
 struct ShortcutEntry {
     ctrl: bool,
     alt: bool,
-    shift: Option<bool>, // None matches either shift state (e.g. Ctrl+= / Ctrl++)
+    shift: Option<bool>,
     key: Key,
     command: Command,
     label: Option<&'static str>,
@@ -367,7 +360,6 @@ const WINDOW_SHORTCUTS: &[ShortcutEntry] = &[
     },
 ];
 
-/// Resolves a window-level keyboard shortcut, ignoring AltGr text chords (K-4, AR-5).
 pub(crate) fn window_shortcut(ev: KeyEvent) -> Option<Command> {
     let m = ev.modifiers;
     if m.win || m.alt_gr {
@@ -384,7 +376,6 @@ pub(crate) fn window_shortcut(ev: KeyEvent) -> Option<Command> {
         .map(|entry| entry.command)
 }
 
-/// Returns the displayed menu shortcut label from the single shortcut table (AR-5).
 pub(crate) fn shortcut_label(command: Command) -> Option<&'static str> {
     if let Some(entry) = WINDOW_SHORTCUTS
         .iter()

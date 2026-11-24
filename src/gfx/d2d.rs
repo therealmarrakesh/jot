@@ -1,10 +1,3 @@
-//! Direct3D 11 + DirectComposition + Direct2D 1.1 renderer.
-//!
-//! Binds `ID2D1DeviceContext` directly to a `CreateSwapChainForComposition` premultiplied
-//! `B8G8R8A8_UNORM` swapchain for Windows 11 Mica Alt backdrop, transparent overlay HWNDs, and
-//! `FLIP_SEQUENTIAL` presentation (`Present(0)` paced externally via `DwmFlush`) with zero HLSL
-//! shaders and zero glyph atlases.
-
 use std::collections::HashMap;
 use std::time::Instant;
 
@@ -89,7 +82,6 @@ fn to_d2d_rect(r: Rect) -> D2D_RECT_F {
     }
 }
 
-/// Process-wide Direct3D 11 + DXGI + Direct2D 1.1 device objects shared across all Jot windows.
 #[derive(Clone)]
 pub(crate) struct Direct2DDevices {
     pub(crate) dxgi_factory: IDXGIFactory6,
@@ -101,13 +93,11 @@ pub(crate) struct Direct2DDevices {
 
 impl Direct2DDevices {
     pub(crate) fn new() -> Result<Self> {
-        // SAFETY: Standard DXGI factory creation with zero flags.
         let dxgi_factory: IDXGIFactory6 =
             unsafe { CreateDXGIFactory2(DXGI_CREATE_FACTORY_FLAGS(0))? };
         let feature_levels = [D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0];
         let mut d3d_device: Option<ID3D11Device> = None;
 
-        // SAFETY: Creates hardware D3D11 device with BGRA support for Direct2D interop.
         let hw = unsafe {
             D3D11CreateDevice(
                 None,
@@ -122,7 +112,6 @@ impl Direct2DDevices {
             )
         };
         if hw.is_err() {
-            // SAFETY: Falls back to software WARP adapter when hardware D3D11 is unavailable.
             unsafe {
                 D3D11CreateDevice(
                     None,
@@ -141,14 +130,12 @@ impl Direct2DDevices {
             d3d_device.ok_or_else(|| Error::new("D3D11CreateDevice returned null device"))?;
         let dxgi_device: IDXGIDevice = d3d_device.cast()?;
 
-        // SAFETY: Creates single-threaded D2D1 factory and binds it to the DXGI device.
         let d2d_factory: ID2D1Factory1 = unsafe {
             D2D1CreateFactory(
                 D2D1_FACTORY_TYPE_SINGLE_THREADED,
                 Some(&D2D1_FACTORY_OPTIONS::default()),
             )?
         };
-        // SAFETY: `d2d_factory` and `dxgi_device` are valid COM interfaces created above.
         let d2d_device = unsafe { d2d_factory.CreateDevice(&dxgi_device)? };
 
         Ok(Self {
@@ -177,7 +164,6 @@ struct CachedShadow {
     last_used: Instant,
 }
 
-/// Filled/bordered rounded-rectangle primitive.
 #[derive(Copy, Clone, Debug, Default, PartialEq)]
 pub(crate) struct PaintQuad {
     pub(crate) bounds: Rect,
@@ -210,7 +196,6 @@ enum RenderScope {
     Layer,
 }
 
-/// Per-window Direct2D 1.1 + DirectComposition renderer bound to a premultiplied DXGI swapchain.
 pub(crate) struct D2DRenderer {
     devices: Direct2DDevices,
     swap_chain: IDXGISwapChain1,
@@ -258,14 +243,12 @@ impl D2DRenderer {
             AlphaMode: DXGI_ALPHA_MODE_PREMULTIPLIED,
             Flags: 0,
         };
-        // SAFETY: Creates premultiplied composition swapchain on valid DXGI factory and D3D11 device.
         let swap_chain = unsafe {
             devices
                 .dxgi_factory
                 .CreateSwapChainForComposition(&devices.d3d_device, &desc, None)?
         };
 
-        // SAFETY: Binds swapchain to `hwnd` via DirectComposition visual tree on the UI thread.
         let (comp_device, comp_target, comp_visual) = unsafe {
             let comp_device: IDCompositionDevice =
                 DCompositionCreateDevice(&devices.dxgi_device)?;
@@ -277,7 +260,6 @@ impl D2DRenderer {
             (comp_device, comp_target, comp_visual)
         };
 
-        // SAFETY: Creates main D2D1 device context and reusable solid brush on the UI thread.
         let (context, solid_brush) = unsafe {
             let context = devices
                 .d2d_device
@@ -288,9 +270,6 @@ impl D2DRenderer {
                 context.CreateSolidColorBrush(&to_d2d_color(Rgba::new(0.0, 0.0, 0.0, 1.0)), None)?;
             (context, solid_brush)
         };
-        // Persistent offscreen shadow context + white brush + shadow effect (avoids per-frame
-        // D2D device-context & effect creation during menu/dialog animations, G-11).
-        // SAFETY: Optional offscreen D2D1 context for cached shadow bitmaps on the UI thread.
         let shadow_context = unsafe {
             devices
                 .d2d_device
@@ -298,14 +277,12 @@ impl D2DRenderer {
         }
         .ok();
         let shadow_white_brush = shadow_context.as_ref().and_then(|ctx| {
-            // SAFETY: `ctx` is a valid offscreen `ID2D1DeviceContext`.
             unsafe {
                 ctx.CreateSolidColorBrush(&to_d2d_color(Rgba::new(1.0, 1.0, 1.0, 1.0)), None)
             }
             .ok()
         });
         let shadow_effect = shadow_context.as_ref().and_then(|ctx| {
-            // SAFETY: `ctx` is a valid offscreen `ID2D1DeviceContext` supporting built-in shadow effect.
             unsafe { ctx.CreateEffect(&CLSID_D2D1Shadow) }.ok()
         });
 
@@ -333,7 +310,6 @@ impl D2DRenderer {
     }
 
     fn attach_backbuffer(&mut self, scale_factor: f32) -> Result<()> {
-        // SAFETY: Buffer 0 is always present on a live DXGI swapchain.
         let surface: IDXGISurface = unsafe { self.swap_chain.GetBuffer(0)? };
         let dpi = 96.0 * scale_factor;
         let props = D2D1_BITMAP_PROPERTIES1 {
@@ -346,7 +322,6 @@ impl D2DRenderer {
             bitmapOptions: D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
             ..Default::default()
         };
-        // SAFETY: Wraps backbuffer `IDXGISurface` as D2D1 render target and binds DPI/target.
         let bitmap = unsafe {
             let bitmap = self
                 .context
@@ -374,12 +349,10 @@ impl D2DRenderer {
         {
             return Ok(());
         }
-        // SAFETY: Detaches render target before releasing `target_bitmap` for `ResizeBuffers`.
         unsafe {
             self.context.SetTarget(None);
         }
         self.target_bitmap = None;
-        // SAFETY: All backbuffer references are dropped above; `width`/`height` are >= 1.
         let resize_res = unsafe {
             self.swap_chain.ResizeBuffers(
                 SWAPCHAIN_BUFFERS,
@@ -401,7 +374,6 @@ impl D2DRenderer {
             }
             return Err(err);
         }
-        // Commit dimensions/DPI only after ResizeBuffers + attach_backbuffer succeed (G-4).
         if (scale_factor - self.scale_factor).abs() >= f32::EPSILON {
             self.shadow_cache.clear();
         }
@@ -416,7 +388,6 @@ impl D2DRenderer {
         if self.target_bitmap.is_none() && self.attach_backbuffer(self.scale_factor).is_err() {
             self.needs_recreate = true;
         }
-        // SAFETY: Begins a single-threaded D2D1 draw pass on `self.context`.
         unsafe {
             self.context.BeginDraw();
             self.context.SetTransform(&Matrix3x2::identity());
@@ -424,27 +395,22 @@ impl D2DRenderer {
         }
     }
 
-    /// Ends the D2D frame and presents the swapchain. Returns `Ok(true)` if the GPU device was lost.
     pub(crate) fn end_frame(&mut self) -> Result<bool> {
         while let Some(scope) = self.scopes.pop() {
             match scope {
                 RenderScope::Clip => {
-                    // SAFETY: Unwinds matched clip in strict LIFO order before `EndDraw`.
                     unsafe { self.context.PopAxisAlignedClip() }
                 }
                 RenderScope::Layer => {
-                    // SAFETY: Unwinds matched layer in strict LIFO order before `EndDraw`.
                     unsafe { self.context.PopLayer() }
                 }
             }
         }
-        // SAFETY: Matches `begin_frame`'s `BeginDraw`.
         let end_res = unsafe { self.context.EndDraw(None, None) };
         if self.needs_recreate {
             return Ok(true);
         }
         if let Err(err) = end_res {
-            // SAFETY: Queries whether the underlying D3D11 device was removed/reset.
             let removed = unsafe { self.devices.d3d_device.GetDeviceRemovedReason() }.is_err();
             if is_device_lost_hr(err.code()) || removed {
                 self.needs_recreate = true;
@@ -452,10 +418,8 @@ impl D2DRenderer {
             }
             return Err(err.into());
         }
-        // SAFETY: Presents completed frame to DirectComposition swapchain.
         let hr = unsafe { self.swap_chain.Present(0, DXGI_PRESENT(0)) };
         let removed = if hr.is_err() {
-            // SAFETY: Queries whether the underlying D3D11 device was removed/reset on present error.
             unsafe { self.devices.d3d_device.GetDeviceRemovedReason() }.is_err()
         } else {
             false
@@ -475,7 +439,6 @@ impl D2DRenderer {
 
     pub(crate) fn push_clip(&mut self, bounds: Rect) {
         let rect = to_d2d_rect(bounds);
-        // SAFETY: Called within an active `BeginDraw`/`EndDraw` pair; tracked on `self.scopes`.
         unsafe {
             self.context
                 .PushAxisAlignedClip(&rect, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
@@ -486,15 +449,12 @@ impl D2DRenderer {
     pub(crate) fn pop_clip(&mut self) {
         if self.scopes.last() == Some(&RenderScope::Clip) {
             self.scopes.pop();
-            // SAFETY: Matches the clip pushed at the top of `self.scopes`.
             unsafe {
                 self.context.PopAxisAlignedClip();
             }
         }
     }
 
-    /// Pushes an opacity layer with infinite content bounds so drop shadows and overflowing
-    /// submenus are never clipped during fade animations (G-10).
     pub(crate) fn push_opacity_layer(&mut self, opacity: f32) {
         let params = D2D1_LAYER_PARAMETERS1 {
             contentBounds: D2D_RECT_F {
@@ -510,7 +470,6 @@ impl D2DRenderer {
             opacityBrush: std::mem::ManuallyDrop::new(None),
             layerOptions: D2D1_LAYER_OPTIONS1_NONE,
         };
-        // SAFETY: Called within `BeginDraw`/`EndDraw`; `params` contains no owned COM pointers.
         unsafe {
             self.context.PushLayer(&params, None);
         }
@@ -520,7 +479,6 @@ impl D2DRenderer {
     pub(crate) fn pop_layer(&mut self) {
         if self.scopes.last() == Some(&RenderScope::Layer) {
             self.scopes.pop();
-            // SAFETY: Matches the layer pushed at the top of `self.scopes`.
             unsafe {
                 self.context.PopLayer();
             }
@@ -529,7 +487,6 @@ impl D2DRenderer {
 
     #[inline]
     fn set_brush_color(&self, color: Rgba) {
-        // SAFETY: `self.solid_brush` is a valid D2D1 brush owned by `self`.
         unsafe {
             self.solid_brush.SetColor(&to_d2d_color(color));
         }
@@ -543,7 +500,6 @@ impl D2DRenderer {
         br: f32,
         bl: f32,
     ) -> Option<ID2D1PathGeometry> {
-        // SAFETY: Creates and populates a closed path geometry from `self.devices.d2d_factory`.
         let (geom, sink) = unsafe {
             let geom = self.devices.d2d_factory.CreatePathGeometry().ok()?;
             let sink = geom.Open().ok()?;
@@ -569,7 +525,6 @@ impl D2DRenderer {
             sweepDirection: D2D1_SWEEP_DIRECTION_CLOCKWISE,
             arcSize: D2D1_ARC_SIZE_SMALL,
         };
-        // SAFETY: `sink` is an open geometry sink closed before returning `geom`.
         unsafe {
             sink.BeginFigure(Vector2 { X: l + tl, Y: t }, D2D1_FIGURE_BEGIN_FILLED);
             sink.AddLine(Vector2 { X: r - tr, Y: t });
@@ -610,12 +565,10 @@ impl D2DRenderer {
             && (tr - br).abs() < 1e-4
             && (br - bl).abs() < 1e-4;
 
-        // 1. Background fill
         if !quad.background.is_transparent() {
             self.set_brush_color(quad.background);
             let rect = to_d2d_rect(quad.bounds);
             if max_r <= 0.0 {
-                // SAFETY: Valid D2D1 context and brush within `BeginDraw`/`EndDraw`.
                 unsafe {
                     self.context.FillRectangle(&rect, &self.solid_brush);
                 }
@@ -625,19 +578,16 @@ impl D2DRenderer {
                     radiusX: max_r,
                     radiusY: max_r,
                 };
-                // SAFETY: Valid D2D1 context and brush within `BeginDraw`/`EndDraw`.
                 unsafe {
                     self.context.FillRoundedRectangle(&rr, &self.solid_brush);
                 }
             } else if let Some(geom) = self.create_per_corner_geometry(rect, tl, tr, br, bl) {
-                // SAFETY: `geom` is a closed `ID2D1PathGeometry` on the same D2D1 factory.
                 unsafe {
                     self.context.FillGeometry(&geom, &self.solid_brush, None);
                 }
             }
         }
 
-        // 2. Border stroke
         let bw = quad.border_widths;
         let (bt, brw, bb, blw) = (bw.top, bw.right, bw.bottom, bw.left);
         let max_bw = bt.max(brw).max(bb).max(blw);
@@ -671,14 +621,12 @@ impl D2DRenderer {
                     right: quad.bounds.right() - if brw <= 0.0 { stroke } else { 0.0 },
                     bottom: quad.bounds.bottom() - if bb <= 0.0 { stroke } else { 0.0 },
                 };
-                // SAFETY: Paired with `PopAxisAlignedClip` below before returning.
                 unsafe {
                     self.context
                         .PushAxisAlignedClip(&clip_rect, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
                 }
             }
             if max_r <= 0.0 {
-                // SAFETY: Valid D2D1 context and brush within `BeginDraw`/`EndDraw`.
                 unsafe {
                     self.context
                         .DrawRectangle(&inset_rect, &self.solid_brush, stroke, None);
@@ -690,7 +638,6 @@ impl D2DRenderer {
                     radiusX: r,
                     radiusY: r,
                 };
-                // SAFETY: Valid D2D1 context and brush within `BeginDraw`/`EndDraw`.
                 unsafe {
                     self.context
                         .DrawRoundedRectangle(&rr, &self.solid_brush, stroke, None);
@@ -702,21 +649,18 @@ impl D2DRenderer {
                 (br - half).max(0.0),
                 (bl - half).max(0.0),
             ) {
-                // SAFETY: `geom` is a closed `ID2D1PathGeometry` on the same D2D1 factory.
                 unsafe {
                     self.context
                         .DrawGeometry(&geom, &self.solid_brush, stroke, None);
                 }
             }
             if need_clip {
-                // SAFETY: Pops the border clip pushed above.
                 unsafe {
                     self.context.PopAxisAlignedClip();
                 }
             }
         } else {
             let b = quad.bounds;
-            // SAFETY: Valid D2D1 context and brush within `BeginDraw`/`EndDraw`.
             let draw_edge = |rect: D2D_RECT_F| unsafe {
                 self.context.FillRectangle(&rect, &self.solid_brush);
             };
@@ -787,7 +731,6 @@ impl D2DRenderer {
                     right: sb.right() + pad_dip,
                     bottom: sb.bottom() + pad_dip,
                 };
-                // SAFETY: `bitmap` was created on the same D2D1 device and `self.context` is drawing.
                 unsafe {
                     self.context.DrawBitmap(
                         &bitmap,
@@ -810,7 +753,6 @@ impl D2DRenderer {
         color: Rgba,
     ) -> Option<(ID2D1Bitmap1, f32)> {
         let scale = self.scale_factor;
-        // Quantize cached shadow sizes to 4px buckets so animating cards reuse cached shadows (G-11).
         let quant = |px: u32| px.div_ceil(4) * 4;
         let width_px = quant((shape_size.width * scale).round().max(1.0) as u32);
         let height_px = quant((shape_size.height * scale).round().max(1.0) as u32);
@@ -836,7 +778,6 @@ impl D2DRenderer {
         let offscreen = self.shadow_context.clone()?;
         let white_brush = self.shadow_white_brush.clone()?;
         let shadow_eff = self.shadow_effect.clone()?;
-        // CSS `blur_radius` is converted to Gaussian standard deviation (`sigma = blur_radius / 2`).
         let sigma = (blur_radius * 0.5).max(0.5);
         let pad_dip = (sigma * 3.0).ceil();
         let shape_w_dip = width_px as f32 / scale;
@@ -860,7 +801,6 @@ impl D2DRenderer {
             bitmapOptions: D2D1_BITMAP_OPTIONS_TARGET,
             ..Default::default()
         };
-        // SAFETY: Creates two bounded offscreen D2D1 bitmaps (<= 4096x4096) on `offscreen`.
         let (shape_bmp, blurred_bmp) = unsafe {
             let sz = D2D_SIZE_U {
                 width: total_w_px,
@@ -871,7 +811,6 @@ impl D2DRenderer {
             (shape_bmp, blurred_bmp)
         };
 
-        // SAFETY: Rasterizes solid rounded shape mask into `shape_bmp` on the offscreen context.
         unsafe {
             offscreen.SetDpi(dpi, dpi);
             offscreen.SetTarget(&shape_bmp);
@@ -896,7 +835,6 @@ impl D2DRenderer {
         color_bytes[4..8].copy_from_slice(&color.g.to_le_bytes());
         color_bytes[8..12].copy_from_slice(&color.b.to_le_bytes());
         color_bytes[12..16].copy_from_slice(&color.a.to_le_bytes());
-        // SAFETY: Applies `CLSID_D2D1Shadow` to `shape_bmp` and renders blurred result into `blurred_bmp`.
         unsafe {
             shadow_eff.SetInput(0, &shape_bmp, true);
             let _ = shadow_eff.SetValue(
@@ -955,7 +893,6 @@ impl D2DRenderer {
             return;
         }
         self.set_brush_color(default_color);
-        // SAFETY: `layout` is a valid `IDWriteTextLayout` and `self.context` is inside `BeginDraw`.
         unsafe {
             self.context.DrawTextLayout(
                 Vector2 {

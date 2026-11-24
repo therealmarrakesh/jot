@@ -1,5 +1,3 @@
-//! Win32 Common Item Dialogs (`IFileOpenDialog` and `IFileSaveDialog` with custom encoding combo).
-
 use std::ffi::OsString;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
@@ -53,7 +51,6 @@ struct OleGuard(bool);
 
 impl OleGuard {
     fn init() -> Self {
-        // SAFETY: Initializes OLE/STA for the current dialog worker thread; paired in Drop only if ok.
         Self(unsafe { OleInitialize(None) }.is_ok())
     }
 }
@@ -61,7 +58,6 @@ impl OleGuard {
 impl Drop for OleGuard {
     fn drop(&mut self) {
         if self.0 {
-            // SAFETY: Matches the successful `OleInitialize` call on this thread.
             unsafe { OleUninitialize() };
         }
     }
@@ -79,9 +75,7 @@ fn path_to_wide_null(p: &Path) -> Vec<u16> {
 }
 
 unsafe fn shell_item_path(item: &IShellItem) -> Result<PathBuf> {
-    // SAFETY: `item` is a valid `IShellItem` COM interface.
     let pwstr = unsafe { item.GetDisplayName(SIGDN_FILESYSPATH)? };
-    // SAFETY: `GetDisplayName` returns a NUL-terminated CoTaskMem-allocated UTF-16 string.
     let path = unsafe {
         let mut len = 0;
         while *pwstr.0.add(len) != 0 {
@@ -105,7 +99,6 @@ pub(crate) fn run_open_dialog(
 ) -> Result<Option<Vec<PathBuf>>> {
     let _ole = OleGuard::init();
     let owner = HWND(owner_raw as *mut _);
-    // SAFETY: OLE/STA is initialized above on this worker thread; COM interface calls follow Win32 contracts.
     unsafe {
         let dialog: IFileOpenDialog =
             CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER)?;
@@ -163,7 +156,6 @@ pub(crate) fn run_open_dialog(
 pub(crate) fn run_save_dialog(owner_raw: isize, options: SaveDialogOptions) -> SaveDialogResult {
     let _ole = OleGuard::init();
     let owner = HWND(owner_raw as *mut _);
-    // SAFETY: OLE/STA is initialized above on this worker thread; all wide buffers outlive COM calls.
     unsafe {
         let dialog: IFileSaveDialog =
             CoCreateInstance(&FileSaveDialog, None, CLSCTX_INPROC_SERVER)?;

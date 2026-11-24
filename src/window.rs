@@ -1,6 +1,3 @@
-//! Main editor window: custom Mica Alt titlebar + caption buttons, tab strip, menu bar row,
-//! multi-tab editor host, status bar, dynamic min-size tracking, and direct top-down input routing.
-
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -74,7 +71,6 @@ const ZOOM_STEP: f32 = 0.1;
 const ZOOM_MIN: f32 = 0.1;
 const ZOOM_MAX: f32 = 5.;
 
-/// Explicit per-window focus target.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Focus {
     Editor(EditorSlot),
@@ -82,7 +78,6 @@ pub(crate) enum Focus {
     DialogButton(usize),
 }
 
-/// Cross-window or app-level action returned cleanly from `MainWindow` methods to `App`.
 pub(crate) enum WindowAction {
     NewWindow,
     Exit,
@@ -100,7 +95,6 @@ pub(crate) enum WindowAction {
     ForgetTabDrag(TabId),
 }
 
-/// Result of painting one frame of a `MainWindow`.
 pub(crate) struct FrameResult {
     pub(crate) needs_vsync: bool,
     pub(crate) device_lost: bool,
@@ -131,7 +125,6 @@ struct MinSizeCache {
     size: Size,
 }
 
-/// Lightweight `EditorTimers` adapter routing timer callbacks into typed `AppEvent`s.
 pub(crate) struct WindowEditorTimers<'a> {
     jobs: &'a Jobs<AppEvent>,
     window: WindowId,
@@ -167,7 +160,6 @@ impl EditorTimers for WindowEditorTimers<'_> {
     }
 }
 
-/// Concrete main application window owning its `NativeWindow`, tabs, UI scene, and workflows.
 pub(crate) struct MainWindow {
     pub(crate) native: NativeWindow,
     pub(crate) ui: UiState,
@@ -376,8 +368,6 @@ impl MainWindow {
         self.dirty = true;
     }
 
-    // ---- Tab operations ----
-
     pub(crate) fn select_tab_only(&mut self, ix: usize) {
         if self.active != ix {
             self.native.hwnd().complete_ime_composition();
@@ -579,8 +569,6 @@ impl MainWindow {
         self.activate_tab(last, jobs);
     }
 
-    // ---- File workflows ----
-
     pub(crate) fn find_open_tab_by_key(&self, key: &str) -> Option<usize> {
         self.tabs
             .iter()
@@ -634,7 +622,6 @@ impl MainWindow {
 
     pub(crate) fn save(&mut self, jobs: &Jobs<AppEvent>) {
         let data = &self.tabs[self.active].data;
-        // Skip redundant disk rewrites when the tab is clean and has no lossy-decode flag (DOC-3).
         if data.path.is_some() && !data.is_dirty() && !data.format.lossy_decode {
             return;
         }
@@ -759,8 +746,6 @@ impl MainWindow {
                         WorkflowFinish::None => {}
                         WorkflowFinish::RemoveTab(id) => {
                             if let Some(ix) = self.tab_index(id) {
-                                // Re-check dirtiness so edits made during async save are never lost,
-                                // while still honoring an explicit "Don't save" for the same revision (F-2).
                                 let rev = self.tabs[ix].data.editor.revision();
                                 if self.tabs[ix].data.is_dirty()
                                     && !workflow.is_discard_approved(id, rev)
@@ -771,7 +756,6 @@ impl MainWindow {
                             }
                         }
                         WorkflowFinish::CloseWindow => {
-                            // Re-validate all tabs so edits / Ctrl+N during async save are never lost (F-2).
                             let remaining_dirty: Vec<TabId> = self
                                 .tabs
                                 .iter()
@@ -870,7 +854,6 @@ impl MainWindow {
         jobs: &Jobs<AppEvent>,
     ) {
         let data = &mut self.tabs[ix].data;
-        // Coalesce concurrent saves of the same tab into one trailing write (F-3).
         if let TabSaveState::InFlight { pending } = &mut data.save_state {
             *pending = Some(PendingSave {
                 path,
@@ -928,8 +911,6 @@ impl MainWindow {
         }
         None
     }
-
-    // ---- Dialogs & Find helpers ----
 
     fn show_dialog(&mut self, kind: DialogKind, jobs: &Jobs<AppEvent>) {
         if self.dialogs.is_open() {
@@ -1155,8 +1136,6 @@ impl MainWindow {
         }
     }
 
-    // ---- Menu helpers ----
-
     pub(crate) fn key_tips(&self, ts: &TextSystem) -> Vec<KeyTip> {
         self.menu_bar.key_tips(&self.ui.frame, ts)
     }
@@ -1203,8 +1182,6 @@ impl MainWindow {
         }
         (out.handled, None)
     }
-
-    // ---- Events ----
 
     pub(crate) fn on_activated(&mut self, active: bool, jobs: &Jobs<AppEvent>) {
         self.native.active = active;
@@ -1485,7 +1462,6 @@ impl MainWindow {
         self.pointer_pressed = false;
         self.last_mouse_pos = pos;
         let clicked = self.ui.on_mouse_up(pos, button);
-        // Support Win32 press-on-trigger, drag-to-item, release-to-activate (K-8).
         let menu_release = if button == MouseButton::Left
             && clicked.is_none()
             && self.menu_bar.is_open()
@@ -1758,7 +1734,6 @@ impl MainWindow {
             }
         }
 
-        // Single-line Find / Replace Tab and Enter shortcuts.
         if ev.key == Key::Tab && !ev.modifiers.ctrl && !ev.modifiers.alt && !ev.modifiers.win && self.find.replace {
             match self.focus {
                 Focus::Editor(EditorSlot::FindQuery) => {
@@ -1997,8 +1972,6 @@ impl MainWindow {
         (true, None)
     }
 
-    // ---- Rendering & dynamic min-size ----
-
     fn status_metrics(&self) -> StatusMetrics {
         let editor = self.active_editor();
         let text = editor.text();
@@ -2051,8 +2024,6 @@ impl MainWindow {
         {
             return;
         }
-        // Measure against fixed representative counters so min_size stays stable across typing and
-        // cursor moves without recomputing layout on every keystroke (P-6).
         let status_sz = status_bar.then(|| {
             let reference = StatusMetrics {
                 line: 9999,
@@ -2292,7 +2263,6 @@ impl MainWindow {
             true
         };
 
-        // Keep the hidden Win32 system caret synced for Windows Magnifier / assistive tools (A11Y-1).
         let sys_caret_px = if window_active && !caret_hidden {
             self.focused_editor_slot()
                 .and_then(|slot| self.editor_by_slot(slot))

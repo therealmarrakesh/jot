@@ -1,6 +1,3 @@
-//! Menu bar (File/Edit/View), cascading Zoom submenu, Win11 context menu with command tiles,
-//! anchored find-options flyout, animated unroll/fade, and KeyTip anchor computation.
-
 use std::time::Duration;
 
 use crate::app::{AppEvent, ViewSettings};
@@ -557,7 +554,6 @@ impl OpenMenu {
     }
 }
 
-/// Outcome returned from `MenuBar` operations to `MainWindow`.
 #[derive(Default)]
 pub(crate) struct MenuOutcome {
     pub(crate) handled: bool,
@@ -963,8 +959,6 @@ impl MenuBar {
         }
     }
 
-    // ---- Keyboard & Alt/F10 KeyTip routing ----
-
     pub(crate) fn on_key_up(&mut self, ev: KeyEvent) -> MenuOutcome {
         if ev.key == Key::Alt && self.alt_armed {
             self.alt_armed = false;
@@ -982,16 +976,12 @@ impl MenuBar {
         ts: &TextSystem,
     ) -> MenuOutcome {
         let m = ev.modifiers;
-        // Never intercept Win32 system chords (Alt+F4, Alt+Space) so DefWindowProcW always runs
-        // window close and the system menu (K-1, K-2).
         if m.alt && !m.ctrl && !m.win && matches!(ev.key, Key::F(4) | Key::Space) {
             self.alt_armed = false;
             let mut out = self.cancel();
             out.handled = false;
             return out;
         }
-        // Solo Alt press: close an open menu immediately, or arm KeyTips activation for KeyUp so
-        // holding Alt for Alt+F4 / Alt+Tab / Alt+Space never steals the chord (K-1, K-8).
         if ev.key == Key::Alt && m.none() {
             if self.live_open().is_some() {
                 self.alt_armed = false;
@@ -1000,7 +990,6 @@ impl MenuBar {
             self.alt_armed = true;
             return MenuOutcome::default();
         }
-        // Any other key cancels a pending solo-Alt KeyTips arm.
         self.alt_armed = false;
 
         if ev.key == Key::F(10) && m.none() {
@@ -1028,7 +1017,6 @@ impl MenuBar {
                 }
             }
             if self.live_open().is_some() {
-                // Plain-letter mnemonics work inside open menus even when opened by mouse (K-8).
                 if let Some(ch) = access_ch
                     && m.none()
                 {
@@ -1041,7 +1029,6 @@ impl MenuBar {
                 if nav.handled {
                     return nav;
                 }
-                // Consume non-menu shortcuts (Ctrl+W, Ctrl+Tab, etc.) while a menu is open (K-3).
                 return MenuOutcome::handled();
             }
             if focus == Focus::MenuBar {
@@ -1050,7 +1037,6 @@ impl MenuBar {
             return MenuOutcome::default();
         }
 
-        // Access (KeyTips) mode is active.
         match ev.key {
             Key::Escape if m.none() => self.access_back(),
             Key::Up
@@ -1084,7 +1070,6 @@ impl MenuBar {
                             ..out
                         };
                     }
-                    // Unmatched Alt+<key> passes through instead of swallowing system chords (K-1).
                     return MenuOutcome::default();
                 }
                 if m.alt {
@@ -1419,8 +1404,6 @@ impl MenuBar {
             }
         }
     }
-
-    // ---- Sampling, rendering & KeyTips ----
 
     pub(crate) fn sample(&mut self, ui: &mut UiState) {
         if self.open.as_mut().is_some_and(|open| open.sample(ui)) {

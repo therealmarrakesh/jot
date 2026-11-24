@@ -1,6 +1,3 @@
-//! Unified Win32 platform layer: display enumeration, message loop, vsync pacing, windowing,
-//! native dialogs, clipboard, named pipes, OS helpers, and typed jobs/timers.
-
 pub(crate) mod clipboard;
 pub(crate) mod dialogs;
 mod drop_target;
@@ -86,8 +83,6 @@ fn debug_ring() -> &'static Mutex<VecDeque<String>> {
     RING.get_or_init(|| Mutex::new(VecDeque::with_capacity(DEBUG_RING_CAPACITY)))
 }
 
-/// Logs a diagnostic line to the in-memory ring buffer and the Windows debug output stream
-/// (`OutputDebugStringW`) without touching disk.
 pub(crate) fn debug_log(message: &str) {
     {
         let mut ring = debug_ring().lock().unwrap_or_else(|e| e.into_inner());
@@ -97,22 +92,17 @@ pub(crate) fn debug_log(message: &str) {
         ring.push_back(message.to_owned());
     }
     let wide = HSTRING::from(format!("[Jot] {message}\n"));
-    // SAFETY: `wide` is a valid NUL-terminated UTF-16 string for the duration of the call.
     unsafe { OutputDebugStringW(&wide) };
 }
 
-/// Displays a native Win32 error dialog (used only for fatal startup or caught FFI-boundary errors).
 pub(crate) fn show_error_dialog(title: &str, message: &str) {
     let title_w = HSTRING::from(title);
     let msg_w = HSTRING::from(message);
-    // SAFETY: Both HSTRING pointers are valid NUL-terminated UTF-16 strings.
     unsafe {
         let _ = MessageBoxW(None, &msg_w, &title_w, MB_OK | MB_ICONERROR);
     }
 }
 
-/// Installs a process-wide panic hook that records panics to `OutputDebugStringW` and the
-/// in-memory diagnostic ring buffer.
 pub(crate) fn install_panic_hook() {
     let prev = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -160,13 +150,11 @@ pub(crate) struct WindowsDisplay {
 
 impl WindowsDisplay {
     pub(crate) fn primary() -> Option<Self> {
-        // SAFETY: `MonitorFromPoint` accepts any coordinates with `MONITOR_DEFAULTTOPRIMARY`.
         let monitor = unsafe { MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY) };
         (!monitor.is_invalid()).then_some(Self { monitor })
     }
 
     pub(crate) fn from_point(pt: crate::geom::ScreenPoint) -> Option<Self> {
-        // SAFETY: `MonitorFromPoint` accepts any coordinates with `MONITOR_DEFAULTTONEAREST`.
         let monitor = unsafe {
             MonitorFromPoint(
                 POINT { x: pt.x, y: pt.y },
@@ -188,7 +176,6 @@ impl WindowsDisplay {
     pub(crate) fn scale_factor(&self) -> f32 {
         let mut dpi_x = USER_DEFAULT_SCREEN_DPI;
         let mut dpi_y = USER_DEFAULT_SCREEN_DPI;
-        // SAFETY: `self.monitor` is a valid HMONITOR and out-pointers point to stack locals.
         let _ =
             unsafe { GetDpiForMonitor(self.monitor, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y) };
         (dpi_x.max(USER_DEFAULT_SCREEN_DPI) as f32) / (USER_DEFAULT_SCREEN_DPI as f32)
@@ -199,7 +186,6 @@ impl WindowsDisplay {
             cbSize: std::mem::size_of::<MONITORINFO>() as u32,
             ..Default::default()
         };
-        // SAFETY: `info.cbSize` is initialized and `self.monitor` is a valid HMONITOR.
         if !unsafe { GetMonitorInfoW(self.monitor, &mut info) }.as_bool() {
             return Rect::new(point(0.0, 0.0), size(1280.0, 800.0));
         }
@@ -245,8 +231,6 @@ impl Drop for ActiveHandlerGuard {
     }
 }
 
-/// Pacing thread that blocks in `Condvar` at 0% CPU until armed, then waits one `DwmFlush`
-/// and posts `WM_APP_VSYNC` back to the hidden UI wake window.
 struct VsyncPacer {
     armed: Mutex<bool>,
     condvar: Condvar,
@@ -272,12 +256,9 @@ impl VsyncPacer {
                     }
                     *armed = false;
                 }
-                // SAFETY: `DwmFlush` synchronizes with DWM composition; if unavailable, fall back
-                // to a ~60 Hz sleep so animations cannot busy-spin.
                 if unsafe { DwmFlush() }.is_err() {
                     std::thread::sleep(Duration::from_millis(16));
                 }
-                // SAFETY: `PostMessageW` is thread-safe; posting to a destroyed HWND fails harmlessly.
                 unsafe {
                     let _ = PostMessageW(
                         Some(HWND(wake_hwnd_raw as *mut _)),
@@ -311,18 +292,14 @@ pub(crate) struct Platform {
 
 impl Platform {
     pub(crate) fn new() -> Result<Self> {
-        // SAFETY: Best-effort DPI awareness for test binaries without an embedded manifest.
         unsafe {
             let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         }
-        // SAFETY: STA COM initialization on the UI thread; matched by `CoUninitialize` in `Drop`.
         let com_initialized =
             unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }.is_ok();
-        // SAFETY: OLE initialization on the UI thread for drag-drop; matched in `Drop`.
         let ole_initialized = unsafe { OleInitialize(None) }.is_ok();
         window::register_window_class()?;
 
-        // SAFETY: `GetModuleHandleW(None)` returns the current executable's module handle.
         let hinstance = unsafe { GetModuleHandleW(None)? };
         let wc = WNDCLASSW {
             lpfnWndProc: Some(wake_wnd_proc),
@@ -330,10 +307,8 @@ impl Platform {
             lpszClassName: WAKE_CLASS_NAME,
             ..Default::default()
         };
-        // SAFETY: `wc` has a static class name and valid `wake_wnd_proc`.
         unsafe { RegisterClassW(&wc) };
 
-        // SAFETY: Creates a message-only wake window using the class registered above.
         let wake_hwnd = unsafe {
             CreateWindowExW(
                 WINDOW_EX_STYLE(0),
@@ -383,7 +358,6 @@ impl Platform {
     pub(crate) fn wake_callback(&self) -> Arc<dyn Fn() + Send + Sync> {
         let wake_raw = self.wake_hwnd.0 as isize;
         Arc::new(move || {
-            // SAFETY: `PostMessageW` is thread-safe; posting to a destroyed HWND fails harmlessly.
             unsafe {
                 let _ = PostMessageW(
                     Some(HWND(wake_raw as *mut _)),
@@ -402,7 +376,6 @@ impl Platform {
     pub(crate) fn system_appearance(&self) -> WindowAppearance {
         let mut value = 1u32;
         let mut size = std::mem::size_of::<u32>() as u32;
-        // SAFETY: Reading a `REG_DWORD` into a 4-byte stack local with static subkey/value strings.
         let status = unsafe {
             RegGetValueW(
                 HKEY_CURRENT_USER,
@@ -422,7 +395,6 @@ impl Platform {
     }
 
     pub(crate) fn post_quit(&self) {
-        // SAFETY: Posts `WM_QUIT` to the current UI thread's message queue.
         unsafe { PostQuitMessage(0) };
     }
 
@@ -456,11 +428,9 @@ impl Platform {
             if handler.borrow().should_quit() {
                 break;
             }
-            // SAFETY: Pumps messages on the UI thread into stack-allocated `msg`.
             if unsafe { GetMessageW(&mut msg, None, 0, 0) }.0 <= 0 {
                 break;
             }
-            // SAFETY: `msg` was populated by `GetMessageW`.
             unsafe {
                 let _ = TranslateMessage(&msg);
                 DispatchMessageW(&msg);
@@ -472,7 +442,6 @@ impl Platform {
 
 impl Drop for Platform {
     fn drop(&mut self) {
-        // SAFETY: Tears down owned wake HWND and balances OLE/COM initialization on the UI thread.
         unsafe {
             let _ = DestroyWindow(self.wake_hwnd);
             if self.ole_initialized {
@@ -532,7 +501,6 @@ fn wake_wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> 
             }
             LRESULT(0)
         }
-        // SAFETY: Forwards unhandled wake-window messages to `DefWindowProcW`.
         _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
     }
 }
@@ -640,8 +608,6 @@ mod tests {
         }));
 
         Platform::run(handler.clone(), |h| {
-            // Re-entrant WM_SIZE while handler is borrowed must queue instead of dropping.
-            // SAFETY: `hwnd` is a valid window owned by the test thread.
             unsafe {
                 let _ = SendMessageW(
                     hwnd.raw(),
@@ -650,8 +616,6 @@ mod tests {
                     Some(LPARAM(((240isize) << 16) | 400isize)),
                 );
             }
-            // Exercise modal size/move timer entry & exit cleanly.
-            // SAFETY: `hwnd` is a valid window owned by the test thread.
             unsafe {
                 let _ = SendMessageW(hwnd.raw(), WM_ENTERSIZEMOVE, Some(WPARAM(0)), Some(LPARAM(0)));
                 let _ = SendMessageW(hwnd.raw(), WM_TIMER, Some(WPARAM(1)), Some(LPARAM(0)));

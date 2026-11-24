@@ -1,5 +1,3 @@
-//! Typed keyboard/mouse/IME input types, Win32 virtual-key translation, and multi-click tracking.
-
 use windows::Win32::{
     Foundation::{HWND, POINT, RECT},
     UI::{
@@ -31,7 +29,6 @@ pub(crate) struct Modifiers {
     pub(crate) alt: bool,
     pub(crate) shift: bool,
     pub(crate) win: bool,
-    /// True when Windows reports AltGr (right Alt + synthetic left Ctrl, K-4).
     pub(crate) alt_gr: bool,
 }
 
@@ -93,14 +90,9 @@ pub(super) struct ClickTracker {
 
 impl ClickTracker {
     pub(super) fn record(&mut self, button: MouseButton, x: i32, y: i32) -> usize {
-        // Use Win32 message timestamp (`GetMessageTime`) and half system double-click rect (K-9).
-        // SAFETY: Querying Win32 message timestamp and double-click metrics requires no preconditions.
         let now_ms = unsafe { GetMessageTime() } as u32;
-        // SAFETY: `GetDoubleClickTime` is a pure OS metric query.
         let dbl_ms = unsafe { GetDoubleClickTime() };
-        // SAFETY: `GetSystemMetrics` is a pure OS metric query.
         let tol_x = (unsafe { GetSystemMetrics(SM_CXDOUBLECLK) } / 2).max(2);
-        // SAFETY: `GetSystemMetrics` is a pure OS metric query.
         let tol_y = (unsafe { GetSystemMetrics(SM_CYDOUBLECLK) } / 2).max(2);
         let same_spot = self.last_button == Some(button)
             && self
@@ -117,12 +109,11 @@ impl ClickTracker {
 }
 
 pub(crate) fn current_modifiers() -> Modifiers {
-    // SAFETY: `GetKeyState` reads synchronous key state on the calling UI thread.
     let down = |vk: VIRTUAL_KEY| (unsafe { GetKeyState(i32::from(vk.0)) } as u16 & 0x8000) != 0;
     let lctrl = down(VK_LCONTROL);
     let rctrl = down(VK_RCONTROL);
     let ralt = down(VK_RMENU);
-    // Windows synthesizes VK_LCONTROL + VK_RMENU for AltGr on international keyboards (K-4).
+    // Windows synthesizes VK_LCONTROL + VK_RMENU for AltGr.
     let alt_gr = ralt && lctrl && !rctrl;
     Modifiers {
         ctrl: down(VK_CONTROL),
@@ -176,14 +167,12 @@ pub(super) fn translate_vk(vk: u16, modifiers: Modifiers) -> Option<Key> {
 }
 
 pub(super) fn read_ime_string(himc: HIMC, flag: IME_COMPOSITION_STRING) -> Option<String> {
-    // SAFETY: `himc` is a valid IMC handle acquired by caller; querying byte length with `None`.
     let bytes = unsafe { ImmGetCompositionStringW(himc, flag, None, 0) };
     if bytes <= 0 {
         return None;
     }
     let len = (bytes as usize) / 2;
     let mut buf = vec![0u16; len];
-    // SAFETY: `buf` has `len * 2 >= bytes` writable bytes for `ImmGetCompositionStringW`.
     let written = unsafe {
         ImmGetCompositionStringW(himc, flag, Some(buf.as_mut_ptr().cast()), bytes as u32)
     };
@@ -198,7 +187,6 @@ pub(super) fn set_ime_candidate_pos(hwnd: HWND, caret_rect: Rect, scale: f32) {
         x: (caret_rect.origin.x * scale).round() as i32,
         y: (caret_rect.bottom() * scale).round() as i32,
     };
-    // SAFETY: `hwnd` is an active UI-thread window; invalid HIMC is checked immediately below.
     let himc = unsafe { ImmGetContext(hwnd) };
     if himc.is_invalid() {
         return;
@@ -214,7 +202,6 @@ pub(super) fn set_ime_candidate_pos(hwnd: HWND, caret_rect: Rect, scale: f32) {
         ptCurrentPos: pt,
         rcArea: RECT::default(),
     };
-    // SAFETY: `himc` is valid and `comp_form` / `cand_form` live for the call; released right after.
     unsafe {
         let _ = ImmSetCompositionWindow(himc, &comp_form);
         let _ = ImmSetCandidateWindow(himc, &cand_form);
@@ -222,14 +209,11 @@ pub(super) fn set_ime_candidate_pos(hwnd: HWND, caret_rect: Rect, scale: f32) {
     }
 }
 
-/// Asks Windows IME to commit any active composition string before focus/tab/pointer transitions (E-2).
 pub(crate) fn complete_ime_composition(hwnd: HWND) {
-    // SAFETY: `ImmGetContext` is called on the UI thread owning `hwnd`; invalid HIMC is checked.
     let himc = unsafe { ImmGetContext(hwnd) };
     if himc.is_invalid() {
         return;
     }
-    // SAFETY: `himc` is a valid IMC handle paired with `ImmReleaseContext` below.
     unsafe {
         let _ = ImmNotifyIME(himc, NI_COMPOSITIONSTR, CPS_COMPLETE, 0);
         let _ = ImmReleaseContext(hwnd, himc);

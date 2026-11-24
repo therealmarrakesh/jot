@@ -1,6 +1,3 @@
-//! Direct editor view layout, DirectWrite shaping, caret/selection/IME painting, pointer
-//! hit-testing, blink timer, drag auto-scroll, and integrated scrollbar coordination.
-
 use std::borrow::Cow;
 use std::ops::Range;
 use std::rc::Rc;
@@ -47,17 +44,12 @@ pub(crate) struct EditorMouseOutcome {
     pub(crate) open_context_menu: Option<Point>,
 }
 
-/// Top-of-viewport anchor preserved across resize, zoom, and word-wrap reflow (E-14).
 #[derive(Copy, Clone, Debug)]
 pub(super) struct ScrollAnchor {
     line: usize,
     byte_in_line: usize,
     frac_px: f64,
 }
-
-// ---------------------------------------------------------------------------
-// Owned caret blink state
-// ---------------------------------------------------------------------------
 
 pub(crate) struct BlinkState {
     visible: bool,
@@ -148,7 +140,6 @@ impl BlinkState {
             self.timer.cancel();
             return;
         };
-        // Respect Windows CaretTimeout so idle editors stop waking & repainting (P-6).
         if let Some(timeout) = caret_blink_timeout()
             && self
                 .started_at
@@ -163,10 +154,6 @@ impl BlinkState {
         self.timer = timers.after(interval, EditorTimer::Blink(next_epoch));
     }
 }
-
-// ---------------------------------------------------------------------------
-// Owned drag auto-scroll state
-// ---------------------------------------------------------------------------
 
 #[derive(Default)]
 pub(crate) struct AutoScroll {
@@ -221,10 +208,6 @@ impl AutoScroll {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Layout snapshots & scroll helpers
-// ---------------------------------------------------------------------------
-
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct LongestLineCache {
     revision: u64,
@@ -239,7 +222,6 @@ pub(super) struct LongestLineCache {
 pub(super) struct ViewLayout {
     pub(super) visible_lines: Vec<usize>,
     pub(super) visible_byte_offsets: Vec<usize>,
-    /// Viewport-relative y offset of `visible_lines[0]`'s sub-row 0, computed in `f64` (E-7).
     pub(super) visible_top_rel: f32,
     pub(super) visible_byte_range: Range<usize>,
     pub(super) rows: Rc<Vec<RowLayout>>,
@@ -261,8 +243,6 @@ fn scrollbar_viewport(
     paddings: Edges<f32>,
     soft_wrap: bool,
 ) -> ScrollbarViewport {
-    // Include top+bottom paddings in content_size.height so `content_span - viewport_span`
-    // matches the editor's exact vertical max scroll range (W-7).
     ScrollbarViewport {
         bounds: Rect::new(
             point(input_bounds.origin.x, input_bounds.origin.y - paddings.top),
@@ -396,15 +376,12 @@ impl Editor {
             y += row_layout.size(lh).height;
         }
 
-        // Clicks below the last visible row respect the horizontal x coordinate (E-17).
         if let Some((row, base)) = layout.rows.last().zip(layout.visible_byte_offsets.last()) {
             let col = row.closest_index_for_x_in_last_row(rel.x);
             return ((base + col).min(self.text.len()), false);
         }
         (self.text.len(), false)
     }
-
-    // ---- Direct pointer, wheel, and timer events ----
 
     pub(crate) fn on_mouse_down(
         &mut self,
@@ -503,7 +480,6 @@ impl Editor {
                 let delta = AutoScroll::compute_delta(position.y, self.input_bounds);
                 self.auto_scroll.update(delta.map(|d| -d), timers);
             }
-            // Mouse drag keeps horizontal caret visible without jumping vertically by BOTTOM_MARGIN_ROWS (E-15).
             self.request_reveal(self.cursor(), aff, None, false);
             dirty = true;
         }
@@ -622,8 +598,6 @@ impl Editor {
         }
     }
 
-    // ---- Direct layout + Direct2D painting ----
-
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn paint(
         &mut self,
@@ -648,7 +622,6 @@ impl Editor {
         let wrap_width = (self.multi_line && self.soft_wrap)
             .then_some((input_bounds.size.width - RIGHT_MARGIN).max(1.0));
 
-        // Preserve top visible document position across resize / zoom / wrap reflow (E-14).
         let reflowing = self.wrap.font() != font
             || self.wrap.font_size() != font_size
             || self.wrap.wrap_width() != wrap_width
@@ -668,8 +641,6 @@ impl Editor {
             self.restore_scroll_anchor(anchor, line_height);
         }
 
-        // Step 1: Compute vertical extent & resolve vertical caret reveal BEFORE slicing visible rows
-        // so the exact rows around the caret are shaped on the VERY FIRST frame (E-5, E-6, E-7).
         let total_rows = self.wrap.visual_row_count().max(1);
         let content_height_f64 = (total_rows as f64 * f64::from(line_height))
             .max(f64::from(input_bounds.size.height));
@@ -710,7 +681,6 @@ impl Editor {
             0.0
         };
 
-        // Step 2: Slice & shape visible rows using viewport-relative f32 coordinates (E-3, E-7, P-2, P-3).
         let placeholder_rope = Rope::from(self.placeholder.as_str());
         let is_empty = self.text.len() == 0;
         let (display_text, text_color) = if is_empty {
@@ -766,7 +736,6 @@ impl Editor {
         );
         layout.rows = Rc::new(rows);
 
-        // Step 3: Compute horizontal extent including visible shaped widths & caret x (G-6).
         let mut max_line_w = wrap_width.unwrap_or(0.0);
         if !self.multi_line || !self.soft_wrap {
             let longest_row = self.wrap.longest_line();
@@ -799,7 +768,6 @@ impl Editor {
             }
         }
 
-        // Compute caret viewport-relative position from freshly shaped visible rows.
         let head = self.cursor();
         let head_pt = self.viewport_pos_for(&layout, head, self.line_end_affinity);
         if !self.multi_line || !self.soft_wrap {
@@ -814,7 +782,6 @@ impl Editor {
         let content_size = size(content_width, content_height_f64 as f32);
         self.content_size = content_size;
 
-        // Step 4: Resolve horizontal caret reveal using the freshly shaped caret x (E-5, E-6).
         let prev_scroll_x = self.scroll_x;
         if reveal_req.is_some() && (!self.multi_line || !self.soft_wrap) {
             let w = input_bounds.size.width;
@@ -831,8 +798,7 @@ impl Editor {
         };
         self.reveal = None;
 
-        // Viewport origin shifted horizontally by `scroll_x`; vertical scrolling is already baked
-        // into `visible_top_rel` via `f64` math so D2D coordinates stay tiny and exact (E-7).
+        // Vertical scroll is baked into visible_top_rel in f64 so D2D coordinates stay exact on huge files.
         let content_bounds = Rect::new(
             point(input_bounds.origin.x + self.scroll_x, input_bounds.origin.y),
             input_bounds.size,
@@ -859,7 +825,6 @@ impl Editor {
             Vec::new()
         };
 
-        // Step 5: Paint selection, visible text rows, and caret clipped to `input_bounds`.
         renderer.push_clip(input_bounds);
         if !selection_rects.is_empty() {
             let sel_color = p.selection();
@@ -886,8 +851,6 @@ impl Editor {
         self.content_bounds = Some(content_bounds);
         self.last_cursor = Some(head);
 
-        // Only request an immediate follow-up frame if a horizontally-windowed huge line shifted
-        // past its shaped window during this frame (P-2, P-6).
         let needs_redraw = shaped_windowed && (self.scroll_x - prev_scroll_x).abs() > 1.0;
 
         let mut needs_vsync = false;
@@ -914,8 +877,6 @@ impl Editor {
             self.scrollbar.paint(renderer);
         }
     }
-
-    // ---- Internal shaping & geometry helpers ----
 
     fn viewport_pos_for(&self, layout: &ViewLayout, offset: usize, aff: bool) -> Point {
         let lh = layout.line_height;
@@ -1001,14 +962,11 @@ impl Editor {
         for (vi, &buf_line) in layout.visible_lines.iter().enumerate() {
             let line_slice = display_text.slice_line(buf_line);
             let line_len = line_slice.len();
-            // Always use the document byte offset of `buf_line` so IME underlines stay aligned
-            // even when the document is scrolled past line 0 (E-3).
             let line_byte_start = layout.visible_byte_offsets[vi];
             let wrapped = self.wrap.line(buf_line).expect("wrapped line exists");
             let first_row_of_line = self.wrap.first_visual_row(buf_line);
             let total_sub_rows = wrapped.row_count();
 
-            // Huge unwrapped line horizontal windowing (P-2).
             if !self.soft_wrap
                 && total_sub_rows == 1
                 && line_len > HUGE_UNWRAPPED_LINE_BYTES
@@ -1021,7 +979,6 @@ impl Editor {
                         ts.with_char_widths(font, font_size, |cw, dw| {
                             cw.horizontal_slice(&line_str, min_x, max_x, dw)
                         });
-                    // Ensure caret stays inside the shaped window if on this line.
                     if caret >= line_byte_start && caret <= line_byte_start + line_len {
                         let local_caret = caret - line_byte_start;
                         if local_caret < start_b {
@@ -1048,7 +1005,6 @@ impl Editor {
                 }
             }
 
-            // On huge wrapped lines, only build VisualRows for the visible sub-row slice (P-3).
             let (slice_start, slice_end) = if total_sub_rows > 64 {
                 let vis_lo = shape_rows
                     .start
@@ -1171,8 +1127,6 @@ fn range_rects(range: &Range<usize>, layout: &ViewLayout) -> Option<Vec<Rect>> {
             let includes_nl = is_last && range.start <= end && range.end > end;
             let indent = row_layout.indent_for(abs_sub);
             if s < e {
-                // Use DirectWrite HitTestTextRange spans so BiDi / RTL selections highlight the
-                // exact visual glyph runs (E-17).
                 for (span_l, span_r) in row.selection_spans(s - off, e - off) {
                     out.push(Rect::from_corners(
                         point(indent + span_l, row_y),

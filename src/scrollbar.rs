@@ -1,5 +1,3 @@
-//! Owned overlay scrollbar state, track geometry, hover/drag handling, and Direct2D painting.
-
 use std::time::{Duration, Instant};
 
 use crate::color::{Rgba, rgba};
@@ -31,7 +29,6 @@ fn clamp_radius(radius: f32, bounds: Rect) -> f32 {
         .max(0.0)
 }
 
-/// 1D geometry along a single scrollbar axis shared by painting, track clicks, and dragging.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct TrackMetrics {
     origin: f32,
@@ -93,7 +90,6 @@ impl TrackMetrics {
     }
 }
 
-/// Viewport inputs supplied by the scrolled content (`Editor`) each frame.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct ScrollbarViewport {
     pub(crate) bounds: Rect,
@@ -101,8 +97,6 @@ pub(crate) struct ScrollbarViewport {
     pub(crate) horizontal: bool,
 }
 
-/// Prepared geometry for one active scrollbar axis retained on `ScrollbarState` for direct
-/// hit-testing, dragging, and painting.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct PreparedAxis {
     pub(crate) axis: Axis,
@@ -123,7 +117,6 @@ pub(crate) struct ScrollbarMoveOutcome {
     pub(crate) consumed: bool,
 }
 
-/// Owned scrollbar interaction, prepared geometry, and animation state (stored on `Editor`).
 pub(crate) struct ScrollbarState {
     hovered_axis: Option<Axis>,
     hovered_thumb: Option<Axis>,
@@ -188,7 +181,6 @@ impl ScrollbarState {
     fn wants_visible(&self, now: Instant) -> bool {
         let hovered = self.hovered_axis.is_some() || self.hovered_thumb.is_some();
         let dragging = self.dragged_axis.is_some();
-        // Hovering the track edge reveals the overlay scrollbar even when faded out (W-9).
         if hovered {
             return true;
         }
@@ -258,7 +250,6 @@ impl ScrollbarState {
         true
     }
 
-    /// Updates scrollbar layout and animation state. Returns `true` if another vsync frame is needed.
     pub(crate) fn prepare(
         &mut self,
         viewport: ScrollbarViewport,
@@ -413,8 +404,6 @@ impl ScrollbarState {
         renderer.pop_clip();
     }
 
-    /// Handles a left mouse-down; returns `Some(new_scroll_offset)` if a scrollbar track/thumb
-    /// consumed the click.
     pub(crate) fn on_mouse_down(&mut self, position: Point, current_offset: Point) -> Option<Point> {
         let item = self
             .axes
@@ -429,7 +418,6 @@ impl ScrollbarState {
             item.metrics
                 .apply_drag(item.axis, position, grab, current_offset)
         } else {
-            // Standard Windows scrollbar track click pages by one viewport (W-9).
             let mut paged = current_offset;
             match item.axis {
                 Axis::Vertical => {
@@ -467,7 +455,6 @@ impl ScrollbarState {
 
         for item in &axes {
             let axis = item.axis;
-            // Hovering the track reveals a faded scrollbar (W-9).
             if item.track_bounds.contains(position) {
                 if self.hovered_axis != Some(axis) {
                     self.hovered_axis = Some(axis);

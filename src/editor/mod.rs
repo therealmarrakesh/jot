@@ -1,6 +1,3 @@
-//! Owned plain-text editor (single-line and multi-line) with integrated soft-wrap,
-//! coalescing undo/redo, IME composition, caret blinking, drag auto-scroll, and overlay scrollbars.
-
 mod actions;
 mod buffer;
 mod view;
@@ -39,7 +36,6 @@ pub(super) enum MoveDirection {
     Down,
 }
 
-/// Active IME preedit composition span owning a single undo history group (E-2).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Composition {
     pub(super) start: usize,
@@ -47,7 +43,6 @@ pub(super) struct Composition {
     pub(super) cursor_utf16: usize,
 }
 
-/// Deferred caret-reveal intent resolved in `paint()` AFTER `wrap.sync_layout` (E-5, E-6, E-15).
 #[derive(Clone, Copy, Debug)]
 pub(super) struct RevealRequest {
     pub(super) offset: usize,
@@ -56,7 +51,6 @@ pub(super) struct RevealRequest {
     pub(super) with_margin: bool,
 }
 
-/// Typed timer events requested by an `Editor` (routed back via `Editor::on_timer`).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub(crate) enum EditorTimer {
     Blink(usize),
@@ -65,7 +59,6 @@ pub(crate) enum EditorTimer {
     ScrollbarDrag,
 }
 
-/// Timer scheduling sink keeping `Editor` completely decoupled from `App` and `WindowId`.
 pub(crate) trait EditorTimers {
     fn after(&mut self, delay: Duration, kind: EditorTimer) -> TimerHandle;
     fn every(&mut self, delay: Duration, interval: Duration, kind: EditorTimer) -> TimerHandle;
@@ -85,7 +78,6 @@ impl EditorTimers for NoopTimers {
     }
 }
 
-/// Tab indentation style.
 #[derive(Debug, Copy, Clone)]
 pub(crate) struct TabSize {
     pub(crate) tab_size: usize,
@@ -94,7 +86,6 @@ pub(crate) struct TabSize {
 
 impl Default for TabSize {
     fn default() -> Self {
-        // Windows Notepad default: hard tabs aligned to 8-column stops (E-11, G-5).
         Self {
             tab_size: 8,
             hard_tabs: true,
@@ -112,7 +103,6 @@ impl TabSize {
     }
 }
 
-/// Translates a `KeyEvent` into an editor `Command` (direct match; zero string keymap).
 pub(crate) fn key_to_command(ev: KeyEvent) -> Option<Command> {
     let m = ev.modifiers;
     match (m.ctrl, m.alt, m.shift, m.win, ev.key) {
@@ -168,7 +158,6 @@ pub(crate) fn key_to_command(ev: KeyEvent) -> Option<Command> {
 
 type ValidateFn = fn(&str) -> bool;
 
-/// Owned plain-text editor state supporting both single-line fields and multi-line documents.
 pub(crate) struct Editor {
     multi_line: bool,
     text: Rope,
@@ -252,8 +241,6 @@ impl Editor {
         }
     }
 
-    // ---- Builder configuration ----
-
     pub(crate) fn with_caret_height(mut self, height: f32) -> Self {
         self.caret_height = height;
         self
@@ -283,8 +270,6 @@ impl Editor {
         self.paddings = paddings;
         self
     }
-
-    // ---- Accessors & configuration setters ----
 
     #[inline]
     pub(crate) fn text(&self) -> &Rope {
@@ -346,7 +331,6 @@ impl Editor {
         });
     }
 
-    /// Clears transient pointer-drag / double-click anchor state on any buffer mutation (E-1).
     #[inline]
     pub(super) fn reset_pointer_selection_state(&mut self) {
         self.word_anchor = None;
@@ -440,8 +424,6 @@ impl Editor {
         self.text.offset_utf16_to_offset(range.start)..self.text.offset_utf16_to_offset(range.end)
     }
 
-    // ---- Save & history state ----
-
     pub(crate) fn can_undo(&self) -> bool {
         self.history.can_undo()
     }
@@ -463,8 +445,6 @@ impl Editor {
         self.history.is_clean()
     }
 
-    // ---- Caret blinking & blur ----
-
     pub(crate) fn start_blink(&mut self, timers: &mut dyn EditorTimers) {
         self.blink.start(timers);
     }
@@ -483,8 +463,6 @@ impl Editor {
         self.blink.stop();
         self.reset_pointer_selection_state();
     }
-
-    // ---- Declarative view node (zero closures, zero EditorHost) ----
 
     pub(crate) fn view(&self, slot: EditorSlot, line_height: f32) -> Node {
         let cursor = crate::platform::CursorStyle::IBeam;

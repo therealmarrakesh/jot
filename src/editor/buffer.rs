@@ -1,5 +1,3 @@
-//! Rope coordinates, selections, UTF-16 conversion, and word/line boundaries.
-
 use std::ops::{Bound, Range, RangeBounds};
 
 use ropey::{LineType, Rope, RopeSlice};
@@ -14,7 +12,6 @@ pub(crate) enum Bias {
     Right,
 }
 
-/// Zero-based logical `(row, byte_column)` coordinate within a `Rope`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct TextPoint {
     pub(crate) row: usize,
@@ -28,7 +25,6 @@ impl TextPoint {
     }
 }
 
-/// Zero-based `(line, char_column)` coordinate used by Go To Line navigation.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct Position {
     pub(crate) line: u32,
@@ -42,7 +38,6 @@ impl Position {
     }
 }
 
-/// Byte span within a text buffer.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Default)]
 pub(crate) struct Selection {
     pub(crate) start: usize,
@@ -75,7 +70,6 @@ impl From<Selection> for Range<usize> {
     }
 }
 
-/// Oriented caret + selection span with preferred vertical-motion X column anchor.
 #[derive(Debug, Copy, Clone, PartialEq, Default)]
 pub(crate) struct CaretSelection {
     pub(crate) start: usize,
@@ -175,7 +169,6 @@ impl RangeBounds<usize> for CaretSelection {
     }
 }
 
-/// Extension utilities on `ropey::Rope` for LF-based line indexing, UTF-16 mapping, and clamping.
 pub(crate) trait RopeExt {
     fn slice_line(&self, row: usize) -> RopeSlice<'_>;
     fn line_len(&self, row: usize) -> usize;
@@ -294,14 +287,12 @@ pub(crate) fn line_range_at(text: &Rope, offset: usize) -> Range<usize> {
     text.line_start_offset(row)..text.line_end_offset(row)
 }
 
-/// Steps backward by one extended Unicode grapheme cluster (UAX #29, E-4).
 pub(crate) fn prev_grapheme_boundary(text: &Rope, offset: usize) -> usize {
     let len = text.len();
     let off = text.clip_offset(offset, Bias::Left);
     if off == 0 {
         return 0;
     }
-    // Fast path for plain printable ASCII pairs (never join with a preceding ASCII byte).
     let prev_b = text.byte(off - 1);
     if (0x20..=0x7E).contains(&prev_b) && (off == 1 || text.byte(off - 2) < 0x80) {
         return off - 1;
@@ -325,7 +316,6 @@ pub(crate) fn prev_grapheme_boundary(text: &Rope, offset: usize) -> usize {
     }
 }
 
-/// Steps forward by one extended Unicode grapheme cluster (UAX #29, E-4).
 pub(crate) fn next_grapheme_boundary(text: &Rope, offset: usize) -> usize {
     let len = text.len();
     let off = text.clip_offset(offset, Bias::Right);
@@ -355,14 +345,12 @@ pub(crate) fn next_grapheme_boundary(text: &Rope, offset: usize) -> usize {
     }
 }
 
-/// Snaps `offset` to the nearest extended Unicode grapheme cluster boundary (E-4).
 pub(crate) fn snap_grapheme_boundary(text: &Rope, offset: usize, bias: Bias) -> usize {
     let len = text.len();
     let off = text.clip_offset(offset, bias);
     if off == 0 || off >= len {
         return off;
     }
-    // Fast path for plain ASCII boundaries (not inside `\r\n`).
     let prev_b = text.byte(off - 1);
     let curr_b = text.byte(off);
     if prev_b < 0x80 && curr_b < 0x80 && !(prev_b == b'\r' && curr_b == b'\n') {
@@ -395,7 +383,6 @@ fn is_horizontal_ws(ch: char) -> bool {
     ch.is_whitespace() && !matches!(ch, '\n' | '\r')
 }
 
-/// Uncapped UAX #29 double-click word selection (selecting the preceding word at line end, E-12).
 pub(crate) fn word_range_at(text: &Rope, offset: usize) -> Option<Range<usize>> {
     let line = line_range_at(text, offset);
     if line.is_empty() {
@@ -456,7 +443,6 @@ pub(crate) fn word_range_at(text: &Rope, offset: usize) -> Option<Range<usize>> 
     }
 }
 
-/// Windows Ctrl+Left / Ctrl+Backspace boundary: treats `\n` as a hard stop (E-10).
 pub(crate) fn prev_word_start(text: &Rope, offset: usize) -> usize {
     let offset = text.floor_char_boundary(offset.min(text.len()));
     if offset == 0 {
@@ -498,8 +484,6 @@ pub(crate) fn prev_word_start(text: &Rope, offset: usize) -> usize {
     }
 }
 
-/// Windows Ctrl+Right / Ctrl+Delete boundary: advances to start of next word on the current line
-/// (stopping at line end, and stepping across `\n` only when already at line end, E-10).
 pub(crate) fn next_word_end(text: &Rope, offset: usize) -> usize {
     let len = text.len();
     let offset = text.floor_char_boundary(offset.min(len));
@@ -516,7 +500,6 @@ pub(crate) fn next_word_end(text: &Rope, offset: usize) -> usize {
     }
 
     let mut start = offset;
-    // If already on horizontal whitespace, advance straight to the next word on this line.
     if text.char_at(start).is_some_and(is_horizontal_ws) {
         for ch in text.chars_at(start) {
             if start >= line_end || !is_horizontal_ws(ch) {
@@ -527,7 +510,6 @@ pub(crate) fn next_word_end(text: &Rope, offset: usize) -> usize {
         return start.min(line_end);
     }
 
-    // Advance past the current UAX #29 word segment within `start..line_end`.
     let mut span = WORD_SCAN_WINDOW_BYTES;
     let word_end = loop {
         let win_end = text
@@ -548,8 +530,6 @@ pub(crate) fn next_word_end(text: &Rope, offset: usize) -> usize {
         span = span.saturating_mul(2);
     };
 
-    // Windows Notepad convention: consume trailing horizontal whitespace on this line so the
-    // caret lands at the start of the next word (or at `line_end`, never crossing `\n`).
     let mut pos = word_end.min(line_end);
     for ch in text.chars_at(pos) {
         if pos >= line_end || !is_horizontal_ws(ch) {
@@ -662,13 +642,11 @@ mod tests {
         );
         let rope = Rope::from(sample.as_str());
 
-        // Newlines act as hard boundaries in both directions (E-10).
         let nl = sample.find('\n').unwrap();
         assert_eq!(prev_word_start(&rope, nl + 1), nl);
         assert_eq!(next_word_end(&rope, nl), nl + 1);
         assert_eq!(next_word_end(&rope, nl - 3), nl);
 
-        // Long identifiers > WORD_SCAN_WINDOW_BYTES work without truncation (E-12).
         let long_start = sample.find(&long_word).unwrap();
         assert_eq!(
             word_range_at(&rope, long_start + 10),
@@ -683,7 +661,6 @@ mod tests {
             long_start + long_word.len() + 2
         );
 
-        // Extended grapheme cluster stepping (E-4).
         let emoji = Rope::from("a👍🏽b👨‍👩‍👧🇺🇸e\u{0301}z");
         let mut forward = vec![0];
         let mut cur = 0;

@@ -1,6 +1,3 @@
-//! Modal Win11 ContentDialogs (Go To, Out of Range, Confirm Discard, Confirm Lossy ANSI, Error)
-//! with animated scale/fade transitions and typed enum dispatch.
-
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -47,7 +44,6 @@ const LOSSY_BUTTONS: &[&str] = &["OK", "Cancel"];
 const BORDER: f32 = 1.;
 const BODY_BASELINE_SNAP: f32 = -1.;
 
-/// Concrete modal dialog payload.
 pub(crate) enum DialogKind {
     GoTo,
     LineOutOfRange,
@@ -244,8 +240,6 @@ impl Dialogs {
         closed
     }
 
-    /// Marks the active dialog as closing and extracts its `DialogKind` so the caller can act on
-    /// the user's button choice while keeping visual buttons intact during fade-out.
     pub(crate) fn take_active(&mut self) -> Option<DialogKind> {
         let ix = self.open.iter().rposition(|d| !d.closing)?;
         let taken = match &mut self.open[ix].kind {

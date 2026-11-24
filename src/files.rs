@@ -1,6 +1,3 @@
-//! Explicit multi-step file workflow state machine for Open, Save, Save As, Save All,
-//! lossy-ANSI checks, and dirty-tab/window close prompts.
-
 use std::collections::VecDeque;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -19,8 +16,6 @@ use crate::platform::{
 use crate::tabs::TabId;
 use crate::types::{Error, SharedStr};
 
-/// Unique generation ID tagging every file workflow so stale async completions never advance
-/// or abort a newer workflow (F-1).
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct WorkflowGen(pub(crate) u64);
 
@@ -63,8 +58,6 @@ pub(crate) fn in_flight_writes() -> usize {
     *lock.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Blocks up to `timeout` waiting for any in-flight `write_rope` operations to finish so
-/// shutdown / session-end does not truncate temp/backup cleanup.
 pub(crate) fn wait_for_in_flight_writes(timeout: Duration) {
     let (lock, cvar) = write_flight_tracker();
     let deadline = Instant::now() + timeout;
@@ -164,7 +157,6 @@ impl FileWorkflow {
     }
 }
 
-/// Typed file prompt data passed to the modal dialog layer.
 pub(crate) enum FilePrompt {
     Error {
         title: SharedStr,
@@ -352,8 +344,6 @@ pub(crate) fn spawn_write_file(
     let guard = WriteFlightGuard::enter();
     let fallback_path = path.clone();
     let fallback_key = document::quick_path_key(&path);
-    // Run file writes on a dedicated thread so a save is never queued behind large file loads
-    // on the background pool (D-4), and release `guard` even if a panic is caught (D-7).
     jobs.spawn_dedicated_guarded(
         "jot-write-file",
         move || {
