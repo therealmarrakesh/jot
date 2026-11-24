@@ -120,10 +120,6 @@ impl Menus {
         }
     }
 
-    fn mode(&self) -> &MenuMode {
-        &self.mode
-    }
-
     fn open_popup(&self) -> Option<&OpenMenu> {
         match &self.mode {
             MenuMode::Open { menu, .. } => Some(menu),
@@ -152,14 +148,10 @@ impl Menus {
     pub(crate) fn pointer_down(&mut self, focus: Focus) -> MenuOutcome {
         self.alt_armed = false;
         match &mut self.mode {
-            MenuMode::Open { tips, .. } => {
-                let had_tips = std::mem::replace(tips, false);
-                if had_tips {
-                    MenuOutcome::default().dirty()
-                } else {
-                    MenuOutcome::default()
-                }
-            }
+            MenuMode::Open { tips, .. } => MenuOutcome {
+                dirty: std::mem::replace(tips, false),
+                ..Default::default()
+            },
             MenuMode::Bar { .. } => {
                 self.mode = MenuMode::Idle;
                 let req = if focus == Focus::MenuBar {
@@ -185,15 +177,11 @@ impl Menus {
         }
         let had_bar = !matches!(self.mode, MenuMode::Idle);
         self.mode = MenuMode::Idle;
-        if focus == Focus::MenuBar {
-            MenuOutcome::default()
-                .dirty()
-                .focus(FocusRequest::RestoreEditor)
-        } else if had_bar {
-            MenuOutcome::default().dirty()
-        } else {
-            MenuOutcome::default()
-        }
+        let out = MenuOutcome {
+            dirty: had_bar || focus == Focus::MenuBar,
+            ..Default::default()
+        };
+        if focus == Focus::MenuBar { out.focus(FocusRequest::RestoreEditor) } else { out }
     }
 
     pub(crate) fn close(&mut self) -> MenuOutcome {
@@ -203,7 +191,7 @@ impl Menus {
         let focus = match std::mem::replace(&mut self.mode, MenuMode::Idle) {
             MenuMode::Open { mut menu, .. } => {
                 let focus = menu.kind.return_focus();
-                menu.motion.close();
+                menu.motion.transition.close();
                 self.leaving = Some(menu);
                 focus
             }
@@ -720,7 +708,7 @@ impl Menus {
                     unreachable!()
                 };
                 let cursor = menu.kind.bar_kind().unwrap();
-                menu.motion.close();
+                menu.motion.transition.close();
                 self.leaving = Some(menu);
                 self.hovered_target = None;
                 self.submenu_timer = None;
@@ -822,7 +810,7 @@ impl Menus {
                 .position(|e| e.command_id() == Some(cmd))
         {
             return Some(HitId::Menu(MenuHit::SubmenuItem {
-                serial: sub.motion.serial(),
+                serial: sub.motion.transition.serial(),
                 ix,
             }));
         }
@@ -833,7 +821,7 @@ impl Menus {
             .position(|b| b.command.command == cmd)
         {
             return Some(HitId::Menu(MenuHit::Command {
-                serial: menu.motion.serial(),
+                serial: menu.motion.transition.serial(),
                 ix,
             }));
         }
@@ -843,7 +831,7 @@ impl Menus {
             .position(|e| e.command_id() == Some(cmd))
             .map(|ix| {
                 HitId::Menu(MenuHit::Item {
-                    serial: menu.motion.serial(),
+                    serial: menu.motion.transition.serial(),
                     ix,
                 })
             })
@@ -861,7 +849,7 @@ impl Menus {
             .find_map(|(ix, e)| {
                 (matches!(e, Entry::Submenu(..)) && menu.panel.labels[ix].as_ref() == title)
                     .then_some(HitId::Menu(MenuHit::Item {
-                        serial: menu.motion.serial(),
+                        serial: menu.motion.transition.serial(),
                         ix,
                     }))
             })
@@ -1250,20 +1238,6 @@ impl PopupTransition {
         }
     }
 
-    #[inline]
-    fn serial(&self) -> usize {
-        self.transition.serial()
-    }
-
-    #[inline]
-    fn is_closing(&self) -> bool {
-        self.transition.is_closing()
-    }
-
-    fn close(&mut self) {
-        self.transition.close();
-    }
-
     fn sample(&mut self, ui: &mut AppUi) -> bool {
         let serial = self.transition.serial();
         let closing = self.transition.is_closing();
@@ -1321,10 +1295,6 @@ impl OpenMenu {
         }
     }
 
-    fn is_closing(&self) -> bool {
-        self.motion.is_closing()
-    }
-
     fn visible_submenu(&self) -> Option<&OpenSubmenu> {
         self.submenu.as_ref().or(self.leaving_submenu.as_ref())
     }
@@ -1351,7 +1321,7 @@ impl OpenMenu {
         if matches!(self.focus, PopupFocus::SubRow(_)) {
             self.focus = PopupFocus::Row(sub.ix);
         }
-        sub.motion.close();
+        sub.motion.transition.close();
         self.leaving_submenu = Some(sub);
         true
     }
@@ -1566,7 +1536,7 @@ impl Menus {
                 .opacity(open.motion.opacity)
                 .child(card)
                 .when_some(sub_node, AppNode::child)
-                .when(open.is_closing(), AppNode::inert),
+                .when(open.motion.transition.is_closing(), AppNode::inert),
         )
     }
 
@@ -1574,7 +1544,7 @@ impl Menus {
         if !self.access_active(focus) {
             return Vec::new();
         }
-        let open = match self.mode() {
+        let open = match &self.mode {
             MenuMode::Open { menu, .. } => menu,
             MenuMode::Bar { .. } => {
                 return MenuKind::ALL
@@ -1592,8 +1562,8 @@ impl Menus {
             return Vec::new();
         }
         let (panel, serial, is_sub, motion) = match open.focused_submenu() {
-            Some(sub) => (&sub.panel, sub.motion.serial(), true, &sub.motion),
-            None => (&open.panel, open.motion.serial(), false, &open.motion),
+            Some(sub) => (&sub.panel, sub.motion.transition.serial(), true, &sub.motion),
+            None => (&open.panel, open.motion.transition.serial(), false, &open.motion),
         };
         if motion.unroll < 1. {
             return Vec::new();
@@ -1644,7 +1614,7 @@ fn render_command_button(open: &OpenMenu, ix: usize, p: Palette, ui: &mut AppUi)
     let focused = ui.last_input_was_keyboard && open.focus == PopupFocus::Command(ix);
     let enabled = command.enabled;
     let hit = HitId::Menu(MenuHit::Command {
-        serial: open.motion.serial(),
+        serial: open.motion.transition.serial(),
         ix,
     });
     let bg = ui.brush(hit, subtle_brushes(p), enabled);
@@ -1710,7 +1680,7 @@ fn render_submenu_popup(
         .cursor(CursorStyle::Arrow)
         .anchored(Anchor::Target {
             target: HitId::Menu(MenuHit::Item {
-                serial: open.motion.serial(),
+                serial: open.motion.transition.serial(),
                 ix: submenu.ix,
             }),
             place: place_submenu,
@@ -1731,7 +1701,7 @@ fn render_submenu_popup(
                 .bg(p.menu_fill)
                 .child(rows),
         )
-        .when(submenu.motion.is_closing(), AppNode::inert)
+        .when(submenu.motion.transition.is_closing(), AppNode::inert)
 }
 
 fn render_panel_rows(
@@ -1741,10 +1711,10 @@ fn render_panel_rows(
     ui: &mut AppUi,
 ) -> AppNode {
     let (panel, serial, is_sub, fade) = match sub {
-        Some(sub) => (&sub.panel, sub.motion.serial(), true, false),
+        Some(sub) => (&sub.panel, sub.motion.transition.serial(), true, false),
         None => (
             &open.panel,
-            open.motion.serial(),
+            open.motion.transition.serial(),
             false,
             !open.kind.commands().is_empty(),
         ),
@@ -1828,13 +1798,8 @@ fn render_row_face(
     };
     let mark_color = match entry {
         _ if !enabled => p.text_disabled,
-        Entry::Toggle { .. } => {
-            if hovered {
-                p.text_primary
-            } else {
-                p.text_secondary
-            }
-        }
+        Entry::Toggle { .. } if hovered => p.text_primary,
+        Entry::Toggle { .. } => p.text_secondary,
         _ if fade && pressed => p.text_secondary,
         _ => p.text_primary,
     };
