@@ -455,6 +455,10 @@ pub(crate) fn next_word_end(text: &Rope, offset: usize) -> usize {
 const BULK_REBUILD_THRESHOLD: usize = 64;
 const SNAPSHOT_HISTORY_THRESHOLD: usize = 1024;
 
+const MAX_HISTORY_ENTRIES: usize = 1000;
+const MAX_CHANGES_PER_ENTRY: usize = 1000;
+const MAX_HISTORY_BYTES: usize = 32 * 1024 * 1024;
+
 pub(crate) type ValidateFn = fn(&str) -> bool;
 
 #[derive(Clone, Copy, Debug)]
@@ -479,30 +483,6 @@ enum SelectionAfter {
     Explicit(Selection),
 }
 
-enum Record {
-    Undoable(EditKind),
-    CommitPreedit(Composition),
-    Preedit {
-        replaced_text: String,
-        sel_before: Selection,
-        cursor_byte: usize,
-    },
-    ResetHistory,
-    Untracked,
-}
-
-enum EditSource {
-    Changes(ChangeSet),
-    ReplaceRope(Rope),
-}
-
-struct Edit {
-    source: EditSource,
-    selection: SelectionAfter,
-    record: Record,
-    validate: bool,
-}
-
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Composition {
     pub(crate) start: usize,
@@ -511,6 +491,20 @@ pub(crate) struct Composition {
     replaced_text: String,
     sel_before: Selection,
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EditKind {
+    Insert,
+    Backspace,
+    DeleteForward,
+    Atomic,
+}
+
+/// History budget charged per change on top of its text: two `(range, text)` records.
+const CHANGE_OVERHEAD: usize = 80;
+
+/// Replace a byte range with new text.
+type Splice = (Range<usize>, String);
 
 pub(crate) struct TextModel {
     text: Rope,
@@ -528,7 +522,7 @@ impl TextModel {
             policy,
             selection: Selection::default(),
             composition: None,
-            history: History::new(),
+            history: History::default(),
             revision: 0,
         }
     }
@@ -567,13 +561,10 @@ impl TextModel {
     }
 
     pub(crate) fn cursor(&self) -> usize {
-        if let Some(comp) = &self.composition {
-            return comp
-                .start
-                .saturating_add(comp.cursor)
-                .clamp(comp.start, comp.end);
+        match &self.composition {
+            Some(c) => c.start.saturating_add(c.cursor).clamp(c.start, c.end),
+            None => self.selection.head,
         }
-        self.selection.head
     }
 
     pub(crate) fn selected_range(&self) -> Range<usize> {
@@ -586,52 +577,49 @@ impl TextModel {
 
     pub(crate) fn caret_line_col(&self) -> (usize, usize) {
         let offset = self.cursor();
-        let pt = self.text.offset_to_point(offset);
-        let line_start = self.text.line_start_offset(pt.row);
-        let col = self
-            .text
-            .byte_to_char_idx(offset)
-            .saturating_sub(self.text.byte_to_char_idx(line_start));
-        (pt.row + 1, col + 1)
+        let row = self.text.offset_to_point(offset).row;
+        let line_start = self.text.line_start_offset(row);
+        let col = self.text.byte_to_char_idx(offset) - self.text.byte_to_char_idx(line_start);
+        (row + 1, col + 1)
     }
 
     pub(crate) fn can_undo(&self) -> bool {
-        self.history.can_undo()
+        !self.history.undo.is_empty()
     }
 
     pub(crate) fn can_redo(&self) -> bool {
-        self.history.can_redo()
+        !self.history.redo.is_empty()
     }
 
     pub(crate) fn is_clean(&self) -> bool {
-        self.history.is_clean() && self.composition.is_none()
+        self.history.saved == self.history.version && self.composition.is_none()
     }
 
+    /// Ends any composition and typing run; returns the version to pass to `mark_saved_version`
+    /// once the save succeeds.
     pub(crate) fn begin_save(&mut self) -> u64 {
         self.commit_composition();
-        self.history.begin_save()
+        self.history.coalesce_broken = true;
+        self.history.version
     }
 
     pub(crate) fn mark_saved_version(&mut self, version: u64) {
-        self.history.mark_saved(version);
+        self.history.saved = version;
     }
 
     pub(crate) fn break_coalescing(&mut self) {
-        self.history.break_coalescing();
+        self.history.coalesce_broken = true;
     }
 
     pub(crate) fn snap_boundary(&self, offset: usize, bias: Bias) -> usize {
         snap_grapheme_boundary(&self.text, offset, bias)
     }
 
+    /// Single-line fields drop line breaks; documents store every line break as `\n`.
     fn normalize<'a>(&self, text: &'a str) -> Cow<'a, str> {
-        if !self.policy.multi_line {
-            if text.contains(['\n', '\r']) {
-                Cow::Owned(text.replace(['\n', '\r'], ""))
-            } else {
-                Cow::Borrowed(text)
-            }
-        } else if text.contains('\r') {
+        if !self.policy.multi_line && text.contains(['\n', '\r']) {
+            Cow::Owned(text.replace(['\n', '\r'], ""))
+        } else if self.policy.multi_line && text.contains('\r') {
             Cow::Owned(text.replace("\r\n", "\n").replace('\r', "\n"))
         } else {
             Cow::Borrowed(text)
@@ -643,181 +631,123 @@ impl TextModel {
     }
 
     fn debug_assert_invariants(&self) {
-        debug_assert!(self.selection.start() <= self.selection.end());
-        debug_assert!(self.selection.end() <= self.text.len());
-        debug_assert!(self.text.is_char_boundary(self.selection.anchor));
-        debug_assert!(self.text.is_char_boundary(self.selection.head));
-        if let Some(comp) = &self.composition {
-            debug_assert!(comp.start <= comp.end && comp.end <= self.text.len());
-            debug_assert!(self.text.is_char_boundary(comp.start));
-            debug_assert!(self.text.is_char_boundary(comp.end));
+        let sel = self.selection;
+        debug_assert!(sel.start() <= sel.end() && sel.end() <= self.text.len());
+        debug_assert!(
+            self.text.is_char_boundary(sel.anchor) && self.text.is_char_boundary(sel.head)
+        );
+        if let Some(c) = &self.composition {
+            debug_assert!(c.start <= c.end && c.end <= self.text.len());
+            debug_assert!(self.text.is_char_boundary(c.start) && self.text.is_char_boundary(c.end));
         }
     }
 
-    fn commit(&mut self, edit: Edit) -> Option<LineChange> {
-        let sel_before = self.selection;
-        let before_rope = self.text.clone();
+    /// Applies `edits` (clipped to char boundaries, line breaks normalized), places the
+    /// selection, and records the edit in the history as `kind` (`None` leaves it untracked).
+    /// A single-line field rejects an edit its validator refuses. Returns the changed lines.
+    fn commit(
+        &mut self,
+        edits: Vec<Splice>,
+        after: SelectionAfter,
+        kind: Option<EditKind>,
+        validate: bool,
+    ) -> Option<LineChange> {
+        if edits.is_empty() {
+            return None;
+        }
+        let (before, sel_before) = (self.text.clone(), self.selection);
+        let mut edits: Vec<Splice> = edits
+            .into_iter()
+            .map(|(range, text)| {
+                let start = self.text.clip_offset(range.start, Bias::Left);
+                let end = self.text.clip_offset(range.end, Bias::Right);
+                (
+                    start.min(end)..start.max(end),
+                    self.normalize(&text).into_owned(),
+                )
+            })
+            .collect();
+        edits.sort_by_key(|(range, _)| range.start);
+        debug_assert!(
+            edits.windows(2).all(|w| w[0].0.end <= w[1].0.start),
+            "edits overlap"
+        );
 
-        let (lines, applied_changes, next_selection) = match edit.source {
-            EditSource::ReplaceRope(rope) => {
-                self.text = rope;
-                let sel = match edit.selection {
-                    SelectionAfter::Explicit(sel) => sel,
-                    SelectionAfter::AfterLastEdit | SelectionAfter::Remap => {
-                        Selection::caret(self.text.len())
-                    }
-                };
-                (LineChange::Full, None, sel)
-            }
-            EditSource::Changes(raw) => {
-                if raw.is_empty() {
-                    return None;
-                }
-                let changes = ChangeSet::new(
-                    raw.changes
-                        .into_iter()
-                        .map(|c| {
-                            let start = self.text.clip_offset(c.range.start, Bias::Left);
-                            let end = self.text.clip_offset(c.range.end, Bias::Right);
-                            Change {
-                                range: start.min(end)..start.max(end),
-                                text: self.normalize(&c.text).into_owned(),
-                            }
-                        })
-                        .collect(),
-                );
-                let first_start = changes.changes[0].range.start;
-                let last_end = changes.changes.last().unwrap().range.end;
-                let old_start_line = self.text.offset_to_point(first_start).row;
-                let old_end_line = self.text.offset_to_point(last_end).row;
-
-                if changes.len() > BULK_REBUILD_THRESHOLD {
-                    self.text = rebuild_rope(&self.text, &changes.changes);
-                } else {
-                    for c in changes.changes.iter().rev() {
-                        self.text.replace(c.range.clone(), &c.text);
-                    }
-                }
-
-                if edit.validate
-                    && !self.policy.multi_line
-                    && self.policy.validate.is_some()
-                    && !self.accepts(&self.text.to_string())
-                    && self.accepts(&before_rope.to_string())
-                {
-                    self.text = before_rope;
-                    return None;
-                }
-
-                let mut shift: isize = 0;
-                let mut last_new_end = first_start;
-                for c in &changes.changes {
-                    last_new_end = (c.range.start as isize + shift) as usize + c.text.len();
-                    shift += c.text.len() as isize - (c.range.end - c.range.start) as isize;
-                }
-                let lines = if matches!(edit.record, Record::ResetHistory) {
-                    LineChange::Full
-                } else {
-                    let new_start_line = self.text.offset_to_point(first_start).row;
-                    let new_end_line = self.text.offset_to_point(last_new_end).row;
-                    LineChange::Splice {
-                        old_lines: old_start_line..old_end_line + 1,
-                        new_lines: new_start_line..new_end_line + 1,
-                    }
-                };
-                let sel = match edit.selection {
-                    SelectionAfter::AfterLastEdit => Selection::caret(last_new_end),
-                    SelectionAfter::Remap => Selection {
-                        anchor: changes.remap_offset(sel_before.anchor),
-                        head: changes.remap_offset(sel_before.head),
-                        end_affinity: false,
-                    },
-                    SelectionAfter::Explicit(sel) => sel,
-                };
-                (lines, Some(changes), sel)
-            }
-        };
-
-        self.revision = self.revision.wrapping_add(1);
-        let mut snapped = next_selection;
-        snapped.anchor = self.snap_boundary(snapped.anchor, Bias::Left);
-        snapped.head = self.snap_boundary(snapped.head, Bias::Left);
-        self.selection = snapped;
-
-        match edit.record {
-            Record::Preedit {
-                replaced_text,
-                sel_before,
-                cursor_byte,
-            } => {
-                let change = &applied_changes.as_ref().unwrap().changes[0];
-                let start = change.range.start;
-                let end = start + change.text.len();
-                let caret = self.snap_boundary(start + cursor_byte, Bias::Left);
-                self.composition = Some(Composition {
-                    start,
-                    end,
-                    cursor: caret.saturating_sub(start),
-                    replaced_text,
-                    sel_before,
-                });
-                self.selection = Selection::caret(caret);
-            }
-            Record::CommitPreedit(comp) => {
-                self.composition = None;
-                let change = &applied_changes.as_ref().unwrap().changes[0];
-                let orig_end = comp.start + comp.replaced_text.len();
-                let new_end = comp.start + change.text.len();
-                self.history.push(Transaction {
-                    kind: EditKind::Atomic,
-                    payload: TxPayload::Changes {
-                        undo: ChangeSet::single(comp.start..new_end, comp.replaced_text),
-                        redo: ChangeSet::single(comp.start..orig_end, change.text.clone()),
-                    },
-                    selection_before: comp.sel_before,
-                    selection_after: self.selection,
-                });
-            }
-            Record::Undoable(kind) => {
-                self.composition = None;
-                if let Some(changes) = applied_changes {
-                    let payload = if changes.len() > SNAPSHOT_HISTORY_THRESHOLD {
-                        let delta_bytes: usize = changes
-                            .changes
-                            .iter()
-                            .map(|c| (c.range.end - c.range.start) + c.text.len())
-                            .sum();
-                        TxPayload::Snapshot {
-                            before: before_rope,
-                            after: self.text.clone(),
-                            delta_bytes,
-                        }
-                    } else {
-                        let undo = invert_changes(&before_rope, &changes);
-                        TxPayload::Changes {
-                            undo,
-                            redo: changes,
-                        }
-                    };
-                    self.history.push(Transaction {
-                        kind,
-                        payload,
-                        selection_before: sel_before,
-                        selection_after: self.selection,
-                    });
-                }
-            }
-            Record::ResetHistory => {
-                self.composition = None;
-                self.history.clear();
-            }
-            Record::Untracked => {
-                self.composition = None;
+        let first = edits[0].0.start;
+        let row = |text: &Rope, offset| text.offset_to_point(offset).row;
+        let old_lines = row(&self.text, first)..row(&self.text, edits[edits.len() - 1].0.end) + 1;
+        if edits.len() > BULK_REBUILD_THRESHOLD {
+            self.text = rebuild_rope(&self.text, &edits);
+        } else {
+            for (range, text) in edits.iter().rev() {
+                self.text.replace(range.clone(), text);
             }
         }
+        if validate
+            && !self.policy.multi_line
+            && self.policy.validate.is_some()
+            && !self.accepts(&self.text.to_string())
+            && self.accepts(&before.to_string())
+        {
+            self.text = before;
+            return None;
+        }
 
+        let (mut last_end, mut shift) = (first, 0isize);
+        for (range, text) in &edits {
+            last_end = range.start.wrapping_add_signed(shift) + text.len();
+            shift += text.len() as isize - range.len() as isize;
+        }
+        let new_lines = row(&self.text, first)..row(&self.text, last_end) + 1;
+        self.settle(match after {
+            SelectionAfter::AfterLastEdit => Selection::caret(last_end),
+            SelectionAfter::Remap => Selection {
+                anchor: remap_offset(&edits, sel_before.anchor),
+                head: remap_offset(&edits, sel_before.head),
+                end_affinity: false,
+            },
+            SelectionAfter::Explicit(sel) => sel,
+        });
+        if let Some(kind) = kind {
+            let payload = if edits.len() > SNAPSHOT_HISTORY_THRESHOLD {
+                let bytes = edits
+                    .iter()
+                    .map(|(range, text)| range.len() + text.len())
+                    .sum::<usize>();
+                Payload::Snapshot {
+                    text: [before, self.text.clone()],
+                    bytes: bytes.max(4096),
+                }
+            } else {
+                let changes = edits.into_iter().map(|(range, new)| Change {
+                    at: range.start,
+                    old: before.slice(range).to_string(),
+                    new,
+                });
+                Payload::Changes(changes.collect())
+            };
+            self.history
+                .push(kind, payload, [sel_before, self.selection]);
+        }
+        Some(LineChange::Splice {
+            old_lines,
+            new_lines,
+        })
+    }
+
+    /// Bookkeeping after any text change: new revision, selection snapped, composition ended.
+    fn settle(&mut self, mut sel: Selection) {
+        self.revision = self.revision.wrapping_add(1);
+        sel.anchor = self.snap_boundary(sel.anchor, Bias::Left);
+        sel.head = self.snap_boundary(sel.head, Bias::Left);
+        self.selection = sel;
+        self.composition = None;
         self.debug_assert_invariants();
-        Some(lines)
+    }
+
+    fn replace(&mut self, range: Range<usize>, text: String, kind: EditKind) -> Option<LineChange> {
+        let edit = vec![(range, text)];
+        self.commit(edit, SelectionAfter::AfterLastEdit, Some(kind), true)
     }
 
     pub(crate) fn replace_all(
@@ -826,186 +756,181 @@ impl TextModel {
         replacement: &str,
     ) -> Option<LineChange> {
         self.commit_composition();
-        if ranges.is_empty() {
-            return None;
-        }
-        let replacement = self.normalize(replacement).into_owned();
-        let changes = ChangeSet::new(
-            ranges
-                .iter()
-                .map(|r| Change {
-                    range: r.clone(),
-                    text: replacement.clone(),
-                })
-                .collect(),
-        );
-        let next_cursor = changes.remap_offset(self.cursor());
-        self.commit(Edit {
-            source: EditSource::Changes(changes),
-            selection: SelectionAfter::Explicit(Selection::caret(next_cursor)),
-            record: Record::Undoable(EditKind::Atomic),
-            validate: true,
-        })
+        let text = self.normalize(replacement).into_owned();
+        let mut edits: Vec<Splice> = ranges.iter().map(|r| (r.clone(), text.clone())).collect();
+        edits.sort_by_key(|(range, _)| range.start);
+        let caret = Selection::caret(remap_offset(&edits, self.cursor()));
+        self.commit(
+            edits,
+            SelectionAfter::Explicit(caret),
+            Some(EditKind::Atomic),
+            true,
+        )
     }
 
+    /// Replaces the whole text and starts a fresh history.
     pub(crate) fn set_value(&mut self, value: &str) -> Option<LineChange> {
         self.composition = None;
-        let normalized = self.normalize(value).into_owned();
-        let target_offset = if self.policy.multi_line {
+        let value = self.normalize(value).into_owned();
+        let caret = Selection::caret(if self.policy.multi_line {
             0
         } else {
-            normalized.len()
-        };
-        let full = 0..self.text.len();
-        self.commit(Edit {
-            source: EditSource::Changes(ChangeSet::single(full, normalized)),
-            selection: SelectionAfter::Explicit(Selection::caret(target_offset)),
-            record: Record::ResetHistory,
-            validate: false,
-        })
+            value.len()
+        });
+        let edit = vec![(0..self.text.len(), value)];
+        let lines = self.commit(edit, SelectionAfter::Explicit(caret), None, false);
+        self.history = History::default();
+        lines.map(|_| LineChange::Full)
     }
 
+    /// Types `text` over the selection, or commits it in place of an active composition.
     pub(crate) fn insert_text(&mut self, text: &str) -> Option<LineChange> {
+        let text = self.normalize(text).into_owned();
         if let Some(comp) = self.composition.take() {
-            let range = comp.start..comp.end;
-            let res = self.commit(Edit {
-                source: EditSource::Changes(ChangeSet::single(range, text)),
-                selection: SelectionAfter::AfterLastEdit,
-                record: Record::CommitPreedit(comp.clone()),
-                validate: true,
-            });
-            if res.is_none() {
+            let edit = vec![(comp.start..comp.end, text.clone())];
+            let Some(lines) = self.commit(edit, SelectionAfter::AfterLastEdit, None, true) else {
                 self.composition = Some(comp);
-            }
-            return res;
+                return None;
+            };
+            let change = Change {
+                at: comp.start,
+                old: comp.replaced_text,
+                new: text,
+            };
+            let selection = [comp.sel_before, self.selection];
+            self.history
+                .push(EditKind::Atomic, Payload::Changes(vec![change]), selection);
+            return Some(lines);
         }
-
         let range = self.selected_range();
-        let normalized = self.normalize(text).into_owned();
-        let kind = if range.is_empty() && !normalized.is_empty() && !normalized.contains('\n') {
-            EditKind::Insert
-        } else {
-            EditKind::Atomic
-        };
-        self.replace_range(range, normalized, kind)
+        let typing = range.is_empty() && !text.is_empty() && !text.contains('\n');
+        self.replace(
+            range,
+            text,
+            if typing {
+                EditKind::Insert
+            } else {
+                EditKind::Atomic
+            },
+        )
     }
 
     pub(crate) fn replace_selection(&mut self, text: &str) -> Option<LineChange> {
         self.commit_composition();
-        self.replace_range(self.selected_range(), text, EditKind::Atomic)
+        self.replace(self.selected_range(), text.to_owned(), EditKind::Atomic)
     }
 
-    fn replace_range(
+    /// Shows uncommitted IME text in place of the selection (or the previous composition).
+    /// It stays out of the history until committed.
+    pub(crate) fn set_composition(
         &mut self,
-        range: Range<usize>,
-        text: impl Into<String>,
-        kind: EditKind,
+        text: &str,
+        cursor_utf16: usize,
     ) -> Option<LineChange> {
-        self.commit(Edit {
-            source: EditSource::Changes(ChangeSet::single(range, text)),
-            selection: SelectionAfter::AfterLastEdit,
-            record: Record::Undoable(kind),
-            validate: true,
-        })
-    }
-
-    pub(crate) fn set_composition(&mut self, text: &str, cursor_utf16: usize) -> Option<LineChange> {
+        let text = self.normalize(text).into_owned();
         if text.is_empty() {
             return self.cancel_composition();
         }
-        let normalized = self.normalize(text).into_owned();
-        if normalized.is_empty() {
-            return self.cancel_composition();
-        }
-        let cursor_byte = utf16_offset_to_byte(&normalized, cursor_utf16);
+        let cursor = utf16_offset_to_byte(&text, cursor_utf16);
         let (range, replaced_text, sel_before) = match &self.composition {
-            Some(comp) => (comp.start..comp.end, comp.replaced_text.clone(), comp.sel_before),
+            Some(c) => (c.start..c.end, c.replaced_text.clone(), c.sel_before),
             None => {
-                let r = self.selected_range();
-                let old = self.text.slice(r.clone()).to_string();
-                (r, old, self.selection)
+                let range = self.selected_range();
+                (
+                    range.clone(),
+                    self.text.slice(range).to_string(),
+                    self.selection,
+                )
             }
         };
-        self.commit(Edit {
-            source: EditSource::Changes(ChangeSet::single(range, normalized)),
-            selection: SelectionAfter::AfterLastEdit,
-            record: Record::Preedit {
-                replaced_text,
-                sel_before,
-                cursor_byte,
-            },
-            validate: true,
-        })
+        let (start, end) = (range.start, range.start + text.len());
+        let lines = self.commit(
+            vec![(range, text)],
+            SelectionAfter::AfterLastEdit,
+            None,
+            true,
+        )?;
+        let caret = self.snap_boundary(start + cursor, Bias::Left);
+        let cursor = caret.saturating_sub(start);
+        self.composition = Some(Composition {
+            start,
+            end,
+            cursor,
+            replaced_text,
+            sel_before,
+        });
+        self.selection = Selection::caret(caret);
+        Some(lines)
     }
 
+    /// Keeps the composed text and records it as one undoable edit. Returns whether a
+    /// composition was active.
     pub(crate) fn commit_composition(&mut self) -> bool {
         let Some(comp) = self.composition.take() else {
             return false;
         };
         let committed = self.text.slice(comp.start..comp.end).to_string();
         self.selection = Selection::caret(self.snap_boundary(comp.end, Bias::Left));
-        let orig_end = comp.start + comp.replaced_text.len();
         if committed != comp.replaced_text {
-            self.history.push(Transaction {
-                kind: EditKind::Atomic,
-                payload: TxPayload::Changes {
-                    undo: ChangeSet::single(comp.start..comp.end, comp.replaced_text),
-                    redo: ChangeSet::single(comp.start..orig_end, committed),
-                },
-                selection_before: comp.sel_before,
-                selection_after: self.selection,
-            });
+            let change = Change {
+                at: comp.start,
+                old: comp.replaced_text,
+                new: committed,
+            };
+            let selection = [comp.sel_before, self.selection];
+            self.history
+                .push(EditKind::Atomic, Payload::Changes(vec![change]), selection);
         }
         self.debug_assert_invariants();
         true
     }
 
+    /// Restores the text and selection from before the composition.
     pub(crate) fn cancel_composition(&mut self) -> Option<LineChange> {
         let comp = self.composition.take()?;
-        self.commit(Edit {
-            source: EditSource::Changes(ChangeSet::single(comp.start..comp.end, comp.replaced_text)),
-            selection: SelectionAfter::Explicit(comp.sel_before),
-            record: Record::Untracked,
-            validate: false,
-        })
+        let edit = vec![(comp.start..comp.end, comp.replaced_text)];
+        self.commit(edit, SelectionAfter::Explicit(comp.sel_before), None, false)
     }
 
+    /// Deletes the selection, or with none the span `span` gives from the caret.
     fn delete_with(
         &mut self,
-        collapsed_kind: EditKind,
-        collapsed_span: impl FnOnce(&Rope, usize) -> Range<usize>,
+        kind: EditKind,
+        span: impl FnOnce(&Rope, usize) -> Range<usize>,
     ) -> Option<LineChange> {
         self.commit_composition();
-        let (range, kind) = if self.selection.is_empty() {
-            let span = collapsed_span(&self.text, self.selection.head);
-            if span.start == span.end {
-                return None;
-            }
-            (span.start.min(span.end)..span.start.max(span.end), collapsed_kind)
-        } else {
-            (self.selection.range(), EditKind::Atomic)
-        };
-        self.replace_range(range, "", kind)
+        if !self.selection.is_empty() {
+            return self.replace(self.selection.range(), String::new(), EditKind::Atomic);
+        }
+        let span = span(&self.text, self.selection.head);
+        if span.start == span.end {
+            return None;
+        }
+        self.replace(
+            span.start.min(span.end)..span.start.max(span.end),
+            String::new(),
+            kind,
+        )
     }
 
     pub(crate) fn delete_backward(&mut self) -> Option<LineChange> {
-        self.delete_with(EditKind::Backspace, |t, off| {
-            prev_grapheme_boundary(t, off)..off
+        self.delete_with(EditKind::Backspace, |t, at| {
+            prev_grapheme_boundary(t, at)..at
         })
     }
 
     pub(crate) fn delete_forward(&mut self) -> Option<LineChange> {
-        self.delete_with(EditKind::DeleteForward, |t, off| {
-            off..next_grapheme_boundary(t, off)
+        self.delete_with(EditKind::DeleteForward, |t, at| {
+            at..next_grapheme_boundary(t, at)
         })
     }
 
     pub(crate) fn delete_prev_word(&mut self) -> Option<LineChange> {
-        self.delete_with(EditKind::Atomic, |t, off| prev_word_start(t, off)..off)
+        self.delete_with(EditKind::Atomic, |t, at| prev_word_start(t, at)..at)
     }
 
     pub(crate) fn delete_next_word(&mut self) -> Option<LineChange> {
-        self.delete_with(EditKind::Atomic, |t, off| off..next_word_end(t, off))
+        self.delete_with(EditKind::Atomic, |t, at| at..next_word_end(t, at))
     }
 
     pub(crate) fn enter(&mut self) -> Option<LineChange> {
@@ -1013,89 +938,64 @@ impl TextModel {
         if !self.policy.multi_line {
             return None;
         }
-        self.replace_range(self.selected_range(), "\n", EditKind::Atomic)
+        self.replace(self.selected_range(), "\n".into(), EditKind::Atomic)
     }
 
+    /// Tab: inserts a tab, or with `block` or a multi-line selection indents every selected
+    /// line. `None` for single-line fields, which don't take tabs.
     pub(crate) fn indent(&mut self, block: bool) -> Option<Option<LineChange>> {
         if !self.policy.multi_line {
             return None;
         }
         self.commit_composition();
-        let before = self.selection;
-        let spans_multiple_lines = !before.is_empty()
-            && self.text.offset_to_point(before.start()).row
-                != self.text.offset_to_point(before.end()).row;
-        if !block && !spans_multiple_lines {
-            return Some(self.replace_range(before.range(), "\t", EditKind::Atomic));
+        let sel = self.selection;
+        let row = |offset| self.text.offset_to_point(offset).row;
+        if !block && (sel.is_empty() || row(sel.start()) == row(sel.end())) {
+            return Some(self.replace(sel.range(), "\t".into(), EditKind::Atomic));
         }
-        let (start_row, end_row) = self.selected_line_bounds(before);
-        let changes = ChangeSet::new(
-            (start_row..=end_row)
-                .map(|row| {
-                    let start = self.text.line_start_offset(row);
-                    Change {
-                        range: start..start,
-                        text: "\t".into(),
-                    }
-                })
-                .collect(),
-        );
-        Some(self.commit(Edit {
-            source: EditSource::Changes(changes),
-            selection: SelectionAfter::Remap,
-            record: Record::Undoable(EditKind::Atomic),
-            validate: true,
-        }))
+        let edits = self.selected_rows().map(|r| {
+            let start = self.text.line_start_offset(r);
+            (start..start, "\t".to_owned())
+        });
+        Some(self.commit(
+            edits.collect(),
+            SelectionAfter::Remap,
+            Some(EditKind::Atomic),
+            true,
+        ))
     }
 
+    /// Removes one tab, or up to eight spaces, from the start of every selected line.
     pub(crate) fn outdent(&mut self) -> Option<Option<LineChange>> {
         if !self.policy.multi_line {
             return None;
         }
         self.commit_composition();
-        let (start_row, end_row) = self.selected_line_bounds(self.selection);
-        let changes: Vec<Change> = (start_row..=end_row)
-            .filter_map(|row| {
-                let start = self.text.line_start_offset(row);
-                let remove = self.leading_outdent_bytes(start);
-                (remove > 0).then(|| Change {
-                    range: start..start + remove,
-                    text: String::new(),
-                })
-            })
-            .collect();
-        if changes.is_empty() {
-            return Some(None);
-        }
-        Some(self.commit(Edit {
-            source: EditSource::Changes(ChangeSet::new(changes)),
-            selection: SelectionAfter::Remap,
-            record: Record::Undoable(EditKind::Atomic),
-            validate: true,
-        }))
+        let edits = self.selected_rows().filter_map(|r| {
+            let start = self.text.line_start_offset(r);
+            let line = self.text.slice(start..);
+            let width = if line.chars().next() == Some('\t') {
+                1
+            } else {
+                line.chars().take(8).take_while(|&ch| ch == ' ').count()
+            };
+            (width > 0).then(|| (start..start + width, String::new()))
+        });
+        Some(self.commit(
+            edits.collect(),
+            SelectionAfter::Remap,
+            Some(EditKind::Atomic),
+            true,
+        ))
     }
 
-    fn selected_line_bounds(&self, sel: Selection) -> (usize, usize) {
-        let start_row = self.text.offset_to_point(sel.start()).row;
-        let end_pt = self.text.offset_to_point(sel.end());
-        let end_row = if !sel.is_empty() && end_pt.column == 0 && end_pt.row > start_row {
-            end_pt.row - 1
-        } else {
-            end_pt.row
-        };
-        (start_row, end_row)
-    }
-
-    fn leading_outdent_bytes(&self, line_start: usize) -> usize {
-        if self.text.char_at(line_start) == Some('\t') {
-            return 1;
-        }
-        self.text
-            .slice(line_start..)
-            .chars()
-            .take(8)
-            .take_while(|&ch| ch == ' ')
-            .count()
+    /// Rows the selection covers; a selection ending at a line start excludes that line.
+    fn selected_rows(&self) -> std::ops::RangeInclusive<usize> {
+        let sel = self.selection;
+        let start = self.text.offset_to_point(sel.start()).row;
+        let end = self.text.offset_to_point(sel.end());
+        let skip_last = !sel.is_empty() && end.column == 0;
+        start..=end.row - usize::from(skip_last)
     }
 
     pub(crate) fn undo(&mut self) -> Option<LineChange> {
@@ -1106,37 +1006,47 @@ impl TextModel {
         self.replay(false)
     }
 
-    fn replay(&mut self, is_undo: bool) -> Option<LineChange> {
+    fn replay(&mut self, undo: bool) -> Option<LineChange> {
         self.commit_composition();
-        let replay = self.history.replay(is_undo)?;
-        let source = match replay.payload {
-            ReplayPayload::Changes(changes) => EditSource::Changes(changes),
-            ReplayPayload::Snapshot(rope) => EditSource::ReplaceRope(rope),
-        };
-        self.commit(Edit {
-            source,
-            selection: SelectionAfter::Explicit(replay.selection),
-            record: Record::Untracked,
-            validate: false,
-        })
+        let side = usize::from(!undo);
+        let entry = self.history.step(undo)?;
+        let selection = entry.selection[side];
+        match &entry.payload {
+            Payload::Snapshot { text, .. } => {
+                self.text = text[side].clone();
+                self.settle(selection);
+                Some(LineChange::Full)
+            }
+            Payload::Changes(changes) => {
+                let mut shift = 0isize;
+                let edits = changes.iter().map(|c| {
+                    if !undo {
+                        return (c.at..c.at + c.old.len(), c.new.clone());
+                    }
+                    let at = c.at.wrapping_add_signed(shift);
+                    shift += c.new.len() as isize - c.old.len() as isize;
+                    (at..at + c.new.len(), c.old.clone())
+                });
+                let edits = edits.collect();
+                self.commit(edits, SelectionAfter::Explicit(selection), None, false)
+            }
+        }
     }
 
     pub(crate) fn select_all(&mut self) {
         self.commit_composition();
         self.selection = Selection::from_range(0..self.text.len());
-        self.debug_assert_invariants();
     }
 
     pub(crate) fn set_selected_range(&mut self, range: Range<usize>) {
         self.commit_composition();
-        let end_bias = if range.start == range.end {
+        let end_bias = if range.is_empty() {
             Bias::Left
         } else {
             Bias::Right
         };
         let start = self.snap_boundary(range.start, Bias::Left);
-        let end = self.snap_boundary(range.end, end_bias);
-        self.selection = Selection::from_range(start..end);
+        self.selection = Selection::from_range(start..self.snap_boundary(range.end, end_bias));
         self.debug_assert_invariants();
     }
 
@@ -1144,14 +1054,12 @@ impl TextModel {
         self.commit_composition();
         let offset = self.snap_boundary(self.text.line_start_offset(line), Bias::Left);
         self.selection = Selection::caret(offset);
-        self.debug_assert_invariants();
     }
 
     pub(crate) fn place_caret(&mut self, offset: usize, end_affinity: bool) {
         self.commit_composition();
         let offset = self.snap_boundary(offset, Bias::Left);
         self.selection.place(offset, end_affinity);
-        self.debug_assert_invariants();
     }
 
     pub(crate) fn extend_selection(
@@ -1160,61 +1068,39 @@ impl TextModel {
         end_affinity: bool,
         anchor_word: Option<Range<usize>>,
     ) {
-        let clamped = self.snap_boundary(offset, Bias::Left);
+        let offset = self.snap_boundary(offset, Bias::Left);
         self.selection
-            .extend_to(clamped, end_affinity, anchor_word, self.text.len());
+            .extend_to(offset, end_affinity, anchor_word, self.text.len());
         self.debug_assert_invariants();
     }
 
     pub(crate) fn select_word_at(&mut self, offset: usize) -> Option<Range<usize>> {
         let range = word_range_at(&self.text, offset)?;
         self.selection = Selection::from_range(range.clone());
-        self.debug_assert_invariants();
         Some(range)
     }
 
     pub(crate) fn select_line_at(&mut self, offset: usize) {
-        let range = line_range_at(&self.text, offset);
-        self.selection = Selection::from_range(range);
-        self.debug_assert_invariants();
+        self.selection = Selection::from_range(line_range_at(&self.text, offset));
     }
 }
 
-fn invert_changes(before: &Rope, forward: &ChangeSet) -> ChangeSet {
-    let mut shift: isize = 0;
-    let mut inverse = Vec::with_capacity(forward.len());
-    for c in &forward.changes {
-        let new_start = (c.range.start as isize + shift) as usize;
-        let new_end = new_start + c.text.len();
-        inverse.push(Change {
-            range: new_start..new_end,
-            text: before.slice(c.range.clone()).to_string(),
-        });
-        shift += c.text.len() as isize - (c.range.end - c.range.start) as isize;
-    }
-    ChangeSet::new(inverse)
-}
-
-fn rebuild_rope(text: &Rope, changes: &[Change]) -> Rope {
-    let mut builder = RopeBuilder::new();
-    let mut cursor = 0usize;
-    for c in changes {
-        if c.range.start > cursor {
-            for chunk in text.slice(cursor..c.range.start).chunks() {
-                builder.append(chunk);
+/// Where `offset` lands after `edits` (sorted, in pre-edit positions). An offset inside a
+/// replaced range keeps its distance into the new text, up to that text's end.
+fn remap_offset(edits: &[Splice], offset: usize) -> usize {
+    let mut out = offset;
+    for (range, text) in edits {
+        if range.end <= offset {
+            out = out - range.len() + text.len();
+        } else {
+            if range.start < offset {
+                let inside = offset - range.start;
+                out = out - inside + inside.min(text.len());
             }
-        }
-        if !c.text.is_empty() {
-            builder.append(&c.text);
-        }
-        cursor = c.range.end;
-    }
-    if cursor < text.len() {
-        for chunk in text.slice(cursor..text.len()).chunks() {
-            builder.append(chunk);
+            break;
         }
     }
-    builder.finish()
+    out
 }
 
 fn utf16_offset_to_byte(text: &str, target_utf16: usize) -> usize {
@@ -1228,361 +1114,187 @@ fn utf16_offset_to_byte(text: &str, target_utf16: usize) -> usize {
     text.len()
 }
 
-const MAX_HISTORY_ENTRIES: usize = 1000;
-const MAX_CHANGES_PER_ENTRY: usize = 1000;
-const MAX_HISTORY_BYTES: usize = 32 * 1024 * 1024;
+/// Builds the edited text in one pass, for edits too many to apply one by one.
+fn rebuild_rope(text: &Rope, edits: &[Splice]) -> Rope {
+    let mut builder = RopeBuilder::new();
+    let mut cursor = 0;
+    for (range, new) in edits {
+        for chunk in text.slice(cursor..range.start).chunks() {
+            builder.append(chunk);
+        }
+        builder.append(new);
+        cursor = range.end;
+    }
+    for chunk in text.slice(cursor..).chunks() {
+        builder.append(chunk);
+    }
+    builder.finish()
+}
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Change {
-    pub(crate) range: Range<usize>,
-    pub(crate) text: String,
+/// One replacement, kept with the text it replaced so it can be undone and redone.
+#[derive(Debug, PartialEq)]
+struct Change {
+    at: usize,
+    old: String,
+    new: String,
 }
 
 impl Change {
-    fn approx_bytes(&self) -> usize {
-        self.text.len() + std::mem::size_of::<Self>()
-    }
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct ChangeSet {
-    changes: Vec<Change>,
-}
-
-impl ChangeSet {
-    pub(crate) fn single(range: Range<usize>, text: impl Into<String>) -> Self {
-        Self {
-            changes: vec![Change {
-                range,
-                text: text.into(),
-            }],
+    /// Merges `next`, the following keystroke of the same `kind`, if it continues this one:
+    /// typing on at the end, backspacing on from the start, or deleting on from the same spot.
+    fn absorb(&mut self, kind: EditKind, next: &Change) -> bool {
+        let breaks = ['\n', '\r'];
+        match kind {
+            EditKind::Insert => {
+                let cut = next.at.wrapping_sub(self.at);
+                if !self.old.is_empty()
+                    || self.new.contains(breaks)
+                    || next.new.contains(breaks)
+                    || next.at < self.at
+                    || next.at + next.old.len() != self.at + self.new.len()
+                    || !self.new.is_char_boundary(cut)
+                {
+                    return false;
+                }
+                self.new.truncate(cut);
+                self.new.push_str(&next.new);
+            }
+            EditKind::Backspace => {
+                if !self.new.is_empty()
+                    || !next.new.is_empty()
+                    || next.at + next.old.len() != self.at
+                {
+                    return false;
+                }
+                self.at = next.at;
+                self.old.insert_str(0, &next.old);
+            }
+            EditKind::DeleteForward => {
+                if !self.new.is_empty() || !next.new.is_empty() || next.at != self.at {
+                    return false;
+                }
+                self.old.push_str(&next.old);
+            }
+            EditKind::Atomic => return false,
         }
-    }
-
-    pub(crate) fn new(mut changes: Vec<Change>) -> Self {
-        changes.sort_by_key(|c| c.range.start);
-        debug_assert!(
-            changes.windows(2).all(|w| w[0].range.end <= w[1].range.start),
-            "ChangeSet ranges must be non-overlapping"
-        );
-        Self { changes }
-    }
-
-    pub(crate) fn is_empty(&self) -> bool {
-        self.changes.is_empty()
-    }
-
-    pub(crate) fn len(&self) -> usize {
-        self.changes.len()
-    }
-
-    fn approx_bytes(&self) -> usize {
-        self.changes.iter().map(Change::approx_bytes).sum()
-    }
-
-    pub(crate) fn remap_offset(&self, offset: usize) -> usize {
-        remap_offset(
-            self.changes.iter().map(|c| (c.range.clone(), c.text.len())),
-            offset,
-        )
+        true
     }
 }
 
-fn remap_offset(
-    changes: impl IntoIterator<Item = (Range<usize>, usize)>,
-    offset: usize,
-) -> usize {
-    let mut out = offset;
-    for (range, new_len) in changes {
-        if range.end <= offset {
-            out = out - (range.end - range.start) + new_len;
-        } else if range.start < offset {
-            let inside = offset - range.start;
-            out = out - inside + inside.min(new_len);
-            break;
-        } else {
-            break;
-        }
-    }
-    out
+enum Payload {
+    Changes(Vec<Change>),
+    /// The whole text before and after an edit with too many changes to keep one by one.
+    Snapshot {
+        text: [Rope; 2],
+        bytes: usize,
+    },
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum EditKind {
-    Insert,
-    Backspace,
-    DeleteForward,
-    Atomic,
-}
-
-#[derive(Debug)]
-pub(crate) enum TxPayload {
-    Changes { undo: ChangeSet, redo: ChangeSet },
-    Snapshot { before: Rope, after: Rope, delta_bytes: usize },
-}
-
-impl TxPayload {
-    fn approx_bytes(&self) -> usize {
+impl Payload {
+    /// What the entry is charged against the history budget.
+    fn bytes(&self) -> usize {
         match self {
-            Self::Changes { undo, redo } => undo.approx_bytes() + redo.approx_bytes(),
-            Self::Snapshot { delta_bytes, .. } => (*delta_bytes).max(4096),
-        }
-    }
-
-    fn is_noop(&self) -> bool {
-        match self {
-            Self::Changes { undo, redo } => undo.is_empty() || undo == redo,
-            Self::Snapshot { .. } => false,
+            Self::Changes(changes) => changes
+                .iter()
+                .map(|c| c.old.len() + c.new.len() + CHANGE_OVERHEAD)
+                .sum(),
+            Self::Snapshot { bytes, .. } => *bytes,
         }
     }
 }
 
-pub(crate) struct Transaction {
-    pub(crate) kind: EditKind,
-    pub(crate) payload: TxPayload,
-    pub(crate) selection_before: Selection,
-    pub(crate) selection_after: Selection,
-}
-
-#[derive(Debug)]
-struct HistoryEntry {
+/// One undo step. `selection` and `version` hold the state before and after it.
+struct Entry {
     kind: EditKind,
-    payload: TxPayload,
-    merged_count: usize,
-    approx_bytes: usize,
-    selection_before: Selection,
-    selection_after: Selection,
-    version_before: u64,
-    version_after: u64,
+    payload: Payload,
+    merged: usize,
+    bytes: usize,
+    selection: [Selection; 2],
+    version: [u64; 2],
 }
 
-pub(crate) enum ReplayPayload {
-    Changes(ChangeSet),
-    Snapshot(Rope),
-}
-
-pub(crate) struct HistoryReplay {
-    pub(crate) payload: ReplayPayload,
-    pub(crate) selection: Selection,
-}
-
-#[derive(Debug)]
-pub(crate) struct History {
-    undo_stack: Vec<HistoryEntry>,
-    redo_stack: Vec<HistoryEntry>,
-    total_bytes: usize,
+/// Undo and redo stacks within an entry and byte budget, plus the version the text was
+/// last saved at.
+#[derive(Default)]
+struct History {
+    undo: Vec<Entry>,
+    redo: Vec<Entry>,
+    bytes: usize,
     coalesce_broken: bool,
-    next_version: u64,
-    current_version: u64,
-    saved_version: u64,
+    last_version: u64,
+    version: u64,
+    saved: u64,
 }
 
 impl History {
-    pub(crate) fn new() -> Self {
-        Self {
-            undo_stack: Vec::new(),
-            redo_stack: Vec::new(),
-            total_bytes: 0,
-            coalesce_broken: false,
-            next_version: 1,
-            current_version: 0,
-            saved_version: 0,
-        }
-    }
-
-    pub(crate) fn break_coalescing(&mut self) {
-        self.coalesce_broken = true;
-    }
-
-    fn clear_redo(&mut self) {
-        for entry in self.redo_stack.drain(..) {
-            self.total_bytes = self.total_bytes.saturating_sub(entry.approx_bytes);
-        }
-    }
-
-    fn enforce_budget(&mut self) {
-        while self.undo_stack.len() > MAX_HISTORY_ENTRIES
-            || (self.undo_stack.len() > 1 && self.total_bytes > MAX_HISTORY_BYTES)
+    /// Records an edit, merging a keystroke into the previous entry when it continues it.
+    fn push(&mut self, kind: EditKind, payload: Payload, selection: [Selection; 2]) {
+        if let Payload::Changes(changes) = &payload
+            && changes.iter().all(|c| c.old == c.new)
         {
-            let evicted = self.undo_stack.remove(0);
-            self.total_bytes = self.total_bytes.saturating_sub(evicted.approx_bytes);
-        }
-    }
-
-    pub(crate) fn push(&mut self, tx: Transaction) {
-        let Transaction {
-            kind,
-            payload,
-            selection_before,
-            selection_after,
-        } = tx;
-
-        if payload.is_noop() {
             self.coalesce_broken = true;
             return;
         }
-
-        self.clear_redo();
-
+        for entry in self.redo.drain(..) {
+            self.bytes = self.bytes.saturating_sub(entry.bytes);
+        }
+        self.last_version += 1;
+        let version = self.last_version;
         if !self.coalesce_broken
             && kind != EditKind::Atomic
-            && let Some(prev) = self.undo_stack.last_mut()
+            && let Some(prev) = self.undo.last_mut()
             && prev.kind == kind
-            && prev.merged_count < MAX_CHANGES_PER_ENTRY
-            && prev.selection_after == selection_before
-            && let (
-                TxPayload::Changes {
-                    undo: prev_undo,
-                    redo: prev_redo,
-                },
-                TxPayload::Changes {
-                    undo: curr_undo,
-                    redo: curr_redo,
-                },
-            ) = (&mut prev.payload, &payload)
-            && try_coalesce(kind, prev_undo, prev_redo, curr_undo, curr_redo)
+            && prev.merged < MAX_CHANGES_PER_ENTRY
+            && prev.selection[1] == selection[0]
+            && let (Payload::Changes(prev_changes), Payload::Changes(changes)) =
+                (&mut prev.payload, &payload)
+            && let ([prev_change], [change]) = (prev_changes.as_mut_slice(), changes.as_slice())
+            && prev_change.absorb(kind, change)
         {
-            let old_bytes = prev.approx_bytes;
-            let version = self.next_version;
-            self.next_version += 1;
-            prev.version_after = version;
-            self.current_version = version;
-            prev.merged_count += 1;
-            prev.selection_after = selection_after;
-            let new_bytes = prev.payload.approx_bytes();
-            prev.approx_bytes = new_bytes;
-            self.total_bytes = self.total_bytes.saturating_sub(old_bytes) + new_bytes;
-            self.enforce_budget();
-            return;
-        }
-
-        let version_before = self.current_version;
-        let version_after = self.next_version;
-        self.next_version += 1;
-        self.current_version = version_after;
-        let merged_count = match &payload {
-            TxPayload::Changes { redo, .. } => redo.len(),
-            TxPayload::Snapshot { .. } => 1,
-        };
-        let approx_bytes = payload.approx_bytes();
-        self.total_bytes += approx_bytes;
-        self.undo_stack.push(HistoryEntry {
-            kind,
-            payload,
-            merged_count,
-            approx_bytes,
-            selection_before,
-            selection_after,
-            version_before,
-            version_after,
-        });
-        self.coalesce_broken = kind == EditKind::Atomic;
-        self.enforce_budget();
-    }
-
-    pub(crate) fn clear(&mut self) {
-        *self = Self::new();
-    }
-
-    pub(crate) fn begin_save(&mut self) -> u64 {
-        self.coalesce_broken = true;
-        self.current_version
-    }
-
-    pub(crate) fn mark_saved(&mut self, version: u64) {
-        self.saved_version = version;
-    }
-
-    pub(crate) fn is_clean(&self) -> bool {
-        self.saved_version == self.current_version
-    }
-
-    pub(crate) fn can_undo(&self) -> bool {
-        !self.undo_stack.is_empty()
-    }
-
-    pub(crate) fn can_redo(&self) -> bool {
-        !self.redo_stack.is_empty()
-    }
-
-    pub(crate) fn replay(&mut self, is_undo: bool) -> Option<HistoryReplay> {
-        let (from, to) = if is_undo {
-            (&mut self.undo_stack, &mut self.redo_stack)
+            let bytes = prev.payload.bytes();
+            self.bytes = self.bytes.saturating_sub(prev.bytes) + bytes;
+            prev.bytes = bytes;
+            prev.merged += 1;
+            prev.selection[1] = selection[1];
+            prev.version[1] = version;
         } else {
-            (&mut self.redo_stack, &mut self.undo_stack)
+            let merged = match &payload {
+                Payload::Changes(changes) => changes.len(),
+                Payload::Snapshot { .. } => 1,
+            };
+            let bytes = payload.bytes();
+            self.bytes += bytes;
+            let version = [self.version, version];
+            self.undo.push(Entry {
+                kind,
+                payload,
+                merged,
+                bytes,
+                selection,
+                version,
+            });
+            self.coalesce_broken = kind == EditKind::Atomic;
+        }
+        self.version = version;
+        while self.undo.len() > MAX_HISTORY_ENTRIES
+            || (self.undo.len() > 1 && self.bytes > MAX_HISTORY_BYTES)
+        {
+            self.bytes = self.bytes.saturating_sub(self.undo.remove(0).bytes);
+        }
+    }
+
+    /// Moves the newest entry to the other stack (undo: onto redo) and returns it.
+    fn step(&mut self, undo: bool) -> Option<&Entry> {
+        let (from, to) = if undo {
+            (&mut self.undo, &mut self.redo)
+        } else {
+            (&mut self.redo, &mut self.undo)
         };
         let entry = from.pop()?;
-        let (version, selection) = if is_undo {
-            (entry.version_before, entry.selection_before)
-        } else {
-            (entry.version_after, entry.selection_after)
-        };
-        let payload = match (&entry.payload, is_undo) {
-            (TxPayload::Changes { undo: c, .. }, true) | (TxPayload::Changes { redo: c, .. }, false) => {
-                ReplayPayload::Changes(c.clone())
-            }
-            (TxPayload::Snapshot { before: r, .. }, true)
-            | (TxPayload::Snapshot { after: r, .. }, false) => ReplayPayload::Snapshot(r.clone()),
-        };
-        to.push(entry);
-        self.current_version = version;
+        self.version = entry.version[usize::from(!undo)];
         self.coalesce_broken = true;
-        Some(HistoryReplay { payload, selection })
-    }
-}
-
-fn try_coalesce(
-    kind: EditKind,
-    prev_undo: &mut ChangeSet,
-    prev_redo: &mut ChangeSet,
-    curr_undo: &ChangeSet,
-    curr_redo: &ChangeSet,
-) -> bool {
-    let ([pu], [pr], [cu], [cr]) = (
-        prev_undo.changes.as_mut_slice(),
-        prev_redo.changes.as_mut_slice(),
-        curr_undo.changes.as_slice(),
-        curr_redo.changes.as_slice(),
-    ) else {
-        return false;
-    };
-    match kind {
-        EditKind::Insert => {
-            if !pr.range.is_empty()
-                || pr.text.contains(['\n', '\r'])
-                || cr.text.contains(['\n', '\r'])
-                || cr.range.start < pu.range.start
-                || cr.range.end != pu.range.end
-            {
-                return false;
-            }
-            let cut = cr.range.start - pr.range.start;
-            if cut > pr.text.len() || !pr.text.is_char_boundary(cut) {
-                return false;
-            }
-            pr.text.truncate(cut);
-            pr.text.push_str(&cr.text);
-            pu.range.end = pr.range.start + pr.text.len();
-            true
-        }
-        EditKind::Backspace => {
-            if !pr.text.is_empty() || !cr.text.is_empty() || cr.range.end != pr.range.start {
-                return false;
-            }
-            pr.range.start = cr.range.start;
-            pu.range = cr.range.start..cr.range.start;
-            pu.text.insert_str(0, &cu.text);
-            true
-        }
-        EditKind::DeleteForward => {
-            if !pr.text.is_empty() || !cr.text.is_empty() || cr.range.start != pr.range.start {
-                return false;
-            }
-            pr.range.end += cr.range.end - cr.range.start;
-            pu.text.push_str(&cu.text);
-            true
-        }
-        EditKind::Atomic => false,
+        to.push(entry);
+        to.last()
     }
 }
 
@@ -1684,9 +1396,8 @@ mod tests {
     fn bounded_word_navigation_matches_full_scan_everywhere() {
         let long_word = "a".repeat(WORD_SCAN_WINDOW_BYTES + 64);
         let long_spaces = " ".repeat(WORD_SCAN_WINDOW_BYTES + 64);
-        let sample = format!(
-            "  hello, don't 1,234.56 foo_bar\n日本語🎉 test{long_spaces}{long_word}  tail"
-        );
+        let sample =
+            format!("  hello, don't 1,234.56 foo_bar\n日本語🎉 test{long_spaces}{long_word}  tail");
         let rope = Rope::from(sample.as_str());
 
         let nl = sample.find('\n').unwrap();
@@ -1789,16 +1500,19 @@ mod tests {
 
     #[test]
     fn replace_all_remaps_cursor_and_round_trips_undo_redo() {
-        let ranges = [0..3, 8..11];
-        assert_eq!(remap_offset(ranges.iter().map(|r| (r.clone(), 1)), 0), 0);
-        assert_eq!(remap_offset(ranges.iter().map(|r| (r.clone(), 1)), 2), 1);
-        assert_eq!(remap_offset(ranges.iter().map(|r| (r.clone(), 0)), 2), 0);
-        assert_eq!(remap_offset(ranges.iter().map(|r| (r.clone(), 5)), 2), 2);
-        assert_eq!(remap_offset(ranges.iter().map(|r| (r.clone(), 1)), 3), 1);
-        assert_eq!(remap_offset(ranges.iter().map(|r| (r.clone(), 1)), 5), 3);
-        assert_eq!(remap_offset(ranges.iter().map(|r| (r.clone(), 1)), 10), 7);
-        assert_eq!(remap_offset(ranges.iter().map(|r| (r.clone(), 0)), 10), 5);
-        assert_eq!(remap_offset(ranges.iter().map(|r| (r.clone(), 1)), 11), 7);
+        let remap = |len: usize, offset| {
+            let edits = [(0..3, "x".repeat(len)), (8..11, "x".repeat(len))];
+            remap_offset(&edits, offset)
+        };
+        assert_eq!(remap(1, 0), 0);
+        assert_eq!(remap(1, 2), 1);
+        assert_eq!(remap(0, 2), 0);
+        assert_eq!(remap(5, 2), 2);
+        assert_eq!(remap(1, 3), 1);
+        assert_eq!(remap(1, 5), 3);
+        assert_eq!(remap(1, 10), 7);
+        assert_eq!(remap(0, 10), 5);
+        assert_eq!(remap(1, 11), 7);
 
         let mut doc = TextModel::new(EditPolicy {
             multi_line: true,
@@ -1818,135 +1532,117 @@ mod tests {
         assert_eq!(doc.cursor(), 11);
     }
 
-    fn insert_tx(offset: usize, text: &str, kind: EditKind) -> Transaction {
-        Transaction {
-            kind,
-            payload: TxPayload::Changes {
-                undo: ChangeSet::single(offset..offset + text.len(), ""),
-                redo: ChangeSet::single(offset..offset, text),
-            },
-            selection_before: Selection::caret(offset),
-            selection_after: Selection::caret(offset + text.len()),
-        }
+    fn typed(h: &mut History, at: usize, text: &str, kind: EditKind) {
+        let change = Change {
+            at,
+            old: String::new(),
+            new: text.into(),
+        };
+        let selection = [Selection::caret(at), Selection::caret(at + text.len())];
+        h.push(kind, Payload::Changes(vec![change]), selection);
     }
 
-    fn undo_changes(h: &mut History) -> ChangeSet {
-        match h.replay(true).unwrap().payload {
-            ReplayPayload::Changes(c) => c,
-            ReplayPayload::Snapshot(_) => panic!("expected changes"),
-        }
+    /// Undoes the newest entry and returns its changes as `(at, old, new)`.
+    fn undone(h: &mut History) -> Vec<(usize, String, String)> {
+        let Payload::Changes(changes) = &h.step(true).unwrap().payload else {
+            panic!("expected changes");
+        };
+        changes
+            .iter()
+            .map(|c| (c.at, c.old.clone(), c.new.clone()))
+            .collect()
     }
 
     #[test]
     fn adjacent_typing_coalesces_and_splits_at_limit() {
-        let mut h = History::new();
-        h.push(insert_tx(0, "a", EditKind::Insert));
-        h.push(insert_tx(1, "b", EditKind::Insert));
-        assert_eq!(undo_changes(&mut h), ChangeSet::single(0..2, ""));
-        assert!(h.replay(true).is_none());
+        let mut h = History::default();
+        typed(&mut h, 0, "a", EditKind::Insert);
+        typed(&mut h, 1, "b", EditKind::Insert);
+        assert_eq!(undone(&mut h), [(0, String::new(), "ab".into())]);
+        assert!(h.step(true).is_none());
 
-        let mut h = History::new();
+        let mut h = History::default();
         for i in 0..1_100 {
-            h.push(insert_tx(i, "a", EditKind::Insert));
+            typed(&mut h, i, "a", EditKind::Insert);
         }
+        let run = |len| "a".repeat(len);
         assert_eq!(
-            undo_changes(&mut h),
-            ChangeSet::single(MAX_CHANGES_PER_ENTRY..MAX_CHANGES_PER_ENTRY + 100, "")
+            undone(&mut h),
+            [(MAX_CHANGES_PER_ENTRY, String::new(), run(100))]
         );
         assert_eq!(
-            undo_changes(&mut h),
-            ChangeSet::single(0..MAX_CHANGES_PER_ENTRY, "")
+            undone(&mut h),
+            [(0, String::new(), run(MAX_CHANGES_PER_ENTRY))]
         );
-        assert!(h.replay(true).is_none());
+        assert!(h.step(true).is_none());
     }
 
     #[test]
     fn multi_edit_atomic_isolation_and_stack_cap() {
-        let mut h = History::new();
-        h.push(Transaction {
-            kind: EditKind::Atomic,
-            payload: TxPayload::Changes {
-                undo: ChangeSet::new(vec![
-                    Change {
-                        range: 0..1,
-                        text: String::new(),
-                    },
-                    Change {
-                        range: 2..3,
-                        text: String::new(),
-                    },
-                    Change {
-                        range: 4..5,
-                        text: String::new(),
-                    },
-                ]),
-                redo: ChangeSet::new(vec![
-                    Change {
-                        range: 0..0,
-                        text: "a".into(),
-                    },
-                    Change {
-                        range: 1..1,
-                        text: "b".into(),
-                    },
-                    Change {
-                        range: 2..2,
-                        text: "c".into(),
-                    },
-                ]),
-            },
-            selection_before: Selection::caret(0),
-            selection_after: Selection::caret(5),
+        let mut h = History::default();
+        let changes = ["a", "b", "c"].iter().enumerate();
+        let changes = changes.map(|(at, t)| Change {
+            at,
+            old: String::new(),
+            new: t.to_string(),
         });
-        assert_eq!(undo_changes(&mut h).len(), 3);
+        let selection = [Selection::caret(0), Selection::caret(5)];
+        h.push(
+            EditKind::Atomic,
+            Payload::Changes(changes.collect()),
+            selection,
+        );
+        assert_eq!(undone(&mut h).len(), 3);
 
-        h.push(insert_tx(0, "x", EditKind::Atomic));
-        h.push(insert_tx(1, "y", EditKind::Insert));
-        assert_eq!(undo_changes(&mut h).len(), 1);
-        assert_eq!(undo_changes(&mut h).len(), 1);
+        typed(&mut h, 0, "x", EditKind::Atomic);
+        typed(&mut h, 1, "y", EditKind::Insert);
+        assert_eq!(undone(&mut h).len(), 1);
+        assert_eq!(undone(&mut h).len(), 1);
 
-        let mut capped = History::new();
+        let mut capped = History::default();
         for i in 0..1_100 {
-            capped.push(insert_tx(i, "a", EditKind::Atomic));
+            typed(&mut capped, i, "a", EditKind::Atomic);
         }
         for _ in 0..MAX_HISTORY_ENTRIES {
-            assert!(capped.replay(true).is_some());
+            assert!(capped.step(true).is_some());
         }
-        assert!(capped.replay(true).is_none());
+        assert!(capped.step(true).is_none());
     }
 
     #[test]
     fn clean_state_tracks_undo_redo_and_save_boundaries() {
-        let mut h = History::new();
-        assert!(h.is_clean());
+        let clean = |h: &History| h.saved == h.version;
+        let mut h = History::default();
+        assert!(clean(&h));
 
-        h.push(insert_tx(0, "a", EditKind::Insert));
-        assert!(!h.is_clean());
-        assert!(h.replay(true).is_some());
-        assert!(h.is_clean());
-        assert!(h.can_redo());
-        assert!(h.replay(false).is_some());
-        assert!(!h.is_clean());
+        typed(&mut h, 0, "a", EditKind::Insert);
+        assert!(!clean(&h));
+        assert!(h.step(true).is_some());
+        assert!(clean(&h));
+        assert!(!h.redo.is_empty());
+        assert!(h.step(false).is_some());
+        assert!(!clean(&h));
 
-        let saved = h.begin_save();
-        h.mark_saved(saved);
-        assert!(h.is_clean());
-        h.push(insert_tx(1, "b", EditKind::Insert));
-        assert!(!h.is_clean());
-        assert_eq!(undo_changes(&mut h), ChangeSet::single(1..2, ""));
-        assert!(h.is_clean());
+        h.coalesce_broken = true;
+        h.saved = h.version;
+        assert!(clean(&h));
+        typed(&mut h, 1, "b", EditKind::Insert);
+        assert!(!clean(&h));
+        assert_eq!(undone(&mut h), [(1, String::new(), "b".into())]);
+        assert!(clean(&h));
 
-        let snapshot = h.begin_save();
-        h.push(insert_tx(1, "c", EditKind::Insert));
-        h.mark_saved(snapshot);
-        assert!(!h.is_clean());
-        assert!(h.replay(true).is_some());
-        assert!(h.is_clean());
+        h.coalesce_broken = true;
+        let saving = h.version;
+        typed(&mut h, 1, "c", EditKind::Insert);
+        h.saved = saving;
+        assert!(!clean(&h));
+        assert!(h.step(true).is_some());
+        assert!(clean(&h));
 
-        assert!(h.replay(true).is_some());
-        h.push(insert_tx(0, "z", EditKind::Insert));
-        assert!(!h.is_clean());
-        assert!(h.replay(true).is_some());
-        assert!(!h.is_clean());
+        assert!(h.step(true).is_some());
+        typed(&mut h, 0, "z", EditKind::Insert);
+        assert!(!clean(&h));
+        assert!(h.step(true).is_some());
+        assert!(!clean(&h));
     }
 }
