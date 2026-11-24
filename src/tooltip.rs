@@ -8,9 +8,8 @@ use crate::ids::{Frame, HitId};
 use crate::platform::{
     Jobs, Modifiers, TimerHandle, WindowId, cursor_screen_pos, monitor_work_area_and_scale,
 };
-use crate::theme::{Palette, theme_shadow};
+use crate::theme::{CONTROL_RADIUS, Palette, SMALL_FONT, theme_shadow};
 use crate::types::SharedStr;
-use crate::ui::controls::{CONTROL_RADIUS, SMALL_FONT};
 use crate::ui::{
     AnimTracks, AvailSize, Curve, Easing, Frame as GenericFrame, Node as GenericNode,
     OverlayAnchor, OverlaySurface, PointerState, box_, text,

@@ -1,23 +1,13 @@
-use std::hash::Hash;
-
-use crate::color::{Rgba, black, transparent_black, white};
-use crate::geom::Edges;
+use crate::color::{black, transparent_black, white};
+use crate::editor::Editor;
+use crate::geom::{Edges, Size};
+use crate::ids::{CustomDraw, EditorSlot, HitId, Node, UiState};
 use crate::platform::CursorStyle;
-use crate::theme::{Palette, Surface};
+use crate::theme::{
+    BODY_LINE, BODY_SIZE, CONTROL_HEIGHT, CONTROL_RADIUS, ICON_FONT, Palette, Surface, TEXT_FONT,
+};
 use crate::types::SharedStr;
-
-use super::scene::{Brushes, Node, UiState, box_, row, text};
-
-pub(crate) const TEXT_FONT: &str = "Segoe UI Variable Text";
-pub(crate) const SMALL_FONT: &str = "Segoe UI Variable Small";
-pub(crate) const ICON_FONT: &str = "Segoe Fluent Icons";
-
-pub(crate) const CONTROL_HEIGHT: f32 = 32.;
-pub(crate) const CONTROL_RADIUS: f32 = 4.;
-pub(crate) const OVERLAY_RADIUS: f32 = 8.;
-pub(crate) const BODY_SIZE: f32 = 14.;
-pub(crate) const BODY_LINE: f32 = 18.;
-pub(crate) const FIELD_CARET: f32 = 19.;
+use crate::ui::{Brushes, box_, row, text};
 
 const ACCENT_TOP_EDGE: f32 = 0x14 as f32 / 255.;
 const ACCENT_HOVER_OPACITY: f32 = 0.9;
@@ -37,31 +27,23 @@ pub(crate) fn subtle_brushes(p: Palette) -> Brushes {
     }
 }
 
-#[derive(Clone, Copy)]
-pub(crate) struct ButtonStyle {
-    pub(crate) surface: Surface,
-    pub(crate) accent: Rgba,
-}
-
-pub(crate) fn button<H: Copy + Eq + Hash, C: Copy, K: Copy + Eq + Hash + From<H>>(
+pub(crate) fn button(
     p: Palette,
-    style: ButtonStyle,
-    hit: H,
+    surface: Surface,
+    hit: HitId,
     label: impl Into<SharedStr>,
     accented: bool,
     focused: bool,
-    ui: &mut UiState<H, C, K>,
-) -> Node<H, C> {
-    let ButtonStyle { surface, accent } = style;
+    ui: &mut UiState,
+) -> Node {
     let ring = focused && ui.last_input_was_keyboard();
     let pressed = ui.is_pressed(hit);
-
+    let accent = p.accent;
     let (fill, hover, pressed_fill, edge, bottom, text_color) = if accented {
-        let panel = surface.panel;
         (
             accent,
-            accent.mix_opaque(panel, 1. - ACCENT_HOVER_OPACITY),
-            accent.mix_opaque(panel, 1. - ACCENT_PRESSED_OPACITY),
+            accent.mix_opaque(surface.panel, 1. - ACCENT_HOVER_OPACITY),
+            accent.mix_opaque(surface.panel, 1. - ACCENT_PRESSED_OPACITY),
             accent.mix_opaque(white(), ACCENT_TOP_EDGE),
             accent.mix_opaque(black(), p.accent_bottom_edge),
             p.on_accent,
@@ -81,7 +63,6 @@ pub(crate) fn button<H: Copy + Eq + Hash, C: Copy, K: Copy + Eq + Hash + From<H>
     } else {
         (edge, edge, p.text_secondary)
     };
-
     let face_bg = ui.brush(
         hit,
         Brushes {
@@ -125,23 +106,16 @@ pub(crate) fn button<H: Copy + Eq + Hash, C: Copy, K: Copy + Eq + Hash + From<H>
         })
 }
 
-#[derive(Clone, Copy)]
-pub(crate) struct IconButtonStyle {
-    pub(crate) glyph_size: f32,
-    pub(crate) width: f32,
-    pub(crate) height: f32,
-    pub(crate) radius: f32,
-}
-
-pub(crate) fn icon_button<H: Copy + Eq + Hash, C: Copy, K: Copy + Eq + Hash + From<H>>(
+pub(crate) fn icon_button(
     p: Palette,
-    hit: H,
+    hit: HitId,
     tip: impl Into<SharedStr>,
-    glyph: &'static str,
-    style: IconButtonStyle,
+    glyph: (&'static str, f32),
+    dims: Size,
     enabled: bool,
-    ui: &mut UiState<H, C, K>,
-) -> Node<H, C> {
+    ui: &mut UiState,
+) -> Node {
+    let (glyph, glyph_size) = glyph;
     let bg = ui.brush(hit, subtle_brushes(p), enabled);
     let fg = if !enabled {
         p.text_disabled
@@ -155,20 +129,20 @@ pub(crate) fn icon_button<H: Copy + Eq + Hash, C: Copy, K: Copy + Eq + Hash + Fr
         .flex_none()
         .items_center()
         .justify_center()
-        .w(style.width)
-        .h(style.height)
-        .rounded(style.radius)
+        .w(dims.width)
+        .h(dims.height)
+        .rounded(CONTROL_RADIUS)
         .bg(bg)
         .cursor(CursorStyle::Arrow)
         .font_family(ICON_FONT)
-        .text_size(style.glyph_size)
-        .line_height(style.glyph_size)
+        .text_size(glyph_size)
+        .line_height(glyph_size)
         .text_color(fg)
         .tooltip(tip)
         .child(text(glyph))
 }
 
-pub(crate) fn focus_ring<H, C>(p: Palette, outset: Edges<f32>, radius: f32) -> Node<H, C> {
+pub(crate) fn focus_ring(p: Palette, outset: Edges<f32>, radius: f32) -> Node {
     box_()
         .absolute()
         .top(-outset.top)
@@ -185,7 +159,7 @@ pub(crate) fn focus_ring<H, C>(p: Palette, outset: Edges<f32>, radius: f32) -> N
         )
 }
 
-fn field_glyph<H, C>(p: Palette, glyph: &'static str, right: f32) -> Node<H, C> {
+fn field_glyph(p: Palette, glyph: &'static str, right: f32) -> Node {
     row()
         .absolute()
         .top(2.)
@@ -202,29 +176,19 @@ fn field_glyph<H, C>(p: Palette, glyph: &'static str, right: f32) -> Node<H, C> 
         .child(text(glyph))
 }
 
-#[derive(Clone, Copy)]
-pub(crate) struct TextFieldStyle {
-    pub(crate) surface: Surface,
-    pub(crate) focused: bool,
-    pub(crate) empty: bool,
-    pub(crate) search_icon: bool,
-}
-
-pub(crate) fn text_field_frame<H: Copy + Eq + Hash, C: Copy, K: Copy + Eq + Hash>(
+pub(crate) fn text_field(
     p: Palette,
-    field_hit: H,
-    clear_hit: H,
-    style: TextFieldStyle,
-    editor_node: Node<H, C>,
-    ui: &UiState<H, C, K>,
-) -> Node<H, C> {
-    let TextFieldStyle {
-        surface,
-        focused,
-        empty,
-        search_icon,
-    } = style;
-    let hovered = ui.is_hovered(field_hit);
+    surface: Surface,
+    slot: EditorSlot,
+    editor: &Editor,
+    focused: bool,
+    search_icon: bool,
+    ui: &UiState,
+) -> Node {
+    let field_hit = HitId::Editor(slot);
+    let clear_hit = HitId::FieldClear(slot);
+    let empty = editor.model().text().len() == 0;
+    let editor_node = editor.view(field_hit, CustomDraw::Editor(slot), BODY_LINE + 2.);
     let (trailing, clear_right) = if search_icon {
         (
             2. * FIELD_GLYPH_WIDTH + FIELD_GLYPH_RIGHT,
@@ -235,12 +199,11 @@ pub(crate) fn text_field_frame<H: Copy + Eq + Hash, C: Copy, K: Copy + Eq + Hash
     };
     let bg = if focused {
         p.field_focused
-    } else if hovered {
+    } else if ui.is_hovered(field_hit) {
         surface.hover
     } else {
         surface.fill
     };
-    let clear_hovered = ui.is_hovered(clear_hit);
     let clear_pressed = ui.is_pressed(clear_hit);
 
     box_()
@@ -280,11 +243,7 @@ pub(crate) fn text_field_frame<H: Copy + Eq + Hash, C: Copy, K: Copy + Eq + Hash
                 .bottom(0.)
                 .h(if focused { 2. } else { 1. })
                 .rounded_b(CONTROL_RADIUS)
-                .bg(if focused {
-                    p.accent
-                } else {
-                    surface.field_bottom
-                }),
+                .bg(if focused { p.accent } else { surface.field_bottom }),
         )
         .when(search_icon, |this| {
             this.child(
@@ -299,7 +258,7 @@ pub(crate) fn text_field_frame<H: Copy + Eq + Hash, C: Copy, K: Copy + Eq + Hash
                     .when(clear_pressed, |g| {
                         g.bg(p.subtle_tertiary).text_color(p.text_tertiary)
                     })
-                    .when(!clear_pressed && clear_hovered, |g| {
+                    .when(!clear_pressed && ui.is_hovered(clear_hit), |g| {
                         g.bg(p.subtle_secondary)
                     }),
             )

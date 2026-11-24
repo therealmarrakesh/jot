@@ -9,9 +9,9 @@ use crate::menu::MENU_BAR_HEIGHT;
 use crate::platform::WindowControlArea;
 use crate::shell::Shell;
 use crate::tabs::{self, StripFrame, TAB_HEIGHT};
-use crate::theme::Palette;
-use crate::ui::controls::{CONTROL_RADIUS, ICON_FONT, IconButtonStyle, SMALL_FONT, icon_button};
+use crate::theme::{ICON_FONT, Palette, SMALL_FONT};
 use crate::ui::{AvailSize, Brushes, box_, custom, row, text};
+use crate::widgets::icon_button;
 
 use super::{EDITOR_FONT_SIZE, EDITOR_PADDINGS, MainWindow};
 
@@ -46,20 +46,6 @@ pub(super) struct StatusMetrics {
     total: usize,
     zoom_pct: u32,
     format: Format,
-}
-
-#[derive(Clone, Copy, PartialEq)]
-struct MinSizeKey {
-    status: Option<StatusMetrics>,
-    zoom_pct: u32,
-    menu_width: f32,
-    scale: f32,
-}
-
-#[derive(Clone, Copy)]
-pub(super) struct MinSizeCache {
-    key: MinSizeKey,
-    pub(super) size: Size,
 }
 
 impl MainWindow {
@@ -100,43 +86,47 @@ impl MainWindow {
 
     pub(super) fn update_min_size(
         &mut self,
+        logical: Size,
         metrics: Option<StatusMetrics>,
         frame: &Frame,
         p: Palette,
         ts: &TextSystem,
     ) {
-        let zoom_pct = metrics.map_or((self.zoom() * 100.).round() as u32, |m| m.zoom_pct);
-        let scale = self.native.scale_factor();
-        let menu_width = frame
-            .rect_of(HitId::MenuBar)
-            .map_or(0.0, |r| r.size.width);
-        let key = MinSizeKey {
-            status: metrics,
-            zoom_pct,
-            menu_width,
-            scale,
+        let status_w = match metrics {
+            Some(m) => {
+                let spacer_w = frame
+                    .custom_rects()
+                    .find_map(|(tok, r)| (tok == CustomDraw::StatusSpacer).then_some(r.size.width));
+                match spacer_w {
+                    Some(w) if w > STATUS_DIVIDER_WIDTH + 0.5 => {
+                        logical.width - (w - STATUS_DIVIDER_WIDTH)
+                    }
+                    _ => Frame::measure(
+                        self.status_bar(m, p),
+                        AvailSize::MIN,
+                        self.native.scale_factor(),
+                        ts,
+                    )
+                    .width,
+                }
+            }
+            None => 0.0,
         };
-        if self
-            .min_size_cache
-            .is_some_and(|cached| cached.key == key)
-        {
-            return;
-        }
-        let status_sz =
-            metrics.map(|m| Frame::measure(self.status_bar(m, p), AvailSize::MIN, scale, ts));
+        let status_h = if metrics.is_some() {
+            SEPARATOR_HEIGHT + STATUS_BAR_HEIGHT
+        } else {
+            0.0
+        };
+        let menu_width = frame.rect_of(HitId::MenuBar).map_or(0.0, |r| r.size.width);
         let menu_row = MENU_BAR_LEFT + menu_width + THEME_BUTTON_WIDTH + THEME_BUTTON_RIGHT;
-        let width = status_sz
-            .map_or(0., |s| s.width)
-            .max(menu_row)
-            .max(TITLE_BAR_MIN_WIDTH);
+        let width = status_w.max(menu_row).max(TITLE_BAR_MIN_WIDTH);
         let chrome_top = frame.rect_of(HitId::EditorArea).map_or(0., |r| r.top());
-        let height = chrome_top + self.editor_min_height() + status_sz.map_or(0., |s| s.height);
+        let height = chrome_top + self.editor_min_height() + status_h;
         let next = size(width, height);
-        let changed = self
-            .min_size_cache
-            .is_none_or(|cached| cached.size != next);
-        self.min_size_cache = Some(MinSizeCache { key, size: next });
-        if changed {
+        if self.min_size.is_none_or(|prev| {
+            (prev.width - next.width).abs() > 0.5 || (prev.height - next.height).abs() > 0.5
+        }) {
+            self.min_size = Some(next);
             self.native.set_min_size(Some(next));
         }
     }
@@ -185,13 +175,8 @@ impl MainWindow {
             p,
             HitId::ThemeToggle,
             "Switch theme",
-            if p.dark { SUN_GLYPH } else { MOON_GLYPH },
-            IconButtonStyle {
-                glyph_size: THEME_GLYPH_SIZE,
-                width: THEME_BUTTON_WIDTH,
-                height: MENU_BAR_HEIGHT,
-                radius: CONTROL_RADIUS,
-            },
+            (if p.dark { SUN_GLYPH } else { MOON_GLYPH }, THEME_GLYPH_SIZE),
+            size(THEME_BUTTON_WIDTH, MENU_BAR_HEIGHT),
             true,
             &mut self.ui,
         );

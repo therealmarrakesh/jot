@@ -2,17 +2,16 @@ use std::hash::Hash;
 use std::time::{Duration, Instant};
 
 use crate::color::{Rgba, black, transparent_black};
-use crate::geom::{Corners, Edges, Point, Rect, Shadows, Size, point};
+use crate::geom::{Corners, Edges, Point, Rect, Shadows, Size, point, size};
 use crate::gfx::{
-    Canvas, FontWeight, Label, LabelLayout, PaintQuad, Scope, TextAlign, TextStyle, TextSystem,
+    Canvas, FontWeight, Label, LabelLayout, PaintQuad, Scope, TextStyle, TextSystem,
 };
 use crate::platform::{CursorStyle, MouseButton, WindowControlArea};
 use crate::types::SharedStr;
 
 use super::anim::{AnimSample, AnimTracks, Curve, Easing};
 use super::layout::{
-    AlignItems, AvailSize, AvailableSpace, Dim, FlexDirection, FlexStyle, JustifyContent,
-    LayoutEngine, LayoutId, Overflow, Position, snap_border_edges,
+    AvailSize, Dim, Flex, FlexStyle, LayoutEngine, LayoutId, Space, snap_border_edges,
 };
 
 pub(crate) const BRUSH_FADE_DURATION: Duration = Duration::from_millis(83);
@@ -37,7 +36,6 @@ struct TextOverrides {
     size: Option<f32>,
     line_height: Option<f32>,
     color: Option<Rgba>,
-    align: Option<TextAlign>,
     nowrap: Option<bool>,
     line_clamp: Option<usize>,
 }
@@ -47,7 +45,6 @@ struct ResolvedTextStyle {
     style: TextStyle,
     line_height: f32,
     color: Rgba,
-    align: TextAlign,
     nowrap: bool,
     line_clamp: Option<usize>,
 }
@@ -58,7 +55,6 @@ impl Default for ResolvedTextStyle {
             style: TextStyle::default(),
             line_height: 20.0,
             color: black(),
-            align: TextAlign::Left,
             nowrap: false,
             line_clamp: None,
         }
@@ -83,9 +79,6 @@ impl ResolvedTextStyle {
         if let Some(c) = o.color {
             out.color = c;
         }
-        if let Some(a) = o.align {
-            out.align = a;
-        }
         if let Some(nw) = o.nowrap {
             out.nowrap = nw;
         }
@@ -96,28 +89,97 @@ impl ResolvedTextStyle {
     }
 }
 
+#[derive(Copy, Clone, Debug, Default, PartialEq)]
+pub(crate) enum Transform {
+    #[default]
+    None,
+    Scale(f32, f32),
+    ScaleFromPx {
+        collapsed: f32,
+        min_start: f32,
+        t: f32,
+    },
+    RevealY {
+        shown_ratio: f32,
+        slide: bool,
+    },
+}
+
+impl Transform {
+    fn resolved_scale(self, sz: Size) -> Option<(f32, f32)> {
+        match self {
+            Self::Scale(sx, sy) => Some((sx, sy)),
+            Self::ScaleFromPx {
+                collapsed,
+                min_start,
+                t,
+            } => {
+                let axis = |dim: f32| {
+                    let start = (collapsed / dim.max(collapsed)).min(min_start);
+                    start + (1.0 - start) * t
+                };
+                Some((axis(sz.width), axis(sz.height)))
+            }
+            Self::None | Self::RevealY { .. } => None,
+        }
+    }
+}
+
+#[derive(Copy, Clone)]
+struct Decor {
+    bg: Rgba,
+    border_color: Rgba,
+    corners: Corners,
+    shadows: Shadows,
+    opacity: f32,
+    transform: Transform,
+    inert: bool,
+}
+
+impl Default for Decor {
+    fn default() -> Self {
+        Self {
+            bg: transparent_black(),
+            border_color: transparent_black(),
+            corners: Corners::ZERO,
+            shadows: Shadows::NONE,
+            opacity: 1.0,
+            transform: Transform::None,
+            inert: false,
+        }
+    }
+}
+
+struct Interact<H> {
+    hit: Option<H>,
+    cursor: Option<CursorStyle>,
+    window_area: Option<WindowControlArea>,
+    tooltip: Option<SharedStr>,
+}
+
+impl<H> Default for Interact<H> {
+    fn default() -> Self {
+        Self {
+            hit: None,
+            cursor: None,
+            window_area: None,
+            tooltip: None,
+        }
+    }
+}
+
 enum NodePayload<H, C> {
     Box(Vec<Node<H, C>>),
     Text(SharedStr),
     Custom(C),
 }
 
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Copy, Clone)]
 pub(crate) enum Anchor<H> {
     Point(Point),
-    BelowStart {
+    Target {
         target: H,
-        gap: f32,
-    },
-    AboveOrBelowCenter {
-        target: H,
-        gap: f32,
-        min_top: f32,
-    },
-    SideOf {
-        target: H,
-        overlap: f32,
-        offset_y: f32,
+        place: fn(target: Rect, popup: Size, viewport: Size) -> Point,
     },
 }
 
@@ -128,66 +190,28 @@ impl<H: Copy> Anchor<H> {
         popup: Size,
         mut lookup: impl FnMut(H) -> Option<Rect>,
     ) -> Point {
-        let clamp_x = |x: f32| x.min((viewport.width - popup.width).max(0.)).max(0.);
-        let clamp_y = |y: f32| y.min((viewport.height - popup.height).max(0.)).max(0.);
-        match self {
-            Self::Point(p) => point(clamp_x(p.x), clamp_y(p.y)),
-            Self::BelowStart { target, gap } => {
-                let p = lookup(target).map_or(Point::ZERO, |r| point(r.left(), r.bottom() + gap));
-                point(clamp_x(p.x), clamp_y(p.y))
-            }
-            Self::AboveOrBelowCenter {
-                target,
-                gap,
-                min_top,
-            } => {
-                let Some(r) = lookup(target) else {
+        let raw = match self {
+            Self::Point(p) => p,
+            Self::Target { target, place } => {
+                let Some(rect) = lookup(target) else {
                     return Point::ZERO;
                 };
-                let x = clamp_x(r.center().x - (popup.width / 2.).floor());
-                let above = r.top() - (gap + popup.height);
-                let y = if above >= min_top {
-                    above
-                } else {
-                    r.bottom() + gap
-                };
-                point(x, clamp_y(y))
+                place(rect, popup, viewport)
             }
-            Self::SideOf {
-                target,
-                overlap,
-                offset_y,
-            } => {
-                let Some(r) = lookup(target) else {
-                    return Point::ZERO;
-                };
-                let right_x = r.right() - overlap;
-                let x = if right_x + popup.width <= viewport.width {
-                    right_x
-                } else {
-                    (r.left() - popup.width + overlap).max(0.)
-                };
-                point(x, clamp_y(r.top() + offset_y))
-            }
-        }
+        };
+        point(
+            raw.x.min((viewport.width - popup.width).max(0.0)).max(0.0),
+            raw.y.min((viewport.height - popup.height).max(0.0)).max(0.0),
+        )
     }
 }
 
 pub(crate) struct Node<H, C> {
     flex: FlexStyle,
-    bg: Rgba,
-    border_color: Rgba,
-    corners: Corners,
-    shadows: Shadows,
-    opacity: f32,
-    scale: (f32, f32),
-    inert: bool,
+    decor: Decor,
+    interact: Interact<H>,
     anchor: Option<Anchor<H>>,
     text: TextOverrides,
-    hit: Option<H>,
-    cursor: Option<CursorStyle>,
-    window_area: Option<WindowControlArea>,
-    tooltip: Option<SharedStr>,
     payload: NodePayload<H, C>,
 }
 
@@ -205,119 +229,86 @@ macro_rules! setters {
 }
 
 impl<H, C> Node<H, C> {
-    fn new_box(direction: FlexDirection) -> Self {
+    fn new_box(row: bool) -> Self {
         Self {
             flex: FlexStyle {
-                direction,
+                row,
                 ..Default::default()
             },
-            bg: transparent_black(),
-            border_color: transparent_black(),
-            corners: Corners::ZERO,
-            shadows: Shadows::NONE,
-            opacity: 1.0,
-            scale: (1.0, 1.0),
-            inert: false,
+            decor: Decor::default(),
+            interact: Interact::default(),
             anchor: None,
             text: TextOverrides::default(),
-            hit: None,
-            cursor: None,
-            window_area: None,
-            tooltip: None,
             payload: NodePayload::Box(Vec::new()),
         }
     }
 
     setters! {
-        absolute() => |s| { s.flex.position = Position::Absolute; }
-        w(v: f32) => |s| { s.flex.width = Dim::Px(v); }
-        h(v: f32) => |s| { s.flex.height = Dim::Px(v); }
-        w_full() => |s| { s.flex.width = Dim::Pct(1.0); }
-        h_full() => |s| { s.flex.height = Dim::Pct(1.0); }
-        min_w(v: f32) => |s| { s.flex.min_width = Dim::Px(v); }
-        min_h(v: f32) => |s| { s.flex.min_height = Dim::Px(v); }
-        min_h_full() => |s| { s.flex.min_height = Dim::Pct(1.0); }
-        max_w(v: f32) => |s| { s.flex.max_width = Dim::Px(v); }
-        max_w_full() => |s| { s.flex.max_width = Dim::Pct(1.0); }
-        flex_1() => |s| {
-            s.flex.flex_grow = 1.0;
-            s.flex.flex_shrink = 1.0;
-            s.flex.flex_basis = Dim::Pct(0.0);
-        }
-        flex_none() => |s| {
-            s.flex.flex_grow = 0.0;
-            s.flex.flex_shrink = 0.0;
-        }
+        absolute() => |s| { s.flex.absolute = true; }
+        w(v: f32) => |s| { s.flex.size[0] = Dim::Px(v); }
+        h(v: f32) => |s| { s.flex.size[1] = Dim::Px(v); }
+        w_full() => |s| { s.flex.size[0] = Dim::Full; }
+        h_full() => |s| { s.flex.size[1] = Dim::Full; }
+        min_w(v: f32) => |s| { s.flex.min[0] = Dim::Px(v); }
+        min_h(v: f32) => |s| { s.flex.min[1] = Dim::Px(v); }
+        min_h_full() => |s| { s.flex.min[1] = Dim::Full; }
+        max_w(v: f32) => |s| { s.flex.max[0] = Dim::Px(v); }
+        max_w_full() => |s| { s.flex.max[0] = Dim::Full; }
+        flex_1() => |s| { s.flex.flex = Flex::Fill; }
+        flex_none() => |s| { s.flex.flex = Flex::Fixed; }
         gap(v: f32) => |s| { s.flex.gap = v; }
-        items_center() => |s| { s.flex.align_items = Some(AlignItems::Center); }
-        self_start() => |s| { s.flex.align_self = Some(AlignItems::Start); }
-        justify_center() => |s| { s.flex.justify_content = Some(JustifyContent::Center); }
-        overflow_hidden() => |s| {
-            s.flex.overflow_x = Overflow::Hidden;
-            s.flex.overflow_y = Overflow::Hidden;
-        }
-        overflow_x_hidden() => |s| { s.flex.overflow_x = Overflow::Hidden; }
-        p(v: f32) => |s| { s.flex.padding = Edges::all(Dim::Px(v)); }
-        px(v: f32) => |s| {
-            s.flex.padding.left = Dim::Px(v);
-            s.flex.padding.right = Dim::Px(v);
-        }
-        py(v: f32) => |s| {
-            s.flex.padding.top = Dim::Px(v);
-            s.flex.padding.bottom = Dim::Px(v);
-        }
-        pt(v: f32) => |s| { s.flex.padding.top = Dim::Px(v); }
-        pr(v: f32) => |s| { s.flex.padding.right = Dim::Px(v); }
-        pb(v: f32) => |s| { s.flex.padding.bottom = Dim::Px(v); }
-        pl(v: f32) => |s| { s.flex.padding.left = Dim::Px(v); }
-        padding(e: Edges<f32>) => |s| {
-            s.flex.padding = Edges {
-                top: Dim::Px(e.top),
-                right: Dim::Px(e.right),
-                bottom: Dim::Px(e.bottom),
-                left: Dim::Px(e.left),
-            };
-        }
-        mt(v: f32) => |s| { s.flex.margin.top = Dim::Px(v); }
-        mb(v: f32) => |s| { s.flex.margin.bottom = Dim::Px(v); }
-        ml(v: f32) => |s| { s.flex.margin.left = Dim::Px(v); }
-        top(v: f32) => |s| { s.flex.inset.top = Dim::Px(v); }
-        right(v: f32) => |s| { s.flex.inset.right = Dim::Px(v); }
-        bottom(v: f32) => |s| { s.flex.inset.bottom = Dim::Px(v); }
-        left(v: f32) => |s| { s.flex.inset.left = Dim::Px(v); }
-        bg(color: Rgba) => |s| { s.bg = color; }
+        items_center() => |s| { s.flex.items_center = true; }
+        justify_center() => |s| { s.flex.justify_center = true; }
+        overflow_hidden() => |s| { s.flex.clip = [true, true]; }
+        overflow_x_hidden() => |s| { s.flex.clip[0] = true; }
+        p(v: f32) => |s| { s.flex.padding = Edges::all(v); }
+        px(v: f32) => |s| { s.flex.padding.left = v; s.flex.padding.right = v; }
+        py(v: f32) => |s| { s.flex.padding.top = v; s.flex.padding.bottom = v; }
+        pt(v: f32) => |s| { s.flex.padding.top = v; }
+        pr(v: f32) => |s| { s.flex.padding.right = v; }
+        pb(v: f32) => |s| { s.flex.padding.bottom = v; }
+        pl(v: f32) => |s| { s.flex.padding.left = v; }
+        padding(e: Edges<f32>) => |s| { s.flex.padding = e; }
+        mt(v: f32) => |s| { s.flex.margin.top = v; }
+        mb(v: f32) => |s| { s.flex.margin.bottom = v; }
+        ml(v: f32) => |s| { s.flex.margin.left = v; }
+        top(v: f32) => |s| { s.flex.inset.top = Some(v); }
+        right(v: f32) => |s| { s.flex.inset.right = Some(v); }
+        bottom(v: f32) => |s| { s.flex.inset.bottom = Some(v); }
+        left(v: f32) => |s| { s.flex.inset.left = Some(v); }
+        bg(color: Rgba) => |s| { s.decor.bg = color; }
         border(width: f32, color: Rgba) => |s| {
             s.flex.border = Edges::all(width);
-            s.border_color = color;
+            s.decor.border_color = color;
         }
         border_widths(widths: Edges<f32>, color: Rgba) => |s| {
             s.flex.border = widths;
-            s.border_color = color;
+            s.decor.border_color = color;
         }
         border_t(w: f32) => |s| { s.flex.border.top = w; }
         border_r(w: f32) => |s| { s.flex.border.right = w; }
         border_b(w: f32) => |s| { s.flex.border.bottom = w; }
         border_l(w: f32) => |s| { s.flex.border.left = w; }
-        border_color(color: Rgba) => |s| { s.border_color = color; }
-        rounded(r: f32) => |s| { s.corners = Corners::all(r); }
-        rounded_full() => |s| { s.corners = Corners::all(9999.0); }
-        rounded_t(r: f32) => |s| { s.corners = Corners::top(r); }
-        rounded_b(r: f32) => |s| { s.corners = Corners::bottom(r); }
-        shadows(shadows: Shadows) => |s| { s.shadows = shadows; }
-        opacity(opacity: f32) => |s| { s.opacity = opacity; }
-        scale(sx: f32, sy: f32) => |s| { s.scale = (sx, sy); }
-        inert() => |s| { s.inert = true; }
+        border_color(color: Rgba) => |s| { s.decor.border_color = color; }
+        rounded(r: f32) => |s| { s.decor.corners = Corners::all(r); }
+        rounded_full() => |s| { s.decor.corners = Corners::all(9999.0); }
+        rounded_t(r: f32) => |s| { s.decor.corners = Corners::top(r); }
+        rounded_b(r: f32) => |s| { s.decor.corners = Corners::bottom(r); }
+        shadows(shadows: Shadows) => |s| { s.decor.shadows = shadows; }
+        opacity(opacity: f32) => |s| { s.decor.opacity = opacity; }
+        scale(sx: f32, sy: f32) => |s| { s.decor.transform = Transform::Scale(sx, sy); }
+        transform(t: Transform) => |s| { s.decor.transform = t; }
+        inert() => |s| { s.decor.inert = true; }
         anchored(anchor: Anchor<H>) => |s| { s.anchor = Some(anchor); }
         font_semibold() => |s| { s.text.weight = Some(FontWeight::Semibold); }
         text_size(size: f32) => |s| { s.text.size = Some(size); }
         line_height(lh: f32) => |s| { s.text.line_height = Some(lh); }
         text_color(color: Rgba) => |s| { s.text.color = Some(color); }
-        text_center() => |s| { s.text.align = Some(TextAlign::Center); }
         nowrap() => |s| { s.text.nowrap = Some(true); }
         line_clamp(lines: usize) => |s| { s.text.line_clamp = Some(lines); }
-        hit(id: H) => |s| { s.hit = Some(id); }
-        cursor(cursor: CursorStyle) => |s| { s.cursor = Some(cursor); }
-        window_area(area: WindowControlArea) => |s| { s.window_area = Some(area); }
+        hit(id: H) => |s| { s.interact.hit = Some(id); }
+        cursor(cursor: CursorStyle) => |s| { s.interact.cursor = Some(cursor); }
+        window_area(area: WindowControlArea) => |s| { s.interact.window_area = Some(area); }
     }
 
     pub(crate) fn size(self, v: f32) -> Self {
@@ -337,7 +328,7 @@ impl<H, C> Node<H, C> {
         self
     }
     pub(crate) fn tooltip(mut self, tip: impl Into<SharedStr>) -> Self {
-        self.tooltip = Some(tip.into());
+        self.interact.tooltip = Some(tip.into());
         self
     }
     pub(crate) fn child(mut self, child: Node<H, C>) -> Self {
@@ -364,21 +355,21 @@ impl<H, C> Node<H, C> {
 }
 
 pub(crate) fn row<H, C>() -> Node<H, C> {
-    Node::new_box(FlexDirection::Row)
+    Node::new_box(true)
 }
 
 pub(crate) fn box_<H, C>() -> Node<H, C> {
-    Node::new_box(FlexDirection::Column)
+    Node::new_box(false)
 }
 
 pub(crate) fn text<H, C>(content: impl Into<SharedStr>) -> Node<H, C> {
-    let mut node = Node::new_box(FlexDirection::Column);
+    let mut node = Node::new_box(false);
     node.payload = NodePayload::Text(content.into());
     node
 }
 
 pub(crate) fn custom<H, C>(token: C) -> Node<H, C> {
-    let mut node = Node::new_box(FlexDirection::Column);
+    let mut node = Node::new_box(false);
     node.payload = NodePayload::Custom(token);
     node
 }
@@ -398,22 +389,12 @@ enum FlatKind<C> {
 
 struct FlatNode<H, C> {
     parent: Option<usize>,
-    layout_id: LayoutId,
     rect: Rect,
-    bg: Rgba,
     border: Edges<f32>,
-    border_color: Rgba,
-    corners: Corners,
-    shadows: Shadows,
-    opacity: f32,
-    scale: (f32, f32),
-    inert: bool,
-    anchor: Option<Anchor<H>>,
     clip: bool,
-    hit: Option<H>,
-    cursor: Option<CursorStyle>,
-    window_area: Option<WindowControlArea>,
-    tooltip: Option<SharedStr>,
+    decor: Decor,
+    interact: Interact<H>,
+    anchor: Option<Anchor<H>>,
     kind: FlatKind<C>,
 }
 
@@ -450,6 +431,7 @@ impl<H: Copy + Eq, C: Copy> Frame<H, C> {
             _ => None,
         })
     }
+
     pub(crate) fn layout(
         root_node: Node<H, C>,
         available: AvailSize,
@@ -458,27 +440,18 @@ impl<H: Copy + Eq, C: Copy> Frame<H, C> {
     ) -> Self {
         let mut engine = LayoutEngine::new();
         let mut frame = Frame::default();
-        let mut layout_to_flat: Vec<usize> = Vec::new();
         let default_text = ResolvedTextStyle::default();
 
-        let root_idx = frame.flatten(
-            root_node,
-            None,
-            &default_text,
-            scale,
-            &mut engine,
-            &mut layout_to_flat,
-        );
+        let root_idx = frame.flatten(root_node, None, &default_text, scale, &mut engine);
         frame.root = Some(root_idx);
-        let root_layout_id = frame.nodes[root_idx].layout_id;
+        let root_lid = LayoutId(root_idx as u32);
 
-        engine.compute(root_layout_id, available, scale, &mut |lid, kw, _kh, avail| {
-            let flat_idx = layout_to_flat[lid.0 as usize];
+        engine.compute(root_lid, available, scale, &mut |lid, kw, _kh, avail| {
             let FlatKind::Text {
                 content,
                 style,
                 label,
-            } = &mut frame.nodes[flat_idx].kind
+            } = &mut frame.nodes[lid.0 as usize].kind
             else {
                 return Size::ZERO;
             };
@@ -486,7 +459,7 @@ impl<H: Copy + Eq, C: Copy> Frame<H, C> {
                 None
             } else {
                 kw.or(match avail.width {
-                    AvailableSpace::Definite(w) => Some(w),
+                    Space::Definite(w) => Some(w),
                     _ => None,
                 })
             };
@@ -497,7 +470,6 @@ impl<H: Copy + Eq, C: Copy> Frame<H, C> {
                     line_height: style.line_height,
                     wrap_width,
                     line_clamp: style.line_clamp,
-                    align: style.align,
                 },
             );
             let sz = shaped.size();
@@ -505,30 +477,31 @@ impl<H: Copy + Eq, C: Copy> Frame<H, C> {
             sz
         });
 
-        let root_rect = engine.bounds(root_layout_id, scale);
+        let root_rect = engine.bounds(root_lid, scale);
         let viewport = match (available.width, available.height) {
-            (AvailableSpace::Definite(w), AvailableSpace::Definite(h)) => Size::new(w, h),
+            (Space::Definite(w), Space::Definite(h)) => Size::new(w, h),
             _ => root_rect.size,
         };
         for idx in 0..frame.nodes.len() {
             let Some(anchor) = frame.nodes[idx].anchor else {
                 continue;
             };
-            let lid = frame.nodes[idx].layout_id;
+            let lid = LayoutId(idx as u32);
             let popup_size = engine.bounds(lid, scale).size;
             let origin = anchor.resolve(viewport, popup_size, |target| {
                 frame
                     .nodes
                     .iter()
+                    .enumerate()
                     .rev()
-                    .find(|n| n.hit == Some(target))
-                    .map(|n| engine.bounds(n.layout_id, scale))
+                    .find(|(_, n)| n.interact.hit == Some(target))
+                    .map(|(i, _)| engine.bounds(LayoutId(i as u32), scale))
             });
             engine.set_origin(lid, origin, scale);
         }
 
-        for node in &mut frame.nodes {
-            node.rect = engine.bounds(node.layout_id, scale);
+        for (idx, node) in frame.nodes.iter_mut().enumerate() {
+            node.rect = engine.bounds(LayoutId(idx as u32), scale);
         }
 
         let initial_clip = Rect::new(Point::ZERO, viewport);
@@ -555,127 +528,88 @@ impl<H: Copy + Eq, C: Copy> Frame<H, C> {
         inherited_text: &ResolvedTextStyle,
         scale: f32,
         engine: &mut LayoutEngine,
-        layout_to_flat: &mut Vec<usize>,
     ) -> usize {
         let resolved_text = inherited_text.merge(&node.text);
-        let clip = node.flex.overflow_x == Overflow::Hidden
-            || node.flex.overflow_y == Overflow::Hidden;
+        let clip = node.flex.clip[0] || node.flex.clip[1];
         let border = snap_border_edges(node.flex.border, scale);
-        let flat_idx = self.nodes.len();
         let Node {
             mut flex,
-            bg,
-            border_color,
-            corners,
-            shadows,
-            opacity,
-            scale: node_scale,
-            inert,
+            decor,
+            interact,
             anchor,
-            hit,
-            cursor,
-            window_area,
-            tooltip,
             payload,
             ..
         } = node;
         if anchor.is_some() {
-            flex.position = Position::Absolute;
+            flex.absolute = true;
         }
+        let is_text = matches!(payload, NodePayload::Text(_));
+        let flat_idx = self.nodes.len();
+        let lid = engine.reserve_node(flex, scale, is_text);
+        debug_assert_eq!(lid.0 as usize, flat_idx);
 
         self.nodes.push(FlatNode {
             parent,
-            layout_id: LayoutId(0),
             rect: Rect::ZERO,
-            bg,
             border,
-            border_color,
-            corners,
-            shadows,
-            opacity,
-            scale: node_scale,
-            inert,
-            anchor,
             clip,
-            hit,
-            cursor,
-            window_area,
-            tooltip,
+            decor,
+            interact,
+            anchor,
             kind: FlatKind::Box {
                 children_start: 0,
                 children_len: 0,
             },
         });
 
-        let (lid, kind) = match payload {
+        let kind = match payload {
             NodePayload::Box(children) => {
                 let mut child_flat_ids = Vec::with_capacity(children.len());
-                let mut child_layout_ids = Vec::with_capacity(children.len());
+                let mut child_lids = Vec::with_capacity(children.len());
                 for child in children {
-                    let c_idx = self.flatten(
-                        child,
-                        Some(flat_idx),
-                        &resolved_text,
-                        scale,
-                        engine,
-                        layout_to_flat,
-                    );
+                    let c_idx = self.flatten(child, Some(flat_idx), &resolved_text, scale, engine);
                     child_flat_ids.push(c_idx);
-                    child_layout_ids.push(self.nodes[c_idx].layout_id);
+                    child_lids.push(LayoutId(c_idx as u32));
                 }
                 let start = self.child_order.len();
                 self.child_order.extend_from_slice(&child_flat_ids);
-                let lid = engine.add_node(flex, scale, &child_layout_ids, false);
-                (
-                    lid,
-                    FlatKind::Box {
-                        children_start: start,
-                        children_len: child_flat_ids.len(),
-                    },
-                )
+                engine.set_children(lid, &child_lids);
+                FlatKind::Box {
+                    children_start: start,
+                    children_len: child_flat_ids.len(),
+                }
             }
-            NodePayload::Text(content) => (
-                engine.add_node(flex, scale, &[], true),
-                FlatKind::Text {
-                    content,
-                    style: resolved_text,
-                    label: None,
-                },
-            ),
-            NodePayload::Custom(token) => (
-                engine.add_node(flex, scale, &[], false),
-                FlatKind::Custom(token),
-            ),
+            NodePayload::Text(content) => FlatKind::Text {
+                content,
+                style: resolved_text,
+                label: None,
+            },
+            NodePayload::Custom(token) => FlatKind::Custom(token),
         };
-
-        if layout_to_flat.len() <= lid.0 as usize {
-            layout_to_flat.resize(lid.0 as usize + 1, 0);
-        }
-        layout_to_flat[lid.0 as usize] = flat_idx;
-        self.nodes[flat_idx].layout_id = lid;
         self.nodes[flat_idx].kind = kind;
         flat_idx
     }
 
     fn collect_hits(&mut self, idx: usize, clip: Rect) {
         let node = &self.nodes[idx];
-        if node.inert
-            || (node.scale.0 - 1.0).abs() > 1e-4
-            || (node.scale.1 - 1.0).abs() > 1e-4
-        {
+        let scaled = node
+            .decor
+            .transform
+            .resolved_scale(node.rect.size)
+            .is_some_and(|(sx, sy)| (sx - 1.0).abs() > 1e-4 || (sy - 1.0).abs() > 1e-4);
+        if node.decor.inert || scaled {
             return;
         }
-        let rect = node.rect;
-        let clipped = rect.intersect(clip);
+        let clipped = node.rect.intersect(clip);
         let child_clip = if node.clip { clipped } else { clip };
 
         if !clipped.is_empty() {
-            if let Some(area) = self.nodes[idx].window_area {
+            if let Some(area) = self.nodes[idx].interact.window_area {
                 self.control_areas.push((clipped, area));
-            } else if self.nodes[idx].hit.is_some() {
+            } else if self.nodes[idx].interact.hit.is_some() {
                 self.control_areas.push((clipped, WindowControlArea::Client));
             }
-            if self.nodes[idx].hit.is_some() {
+            if self.nodes[idx].interact.hit.is_some() {
                 self.hits.push(HitEntry {
                     node_idx: idx,
                     clipped_rect: clipped,
@@ -689,8 +623,7 @@ impl<H: Copy + Eq, C: Copy> Frame<H, C> {
         } = self.nodes[idx].kind
         {
             for offset in 0..children_len {
-                let child_idx = self.child_order[children_start + offset];
-                self.collect_hits(child_idx, child_clip);
+                self.collect_hits(self.child_order[children_start + offset], child_clip);
             }
         }
     }
@@ -713,7 +646,7 @@ impl<H: Copy + Eq, C: Copy> Frame<H, C> {
         let mut chain = Vec::with_capacity(4);
         let mut cur = Some(top.node_idx);
         while let Some(idx) = cur {
-            if let Some(hit) = self.nodes[idx].hit {
+            if let Some(hit) = self.nodes[idx].interact.hit {
                 chain.push(hit);
             }
             cur = self.nodes[idx].parent;
@@ -725,7 +658,7 @@ impl<H: Copy + Eq, C: Copy> Frame<H, C> {
         self.nodes
             .iter()
             .rev()
-            .find(|node| node.hit == Some(id))
+            .find(|node| node.interact.hit == Some(id))
             .map(|node| node.rect)
     }
 
@@ -734,7 +667,7 @@ impl<H: Copy + Eq, C: Copy> Frame<H, C> {
         self.nodes
             .iter()
             .rev()
-            .find(|node| node.hit.is_some_and(&pred))
+            .find(|node| node.interact.hit.is_some_and(&pred))
             .map(|node| node.rect)
     }
 
@@ -744,7 +677,7 @@ impl<H: Copy + Eq, C: Copy> Frame<H, C> {
         };
         let mut cur = Some(top.node_idx);
         while let Some(idx) = cur {
-            if let Some(c) = self.nodes[idx].cursor {
+            if let Some(c) = self.nodes[idx].interact.cursor {
                 return c;
             }
             cur = self.nodes[idx].parent;
@@ -756,8 +689,8 @@ impl<H: Copy + Eq, C: Copy> Frame<H, C> {
         let top = self.top_hit(pos)?;
         let mut cur = Some(top.node_idx);
         while let Some(idx) = cur {
-            if let Some(tip) = &self.nodes[idx].tooltip
-                && let Some(hit) = self.nodes[idx].hit
+            if let Some(tip) = &self.nodes[idx].interact.tooltip
+                && let Some(hit) = self.nodes[idx].interact.hit
             {
                 return Some((hit, tip.clone(), self.nodes[idx].rect));
             }
@@ -783,37 +716,51 @@ impl<H: Copy + Eq, C: Copy> Frame<H, C> {
         draw_custom: &mut impl FnMut(C, Rect, &mut Canvas),
     ) {
         let node = &self.nodes[idx];
-        if node.opacity <= 0.0 || node.scale.0 <= 1e-3 || node.scale.1 <= 1e-3 {
+        let d = node.decor;
+        let resolved_scale = d.transform.resolved_scale(node.rect.size);
+        if d.opacity <= 0.0 || resolved_scale.is_some_and(|(sx, sy)| sx <= 1e-3 || sy <= 1e-3) {
             return;
         }
-        let opacity = (node.opacity < 1.0 - 1e-4).then_some(node.opacity);
-        let scale = ((node.scale.0 - 1.0).abs() > 1e-4 || (node.scale.1 - 1.0).abs() > 1e-4)
-            .then_some((node.rect.center(), node.scale.0, node.scale.1));
+        let opacity = (d.opacity < 1.0 - 1e-4).then_some(d.opacity);
+        let scale = resolved_scale.and_then(|(sx, sy)| {
+            ((sx - 1.0).abs() > 1e-4 || (sy - 1.0).abs() > 1e-4)
+                .then_some((node.rect.center(), sx, sy))
+        });
+        let (paint_rect, reveal_clip, reveal_translate) = match d.transform {
+            Transform::RevealY { shown_ratio, slide } if shown_ratio < 1.0 - 1e-4 => {
+                let shown_h = (node.rect.size.height * shown_ratio).max(0.0);
+                let r = Rect::new(node.rect.origin, size(node.rect.size.width, shown_h));
+                let delta = slide.then_some(point(0.0, -(node.rect.size.height - shown_h)));
+                (r, Some(r.inset(node.border)), delta)
+            }
+            _ => (node.rect, None, None),
+        };
 
         canvas.scoped(
             Scope {
                 opacity,
                 scale,
-                clip: None,
+                ..Default::default()
             },
             |canvas| {
-                if !node.shadows.is_empty() {
-                    canvas.paint_shadows(node.rect, node.corners, node.shadows);
+                if !d.shadows.is_empty() {
+                    canvas.paint_shadows(paint_rect, d.corners, d.shadows);
                 }
-                if !node.bg.is_transparent()
-                    || (!node.border_color.is_transparent() && node.border.any_nonzero())
+                if !d.bg.is_transparent()
+                    || (!d.border_color.is_transparent() && node.border.any_nonzero())
                 {
                     canvas.paint_quad(PaintQuad {
-                        bounds: node.rect,
-                        corner_radii: node.corners,
-                        background: node.bg,
+                        bounds: paint_rect,
+                        corner_radii: d.corners,
+                        background: d.bg,
                         border_widths: node.border,
-                        border_color: node.border_color,
+                        border_color: d.border_color,
                     });
                 }
                 canvas.scoped(
                     Scope {
-                        clip: node.clip.then_some(node.rect),
+                        clip: reveal_clip.or_else(|| node.clip.then_some(node.rect)),
+                        translate: reveal_translate,
                         ..Default::default()
                     },
                     |canvas| match &node.kind {
@@ -822,8 +769,11 @@ impl<H: Copy + Eq, C: Copy> Frame<H, C> {
                             children_len,
                         } => {
                             for offset in 0..*children_len {
-                                let child_idx = self.child_order[*children_start + offset];
-                                self.paint_node(child_idx, canvas, draw_custom);
+                                self.paint_node(
+                                    self.child_order[*children_start + offset],
+                                    canvas,
+                                    draw_custom,
+                                );
                             }
                         }
                         FlatKind::Text { style, label, .. } => {
@@ -901,9 +851,7 @@ impl<H: Copy + Eq + Hash, C: Copy, K: Copy + Eq + Hash> UiState<H, C, K> {
     pub(crate) fn finish_frame(&mut self, frame: Frame<H, C>) -> bool {
         self.frame = frame;
         let animating = self.anims.end_frame();
-        let hover_shifted = self
-            .pointer
-            .is_some_and(|p| self.refresh_hover(p.pos));
+        let hover_shifted = self.pointer.is_some_and(|p| self.refresh_hover(p.pos));
         animating || hover_shifted
     }
 
@@ -1068,9 +1016,7 @@ mod tests {
                                     .tooltip("Close tab"),
                             ),
                     )
-                    .child(
-                        row().w(100.).h(32.).flex_none().hit(TestHit::Tab(2)),
-                    ),
+                    .child(row().w(100.).h(32.).flex_none().hit(TestHit::Tab(2))),
             )
             .child(box_().w(40.).h(32.).hit(TestHit::NewTab).bg(rgb(0x123456)));
 
@@ -1095,13 +1041,7 @@ mod tests {
                     .absolute()
                     .inset_0()
                     .hit(TestHit::Backdrop)
-                    .child(
-                        box_()
-                            .w(80.)
-                            .h(32.)
-                            .hit(TestHit::Button(0))
-                            .bg(white()),
-                    ),
+                    .child(box_().w(80.).h(32.).hit(TestHit::Button(0)).bg(white())),
             );
         let modal_frame = Frame::layout(modal, AvailSize::definite(200., 100.), 1.0, &ts);
         assert_eq!(
@@ -1118,10 +1058,7 @@ mod tests {
             .child(box_().w(100.).h(40.).hit(TestHit::NewTab))
             .child(box_().absolute().inset_0());
         let pass_frame = Frame::layout(passthrough, AvailSize::definite(200., 100.), 1.0, &ts);
-        assert_eq!(
-            pass_frame.hit_chain(point(10., 10.)),
-            vec![TestHit::NewTab]
-        );
+        assert_eq!(pass_frame.hit_chain(point(10., 10.)), vec![TestHit::NewTab]);
     }
 
     #[test]
@@ -1159,9 +1096,9 @@ mod tests {
                     .w(120.)
                     .h(80.)
                     .hit(AnchorHit::Popup)
-                    .anchored(Anchor::BelowStart {
+                    .anchored(Anchor::Target {
                         target: AnchorHit::Trigger,
-                        gap: 0.,
+                        place: |r, _, _| point(r.left(), r.bottom()),
                     })
                     .child(
                         box_()
@@ -1172,35 +1109,44 @@ mod tests {
                             .h(30.)
                             .hit(AnchorHit::Item),
                     )
-                    .child(box_().w(100.).h(60.).hit(AnchorHit::Submenu).anchored(
-                        Anchor::SideOf {
-                            target: AnchorHit::Item,
-                            overlap: 3.,
-                            offset_y: -3.,
-                        },
-                    )),
+                    .child(
+                        box_()
+                            .w(100.)
+                            .h(60.)
+                            .hit(AnchorHit::Submenu)
+                            .anchored(Anchor::Target {
+                                target: AnchorHit::Item,
+                                place: |r, popup, vp| {
+                                    let right_x = r.right() - 3.;
+                                    let x = if right_x + popup.width <= vp.width {
+                                        right_x
+                                    } else {
+                                        r.left() - popup.width + 3.
+                                    };
+                                    point(x, r.top() - 3.)
+                                },
+                            }),
+                    ),
             )
-            .child(box_().w(80.).h(50.).hit(AnchorHit::Flyout).anchored(
-                Anchor::AboveOrBelowCenter {
-                    target: AnchorHit::FlyoutBtn,
-                    gap: 4.,
-                    min_top: 32.,
-                },
-            ));
+            .child(
+                box_()
+                    .w(80.)
+                    .h(50.)
+                    .hit(AnchorHit::Flyout)
+                    .anchored(Anchor::Target {
+                        target: AnchorHit::FlyoutBtn,
+                        place: |r, popup, _| {
+                            let x = r.center().x - (popup.width / 2.).floor();
+                            let above = r.top() - (4. + popup.height);
+                            point(x, if above >= 32. { above } else { r.bottom() + 4. })
+                        },
+                    }),
+            );
 
         let frame = Frame::layout(tree, AvailSize::definite(300., 200.), 1.0, &ts);
-        assert_eq!(
-            frame.rect_of(AnchorHit::Popup).unwrap().origin,
-            point(120., 32.)
-        );
-        assert_eq!(
-            frame.rect_of(AnchorHit::Submenu).unwrap().origin,
-            point(24., 49.)
-        );
-        assert_eq!(
-            frame.rect_of(AnchorHit::Flyout).unwrap().origin,
-            point(115., 94.)
-        );
+        assert_eq!(frame.rect_of(AnchorHit::Popup).unwrap().origin, point(120., 32.));
+        assert_eq!(frame.rect_of(AnchorHit::Submenu).unwrap().origin, point(24., 49.));
+        assert_eq!(frame.rect_of(AnchorHit::Flyout).unwrap().origin, point(115., 94.));
 
         for scale in [1.0f32, 1.5] {
             let short: Node<(), ()> = box_()

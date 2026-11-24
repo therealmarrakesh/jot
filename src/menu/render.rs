@@ -1,21 +1,21 @@
 use crate::color::transparent_black;
-use crate::geom::{Edges, round_half_up};
-use crate::gfx::{TextStyle, TextSystem};
+use crate::geom::Edges;
+use crate::gfx::TextSystem;
 use crate::ids::{Focus, Frame, HitId, MenuKind, Node, UiState};
 use crate::keytips::{self, KeyTip};
 use crate::platform::CursorStyle;
-use crate::theme::{Palette, theme_shadow};
-use crate::ui::controls::{
-    CONTROL_RADIUS, ICON_FONT, OVERLAY_RADIUS, SMALL_FONT, TEXT_FONT, focus_ring, subtle_brushes,
+use crate::theme::{
+    CONTROL_RADIUS, ICON_FONT, OVERLAY_RADIUS, Palette, SMALL_FONT, TEXT_FONT, theme_shadow,
 };
-use crate::ui::{Anchor, box_, row, text};
+use crate::ui::{Anchor, Transform, box_, row, text};
+use crate::widgets::{focus_ring, subtle_brushes};
 
 use super::bar::{MenuBar, MenuMode};
 use super::model::{
-    BORDER, CHECK_COLUMN, CommandButton, Entry, LABEL_SIZE, PADDING_Y, Panel, ROW_INSET,
-    ROW_PADDING, ROW_SEPARATOR, SHORTCUT_SIZE,
+    BORDER, CHECK_COLUMN, CHEVRON_WIDTH, CommandButton, Entry, LABEL_SIZE, PADDING_Y, Panel,
+    ROW_INSET, ROW_PADDING, ROW_SEPARATOR, SHORTCUT_GAP, SHORTCUT_SIZE,
 };
-use super::popup::{COMMAND_ROW, OpenMenu, OpenSubmenu, PopupFocus};
+use super::popup::{COMMAND_ROW, OpenMenu, OpenSubmenu, PopupFocus, place_submenu};
 
 const CLOSED_RATIO: f32 = 0.5;
 const MENU_Z: f32 = 32.;
@@ -25,17 +25,14 @@ const ICON_SIZE: f32 = 16.;
 const COMMAND_BUTTON: f32 = 58.;
 const COMMAND_GAP: f32 = 1.;
 const COMMAND_ICON_TOP: f32 = 9.;
-const COMMAND_LABEL_PANEL: f32 = 60.;
 const COMMAND_LABEL_GAP: f32 = 4.;
 const COMMAND_LINE: f32 = 16.;
 const COMMAND_LABEL_SIZE: f32 = 12.;
 const COMMAND_DIVIDER_TOP: f32 = 14.;
 const COMMAND_DIVIDER_HEIGHT: f32 = 32.;
-const COMMAND_OUTSET: f32 = 1.;
 const COMMAND_INSET: f32 = 2.;
 const ROW_MARGIN_Y: f32 = 2.;
 const GLYPH_SIZE: f32 = 12.;
-const SUBMENU_OVERLAP: f32 = 4.;
 const BAR_ITEM_PADDING: f32 = 10.;
 const BAR_GAP: f32 = 8.;
 const CHECK_GLYPH: &str = "\u{E73E}";
@@ -91,40 +88,43 @@ impl MenuBar {
             .children(triggers)
     }
 
-    pub(crate) fn render_popup(
-        &self,
-        p: Palette,
-        ts: &TextSystem,
-        ui: &mut UiState,
-    ) -> Option<Node> {
+    pub(crate) fn render_popup(&self, p: Palette, ui: &mut UiState) -> Option<Node> {
         let open = self.open_popup()?;
-        let (height, bar) = open.total_height();
-        let width = open.panel.width;
         let has_commands = !open.kind.commands().is_empty();
-        let hidden = open.panel.height() * CLOSED_RATIO * (1. - open.motion.unroll);
-        let offset = if has_commands { 0. } else { -hidden };
+        let shown_ratio = 1. - CLOSED_RATIO * (1. - open.motion.unroll);
 
-        let cmd_row = has_commands.then(|| render_command_row(open, p, ts, ui));
-        let main_rows = render_panel_rows(open, None, bar, p, ui);
+        let cmd_row = has_commands.then(|| render_command_row(open, p, ui));
+        let main_rows = render_panel_rows(open, None, p, ui);
         let sub_node = open
             .visible_submenu()
             .map(|sub| render_submenu_popup(open, sub, p, ui));
 
-        let content = box_()
-            .size_full()
-            .when_some(cmd_row, |this, r| this.child(r))
-            .child(main_rows);
+        let card = box_()
+            .hit(HitId::MenuPanel)
+            .cursor(CursorStyle::Arrow)
+            .min_w(open.panel.min_width)
+            .border(BORDER, p.flyout_stroke)
+            .rounded(OVERLAY_RADIUS)
+            .shadows(theme_shadow(p.dark, MENU_Z))
+            .transform(Transform::RevealY {
+                shown_ratio,
+                slide: !has_commands,
+            })
+            .child(
+                box_()
+                    .w_full()
+                    .rounded(OVERLAY_RADIUS - BORDER)
+                    .bg(p.menu_fill)
+                    .when_some(cmd_row, Node::child)
+                    .child(main_rows),
+            );
 
         Some(
             box_()
-                .hit(HitId::MenuPanel)
-                .cursor(CursorStyle::Arrow)
                 .anchored(open.kind.anchor())
-                .w(width)
-                .h(height)
                 .opacity(open.motion.opacity)
-                .children(reveal_card(p, MENU_Z, height, height - hidden, offset, content))
-                .when_some(sub_node, |this, sub| this.child(sub))
+                .child(card)
+                .when_some(sub_node, Node::child)
                 .when(open.is_closing(), Node::inert),
         )
     }
@@ -175,12 +175,8 @@ impl MenuBar {
     }
 }
 
-fn render_command_row(open: &OpenMenu, p: Palette, ts: &TextSystem, ui: &mut UiState) -> Node {
+fn render_command_row(open: &OpenMenu, p: Palette, ui: &mut UiState) -> Node {
     let commands = open.kind.commands();
-    let count = commands.len() as f32;
-    let row_w = open.panel.width + 2. * COMMAND_OUTSET;
-    let cell = ((row_w - (count - 1.)) / count).floor();
-
     let mut children = Vec::with_capacity(commands.len() * 2);
     for ix in 0..commands.len() {
         if ix > 0 {
@@ -193,36 +189,16 @@ fn render_command_row(open: &OpenMenu, p: Palette, ts: &TextSystem, ui: &mut UiS
                     .bg(p.menu_separator),
             );
         }
-        children.push(render_command_button(open, ix, cell, p, ts, ui));
+        children.push(render_command_button(open, ix, p, ui));
     }
 
-    row()
-        .absolute()
-        .top(BORDER)
-        .left(-COMMAND_OUTSET)
-        .w(row_w)
-        .h(COMMAND_ROW)
-        .children(children)
-        .child(
-            box_()
-                .absolute()
-                .left(BORDER + COMMAND_OUTSET)
-                .right(BORDER + COMMAND_OUTSET)
-                .bottom(-1.)
-                .h(1.)
-                .bg(p.menu_separator),
-        )
+    box_()
+        .w_full()
+        .child(row().w_full().h(COMMAND_ROW).children(children))
+        .child(box_().w_full().h(1.).bg(p.menu_separator))
 }
 
-fn render_command_button(
-    open: &OpenMenu,
-    ix: usize,
-    cell: f32,
-    p: Palette,
-    ts: &TextSystem,
-    ui: &mut UiState,
-) -> Node {
-    let face_w = cell - 2. * (COMMAND_GAP + COMMAND_INSET);
+fn render_command_button(open: &OpenMenu, ix: usize, p: Palette, ui: &mut UiState) -> Node {
     let CommandButton { command, glyph } = &open.kind.commands()[ix];
     let focused = ui.last_input_was_keyboard() && open.focus == PopupFocus::Command(ix);
     let enabled = command.enabled;
@@ -238,20 +214,11 @@ fn render_command_button(
     } else {
         p.text_primary
     };
-    let label_width = ts
-        .measure(
-            command.label,
-            &TextStyle::regular(SMALL_FONT, COMMAND_LABEL_SIZE),
-        )
-        .ceil();
-    let label_left = (face_w - COMMAND_LABEL_PANEL) / 2.
-        + round_half_up((COMMAND_LABEL_PANEL - label_width) / 2.);
 
     box_()
         .hit(hit)
         .cursor(CursorStyle::Arrow)
-        .flex_none()
-        .w(cell)
+        .flex_1()
         .h_full()
         .pt(COMMAND_ROW - COMMAND_BUTTON + COMMAND_INSET)
         .px(COMMAND_GAP + COMMAND_INSET)
@@ -274,15 +241,12 @@ fn render_command_button(
                 )
                 .child(
                     box_()
-                        .self_start()
-                        .ml(label_left)
-                        .w(label_width)
-                        .text_center()
                         .mt(COMMAND_LABEL_GAP)
                         .h(COMMAND_LINE)
                         .line_height(COMMAND_LINE)
                         .font_family(SMALL_FONT)
                         .text_size(COMMAND_LABEL_SIZE)
+                        .nowrap()
                         .child(text(command.label)),
                 )
                 .when(focused, |this| {
@@ -297,33 +261,41 @@ fn render_submenu_popup(
     p: Palette,
     ui: &mut UiState,
 ) -> Node {
-    let sub_w = submenu.panel.width;
-    let sub_h = submenu.panel.height();
-    let hidden = sub_h * SUBMENU_CLOSED_RATIO * (1. - submenu.motion.unroll);
-    let rows = render_panel_rows(open, Some(submenu), 0., p, ui);
+    let shown_ratio = 1. - SUBMENU_CLOSED_RATIO * (1. - submenu.motion.unroll);
+    let rows = render_panel_rows(open, Some(submenu), p, ui);
 
     box_()
         .hit(HitId::SubmenuPanel)
         .cursor(CursorStyle::Arrow)
-        .anchored(Anchor::SideOf {
+        .anchored(Anchor::Target {
             target: HitId::MenuItem {
                 serial: open.motion.serial(),
                 ix: submenu.ix,
             },
-            overlap: SUBMENU_OVERLAP - BORDER,
-            offset_y: -(BORDER + PADDING_Y),
+            place: place_submenu,
         })
-        .w(sub_w)
-        .h(sub_h)
+        .min_w(submenu.panel.min_width)
+        .border(BORDER, p.flyout_stroke)
+        .rounded(OVERLAY_RADIUS)
+        .shadows(theme_shadow(p.dark, SUBMENU_Z))
         .opacity(submenu.motion.opacity)
-        .children(reveal_card(p, SUBMENU_Z, sub_h, sub_h - hidden, -hidden, rows))
+        .transform(Transform::RevealY {
+            shown_ratio,
+            slide: true,
+        })
+        .child(
+            box_()
+                .w_full()
+                .rounded(OVERLAY_RADIUS - BORDER)
+                .bg(p.menu_fill)
+                .child(rows),
+        )
         .when(submenu.motion.is_closing(), Node::inert)
 }
 
 fn render_panel_rows(
     open: &OpenMenu,
     sub: Option<&OpenSubmenu>,
-    offset: f32,
     p: Palette,
     ui: &mut UiState,
 ) -> Node {
@@ -383,12 +355,7 @@ fn render_panel_rows(
         })
         .collect();
 
-    box_()
-        .absolute()
-        .top(BORDER + PADDING_Y + offset)
-        .left(BORDER)
-        .w(panel.width - 2. * BORDER)
-        .children(rows)
+    box_().w_full().py(PADDING_Y).children(rows)
 }
 
 fn render_row_face(
@@ -479,6 +446,7 @@ fn render_row_face(
             this.child(
                 box_()
                     .flex_none()
+                    .ml(SHORTCUT_GAP)
                     .font_family(SMALL_FONT)
                     .text_size(SHORTCUT_SIZE)
                     .nowrap()
@@ -494,6 +462,8 @@ fn render_row_face(
             this.child(
                 box_()
                     .flex_none()
+                    .ml(SHORTCUT_GAP)
+                    .w(CHEVRON_WIDTH)
                     .font_family(ICON_FONT)
                     .text_size(GLYPH_SIZE)
                     .line_height(GLYPH_SIZE)
@@ -501,48 +471,4 @@ fn render_row_face(
                     .child(text(CHEVRON_GLYPH)),
             )
         })
-}
-
-fn reveal_card(
-    p: Palette,
-    z: f32,
-    height: f32,
-    shown: f32,
-    offset: f32,
-    rows: Node,
-) -> [Node; 2] {
-    let card = box_()
-        .absolute()
-        .top(0.)
-        .left(0.)
-        .w_full()
-        .h(shown)
-        .border(BORDER, p.flyout_stroke)
-        .rounded(OVERLAY_RADIUS)
-        .shadows(theme_shadow(p.dark, z))
-        .child(
-            box_()
-                .size_full()
-                .rounded(OVERLAY_RADIUS - BORDER)
-                .bg(p.menu_fill),
-        );
-    [
-        card,
-        box_()
-            .absolute()
-            .top(0.)
-            .left(0.)
-            .w_full()
-            .h(shown)
-            .overflow_hidden()
-            .child(
-                box_()
-                    .absolute()
-                    .left(0.)
-                    .top(offset)
-                    .w_full()
-                    .h(height)
-                    .child(rows),
-            ),
-    ]
 }

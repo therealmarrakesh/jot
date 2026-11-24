@@ -6,8 +6,7 @@ use std::rc::Rc;
 use windows::Win32::Graphics::DirectWrite::{
     DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
     DWRITE_FONT_WEIGHT, DWRITE_HIT_TEST_METRICS, DWRITE_LINE_METRICS,
-    DWRITE_LINE_SPACING_METHOD_UNIFORM, DWRITE_TEXT_ALIGNMENT_CENTER,
-    DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_TEXT_METRICS, DWRITE_TRIMMING,
+    DWRITE_LINE_SPACING_METHOD_UNIFORM, DWRITE_TEXT_METRICS, DWRITE_TRIMMING,
     DWRITE_TRIMMING_GRANULARITY_CHARACTER, DWRITE_WORD_WRAPPING_NO_WRAP, DWRITE_WORD_WRAPPING_WRAP,
     DWriteCreateFactory, IDWriteFactory5, IDWriteTextAnalyzer, IDWriteTextFormat,
     IDWriteTextLayout,
@@ -113,19 +112,11 @@ impl TextStyle {
     }
 }
 
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash)]
-pub(crate) enum TextAlign {
-    #[default]
-    Left,
-    Center,
-}
-
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub(crate) struct LabelLayout {
     pub(crate) line_height: f32,
     pub(crate) wrap_width: Option<f32>,
     pub(crate) line_clamp: Option<usize>,
-    pub(crate) align: TextAlign,
 }
 
 #[derive(Clone)]
@@ -266,7 +257,6 @@ pub(crate) struct Label {
     pub(crate) line_count: usize,
     line_height: f32,
     layout_box_width: Option<f32>,
-    align: TextAlign,
     clamped: bool,
     layout: Option<IDWriteTextLayout>,
 }
@@ -315,31 +305,23 @@ impl Canvas {
         &mut self,
         label: &Label,
         origin: Point,
-        align_width: f32,
+        width: f32,
         color: Rgba,
     ) {
         let Some(layout) = &label.layout else {
             return;
         };
-        let align_offset_x = match label.align {
-            TextAlign::Center => {
-                let ref_w = label.layout_box_width.unwrap_or(label.width);
-                (align_width - ref_w) * 0.5
-            }
-            TextAlign::Left => 0.0,
-        };
-        let draw_origin = point(origin.x + align_offset_x, origin.y);
         if label.clamped {
             let clip_w = label
                 .layout_box_width
-                .map_or(align_width, |bw| align_width.max(bw))
+                .map_or(width, |bw| width.max(bw))
                 .max(label.width)
                 + 2.0;
             self.with_clip(Rect::new(origin, size(clip_w, label.size().height)), |c| {
-                c.draw_text_layout(draw_origin, layout, color);
+                c.draw_text_layout(origin, layout, color);
             });
         } else {
-            self.draw_text_layout(draw_origin, layout, color);
+            self.draw_text_layout(origin, layout, color);
         }
     }
 }
@@ -445,7 +427,6 @@ struct LabelCacheKey {
     line_height_tenths: u32,
     wrap_width_tenths: Option<u32>,
     line_clamp: Option<usize>,
-    align: TextAlign,
 }
 
 pub(crate) struct TextSystem {
@@ -510,7 +491,6 @@ impl TextSystem {
                 line_height: style.size(),
                 wrap_width: None,
                 line_clamp: None,
-                align: TextAlign::Left,
             },
         )
         .width
@@ -598,7 +578,6 @@ impl TextSystem {
             line_height_tenths: (lh * 10.0).round() as u32,
             wrap_width_tenths: box_w.map(|w| (w * 10.0).round() as u32),
             line_clamp: opts.line_clamp,
-            align: opts.align,
         };
 
         if let Some(cached) = self.state.borrow_mut().labels.get(&key) {
@@ -628,13 +607,6 @@ impl TextSystem {
                     lh,
                     top_pad + face.ascent,
                 );
-                if box_w.is_some() {
-                    let dw_align = match opts.align {
-                        TextAlign::Left => DWRITE_TEXT_ALIGNMENT_LEADING,
-                        TextAlign::Center => DWRITE_TEXT_ALIGNMENT_CENTER,
-                    };
-                    let _ = layout.SetTextAlignment(dw_align);
-                }
             }
         }
 
@@ -670,7 +642,6 @@ impl TextSystem {
             line_count,
             line_height: lh,
             layout_box_width: box_w,
-            align: opts.align,
             clamped,
             layout,
         };
@@ -844,24 +815,23 @@ mod tests {
     }
 
     #[test]
-    fn wrapped_text_two_frame_cache_promotes_and_evicts_and_isolates_alignment() {
+    fn wrapped_text_two_frame_cache_promotes_and_evicts() {
         use windows::core::Interface;
 
         let ts = TextSystem::new();
         let style = TextStyle::regular("Segoe UI Variable Small", 12.0);
-        let left = LabelLayout {
+        let single = LabelLayout {
             line_height: 16.0,
             wrap_width: None,
             line_clamp: None,
-            align: TextAlign::Left,
         };
-        let center = LabelLayout {
-            align: TextAlign::Center,
-            ..left
+        let wrapped = LabelLayout {
+            wrap_width: Some(80.0),
+            ..single
         };
 
-        let a = ts.shape_label(SharedStr::new_static("Ln 1, Col 1"), &style, left);
-        let b = ts.shape_label(SharedStr::new_static("Ln 1, Col 1"), &style, center);
+        let a = ts.shape_label(SharedStr::new_static("Ln 1, Col 1"), &style, single);
+        let b = ts.shape_label(SharedStr::new_static("Ln 1, Col 1"), &style, wrapped);
         assert_ne!(
             a.layout.as_ref().unwrap().as_raw(),
             b.layout.as_ref().unwrap().as_raw()
@@ -870,7 +840,7 @@ mod tests {
 
         ts.finish_frame();
         assert_eq!(ts.label_cache_counts(), (0, 2));
-        let a2 = ts.shape_label(SharedStr::new_static("Ln 1, Col 1"), &style, left);
+        let a2 = ts.shape_label(SharedStr::new_static("Ln 1, Col 1"), &style, single);
         assert_eq!(
             a.layout.as_ref().unwrap().as_raw(),
             a2.layout.as_ref().unwrap().as_raw()

@@ -2,19 +2,17 @@ use std::time::Duration;
 
 use crate::command::AppCommand;
 use crate::editor::{Editor, FieldOptions};
-use crate::geom::{Point, point};
+use crate::geom::{Point, Rect, Size, point, size};
 use crate::gfx::TextSystem;
-use crate::ids::{AnimKey, CustomDraw, EditorSlot, Focus, HitId, Node, UiState};
+use crate::ids::{AnimKey, EditorSlot, Focus, HitId, Node, UiState};
 use crate::platform::{CursorStyle, Key, KeyEvent, TimerHandle};
 use crate::shell::{WindowTimer, WindowTimers};
-use crate::theme::{Palette, theme_shadow};
-use crate::types::SharedStr;
-use crate::ui::controls::{
-    BODY_LINE, BODY_SIZE, ButtonStyle, CONTROL_HEIGHT, CONTROL_RADIUS, FIELD_CARET,
-    IconButtonStyle, OVERLAY_RADIUS, TEXT_FONT, TextFieldStyle, button, icon_button,
-    text_field_frame,
+use crate::theme::{
+    BODY_SIZE, FIELD_CARET, OVERLAY_RADIUS, Palette, TEXT_FONT, theme_shadow,
 };
-use crate::ui::{AnimStatus, Curve, Easing, Transition, box_, row, text};
+use crate::types::SharedStr;
+use crate::ui::{Anchor, AnimStatus, Curve, Easing, Transform, Transition, box_, row, text};
+use crate::widgets::{button, icon_button, text_field};
 
 use super::matcher::Matcher;
 
@@ -329,15 +327,7 @@ impl FindBar {
         FindOutcome::Replaced(count)
     }
 
-    fn card_size(&self, viewport_width: f32) -> (f32, f32) {
-        let rows = if self.replace { 2. } else { 1. };
-        let height =
-            2. * BORDER + 2. * CARD_PADDING + rows * CONTROL_HEIGHT + (rows - 1.) * ROW_GAP;
-        let available = viewport_width - 2. * CARD_SIDE_MARGIN;
-        (CARD_WIDTH.min(available).max(0.), height)
-    }
-
-    fn sample(&mut self, viewport_width: f32, ui: &mut UiState) -> Option<Point> {
+    fn sample(&mut self, ui: &mut UiState) -> Option<Transform> {
         if !self.transition.is_visible() {
             return None;
         }
@@ -351,87 +341,64 @@ impl FindBar {
             closing,
             CONTRACT_CURVE,
         );
-        let (width, height) = self.card_size(viewport_width);
-        let axis = |sz: f32| {
-            let collapsed = COLLAPSED_SIZE / sz.max(COLLAPSED_SIZE);
-            if closing {
-                1. - (1. - collapsed) * hidden.value
-            } else {
-                let start = collapsed.min(EXPAND_START_SCALE);
-                start + (1. - start) * shown
-            }
-        };
-        let scale = point(axis(width), axis(height));
         if closing && hidden.status == AnimStatus::Finished {
             self.transition.finish();
             return None;
         }
-        Some(scale)
+        Some(Transform::ScaleFromPx {
+            collapsed: COLLAPSED_SIZE,
+            min_start: if closing { 1.0 } else { EXPAND_START_SCALE },
+            t: if closing { 1.0 - hidden.value } else { shown },
+        })
     }
 
     pub(crate) fn render(
         &mut self,
-        viewport_width: f32,
         focused_slot: Option<EditorSlot>,
         p: Palette,
         ui: &mut UiState,
     ) -> Option<Node> {
-        let scale = self.sample(viewport_width, ui)?;
-        let (width, height) = self.card_size(viewport_width);
+        let transform = self.sample(ui)?;
         let notice_node = self
             .notice
             .clone()
             .filter(|_| self.transition.is_open())
-            .map(|msg| render_notice(p, msg, CARD_TOP + height + NOTICE_GAP));
+            .map(|msg| render_notice(p, msg));
         let card = self
-            .render_card(p, width, height, focused_slot, ui)
-            .scale(scale.x, scale.y)
+            .render_card(p, focused_slot, ui)
+            .transform(transform)
             .when(self.transition.is_closing(), Node::inert);
 
         Some(
             box_()
                 .absolute()
-                .top(0.)
-                .left(0.)
-                .right(0.)
+                .inset_0()
                 .child(
                     row()
                         .absolute()
                         .top(CARD_TOP - CARD_SHADOW_CLIP_TOP)
                         .left(0.)
                         .right(0.)
-                        .h(height + CARD_SHADOW_CLIP_TOP + CARD_SHADOW_CLIP_BOTTOM)
+                        .px(CARD_SIDE_MARGIN)
                         .pt(CARD_SHADOW_CLIP_TOP)
                         .pb(CARD_SHADOW_CLIP_BOTTOM)
                         .overflow_hidden()
-                        .items_center()
                         .justify_center()
                         .child(card),
                 )
-                .when_some(notice_node, |this, n| this.child(n)),
+                .when_some(notice_node, Node::child),
         )
     }
 
-    fn render_card(
-        &self,
-        p: Palette,
-        width: f32,
-        height: f32,
-        focused_slot: Option<EditorSlot>,
-        ui: &mut UiState,
-    ) -> Node {
-        let buttons = ButtonStyle {
-            surface: p.card_surface,
-            accent: p.accent,
-        };
+    fn render_card(&self, p: Palette, focused_slot: Option<EditorSlot>, ui: &mut UiState) -> Node {
         let query_row = self.render_query_row(p, focused_slot, ui);
         let replace_row = self
             .replace
-            .then(|| self.render_replace_row(p, buttons, focused_slot, ui));
+            .then(|| self.render_replace_row(p, focused_slot, ui));
 
         box_()
-            .w(width)
-            .h(height)
+            .w(CARD_WIDTH)
+            .max_w_full()
             .border(BORDER, p.surface_stroke)
             .rounded(OVERLAY_RADIUS)
             .shadows(theme_shadow(p.dark, CARD_Z))
@@ -439,38 +406,13 @@ impl FindBar {
                 box_()
                     .hit(HitId::FindCard)
                     .cursor(CursorStyle::Arrow)
-                    .size_full()
-                    .justify_center()
+                    .w_full()
                     .p(CARD_PADDING)
                     .rounded(OVERLAY_RADIUS - BORDER)
                     .bg(p.card_surface.panel)
                     .child(query_row)
-                    .when_some(replace_row, |this, r| this.child(r)),
+                    .when_some(replace_row, Node::child),
             )
-    }
-
-    fn render_field(
-        editor: &Editor,
-        slot: EditorSlot,
-        focused_slot: Option<EditorSlot>,
-        search_icon: bool,
-        p: Palette,
-        ui: &mut UiState,
-    ) -> Node {
-        let view = editor.view(HitId::Editor(slot), CustomDraw::Editor(slot), BODY_LINE + 2.);
-        text_field_frame(
-            p,
-            HitId::Editor(slot),
-            HitId::FieldClear(slot),
-            TextFieldStyle {
-                surface: p.card_surface,
-                focused: focused_slot == Some(slot),
-                empty: editor.model().text().len() == 0,
-                search_icon,
-            },
-            view,
-            ui,
-        )
     }
 
     fn render_query_row(
@@ -479,9 +421,12 @@ impl FindBar {
         focused_slot: Option<EditorSlot>,
         ui: &mut UiState,
     ) -> Node {
+        let dims = size(ICON_BUTTON_SIZE, ICON_BUTTON_SIZE);
+        let btn = |hit, tip, glyph, sz, ui: &mut UiState| {
+            icon_button(p, hit, tip, (glyph, sz), dims, true, ui)
+        };
         let replace = self.replace;
-        let expand_btn = find_icon_button(
-            p,
+        let expand_btn = btn(
             HitId::FindToggleReplace,
             if replace {
                 "Close replace options"
@@ -496,34 +441,19 @@ impl FindBar {
             CHEVRON_SIZE,
             ui,
         );
-        let query_field =
-            Self::render_field(&self.query, EditorSlot::FindQuery, focused_slot, true, p, ui);
-        let next_btn = find_icon_button(
+        let query_field = text_field(
             p,
-            HitId::FindNext,
-            "Search down",
-            ARROW_DOWN_GLYPH,
-            ICON_SIZE,
+            p.card_surface,
+            EditorSlot::FindQuery,
+            &self.query,
+            focused_slot == Some(EditorSlot::FindQuery),
+            true,
             ui,
         );
-        let prev_btn = find_icon_button(
-            p,
-            HitId::FindPrev,
-            "Search up",
-            ARROW_UP_GLYPH,
-            ICON_SIZE,
-            ui,
-        );
-        let opts_btn = find_icon_button(
-            p,
-            HitId::FindOptions,
-            "More options",
-            OPTIONS_GLYPH,
-            ICON_SIZE,
-            ui,
-        );
-        let close_btn = find_icon_button(
-            p,
+        let next_btn = btn(HitId::FindNext, "Search down", ARROW_DOWN_GLYPH, ICON_SIZE, ui);
+        let prev_btn = btn(HitId::FindPrev, "Search up", ARROW_UP_GLYPH, ICON_SIZE, ui);
+        let opts_btn = btn(HitId::FindOptions, "More options", OPTIONS_GLYPH, ICON_SIZE, ui);
+        let close_btn = btn(
             HitId::FindClose,
             "Exit Find and Replace",
             CLOSE_GLYPH,
@@ -545,22 +475,30 @@ impl FindBar {
     fn render_replace_row(
         &self,
         p: Palette,
-        buttons: ButtonStyle,
         focused_slot: Option<EditorSlot>,
         ui: &mut UiState,
     ) -> Node {
-        let replace_field = Self::render_field(
-            &self.replacement,
-            EditorSlot::FindReplace,
-            focused_slot,
-            false,
+        let replace_field = text_field(
             p,
+            p.card_surface,
+            EditorSlot::FindReplace,
+            &self.replacement,
+            focused_slot == Some(EditorSlot::FindReplace),
+            false,
             ui,
         );
-        let replace_btn = button(p, buttons, HitId::FindReplace, "Replace", false, false, ui);
+        let replace_btn = button(
+            p,
+            p.card_surface,
+            HitId::FindReplace,
+            "Replace",
+            false,
+            false,
+            ui,
+        );
         let replace_all_btn = button(
             p,
-            buttons,
+            p.card_surface,
             HitId::FindReplaceAll,
             "Replace all",
             false,
@@ -594,56 +532,35 @@ fn not_found(query: &str) -> String {
     format!("Cannot find \"{query}\"")
 }
 
-fn render_notice(p: Palette, msg: SharedStr, top: f32) -> Node {
-    row()
-        .absolute()
-        .top(top)
-        .left(0.)
-        .right(0.)
-        .justify_center()
-        .child(
-            box_()
-                .border(BORDER, p.flyout_stroke)
-                .rounded(OVERLAY_RADIUS)
-                .shadows(theme_shadow(p.dark, NOTICE_Z))
-                .child(
-                    box_()
-                        .px(NOTICE_PADDING_X)
-                        .pt(NOTICE_PADDING_TOP)
-                        .pb(NOTICE_PADDING_BOTTOM)
-                        .rounded(OVERLAY_RADIUS - BORDER)
-                        .bg(p.notice_fill)
-                        .font_family(TEXT_FONT)
-                        .text_size(BODY_SIZE)
-                        .line_height(NOTICE_LINE)
-                        .text_color(p.text_primary)
-                        .child(text(msg)),
-                ),
-        )
+fn place_notice(card: Rect, popup: Size, _viewport: Size) -> Point {
+    point(
+        card.center().x - (popup.width / 2.).floor(),
+        card.bottom() + BORDER + NOTICE_GAP,
+    )
 }
 
-fn find_icon_button(
-    p: Palette,
-    hit: HitId,
-    tip: &'static str,
-    glyph: &'static str,
-    glyph_size: f32,
-    ui: &mut UiState,
-) -> Node {
-    icon_button(
-        p,
-        hit,
-        tip,
-        glyph,
-        IconButtonStyle {
-            glyph_size,
-            width: ICON_BUTTON_SIZE,
-            height: ICON_BUTTON_SIZE,
-            radius: CONTROL_RADIUS,
-        },
-        true,
-        ui,
-    )
+fn render_notice(p: Palette, msg: SharedStr) -> Node {
+    box_()
+        .anchored(Anchor::Target {
+            target: HitId::FindCard,
+            place: place_notice,
+        })
+        .border(BORDER, p.flyout_stroke)
+        .rounded(OVERLAY_RADIUS)
+        .shadows(theme_shadow(p.dark, NOTICE_Z))
+        .child(
+            box_()
+                .px(NOTICE_PADDING_X)
+                .pt(NOTICE_PADDING_TOP)
+                .pb(NOTICE_PADDING_BOTTOM)
+                .rounded(OVERLAY_RADIUS - BORDER)
+                .bg(p.notice_fill)
+                .font_family(TEXT_FONT)
+                .text_size(BODY_SIZE)
+                .line_height(NOTICE_LINE)
+                .text_color(p.text_primary)
+                .child(text(msg)),
+        )
 }
 
 #[cfg(test)]

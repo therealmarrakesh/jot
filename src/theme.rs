@@ -2,6 +2,17 @@ use crate::color::{Rgba, black, rgb, rgba, transparent_black};
 use crate::geom::{BoxShadow, Shadows, point};
 use crate::platform::HighContrastColors;
 
+pub(crate) const TEXT_FONT: &str = "Segoe UI Variable Text";
+pub(crate) const SMALL_FONT: &str = "Segoe UI Variable Small";
+pub(crate) const ICON_FONT: &str = "Segoe Fluent Icons";
+
+pub(crate) const CONTROL_HEIGHT: f32 = 32.;
+pub(crate) const CONTROL_RADIUS: f32 = 4.;
+pub(crate) const OVERLAY_RADIUS: f32 = 8.;
+pub(crate) const BODY_SIZE: f32 = 14.;
+pub(crate) const BODY_LINE: f32 = 18.;
+pub(crate) const FIELD_CARET: f32 = 19.;
+
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Surface {
     pub(crate) panel: Rgba,

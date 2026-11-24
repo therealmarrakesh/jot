@@ -3,15 +3,14 @@ use std::time::Duration;
 
 use crate::editor::{Editor, FieldOptions};
 use crate::files::{Prompt, PromptId};
-use crate::ids::{AnimKey, CustomDraw, EditorSlot, Focus, HitId, Node, TabId, UiState};
+use crate::ids::{AnimKey, EditorSlot, Focus, HitId, Node, TabId, UiState};
 use crate::platform::{CursorStyle, Key, KeyEvent};
-use crate::theme::{Palette, theme_shadow};
-use crate::types::SharedStr;
-use crate::ui::controls::{
-    BODY_LINE, BODY_SIZE, ButtonStyle, FIELD_CARET, OVERLAY_RADIUS, TEXT_FONT, TextFieldStyle,
-    button, text_field_frame,
+use crate::theme::{
+    BODY_LINE, BODY_SIZE, FIELD_CARET, OVERLAY_RADIUS, Palette, TEXT_FONT, theme_shadow,
 };
+use crate::types::SharedStr;
 use crate::ui::{AnimStatus, Curve, Easing, Transition, box_, row, text};
+use crate::widgets::{button, text_field};
 
 const TITLE_FONT: &str = "Segoe UI Variable Display";
 const OPEN_SCALE: f32 = 1.05;
@@ -287,10 +286,6 @@ impl Dialogs {
     }
 
     fn render_layer(&self, dialog: &OpenDialog, focus: Focus, p: Palette, ui: &mut UiState) -> Node {
-        let style = ButtonStyle {
-            surface: p.command_surface,
-            accent: p.accent,
-        };
         let focused_btn = match focus {
             Focus::DialogButton(ix) => Some(ix),
             _ => None,
@@ -305,7 +300,7 @@ impl Dialogs {
                 let is_focused = !closing && focused_btn == Some(ix);
                 button(
                     p,
-                    style,
+                    p.command_surface,
                     HitId::DialogButton(ix),
                     label,
                     accented,
@@ -352,20 +347,13 @@ impl Dialogs {
 
     fn render_go_to_body(&self, focus: Focus, p: Palette, ui: &UiState) -> Node {
         let slot = EditorSlot::GoToLine;
-        let line_editor = self
-            .line
-            .view(HitId::Editor(slot), CustomDraw::Editor(slot), BODY_LINE + 2.);
-        let field = text_field_frame(
+        let field = text_field(
             p,
-            HitId::Editor(slot),
-            HitId::FieldClear(slot),
-            TextFieldStyle {
-                surface: p.content_surface,
-                focused: focus == Focus::Editor(slot),
-                empty: self.line.model().text().len() == 0,
-                search_icon: false,
-            },
-            line_editor,
+            p.content_surface,
+            slot,
+            &self.line,
+            focus == Focus::Editor(slot),
+            false,
             ui,
         );
         box_()

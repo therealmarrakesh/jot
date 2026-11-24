@@ -20,6 +20,7 @@ mod theme;
 mod tooltip;
 mod types;
 mod ui;
+mod widgets;
 mod window;
 
 #[cfg(test)]

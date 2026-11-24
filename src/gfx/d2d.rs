@@ -554,6 +554,7 @@ pub(crate) fn fill(bounds: Rect, background: Rgba) -> PaintQuad {
 pub(crate) struct Scope {
     pub(crate) opacity: Option<f32>,
     pub(crate) scale: Option<(Point, f32, f32)>,
+    pub(crate) translate: Option<Point>,
     pub(crate) clip: Option<Rect>,
 }
 
@@ -612,14 +613,22 @@ impl Canvas {
                 self.context.PushLayer(&params, None);
             }
         }
-        let prev_transform = scope.scale.map(|(origin, sx, sy)| {
+        let prev_transform = (scope.scale.is_some() || scope.translate.is_some()).then(|| {
+            let (sx, sy, mut tx, mut ty) = match scope.scale {
+                Some((origin, sx, sy)) => (sx, sy, origin.x * (1.0 - sx), origin.y * (1.0 - sy)),
+                None => (1.0, 1.0, 0.0, 0.0),
+            };
+            if let Some(delta) = scope.translate {
+                tx += delta.x;
+                ty += delta.y;
+            }
             let local = Matrix3x2 {
                 M11: sx,
                 M12: 0.0,
                 M21: 0.0,
                 M22: sy,
-                M31: origin.x * (1.0 - sx),
-                M32: origin.y * (1.0 - sy),
+                M31: tx,
+                M32: ty,
             };
             let prev = self.transform;
             self.transform = local * prev;

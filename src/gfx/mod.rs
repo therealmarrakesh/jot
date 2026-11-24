@@ -6,7 +6,7 @@ pub(crate) mod wrap;
 
 pub(crate) use d2d::{Canvas, Gpu, PaintQuad, Scope, Surface, fill};
 pub(crate) use text::{
-    FontFace, FontWeight, Label, LabelLayout, ShapedRow, TextAlign, TextStyle, TextSystem,
+    FontFace, FontWeight, Label, LabelLayout, ShapedRow, TextStyle, TextSystem,
 };
 
 use std::collections::HashMap;
@@ -21,7 +21,7 @@ pub(super) struct FrameCache<K, V> {
     keep_frames: u64,
 }
 
-impl<K: Eq + Hash, V> FrameCache<K, V> {
+impl<K: Eq + Hash + Clone, V> FrameCache<K, V> {
     pub(super) fn new(max_entries: usize, max_weight: usize, keep_frames: u64) -> Self {
         Self {
             entries: HashMap::new(),
@@ -40,10 +40,9 @@ impl<K: Eq + Hash, V> FrameCache<K, V> {
     }
 
     pub(super) fn insert(&mut self, key: K, value: V, item_weight: usize) {
-        if self.entries.contains_key(&key) {
-            if let Some((_, _, old_w)) = self.entries.insert(key, (value, self.frame, item_weight)) {
-                self.weight = self.weight.saturating_sub(old_w) + item_weight;
-            }
+        if let Some(entry) = self.entries.get_mut(&key) {
+            self.weight = self.weight.saturating_sub(entry.2) + item_weight;
+            *entry = (value, self.frame, item_weight);
             return;
         }
         while self.entries.len() >= self.max_entries
@@ -55,31 +54,12 @@ impl<K: Eq + Hash, V> FrameCache<K, V> {
                 .entries
                 .iter()
                 .min_by_key(|(_, (_, last, _))| *last)
-                .map(|(k, _)| k as *const K)
+                .map(|(k, _)| k.clone())
             else {
                 break;
             };
-            // Find and remove oldest without requiring K: Clone.
-            let mut drop_idx = None;
-            for (k, (_, last, _)) in &self.entries {
-                if std::ptr::eq(k, oldest) {
-                    drop_idx = Some(*last);
-                    break;
-                }
-            }
-            let Some(cutoff) = drop_idx else { break };
-            let mut removed_one = false;
-            self.entries.retain(|_, (_, last, w)| {
-                if !removed_one && *last == cutoff {
-                    removed_one = true;
-                    self.weight = self.weight.saturating_sub(*w);
-                    false
-                } else {
-                    true
-                }
-            });
-            if !removed_one {
-                break;
+            if let Some((_, _, w)) = self.entries.remove(&oldest) {
+                self.weight = self.weight.saturating_sub(w);
             }
         }
         self.weight += item_weight;

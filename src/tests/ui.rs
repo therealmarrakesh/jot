@@ -5,8 +5,8 @@ use crate::platform::window::hit_test_control_areas;
 use crate::platform::{
     Key, KeyEvent, Modifiers, MouseButton, PlatformEvent, PlatformHandler, WindowControlArea,
 };
-use crate::ui::controls::{SMALL_FONT, TEXT_FONT};
-use crate::ui::{AvailSize, box_, row, text};
+use crate::theme::{SMALL_FONT, TEXT_FONT};
+use crate::ui::{AvailSize, Space, box_, row, snap_border_edges, text};
 
 use super::{EDITOR_PADDING_LEFT, EDITOR_PADDING_TOP, TestHarness};
 
@@ -357,8 +357,8 @@ fn status_bar_min_width_and_no_vertical_char_wrapping() {
 
     let (hwnd, min_size, scale) = h.read(|w, _| {
         let cached = w
-            .min_size_cached()
-            .expect("min_size cache must populate on first draw");
+            .min_size()
+            .expect("min_size must populate on first draw");
         (w.hwnd(), cached, w.scale_factor())
     });
     assert!(
@@ -467,8 +467,8 @@ fn status_bar_min_width_and_no_vertical_char_wrapping() {
     let dlg_frame = Frame::layout(
         dialog_body,
         AvailSize {
-            width: crate::ui::layout::AvailableSpace::Definite(180.0),
-            height: crate::ui::layout::AvailableSpace::MaxContent,
+            width: Space::Definite(180.0),
+            height: Space::MaxContent,
         },
         scale,
         ts,
@@ -595,7 +595,7 @@ fn keyboard_system_chords_altgr_menu_gate_popup_occlusion_and_fractional_borders
     h.press_key("escape");
 
     for scale in [1.25f32, 1.5, 1.75] {
-        let snapped = crate::ui::layout::snap_border_edges(crate::geom::Edges::all(1.0), scale);
+        let snapped = snap_border_edges(crate::geom::Edges::all(1.0), scale);
         let px = snapped.top * scale;
         assert!(
             (px - px.round()).abs() < 1e-4 && px >= 1.0,

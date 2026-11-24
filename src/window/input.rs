@@ -29,9 +29,7 @@ impl MainWindow {
         if mode != InputMode::Dialog {
             let state = self.menu_state(cx.shell);
             let timers = cx.timers(self.id());
-            let menu_out =
-                self.menu_bar
-                    .on_hover_change(top, state, cx.ts(), &mut self.ui, timers);
+            let menu_out = self.menu_bar.on_hover_change(top, state, &mut self.ui, timers);
             let _ = self.apply_menu_outcome(menu_out, cx);
         }
 
@@ -157,7 +155,7 @@ impl MainWindow {
                 ) => return,
                 Some(HitId::MenuTrigger(kind)) => {
                     let state = self.menu_state(cx.shell);
-                    let out = self.menu_bar.toggle_trigger(kind, state, cx.ts());
+                    let out = self.menu_bar.toggle_trigger(kind, state);
                     let _ = self.apply_menu_outcome(out, cx);
                     return;
                 }
@@ -294,13 +292,13 @@ impl MainWindow {
             .flatten();
         if let Some(anchor) = open_ctx {
             let state = self.menu_state(cx.shell);
-            let out = self.menu_bar.open_context_menu(anchor, state, cx.ts());
+            let out = self.menu_bar.open_context_menu(anchor, state);
             let _ = self.apply_menu_outcome(out, cx);
             return;
         }
 
         match activated {
-            Some(HitId::DialogButton(ix)) => self.press_dialog_button(ix, cx),
+            Some(HitId::DialogButton(ix)) => self.finish_dialog(Some(ix), cx),
             Some(HitId::FieldClear(slot)) => {
                 if let Some(ed) = self.editor_by_slot_mut(slot) {
                     ed.set_value("", cx.ts());
@@ -326,23 +324,20 @@ impl MainWindow {
                         AppCommand::ToggleWrapAround,
                     ),
                 ];
-                let out = self.menu_bar.open_flyout(
-                    entries,
-                    HitId::FindOptions,
-                    EditorSlot::FindQuery,
-                    cx.ts(),
-                );
+                let out =
+                    self.menu_bar
+                        .open_flyout(entries, HitId::FindOptions, EditorSlot::FindQuery);
                 let _ = self.apply_menu_outcome(out, cx);
             }
             Some(HitId::FindClose) => self.close_find(cx.shell),
             Some(HitId::FindReplace) => self.replace_next(cx.shell),
             Some(HitId::FindReplaceAll) => self.replace_all(cx.shell),
             Some(HitId::MenuItem { ix, .. }) => {
-                let out = self.menu_bar.activate(RowPath::Root(ix), false, cx.ts());
+                let out = self.menu_bar.activate(RowPath::Root(ix), false);
                 let _ = self.apply_menu_outcome(out, cx);
             }
             Some(HitId::SubmenuItem { ix: sub_ix, .. }) => {
-                let out = self.menu_bar.activate(RowPath::Sub(sub_ix), false, cx.ts());
+                let out = self.menu_bar.activate(RowPath::Sub(sub_ix), false);
                 let _ = self.apply_menu_outcome(out, cx);
             }
             Some(HitId::MenuCommand { ix, .. }) => {
@@ -417,11 +412,11 @@ impl MainWindow {
                     true
                 }
                 DialogKey::PressButton(ix) => {
-                    self.press_dialog_button(ix, cx);
+                    self.finish_dialog(Some(ix), cx);
                     true
                 }
                 DialogKey::Cancel => {
-                    self.cancel_dialog(cx);
+                    self.finish_dialog(None, cx);
                     true
                 }
                 DialogKey::EditGoToLine => edit_shortcut(ev)
@@ -432,7 +427,7 @@ impl MainWindow {
 
         let was_popup = self.menu_bar.is_open();
         let state = self.menu_state(cx.shell);
-        let out = self.menu_bar.on_key_down(ev, self.focus, state, cx.ts());
+        let out = self.menu_bar.on_key_down(ev, self.focus, state);
         let handled = self.apply_menu_outcome(out, cx);
         if handled || was_popup {
             return handled;

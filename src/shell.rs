@@ -61,26 +61,12 @@ pub(crate) struct WindowTimers<'a> {
 
 impl<'a> WindowTimers<'a> {
     pub(crate) fn after(&self, delay: Duration, timer: WindowTimer) -> TimerHandle {
-        self.jobs.after(
-            delay,
-            AppEvent::Window {
-                window: self.window,
-                timer,
-            },
-        )
+        self.jobs.after(delay, AppEvent::Window { window: self.window, timer })
     }
 
-    pub(crate) fn every(
-        &self,
-        delay: Duration,
-        interval: Duration,
-        timer: WindowTimer,
-    ) -> TimerHandle {
+    pub(crate) fn every(&self, delay: Duration, interval: Duration, timer: WindowTimer) -> TimerHandle {
         let window = self.window;
-        self.jobs.every(delay, interval, move || AppEvent::Window {
-            window,
-            timer,
-        })
+        self.jobs.every(delay, interval, move || AppEvent::Window { window, timer })
     }
 
     #[inline]
@@ -90,56 +76,28 @@ impl<'a> WindowTimers<'a> {
 
     #[inline]
     pub(crate) fn for_editor(self, slot: EditorSlot) -> SlotTimers<'a> {
-        SlotTimers { timers: self, slot }
+        SlotTimers(self, slot)
     }
 
     #[cfg(test)]
     pub(crate) fn for_test(jobs: &'a Jobs<AppEvent>) -> Self {
-        Self {
-            jobs,
-            window: WindowId(0),
-            settings: SystemSettings::default(),
-        }
+        Self { jobs, window: WindowId(0), settings: SystemSettings::default() }
     }
 }
 
-pub(crate) struct SlotTimers<'a> {
-    timers: WindowTimers<'a>,
-    slot: EditorSlot,
-}
+pub(crate) struct SlotTimers<'a>(WindowTimers<'a>, EditorSlot);
 
 impl EditorTimers for SlotTimers<'_> {
     fn after(&mut self, delay: Duration, kind: EditorTimer) -> Option<TimerHandle> {
-        Some(self.timers.after(
-            delay,
-            WindowTimer::Editor {
-                slot: self.slot,
-                kind,
-            },
-        ))
+        Some(self.0.after(delay, WindowTimer::Editor { slot: self.1, kind }))
     }
 
-    fn every(
-        &mut self,
-        delay: Duration,
-        interval: Duration,
-        kind: EditorTimer,
-    ) -> Option<TimerHandle> {
-        Some(self.timers.every(
-            delay,
-            interval,
-            WindowTimer::Editor {
-                slot: self.slot,
-                kind,
-            },
-        ))
+    fn every(&mut self, delay: Duration, interval: Duration, kind: EditorTimer) -> Option<TimerHandle> {
+        Some(self.0.every(delay, interval, WindowTimer::Editor { slot: self.1, kind }))
     }
 
     fn blink_timing(&self) -> (Option<Duration>, Option<Duration>) {
-        (
-            self.timers.settings.caret_blink_interval,
-            self.timers.settings.caret_blink_timeout,
-        )
+        (self.0.settings.caret_blink_interval, self.0.settings.caret_blink_timeout)
     }
 }
 

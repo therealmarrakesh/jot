@@ -1,18 +1,44 @@
 use std::time::Duration;
 
-use crate::geom::Point;
+use crate::geom::{Point, Rect, Size, point};
 use crate::ids::{AnimKey, EditorSlot, HitId, MenuKind, UiState};
 use crate::ui::{Anchor, AnimStatus, Curve, Easing, Transition};
 
 use super::MENU_BAR_HEIGHT;
 use super::bar::FocusRequest;
-use super::model::{CommandButton, PADDING_Y, Panel, cycle};
+use super::model::{BORDER, CommandButton, PADDING_Y, Panel, cycle};
 
 const OPEN_CURVE: Curve = Curve::new(Duration::from_millis(250), Easing::DECELERATE);
 const FADE_CURVE: Curve = Curve::new(Duration::from_millis(83), Easing::Linear);
 const FLYOUT_GAP: f32 = 3.;
+const SUBMENU_OVERLAP: f32 = 4.;
 pub(super) const COMMAND_ROW: f32 = 59.;
-const OVERFLOW_TOP: f32 = 1.;
+
+fn place_below(r: Rect, _popup: Size, _vp: Size) -> Point {
+    point(r.left(), r.bottom())
+}
+
+fn place_flyout(r: Rect, popup: Size, _vp: Size) -> Point {
+    let x = r.center().x - (popup.width / 2.).floor();
+    let above = r.top() - (FLYOUT_GAP + popup.height);
+    let y = if above >= MENU_BAR_HEIGHT {
+        above
+    } else {
+        r.bottom() + FLYOUT_GAP
+    };
+    point(x, y)
+}
+
+pub(super) fn place_submenu(r: Rect, popup: Size, vp: Size) -> Point {
+    let overlap = SUBMENU_OVERLAP - BORDER;
+    let right_x = r.right() - overlap;
+    let x = if right_x + popup.width <= vp.width {
+        right_x
+    } else {
+        r.left() - popup.width + overlap
+    };
+    point(x, r.top() - (BORDER + PADDING_Y))
+}
 
 pub(super) enum PopupKind {
     Bar(MenuKind),
@@ -43,15 +69,14 @@ impl PopupKind {
 
     pub(super) fn anchor(&self) -> Anchor<HitId> {
         match self {
-            Self::Bar(kind) => Anchor::BelowStart {
+            Self::Bar(kind) => Anchor::Target {
                 target: HitId::MenuTrigger(*kind),
-                gap: 0.,
+                place: place_below,
             },
             Self::Context { anchor, .. } => Anchor::Point(*anchor),
-            Self::Flyout { target, .. } => Anchor::AboveOrBelowCenter {
+            Self::Flyout { target, .. } => Anchor::Target {
                 target: *target,
-                gap: FLYOUT_GAP,
-                min_top: MENU_BAR_HEIGHT,
+                place: place_flyout,
             },
         }
     }
@@ -286,14 +311,5 @@ impl OpenMenu {
             self.leaving_submenu = None;
         }
         self.motion.sample(ui)
-    }
-
-    pub(super) fn total_height(&self) -> (f32, f32) {
-        let bar = if !self.kind.commands().is_empty() {
-            COMMAND_ROW + 1. + OVERFLOW_TOP - PADDING_Y
-        } else {
-            0.
-        };
-        (self.panel.height() + bar, bar)
     }
 }

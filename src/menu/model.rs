@@ -1,9 +1,7 @@
 use crate::command::{AppCommand, Command, shortcut_label};
 use crate::editor::EditCommand;
-use crate::gfx::{TextStyle, TextSystem};
 use crate::ids::MenuKind;
 use crate::types::SharedStr;
-use crate::ui::controls::{SMALL_FONT, TEXT_FONT};
 
 pub(super) const BORDER: f32 = 1.;
 pub(super) const PADDING_Y: f32 = 2.;
@@ -235,22 +233,17 @@ pub(super) struct Panel {
     pub(super) entries: Vec<Entry>,
     pub(super) labels: Vec<SharedStr>,
     pub(super) shortcuts: Vec<Option<SharedStr>>,
-    pub(super) width: f32,
+    pub(super) min_width: f32,
     pub(super) checks: bool,
 }
 
 impl Panel {
-    pub(super) fn new(
-        entries: Vec<Entry>,
-        min_width: f32,
-        show_shortcuts: bool,
-        ts: &TextSystem,
-    ) -> Self {
-        let labels: Vec<_> = entries
+    pub(super) fn new(entries: Vec<Entry>, min_width: f32, show_shortcuts: bool) -> Self {
+        let labels = entries
             .iter()
             .map(|e| e.label().map(display_label).unwrap_or_default())
             .collect();
-        let shortcuts: Vec<_> = entries
+        let shortcuts = entries
             .iter()
             .map(|e| {
                 e.command_id()
@@ -264,35 +257,13 @@ impl Panel {
                 Entry::Toggle { .. } | Entry::Command { icon: Some(_), .. }
             )
         });
-        let label_style = TextStyle::regular(TEXT_FONT, LABEL_SIZE);
-        let shortcut_style = TextStyle::regular(SMALL_FONT, SHORTCUT_SIZE);
-        let content = entries
-            .iter()
-            .zip(&labels)
-            .zip(&shortcuts)
-            .map(|((entry, label), shortcut)| {
-                let lw = ts.measure(label, &label_style).ceil();
-                let trailing = match (entry, shortcut) {
-                    (Entry::Submenu(..), _) => SHORTCUT_GAP + CHEVRON_WIDTH,
-                    (_, Some(sc)) => SHORTCUT_GAP + ts.measure(sc, &shortcut_style).ceil(),
-                    _ => 0.,
-                };
-                lw + trailing
-            })
-            .fold(0., f32::max);
-        let check = if checks { CHECK_COLUMN } else { 0. };
-        let width = (2. * (BORDER + ROW_INSET + ROW_PADDING) + check + content).ceil();
         Self {
             entries,
             labels,
             shortcuts,
-            width: width.max(min_width),
+            min_width,
             checks,
         }
-    }
-
-    pub(super) fn height(&self) -> f32 {
-        2. * (BORDER + PADDING_Y) + self.entries.iter().map(Entry::height).sum::<f32>()
     }
 
     pub(super) fn find_key(&self, key: char) -> Option<usize> {

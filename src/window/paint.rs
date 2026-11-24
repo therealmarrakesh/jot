@@ -5,7 +5,7 @@ use crate::geom::{Rect, point, size};
 use crate::gfx::{TextStyle, fill};
 use crate::ids::{CustomDraw, EditorSlot, Focus, Frame};
 use crate::shell::Shell;
-use crate::ui::controls::{BODY_LINE, BODY_SIZE, TEXT_FONT};
+use crate::theme::{BODY_LINE, BODY_SIZE, TEXT_FONT};
 use crate::ui::{AvailSize, box_};
 
 use super::chrome::{STATUS_DIVIDER_WIDTH, tab_strip_column};
@@ -66,12 +66,10 @@ impl MainWindow {
 
         let title_bar = self.title_bar(&strip, window_active, maximized, p);
         let menu_bar = self.menu_bar_row(p);
-        let find_node = self
-            .find
-            .render(logical.width, self.focused_editor_slot(), p, &mut self.ui);
+        let find_node = self.find.render(self.focused_editor_slot(), p, &mut self.ui);
         let editor_node = self.editor_area(find_node, now, shell);
         let status_node = status_metrics.map(|m| self.status_bar(m, p));
-        let menu_popup = self.menu_bar.render_popup(p, ts, &mut self.ui);
+        let menu_popup = self.menu_bar.render_popup(p, &mut self.ui);
         let dialog_node = self.dialogs.render(self.focus, p, &mut self.ui);
 
         let chrome = box_()
@@ -93,7 +91,7 @@ impl MainWindow {
             ts,
         );
         self.native.set_control_areas(frame.control_areas());
-        self.update_min_size(status_metrics, &frame, p, ts);
+        self.update_min_size(logical, status_metrics, &frame, p, ts);
 
         let editor_rects: Vec<(EditorSlot, Rect)> = frame
             .custom_rects()

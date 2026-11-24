@@ -3,12 +3,13 @@ use std::time::Duration;
 use crate::color::transparent_black;
 use crate::command::{AppCommand, shortcut_tooltip};
 use crate::document;
+use crate::geom::size;
 use crate::ids::{AnimKey, HitId, Node, UiState};
 use crate::platform::CursorStyle;
-use crate::theme::Palette;
+use crate::theme::{OVERLAY_RADIUS, Palette, SMALL_FONT};
 use crate::types::SharedStr;
-use crate::ui::controls::{CONTROL_RADIUS, IconButtonStyle, OVERLAY_RADIUS, SMALL_FONT, icon_button};
 use crate::ui::{AnimStatus, Brushes, Easing, box_, row, text};
+use crate::widgets::icon_button;
 
 use super::model::Tab;
 use super::set::{
@@ -156,12 +157,12 @@ impl TabSet {
 
         let scroll_back = self.buttons.then(|| self.scroll_button(false, p, ui));
         let scroll_fwd = self.buttons.then(|| self.scroll_button(true, p, ui));
-        let new_tab = strip_button(
+        let new_tab = icon_button(
             p,
             HitId::NewTab,
             shortcut_tooltip("New tab", AppCommand::NewTab.into()),
-            ADD_GLYPH,
-            BUTTON_GLYPH_SIZE,
+            (ADD_GLYPH, BUTTON_GLYPH_SIZE),
+            size(BUTTON_WIDTH, BUTTON_HEIGHT),
             true,
             ui,
         )
@@ -211,9 +212,17 @@ impl TabSet {
         } else {
             (SCROLL_OUTER_PAD, SCROLL_INNER_PAD)
         };
-        let button = strip_button(p, hit, tip, glyph, SCROLL_GLYPH_SIZE, enabled, ui)
-            .mt(BUTTON_TOP)
-            .when(enabled, |this| this.text_color(p.text_secondary));
+        let button = icon_button(
+            p,
+            hit,
+            tip,
+            (glyph, SCROLL_GLYPH_SIZE),
+            size(BUTTON_WIDTH, BUTTON_HEIGHT),
+            enabled,
+            ui,
+        )
+        .mt(BUTTON_TOP)
+        .when(enabled, |this| this.text_color(p.text_secondary));
         box_()
             .flex_none()
             .h_full()
@@ -308,12 +317,12 @@ fn render_tab(
     };
 
     let close_node = show_close.then(|| {
-        strip_button(
+        icon_button(
             p,
             HitId::TabClose(id),
             shortcut_tooltip("Close tab", AppCommand::CloseTab.into()),
-            CLOSE_GLYPH,
-            BUTTON_GLYPH_SIZE,
+            (CLOSE_GLYPH, BUTTON_GLYPH_SIZE),
+            size(BUTTON_WIDTH, BUTTON_HEIGHT),
             true,
             ui,
         )
@@ -383,31 +392,6 @@ fn unsaved_dot(p: Palette, inset: f32) -> Node {
         .size(UNSAVED_DOT)
         .rounded_full()
         .bg(p.text_tertiary)
-}
-
-fn strip_button(
-    p: Palette,
-    hit: HitId,
-    tip: impl Into<SharedStr>,
-    glyph: &'static str,
-    glyph_size: f32,
-    enabled: bool,
-    ui: &mut UiState,
-) -> Node {
-    icon_button(
-        p,
-        hit,
-        tip,
-        glyph,
-        IconButtonStyle {
-            glyph_size,
-            width: BUTTON_WIDTH,
-            height: BUTTON_HEIGHT,
-            radius: CONTROL_RADIUS,
-        },
-        enabled,
-        ui,
-    )
 }
 
 fn tab_separator(p: Palette) -> Node {

@@ -272,74 +272,53 @@ impl Workflow {
 
     fn next_step(&mut self, host: &impl DocHost) -> NextAction {
         if let Some(tab) = self.save_next.take() {
-            return NextAction::Save {
-                tab,
-                activate: false,
-            };
+            return NextAction::Save { tab, activate: false };
         }
         match &mut self.goal {
-            Goal::Save(slot) => match slot.take() {
-                Some(tab) => NextAction::Save {
-                    tab,
-                    activate: false,
-                },
-                None => NextAction::Done,
-            },
-            Goal::SaveAs(slot) => match slot.take() {
-                Some(tab) => NextAction::SaveAs(tab),
-                None => NextAction::Done,
-            },
-            Goal::SaveAll(queue) => match queue.pop_front() {
-                Some(tab) => NextAction::Save {
-                    tab,
-                    activate: true,
-                },
-                None => NextAction::Done,
-            },
+            Goal::Save(slot) => slot
+                .take()
+                .map_or(NextAction::Done, |tab| NextAction::Save { tab, activate: false }),
+            Goal::SaveAs(slot) => slot.take().map_or(NextAction::Done, NextAction::SaveAs),
+            Goal::SaveAll(queue) => queue
+                .pop_front()
+                .map_or(NextAction::Done, |tab| NextAction::Save { tab, activate: true }),
             Goal::CloseTab(tab) => {
                 let tab = *tab;
                 let Some(info) = host.tab_info(tab) else {
                     return NextAction::Done;
                 };
                 if info.dirty && !self.is_discard_approved(tab, info.revision) {
-                    NextAction::ConfirmDiscard {
-                        tab,
-                        activate: false,
-                    }
+                    NextAction::ConfirmDiscard { tab, activate: false }
                 } else {
                     NextAction::RemoveTab(tab)
                 }
             }
-            Goal::CloseWindow(pending) => loop {
-                if let Some(tab) = pending.pop_front() {
-                    if let Some(info) = host.tab_info(tab)
-                        && info.dirty
-                        && !self.approved.iter().any(|&(id, rev)| id == tab && rev == info.revision)
-                    {
-                        return NextAction::ConfirmDiscard {
-                            tab,
-                            activate: true,
-                        };
+            Goal::CloseWindow(pending) => {
+                let approved = &self.approved;
+                let unapproved = |id: TabId, rev: u64| {
+                    !approved.iter().any(|&(aid, arev)| aid == id && arev == rev)
+                };
+                loop {
+                    if let Some(tab) = pending.pop_front() {
+                        if let Some(info) = host.tab_info(tab)
+                            && info.dirty
+                            && unapproved(tab, info.revision)
+                        {
+                            return NextAction::ConfirmDiscard { tab, activate: true };
+                        }
+                        continue;
                     }
-                    continue;
+                    let remaining: VecDeque<TabId> = host
+                        .window_dirty_tabs(self.origin)
+                        .into_iter()
+                        .filter(|&id| host.tab_info(id).is_some_and(|t| unapproved(id, t.revision)))
+                        .collect();
+                    if remaining.is_empty() {
+                        return NextAction::CloseWindow(self.origin);
+                    }
+                    *pending = remaining;
                 }
-                let remaining: VecDeque<TabId> = host
-                    .window_dirty_tabs(self.origin)
-                    .into_iter()
-                    .filter(|&id| {
-                        host.tab_info(id).is_some_and(|t| {
-                            !self
-                                .approved
-                                .iter()
-                                .any(|&(aid, rev)| aid == id && rev == t.revision)
-                        })
-                    })
-                    .collect();
-                if remaining.is_empty() {
-                    return NextAction::CloseWindow(self.origin);
-                }
-                *pending = remaining;
-            },
+            }
         }
     }
 }

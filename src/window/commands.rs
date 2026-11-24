@@ -36,7 +36,7 @@ impl MainWindow {
                 if let Some(caret) = self.active_editor().caret_bounds() {
                     let anchor = point(caret.right(), caret.bottom());
                     let state = self.menu_state(cx.shell);
-                    let out = self.menu_bar.open_context_menu(anchor, state, cx.ts());
+                    let out = self.menu_bar.open_context_menu(anchor, state);
                     let _ = self.apply_menu_outcome(out, cx);
                 }
                 return true;

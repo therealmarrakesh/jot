@@ -20,7 +20,7 @@ use crate::tabs::{self, Removal, TabData, TabSet};
 use crate::tooltip::TooltipProbe;
 use crate::ui::OverlayAnchor;
 
-use chrome::{CAPTION_WIDTH, HEADER_WIDTH, MinSizeCache, STRIP_TOP};
+use chrome::{CAPTION_WIDTH, HEADER_WIDTH, STRIP_TOP};
 
 pub(crate) const WINDOW_WIDTH: f32 = 2213.;
 pub(crate) const WINDOW_HEIGHT: f32 = 1107.;
@@ -65,7 +65,7 @@ pub(crate) struct MainWindow {
     has_painted: bool,
     pending_close: bool,
     middle_pressed_tab: Option<TabId>,
-    min_size_cache: Option<MinSizeCache>,
+    min_size: Option<Size>,
 }
 
 impl MainWindow {
@@ -93,7 +93,7 @@ impl MainWindow {
             has_painted: false,
             pending_close: false,
             middle_pressed_tab: None,
-            min_size_cache: None,
+            min_size: None,
         };
         win.activate_tab(0, shell);
         win
@@ -271,8 +271,8 @@ impl MainWindow {
     }
 
     #[cfg(test)]
-    pub(crate) fn min_size_cached(&self) -> Option<Size> {
-        self.min_size_cache.map(|c| c.size)
+    pub(crate) fn min_size(&self) -> Option<Size> {
+        self.min_size
     }
 
     #[cfg(test)]
@@ -740,38 +740,21 @@ impl MainWindow {
         self.dialogs.drain_prompt_ids()
     }
 
-    pub(super) fn press_dialog_button(&mut self, ix: usize, cx: &mut Cx<'_>) {
+    pub(super) fn finish_dialog(&mut self, button: Option<usize>, cx: &mut Cx<'_>) {
         let Some(kind) = self.dialogs.take_active() else {
             return;
         };
         match kind {
-            DialogKind::GoTo if ix == 0 => self.submit_go_to(cx.shell),
+            DialogKind::GoTo if button == Some(0) => self.submit_go_to(cx.shell),
             DialogKind::GoTo => self.close_dialogs(cx.shell),
             DialogKind::LineOutOfRange => self.show_go_to(None, cx.shell),
             DialogKind::Prompt(prompt) => {
                 self.close_dialogs(cx.shell);
                 if let Some((id, _)) = prompt.reply {
-                    let answer = prompt.choices.get(ix).map_or(prompt.cancel, |&(_, a)| a);
+                    let answer = button
+                        .and_then(|ix| prompt.choices.get(ix))
+                        .map_or(prompt.cancel, |&(_, a)| a);
                     cx.emit(Effect::PromptResponse { id, answer });
-                }
-            }
-        }
-    }
-
-    pub(super) fn cancel_dialog(&mut self, cx: &mut Cx<'_>) {
-        let Some(kind) = self.dialogs.take_active() else {
-            return;
-        };
-        match kind {
-            DialogKind::GoTo => self.close_dialogs(cx.shell),
-            DialogKind::LineOutOfRange => self.show_go_to(None, cx.shell),
-            DialogKind::Prompt(prompt) => {
-                self.close_dialogs(cx.shell);
-                if let Some((id, _)) = prompt.reply {
-                    cx.emit(Effect::PromptResponse {
-                        id,
-                        answer: prompt.cancel,
-                    });
                 }
             }
         }
@@ -916,7 +899,7 @@ impl MainWindow {
                 }
             }
             WindowTimer::Submenu(target) => {
-                if self.menu_bar.on_submenu_timer(target, &shell.text_system) {
+                if self.menu_bar.on_submenu_timer(target) {
                     self.dirty = true;
                 }
             }
