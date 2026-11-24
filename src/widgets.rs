@@ -1,13 +1,12 @@
 use crate::editor::Editor;
 use crate::geom::{Edges, Size, black, transparent_black, white};
-use crate::ids::{AppNode, AppUi, CustomDraw, EditorSlot, HitId};
 use crate::platform::CursorStyle;
 use crate::theme::{
     BODY_LINE, BODY_SIZE, CONTROL_HEIGHT, CONTROL_RADIUS, ControlColors, ICON_FONT, Palette,
     TEXT_FONT,
 };
 use crate::types::SharedStr;
-use crate::ui::{Brushes, box_, row, text};
+use crate::ui::{AppNode, AppUi, Brushes, CustomDraw, EditorSlot, HitId, box_, row, text};
 
 const ACCENT_TOP_EDGE: f32 = 0x14 as f32 / 255.;
 const ACCENT_HOVER_OPACITY: f32 = 0.9;

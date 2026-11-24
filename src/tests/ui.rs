@@ -1,15 +1,15 @@
 use crate::command::AppCommand;
 use crate::editor::{EditCommand, RopeExt as _};
 use crate::geom::point;
-use crate::ids::{
-    AppFrame, CaptionHit, DialogHit, EditorSlot, FindHit, Focus, HitId, MenuHit, MenuKind,
-};
 use crate::platform::{
     Key, KeyEvent, Modifiers, MouseButton, PlatformEvent, PlatformHandler, WindowControlArea,
     hit_test_control_areas,
 };
 use crate::theme::{SMALL_FONT, TEXT_FONT};
-use crate::ui::{AvailSize, Space, box_, row, snap_border_edges, text};
+use crate::ui::{
+    AppFrame, AvailSize, CaptionHit, DialogHit, EditorSlot, FindHit, Focus, HitId, MenuHit,
+    MenuKind, Space, box_, row, snap_border_edges, text,
+};
 
 use super::{EDITOR_PADDING_LEFT, EDITOR_PADDING_TOP, TestHarness};
 
@@ -394,7 +394,7 @@ fn status_bar_min_width_and_no_vertical_char_wrapping() {
     let spacer_w = live_frame
         .custom_rects()
         .find_map(|(tok, rect)| {
-            (tok == crate::ids::CustomDraw::StatusSpacer).then_some(rect.size.width)
+            (tok == crate::ui::CustomDraw::StatusSpacer).then_some(rect.size.width)
         })
         .expect("StatusSpacer missing");
     assert!(

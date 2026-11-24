@@ -7,11 +7,10 @@ use unicode_segmentation::{GraphemeCursor, GraphemeIncomplete, UnicodeSegmentati
 
 use crate::geom::{Axis, Edges, Point, Rect, Rgba, Size, point, size};
 use crate::gfx::{Canvas, FontFace, ShapedRow, TextStyle, TextSystem, fill};
-use crate::ids::{AnimKey, AppNode, AppUi, EditorSlot, HitId};
 use crate::platform::{CursorStyle, Modifiers, MouseButton, TimerHandle};
 use crate::theme::Palette;
 use crate::types::SharedStr;
-use crate::ui::{Easing, Node, box_, custom, row};
+use crate::ui::{AnimKey, AppNode, AppUi, Easing, EditorSlot, HitId, Node, box_, custom, row};
 
 pub(crate) use ropey::Rope;
 
@@ -4984,7 +4983,7 @@ impl ScrollbarState {
 #[cfg(test)]
 mod tests {
     use crate::geom::{point, rect, size};
-    use crate::ids::TabId;
+    use crate::ui::TabId;
 
     use super::*;
     use super::remap_offset;
@@ -5589,7 +5588,7 @@ mod tests {
         let nodes = sb.render(slot, vp, p, t0, &mut ui, |_| None);
         assert_eq!(nodes.len(), 1);
         assert!(sb.is_interactive(Axis::Vertical));
-        assert!(ui.finish_frame(crate::ids::AppFrame::default()));
+        assert!(ui.finish_frame(crate::ui::AppFrame::default()));
 
         ui.begin_frame(t0 + FADE_IN_DURATION, false);
         let _ = sb.render(
@@ -5600,7 +5599,7 @@ mod tests {
             &mut ui,
             |_| None,
         );
-        assert!(!ui.finish_frame(crate::ids::AppFrame::default()));
+        assert!(!ui.finish_frame(crate::ui::AppFrame::default()));
 
         let after_idle = t0 + IDLE_HOLD + Duration::from_millis(10);
         ui.begin_frame(after_idle, true);

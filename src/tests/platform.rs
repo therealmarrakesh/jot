@@ -3,8 +3,8 @@ use std::rc::Rc;
 
 use crate::geom::ScreenRect;
 use crate::gfx::WindowSurface;
-use crate::ids::{HitId, TabHit};
 use crate::platform::{NativeWindow, Platform, PlatformHandler};
+use crate::ui::{HitId, TabHit};
 
 use super::TestHarness;
 

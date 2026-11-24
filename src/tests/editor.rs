@@ -1,8 +1,8 @@
 use crate::document;
 use crate::geom::point;
 use crate::gfx::TextStyle;
-use crate::ids::HitId;
 use crate::platform::{MouseButton, PlatformEvent, PlatformHandler};
+use crate::ui::HitId;
 
 use super::{EDITOR_PADDING_LEFT, EDITOR_PADDING_TOP, TestHarness};
 

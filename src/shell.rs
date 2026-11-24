@@ -5,9 +5,9 @@ use crate::editor::{EditorTimer, EditorTimers};
 use crate::files::{FileEvent, FileRequest, PromptAnswer, PromptId};
 use crate::geom::Point;
 use crate::gfx::{Gpu, TextSystem};
-use crate::ids::{EditorSlot, HitId, TabId};
 use crate::platform::{Jobs, Platform, SystemSettings, TimerHandle, WindowAppearance, WindowId};
 use crate::theme::Palette;
+use crate::ui::{EditorSlot, HitId, TabId};
 
 #[derive(Copy, Clone, Debug)]
 pub(crate) struct ViewSettings {

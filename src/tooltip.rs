@@ -3,7 +3,6 @@ use std::time::{Duration, Instant};
 
 use crate::geom::{Rect, ScreenPoint, ScreenRect, point, round_half_up, size};
 use crate::gfx::{Gpu, TextStyle, TextSystem};
-use crate::ids::{AppFrame, HitId};
 use crate::platform::{
     Jobs, Modifiers, TimerHandle, WindowId, cursor_screen_pos, monitor_work_area_and_scale,
 };
@@ -11,8 +10,8 @@ use crate::shell::AppEvent;
 use crate::theme::{CONTROL_RADIUS, Palette, SMALL_FONT, theme_shadow};
 use crate::types::SharedStr;
 use crate::ui::{
-    AnimTracks, AvailSize, Curve, Easing, Frame, Node, OverlayAnchor, OverlaySurface, PointerState,
-    box_, text,
+    AnimTracks, AppFrame, AvailSize, Curve, Easing, Frame, HitId, Node, OverlayAnchor,
+    OverlaySurface, PointerState, box_, text,
 };
 
 const PADDING_X: f32 = 9.;
@@ -586,7 +585,7 @@ mod tests {
 
     #[test]
     fn tooltip_state_machine_transitions() {
-        use crate::ids::TabHit;
+        use crate::ui::TabHit;
         let w1 = WindowId(1);
         let w2 = WindowId(2);
         let new_tab = HitId::Tab(TabHit::New);

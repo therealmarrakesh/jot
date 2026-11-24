@@ -3,13 +3,15 @@ use std::time::Duration;
 
 use crate::editor::{Editor, FieldOptions};
 use crate::files::{Prompt, PromptId};
-use crate::ids::{AnimKey, AppNode, AppUi, DialogHit, EditorSlot, Focus, HitId, TabId};
 use crate::platform::{CursorStyle, Key, KeyEvent};
 use crate::theme::{
     BODY_LINE, BODY_SIZE, FIELD_CARET, OVERLAY_RADIUS, Palette, TEXT_FONT, theme_shadow,
 };
 use crate::types::SharedStr;
-use crate::ui::{AnimStatus, Curve, Easing, Transition, box_, row, text};
+use crate::ui::{
+    AnimKey, AnimStatus, AppNode, AppUi, Curve, DialogHit, Easing, EditorSlot, Focus, HitId, TabId,
+    Transition, box_, row, text,
+};
 use crate::widgets::{button, text_field};
 
 const TITLE_FONT: &str = "Segoe UI Variable Display";

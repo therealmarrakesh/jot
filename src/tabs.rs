@@ -6,11 +6,13 @@ use crate::command::{AppCommand, shortcut_tooltip};
 use crate::document::{self, DocPath, Format, PathKey};
 use crate::editor::{DocOptions, Editor, Rope};
 use crate::geom::{Edges, size, transparent_black};
-use crate::ids::{AnimKey, AppNode, AppUi, EditorSlot, HitId, TabHit, TabId};
 use crate::platform::{CursorStyle, TimerHandle};
 use crate::theme::{OVERLAY_RADIUS, Palette, SMALL_FONT};
 use crate::types::SharedStr;
-use crate::ui::{AnimStatus, Brushes, Easing, box_, row, text};
+use crate::ui::{
+    AnimKey, AnimStatus, AppNode, AppUi, Brushes, Easing, EditorSlot, HitId, TabHit, TabId, box_,
+    row, text,
+};
 use crate::widgets::icon_button;
 
 const TAB_WIDTH: f32 = 240.;

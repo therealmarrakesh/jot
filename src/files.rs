@@ -9,13 +9,12 @@ use crate::document::{
     display_name, file_name,
 };
 use crate::editor::Rope;
-use crate::ids::TabId;
 use crate::platform::{
     Jobs, OpenDialogOptions, SaveChoice, SaveDialogOptions, SaveDialogResult, WindowHandle,
     WindowId, run_open_dialog, run_save_dialog,
 };
-use crate::types::APP_NAME;
-use crate::types::{Error, SharedStr};
+use crate::types::{APP_NAME, Error, SharedStr};
+use crate::ui::TabId;
 
 crate::types::id_type!(PromptId);
 crate::types::id_type!(WorkflowId);

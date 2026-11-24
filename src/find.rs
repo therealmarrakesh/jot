@@ -7,12 +7,14 @@ use crate::command::AppCommand;
 use crate::editor::{Editor, FieldOptions};
 use crate::geom::{Point, Rect, Size, point, size};
 use crate::gfx::TextSystem;
-use crate::ids::{AnimKey, AppNode, AppUi, EditorSlot, FindHit, Focus, HitId};
 use crate::platform::{CursorStyle, Key, KeyEvent, TimerHandle};
 use crate::shell::{WindowTimer, WindowTimers};
 use crate::theme::{BODY_SIZE, FIELD_CARET, OVERLAY_RADIUS, Palette, TEXT_FONT, theme_shadow};
 use crate::types::SharedStr;
-use crate::ui::{Anchor, AnimStatus, Curve, Easing, Transform, Transition, box_, row, text};
+use crate::ui::{
+    Anchor, AnimKey, AnimStatus, AppNode, AppUi, Curve, Easing, EditorSlot, FindHit, Focus, HitId,
+    Transform, Transition, box_, row, text,
+};
 use crate::widgets::{button, icon_button, text_field};
 
 const EXPAND_CURVE: Curve = Curve::new(

@@ -3,8 +3,8 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use crate::geom::point;
-use crate::ids::{DialogHit, HitId, TabHit, TabId};
 use crate::platform::{Platform, PlatformEvent, PlatformHandler};
+use crate::ui::{DialogHit, HitId, TabHit, TabId};
 
 use super::TestHarness;
 

@@ -10,7 +10,6 @@ use crate::files::{
 };
 use crate::geom::{Point, Rect, ScreenPoint, Size, point, size};
 use crate::gfx::{Gpu, TextSystem, WindowSurface};
-use crate::ids::{EditorSlot, TabId};
 use crate::platform::{
     Key, MainWindowConfig, MouseButton, NativeWindow, Platform, PlatformEvent, PlatformHandler,
     TimerHandle, WindowAppearance, WindowHandle, WindowId, WindowPlacement, WindowsDisplay,
@@ -21,6 +20,7 @@ use crate::shell::{AppEvent, Cx, Effect, Shell, WindowTimer};
 use crate::tabs::TabData;
 use crate::tooltip::{KeyTips, TooltipTarget, Tooltips};
 use crate::types::APP_NAME;
+use crate::ui::{EditorSlot, TabId};
 use crate::window::{InputMode, MainWindow, WINDOW_HEIGHT, WINDOW_MAX_SCREEN_SHARE, WINDOW_WIDTH};
 
 pub(crate) struct App {
@@ -329,7 +329,7 @@ impl App {
     pub(crate) fn tab_drag_start_and_detach_for_test(
         &mut self,
         window: WindowId,
-        tab: crate::ids::TabId,
+        tab: crate::ui::TabId,
         index: usize,
         grab: crate::geom::Point,
         position: crate::geom::Point,

@@ -14,10 +14,10 @@ use crate::command::Command;
 use crate::document;
 use crate::geom::{Point, Rect, size};
 use crate::gfx::{Gpu, TextSystem};
-use crate::ids::HitId;
 use crate::platform::{
     Key, KeyEvent, Modifiers, MouseButton, Platform, PlatformEvent, PlatformHandler, WindowId,
 };
+use crate::ui::HitId;
 use crate::window::{EDITOR_PADDINGS, MainWindow};
 
 const EDITOR_PADDING_LEFT: f32 = EDITOR_PADDINGS.left;

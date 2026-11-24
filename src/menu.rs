@@ -4,9 +4,6 @@ use crate::command::{AppCommand, Command, shortcut_label};
 use crate::editor::EditCommand;
 use crate::geom::{Edges, Point, Rect, Size, point, transparent_black};
 use crate::gfx::TextSystem;
-use crate::ids::{
-    AnimKey, AppFrame, AppNode, AppUi, EditorSlot, FindHit, Focus, HitId, MenuHit, MenuKind,
-};
 use crate::platform::{CursorStyle, Key, KeyEvent, TimerHandle};
 use crate::shell::{WindowTimer, WindowTimers};
 use crate::theme::{
@@ -14,7 +11,10 @@ use crate::theme::{
 };
 use crate::tooltip::{self, KeyTip};
 use crate::types::SharedStr;
-use crate::ui::{Anchor, AnimStatus, Curve, Easing, Transform, Transition, box_, row, text};
+use crate::ui::{
+    Anchor, AnimKey, AnimStatus, AppFrame, AppNode, AppUi, Curve, Easing, EditorSlot, FindHit,
+    Focus, HitId, MenuHit, MenuKind, Transform, Transition, box_, row, text,
+};
 use crate::widgets::{focus_ring, subtle_brushes};
 
 pub(crate) const MENU_BAR_HEIGHT: f32 = 32.;
@@ -1920,7 +1920,7 @@ mod tests {
 
     use crate::editor::EditCommand;
     use crate::geom::point;
-    use crate::ids::TabId;
+    use crate::ui::TabId;
     use crate::platform::{Jobs, Modifiers};
     use crate::shell::AppEvent;
 
