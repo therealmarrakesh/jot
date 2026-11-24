@@ -10,12 +10,21 @@ use crate::files::{FileRequest, Prompt, PromptId};
 use crate::find::{FindBar, FindKey, FindOutcome};
 use crate::geom::{Edges, Point, Rect, ScreenPoint, Size, point, size};
 use crate::gfx::{TextStyle, TextSystem, WindowSurface, fill};
-use crate::ids::{AppFrame, AppNode, AppUi, CaptionHit, CustomDraw, DialogHit, EditorSlot, FindHit, Focus, HitId, MenuHit, TabHit, TabId};
+use crate::ids::{
+    AppFrame, AppNode, AppUi, CaptionHit, CustomDraw, DialogHit, EditorSlot, FindHit, Focus, HitId,
+    MenuHit, TabHit, TabId,
+};
 use crate::keytips::KeyTip;
 use crate::menu::{FocusRequest, MENU_BAR_HEIGHT, MenuOutcome, MenuState, Menus, RowPath};
-use crate::platform::{KeyEvent, Modifiers, MouseButton, WindowAppearance, WindowControlArea, WindowHandle, WindowId, clipboard, format_local_time_date};
+use crate::platform::{
+    KeyEvent, Modifiers, MouseButton, WindowAppearance, WindowControlArea, WindowHandle, WindowId,
+    clipboard, format_local_time_date,
+};
 use crate::shell::{Cx, Effect, Shell, SlotTimers, WindowTimer};
-use crate::tabs::{self, Removal, SCROLL_REPEAT_DELAY, SCROLL_REPEAT_INTERVAL, SCROLL_STEP, StripFrame, TAB_HEIGHT, TabData, TabSet, WHEEL_SHARE, self as tab_strip};
+use crate::tabs::{
+    self, self as tab_strip, Removal, SCROLL_REPEAT_DELAY, SCROLL_REPEAT_INTERVAL, SCROLL_STEP,
+    StripFrame, TAB_HEIGHT, TabData, TabSet, WHEEL_SHARE,
+};
 use crate::theme::{BODY_LINE, BODY_SIZE, ICON_FONT, Palette, SMALL_FONT, TEXT_FONT};
 use crate::tooltip::TooltipProbe;
 use crate::ui::{AvailSize, Brushes, OverlayAnchor, box_, custom, row, text};

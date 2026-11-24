@@ -5,11 +5,15 @@ use crate::command::{AppCommand, Command, shortcut_label};
 use crate::editor::EditCommand;
 use crate::geom::{Edges, Point, Rect, Size, point};
 use crate::gfx::TextSystem;
-use crate::ids::{AnimKey, AppFrame, AppNode, AppUi, EditorSlot, FindHit, Focus, HitId, MenuHit, MenuKind};
+use crate::ids::{
+    AnimKey, AppFrame, AppNode, AppUi, EditorSlot, FindHit, Focus, HitId, MenuHit, MenuKind,
+};
 use crate::keytips::{self, KeyTip};
 use crate::platform::{CursorStyle, Key, KeyEvent, TimerHandle};
 use crate::shell::{WindowTimer, WindowTimers};
-use crate::theme::{CONTROL_RADIUS, ICON_FONT, OVERLAY_RADIUS, Palette, SMALL_FONT, TEXT_FONT, theme_shadow};
+use crate::theme::{
+    CONTROL_RADIUS, ICON_FONT, OVERLAY_RADIUS, Palette, SMALL_FONT, TEXT_FONT, theme_shadow,
+};
 use crate::types::SharedStr;
 use crate::ui::{Anchor, AnimStatus, Curve, Easing, Transform, Transition, box_, row, text};
 use crate::widgets::{focus_ring, subtle_brushes};

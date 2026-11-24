@@ -1,37 +1,34 @@
 mod actions;
-mod blink;
 mod buffer;
 mod frame;
 mod history;
 mod layout;
 mod model;
-mod pointer;
 mod scroll;
 mod scrollbar;
 pub(crate) mod wrap;
 
-pub(crate) use buffer::RopeExt;
-pub(crate) use frame::{EditorPaintParams, EditorPaintStyle};
-pub(crate) use model::TextModel;
-pub(crate) use ropey::Rope;
-
 use std::ops::Range;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use crate::geom::{Axis, Edges, Point, Rect, point};
-use crate::gfx::{TextStyle, TextSystem};
-use crate::platform::TimerHandle;
-use crate::types::SharedStr;
-use crate::ui::{Node, box_, custom, row};
-
-use blink::{AutoScroll, BlinkState};
 use frame::FrameLayout;
 use layout::LongestLineCache;
 use model::{EditPolicy, LineChange, ValidateFn};
 use scrollbar::ScrollbarState;
 use wrap::WrapIndex;
 
-pub(super) const RIGHT_MARGIN: f32 = 10.0;
+use crate::geom::{Axis, Edges, Point, Rect, point};
+use crate::gfx::{TextStyle, TextSystem};
+use crate::platform::{Modifiers, MouseButton, TimerHandle};
+use crate::types::SharedStr;
+use crate::ui::{Node, box_, custom, row};
+
+pub(crate) use buffer::RopeExt;
+pub(crate) use frame::{EditorPaintParams, EditorPaintStyle};
+pub(crate) use model::TextModel;
+pub(crate) use ropey::Rope;
+
+const RIGHT_MARGIN: f32 = 10.0;
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct DocOptions {
@@ -47,25 +44,25 @@ pub(crate) struct FieldOptions {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(super) enum MoveDirection {
+enum MoveDirection {
     Up,
     Down,
 }
 
 #[derive(Clone, Copy, Debug)]
-pub(super) struct RevealRequest {
-    pub(super) offset: usize,
-    pub(super) end_affinity: bool,
-    pub(super) direction: Option<MoveDirection>,
-    pub(super) with_margin: bool,
+struct RevealRequest {
+    offset: usize,
+    end_affinity: bool,
+    direction: Option<MoveDirection>,
+    with_margin: bool,
 }
 
 #[derive(Copy, Clone, Debug, Default)]
-pub(super) struct Scroll {
-    pub(super) x: f32,
-    pub(super) y: f64,
-    pub(super) content_w: f32,
-    pub(super) content_h: f64,
+struct Scroll {
+    x: f32,
+    y: f64,
+    content_w: f32,
+    content_h: f64,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -269,7 +266,7 @@ impl Editor {
     }
 
     #[inline]
-    pub(super) fn request_reveal(
+    fn request_reveal(
         &mut self,
         offset: usize,
         end_affinity: bool,
@@ -285,7 +282,7 @@ impl Editor {
     }
 
     #[inline]
-    pub(super) fn reset_pointer_selection_state(&mut self) {
+    fn reset_pointer_selection_state(&mut self) {
         self.word_anchor = None;
         self.selecting = false;
         if let Some(doc) = &mut self.doc {
@@ -293,7 +290,7 @@ impl Editor {
         }
     }
 
-    pub(super) fn apply_change(&mut self, change: Option<LineChange>, ts: &TextSystem) {
+    fn apply_change(&mut self, change: Option<LineChange>, ts: &TextSystem) {
         let Some(lines) = change else {
             return;
         };
@@ -418,8 +415,250 @@ impl Editor {
     }
 }
 
+pub(crate) struct BlinkState {
+    active: bool,
+    visible: bool,
+    paused: bool,
+    started_at: Option<Instant>,
+    timer: Option<TimerHandle>,
+}
+
+impl Default for BlinkState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl BlinkState {
+    pub(crate) fn new() -> Self {
+        Self {
+            active: false,
+            visible: false,
+            paused: false,
+            started_at: None,
+            timer: None,
+        }
+    }
+
+    #[inline]
+    pub(crate) fn visible(&self) -> bool {
+        self.paused || self.visible
+    }
+
+    pub(crate) fn stop(&mut self) {
+        self.active = false;
+        self.paused = false;
+        self.visible = false;
+        self.started_at = None;
+        self.timer = None;
+    }
+
+    pub(crate) fn start(&mut self, timers: &mut dyn EditorTimers) {
+        self.active = true;
+        self.paused = false;
+        self.visible = false;
+        self.started_at = Some(Instant::now());
+        self.step(timers);
+    }
+
+    pub(crate) fn pause(&mut self, timers: &mut dyn EditorTimers) {
+        if !self.active && !self.visible {
+            return;
+        }
+        self.paused = true;
+        self.visible = true;
+        self.started_at = Some(Instant::now());
+        let Some(delay) = timers.blink_timing().0 else {
+            self.timer = None;
+            return;
+        };
+        self.timer = timers.after(delay, EditorTimer::Blink);
+    }
+
+    pub(crate) fn on_timer(&mut self, timers: &mut dyn EditorTimers) -> bool {
+        if !self.active {
+            return false;
+        }
+        self.paused = false;
+        self.step(timers);
+        true
+    }
+
+    fn step(&mut self, timers: &mut dyn EditorTimers) {
+        if self.paused {
+            self.visible = true;
+            return;
+        }
+        let (interval, timeout) = timers.blink_timing();
+        let Some(interval) = interval else {
+            self.visible = true;
+            self.timer = None;
+            return;
+        };
+        if let Some(timeout) = timeout
+            && self
+                .started_at
+                .is_some_and(|start| start.elapsed() >= timeout)
+        {
+            self.visible = true;
+            self.timer = None;
+            return;
+        }
+        self.visible = !self.visible;
+        self.timer = timers.after(interval, EditorTimer::Blink);
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct AutoScroll {
+    delta: Option<f32>,
+    timer: Option<TimerHandle>,
+    pub(crate) last_drag_pos: Option<Point>,
+}
+
+impl AutoScroll {
+    pub(crate) fn compute_delta(y: f32, bounds: Rect) -> Option<f32> {
+        const MIN_SPEED: f32 = 12.0;
+        const MAX_SPEED: f32 = 64.0;
+        const INNER_ZONE: f32 = 16.0;
+        const OUTER_RAMP: f32 = 80.0;
+
+        let bottom = bounds.bottom() - INNER_ZONE;
+        let top = bounds.top() + INNER_ZONE;
+
+        if y > bottom {
+            let t = ((y - bottom) / (INNER_ZONE + OUTER_RAMP)).min(1.0);
+            Some(MIN_SPEED + t * (MAX_SPEED - MIN_SPEED))
+        } else if y < top {
+            let t = ((top - y) / (INNER_ZONE + OUTER_RAMP)).min(1.0);
+            Some(-(MIN_SPEED + t * (MAX_SPEED - MIN_SPEED)))
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn stop(&mut self) {
+        self.delta = None;
+        self.timer = None;
+        self.last_drag_pos = None;
+    }
+
+    pub(crate) fn update(&mut self, delta: Option<f32>, timers: &mut dyn EditorTimers) {
+        let was_active = self.delta.is_some();
+        self.delta = delta;
+        if delta.is_none() {
+            self.timer = None;
+            return;
+        }
+        if !was_active {
+            let interval = Duration::from_millis(16);
+            self.timer = timers.every(interval, interval, EditorTimer::AutoScroll);
+        }
+    }
+}
+
+impl Editor {
+    fn hit_test_point(&self, pos: Point) -> (usize, bool) {
+        let Some(frame) = self.fresh_frame() else {
+            return (0, false);
+        };
+        frame.hit_test(
+            pos,
+            self.scroll.x,
+            self.scroll.y,
+            self.model.text().len(),
+            self.model.is_multi_line(),
+        )
+    }
+
+    pub(crate) fn on_mouse_down(
+        &mut self,
+        button: MouseButton,
+        position: Point,
+        modifiers: Modifiers,
+        click_count: usize,
+        timers: &mut dyn EditorTimers,
+    ) {
+        self.model.commit_composition();
+        self.model.break_coalescing();
+        self.selecting = true;
+        let (offset, aff) = self.hit_test_point(position);
+
+        if button == MouseButton::Left && click_count >= 3 {
+            self.select_line_at(offset);
+            return;
+        }
+        if button == MouseButton::Left && click_count == 2 {
+            self.select_word_at(offset);
+            return;
+        }
+        if button == MouseButton::Right {
+            if !self.model.selection().contains(offset) {
+                self.move_to_with_affinity(offset, None, aff, false, Some(timers));
+            }
+            if let Some(doc) = &mut self.doc {
+                doc.pending_context_menu = Some((position, offset));
+            }
+            return;
+        }
+        if modifiers.shift {
+            self.select_to_with_affinity(offset, aff);
+            self.request_reveal(self.model.cursor(), aff, None, false);
+        } else {
+            self.move_to_with_affinity(offset, None, aff, false, Some(timers));
+        }
+    }
+
+    pub(crate) fn on_mouse_move(
+        &mut self,
+        position: Point,
+        dragging_left: bool,
+        focused: bool,
+        timers: &mut dyn EditorTimers,
+    ) -> bool {
+        if dragging_left
+            && self.selecting
+            && focused
+            && self.model.text().len() > 0
+            && self.fresh_frame().is_some()
+        {
+            let (offset, aff) = self.hit_test_point(position);
+            self.select_to_with_affinity(offset, aff);
+            if let Some(doc) = &mut self.doc {
+                doc.auto_scroll.last_drag_pos = Some(position);
+                let delta = AutoScroll::compute_delta(position.y, self.input_bounds);
+                doc.auto_scroll.update(delta.map(|d| -d), timers);
+            }
+            self.request_reveal(self.model.cursor(), aff, None, false);
+            return true;
+        }
+        false
+    }
+
+    pub(crate) fn on_mouse_up(
+        &mut self,
+        button: MouseButton,
+        timers: &mut dyn EditorTimers,
+    ) -> Option<Point> {
+        let mut open_context_menu = None;
+        if button == MouseButton::Right
+            && let Some(doc) = &mut self.doc
+            && let Some((pos, offset)) = doc.pending_context_menu.take()
+        {
+            if !self.model.selection().contains(offset) {
+                self.move_to_with_affinity(offset, None, false, false, Some(timers));
+            }
+            open_context_menu = Some(pos);
+        }
+        self.reset_pointer_selection_state();
+        open_context_menu
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use crate::geom::rect;
+
     use super::*;
 
     #[test]
@@ -473,5 +712,20 @@ mod tests {
         assert_eq!(ed.model().text().to_string(), "hello ");
         ed.paste("world", &ts, &mut timers);
         assert_eq!(ed.model().text().to_string(), "hello world");
+    }
+
+    #[test]
+    fn auto_scroll_delta_has_dead_zone_and_symmetric_ramps() {
+        let bounds = rect(0., 100., 200., 100.);
+        assert_eq!(AutoScroll::compute_delta(150., bounds), None);
+
+        let top = AutoScroll::compute_delta(80., bounds).unwrap();
+        let bottom = AutoScroll::compute_delta(220., bounds).unwrap();
+        assert!(top < 0. && bottom > 0.);
+        assert!((top.abs() - bottom.abs()).abs() < 1e-3);
+
+        let mut scroll = AutoScroll::default();
+        scroll.stop();
+        assert!(scroll.delta.is_none());
     }
 }

@@ -9,7 +9,10 @@ use std::time::Duration;
 use ropey::Rope;
 use ropey::RopeBuilder;
 
-use crate::platform::{AnsiCodePage, HIDDEN_FILE_ATTRIBUTE, ReplaceFileError, documents_dir, file_hard_link_count, replace_file};
+use crate::platform::{
+    AnsiCodePage, HIDDEN_FILE_ATTRIBUTE, ReplaceFileError, documents_dir, file_hard_link_count,
+    replace_file,
+};
 
 const UTF8_BOM: &[u8] = b"\xef\xbb\xbf";
 const UTF16_LE_BOM: &[u8] = b"\xff\xfe";
