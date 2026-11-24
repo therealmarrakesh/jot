@@ -200,7 +200,7 @@ impl App {
             let mut cx = self.shell.cx(&mut fx);
             let r = f(win, &mut cx);
             if mark_dirty {
-                win.mark_dirty();
+                win.dirty = true;
             }
             r
         };
@@ -664,7 +664,7 @@ impl PlatformHandler for App {
         let mut any_vsync = false;
         let mut painted_any = false;
         for ix in 0..self.windows.len() {
-            if self.windows[ix].is_dirty() {
+            if self.windows[ix].dirty {
                 painted_any = true;
                 any_vsync |= self.paint_window_ix(ix, now);
             }
@@ -818,13 +818,13 @@ impl Windows {
 
     pub(crate) fn mark_dirty(&mut self, id: WindowId) {
         if let Some(w) = self.get_mut(id) {
-            w.mark_dirty();
+            w.dirty = true;
         }
     }
 
     pub(crate) fn mark_all_dirty(&mut self) {
         for w in &mut self.list {
-            w.mark_dirty();
+            w.dirty = true;
         }
     }
 
@@ -862,16 +862,16 @@ impl Windows {
     }
 
     pub(crate) fn sweep_closed(&mut self) -> Vec<(WindowId, Vec<crate::files::PromptId>)> {
-        if !self.list.iter().any(MainWindow::is_pending_close) {
+        if !self.list.iter().any(|w| w.pending_close) {
             return Vec::new();
         }
         let closed: Vec<(WindowId, Vec<crate::files::PromptId>)> = self
             .list
             .iter_mut()
-            .filter(|w| w.is_pending_close())
+            .filter(|w| w.pending_close)
             .map(|w| (w.id(), w.drain_cancelled_prompts()))
             .collect();
-        self.list.retain(|w| !w.is_pending_close());
+        self.list.retain(|w| !w.pending_close);
         if let Some(active) = self.active
             && self.get(active).is_none()
         {
@@ -1079,7 +1079,7 @@ impl DocHost for WindowsHost<'_> {
 
     fn mark_window_close(&mut self, window: WindowId) {
         if let Some(w) = self.windows.get_mut(window) {
-            w.request_close();
+            w.pending_close = true;
         }
     }
 
@@ -1129,7 +1129,7 @@ impl TabDrag {
     ) -> Option<Self> {
         let win = windows.get_mut(window_id)?;
         let press = win.local_to_screen(position);
-        win.mark_dirty();
+        win.dirty = true;
         Some(Self {
             owner: window_id,
             source: window_id,

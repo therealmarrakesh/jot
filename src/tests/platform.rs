@@ -39,8 +39,8 @@ fn device_loss_recreates_devices_and_renders_new_windows_cleanly() {
     let gen0 = h.read(|_, app| app.shell.gpu.generation());
     {
         let mut app = h.app.borrow_mut();
-        app.windows[0].mark_device_lost_for_test();
-        app.windows[0].mark_dirty();
+        app.windows[0].win.surface.mark_device_lost_for_test();
+        app.windows[0].dirty = true;
     }
     h.draw();
     let gen1 = h.read(|_, app| app.shell.gpu.generation());
@@ -53,7 +53,7 @@ fn device_loss_recreates_devices_and_renders_new_windows_cleanly() {
     {
         let app = h.app.borrow();
         assert_eq!(app.windows.len(), 2);
-        assert!(app.windows[1].surface_is_ready());
+        assert!(app.windows[1].win.surface.is_ready());
     }
 }
 

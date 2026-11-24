@@ -111,20 +111,20 @@ impl TestHarness {
 
     fn hit_rect(&self, hit: HitId) -> Option<Rect> {
         let app = self.app.borrow();
-        app.windows.get(self.window_id)?.frame().rect_of(hit)
+        app.windows.get(self.window_id)?.ui.frame().rect_of(hit)
     }
 
     fn click_menu_command(&mut self, cmd: impl Into<Command>) {
         let cmd = cmd.into();
         let hit = self
-            .read(|w, _| w.menus().hit_for_command(cmd))
+            .read(|w, _| w.menus.hit_for_command(cmd))
             .unwrap_or_else(|| panic!("menu command {cmd:?} is not visible"));
         self.click_hit(hit);
     }
 
     fn click_menu_submenu(&mut self, title: &str) {
         let hit = self
-            .read(|w, _| w.menus().hit_for_submenu(title))
+            .read(|w, _| w.menus.hit_for_submenu(title))
             .unwrap_or_else(|| panic!("menu submenu {title:?} is not visible"));
         self.click_hit(hit);
     }
@@ -244,7 +244,7 @@ impl TestHarness {
     fn close_all(&mut self) {
         let mut app = self.app.borrow_mut();
         for w in app.windows.iter_mut() {
-            w.request_close();
+            w.pending_close = true;
         }
         app.sweep_closed_windows();
     }

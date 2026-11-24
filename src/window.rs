@@ -57,18 +57,18 @@ pub(crate) enum InputMode {
 }
 
 pub(crate) struct MainWindow {
-    win: WindowSurface,
-    ui: AppUi,
+    pub(crate) win: WindowSurface,
+    pub(crate) ui: AppUi,
     tabs: TabSet,
-    menus: Menus,
-    find: FindBar,
-    dialogs: Dialogs,
+    pub(crate) menus: Menus,
+    pub(crate) find: FindBar,
+    pub(crate) dialogs: Dialogs,
     focus: Focus,
-    dirty: bool,
+    pub(crate) dirty: bool,
     has_painted: bool,
-    pending_close: bool,
+    pub(crate) pending_close: bool,
     middle_pressed_tab: Option<TabId>,
-    min_size: Option<Size>,
+    pub(crate) min_size: Option<Size>,
 }
 
 impl MainWindow {
@@ -96,30 +96,10 @@ impl MainWindow {
         window
     }
 
-    #[inline]
-    pub(crate) fn is_dirty(&self) -> bool {
-        self.dirty
-    }
-
-    #[inline]
-    pub(crate) fn mark_dirty(&mut self) {
-        self.dirty = true;
-    }
-
     pub(crate) fn on_paint_requested(&mut self) {
         if !self.has_painted {
             self.dirty = true;
         }
-    }
-
-    #[inline]
-    pub(crate) fn is_pending_close(&self) -> bool {
-        self.pending_close
-    }
-
-    #[inline]
-    pub(crate) fn request_close(&mut self) {
-        self.pending_close = true;
     }
 
     pub(crate) fn mode(&self) -> InputMode {
@@ -265,53 +245,8 @@ impl MainWindow {
     }
 
     #[cfg(test)]
-    pub(crate) fn min_size(&self) -> Option<Size> {
-        self.min_size
-    }
-
-    #[cfg(test)]
-    pub(crate) fn frame(&self) -> &crate::ui::AppFrame {
-        self.ui.frame()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn ui_state(&self) -> &AppUi {
-        &self.ui
-    }
-
-    #[cfg(test)]
     pub(crate) fn focus(&self) -> Focus {
         self.focus
-    }
-
-    #[cfg(test)]
-    pub(crate) fn menus(&self) -> &Menus {
-        &self.menus
-    }
-
-    #[cfg(test)]
-    pub(crate) fn is_find_open(&self) -> bool {
-        self.find.is_open()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn find_match_case(&self) -> bool {
-        self.find.match_case
-    }
-
-    #[cfg(test)]
-    pub(crate) fn is_dialog_open(&self) -> bool {
-        self.dialogs.is_open()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn surface_is_ready(&self) -> bool {
-        self.win.surface.is_ready()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn mark_device_lost_for_test(&mut self) {
-        self.win.surface.mark_device_lost_for_test();
     }
 
     #[inline]
@@ -653,20 +588,12 @@ impl MainWindow {
         moved
     }
 
-    fn next_tab(&mut self, shell: &Shell) {
-        if self.tabs.len() <= 1 {
-            return;
+    fn step_tab(&mut self, forward: bool, shell: &Shell) {
+        let n = self.tabs.len();
+        if n > 1 {
+            let next = (self.tabs.active_index() + if forward { 1 } else { n - 1 }) % n;
+            self.activate_tab(next, shell);
         }
-        let next = (self.tabs.active_index() + 1) % self.tabs.len();
-        self.activate_tab(next, shell);
-    }
-
-    fn prev_tab(&mut self, shell: &Shell) {
-        if self.tabs.len() <= 1 {
-            return;
-        }
-        let prev = (self.tabs.active_index() + self.tabs.len() - 1) % self.tabs.len();
-        self.activate_tab(prev, shell);
     }
 
     fn select_tab(&mut self, ix: usize, shell: &Shell) {
@@ -759,8 +686,8 @@ impl MainWindow {
                     tab: self.active_tab_id(),
                 }));
             }
-            AppCommand::NextTab => self.next_tab(cx.shell),
-            AppCommand::PrevTab => self.prev_tab(cx.shell),
+            AppCommand::NextTab => self.step_tab(true, cx.shell),
+            AppCommand::PrevTab => self.step_tab(false, cx.shell),
             AppCommand::SelectTab(ix) => self.select_tab(ix, cx.shell),
             AppCommand::SelectLastTab => self.select_last_tab(cx.shell),
             AppCommand::Open => {
@@ -786,26 +713,16 @@ impl MainWindow {
                 self.active_editor_mut().replace(&stamp, cx.ts());
             }
             AppCommand::GoTo => self.open_go_to(cx.shell),
-            AppCommand::Find => {
-                if self.has_text() {
-                    self.open_find(false, cx.shell);
-                }
+            AppCommand::Find | AppCommand::Replace if self.has_text() => {
+                self.open_find(cmd == AppCommand::Replace, cx.shell);
             }
-            AppCommand::Replace => {
-                if self.has_text() {
-                    self.open_find(true, cx.shell);
-                }
+            AppCommand::FindNext | AppCommand::FindPrevious if self.has_text() => {
+                self.find_step(cmd == AppCommand::FindNext, cx.shell);
             }
-            AppCommand::FindNext => {
-                if self.has_text() {
-                    self.find_step(true, cx.shell);
-                }
-            }
-            AppCommand::FindPrevious => {
-                if self.has_text() {
-                    self.find_step(false, cx.shell);
-                }
-            }
+            AppCommand::Find
+            | AppCommand::Replace
+            | AppCommand::FindNext
+            | AppCommand::FindPrevious => {}
             AppCommand::ToggleMatchCase => {
                 self.find.match_case = !self.find.match_case;
                 self.refocus_find(cx.shell);
@@ -1174,43 +1091,25 @@ impl MainWindow {
                     }
                     return;
                 }
-                Some(HitId::Tab(TabHit::ScrollLeft)) => {
-                    if self.scroll_tabs(-SCROLL_STEP) {
+                Some(HitId::Tab(hit @ (TabHit::ScrollLeft | TabHit::ScrollRight))) => {
+                    let step = if hit == TabHit::ScrollLeft { -SCROLL_STEP } else { SCROLL_STEP };
+                    if self.scroll_tabs(step) {
                         self.tabs.repeat = Some(cx.timers(self.id()).every(
                             SCROLL_REPEAT_DELAY,
                             SCROLL_REPEAT_INTERVAL,
-                            WindowTimer::TabScrollRepeat(-SCROLL_STEP),
+                            WindowTimer::TabScrollRepeat(step),
                         ));
                     }
                     return;
                 }
-                Some(HitId::Tab(TabHit::ScrollRight)) => {
-                    if self.scroll_tabs(SCROLL_STEP) {
-                        self.tabs.repeat = Some(cx.timers(self.id()).every(
-                            SCROLL_REPEAT_DELAY,
-                            SCROLL_REPEAT_INTERVAL,
-                            WindowTimer::TabScrollRepeat(SCROLL_STEP),
-                        ));
-                    }
-                    return;
-                }
-                Some(HitId::ScrollThumb(slot, axis))
+                Some(HitId::ScrollThumb(slot, axis) | HitId::ScrollTrack(slot, axis))
                     if slot == self.active_slot()
                         && self.active_editor().scrollbar_interactive(axis) =>
                 {
+                    let thumb = matches!(top, Some(HitId::ScrollThumb(..)));
                     if let Some(track) = self.ui.frame().rect_of(HitId::ScrollTrack(slot, axis)) {
                         self.active_editor_mut()
-                            .on_scrollbar_mouse_down(axis, true, pos, track);
-                    }
-                    return;
-                }
-                Some(HitId::ScrollTrack(slot, axis))
-                    if slot == self.active_slot()
-                        && self.active_editor().scrollbar_interactive(axis) =>
-                {
-                    if let Some(track) = self.ui.frame().rect_of(HitId::ScrollTrack(slot, axis)) {
-                        self.active_editor_mut()
-                            .on_scrollbar_mouse_down(axis, false, pos, track);
+                            .on_scrollbar_mouse_down(axis, thumb, pos, track);
                     }
                     return;
                 }
@@ -2070,9 +1969,7 @@ impl MainWindow {
             self.sync_cursor(ptr.pos);
         }
         let needs_vsync = ui_needs_vsync || editor_needs_redraw || needs_retry;
-        if needs_vsync {
-            self.dirty = true;
-        }
+        self.dirty |= needs_vsync;
         needs_vsync
     }
 }

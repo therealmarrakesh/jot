@@ -61,7 +61,7 @@ fn tab_close_button_new_tab_hover_and_middle_click() {
     h.click_hit(HitId::Tab(TabHit::Close(last_id)));
     h.read(|w, _| {
         assert!(
-            w.is_dialog_open(),
+            w.dialogs.is_open(),
             "closing dirty tab via 'x' must open save confirmation dialog"
         );
     });
@@ -107,7 +107,7 @@ fn dirty_window_close_file_drop_and_multi_window() {
     {
         let mut app = h.app.borrow_mut();
         assert_eq!(app.windows.len(), 2, "Ctrl+Shift+N must open a 2nd window");
-        app.windows[1].request_close();
+        app.windows[1].pending_close = true;
         app.sweep_closed_windows();
         assert_eq!(app.windows.len(), 1);
     }
@@ -123,7 +123,7 @@ fn dirty_window_close_file_drop_and_multi_window() {
         h.window_open(),
         "dirty window must intercept close and show prompt"
     );
-    h.read(|w, _| assert!(w.is_dialog_open()));
+    h.read(|w, _| assert!(w.dialogs.is_open()));
     h.click_hit(HitId::Dialog(DialogHit::Button(2)));
     assert!(h.window_open(), "Cancel must keep window open");
 
@@ -158,7 +158,7 @@ fn tab_drag_pop_out_and_reattach_does_not_panic() {
         let (hwnd1, scale, tab_rect, tab_id) = h.read(|w, _| {
             let id = w.tabs()[1].data.id;
             let rect = w
-                .frame()
+                .ui.frame()
                 .rect_of(HitId::Tab(TabHit::Item(id)))
                 .expect("tab 1 rect");
             (w.hwnd(), w.scale_factor(), rect, id)
