@@ -8,6 +8,7 @@ use crate::files::{FileRequest, Prompt, PromptId};
 use crate::find::{FindBar, FindKey, FindOutcome};
 use crate::geom::{Edges, Point, Rect, ScreenPoint, Size, point, size, transparent_black};
 use crate::gfx::{TextStyle, TextSystem, WindowSurface, fill};
+use crate::layout::AvailSize;
 use crate::menu::{FocusRequest, MENU_BAR_HEIGHT, MenuOutcome, MenuState, Menus, RowPath};
 use crate::platform::{
     KeyEvent, Modifiers, MouseButton, WindowAppearance, WindowControlArea, WindowHandle, WindowId,
@@ -22,7 +23,7 @@ use crate::theme::{BODY_LINE, BODY_SIZE, ICON_FONT, Palette, SMALL_FONT, TEXT_FO
 use crate::tooltip::{KeyTip, TooltipProbe};
 use crate::types::APP_NAME;
 use crate::ui::{
-    AppFrame, AppNode, AppUi, AvailSize, Brushes, CaptionHit, CustomDraw, DialogHit, EditorSlot,
+    AppFrame, AppNode, AppUi, Brushes, CaptionHit, CustomDraw, DialogHit, EditorSlot,
     FindHit, Focus, HitId, MenuHit, OverlayAnchor, TabHit, TabId, box_, custom, row, text,
 };
 use crate::widgets::icon_button;

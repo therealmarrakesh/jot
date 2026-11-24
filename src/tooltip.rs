@@ -3,6 +3,7 @@ use std::time::{Duration, Instant};
 
 use crate::geom::{Rect, ScreenPoint, ScreenRect, point, round_half_up, size};
 use crate::gfx::{Gpu, TextStyle, TextSystem};
+use crate::layout::AvailSize;
 use crate::platform::{
     Jobs, Modifiers, TimerHandle, WindowId, cursor_screen_pos, monitor_work_area_and_scale,
 };
@@ -10,7 +11,7 @@ use crate::shell::AppEvent;
 use crate::theme::{CONTROL_RADIUS, Palette, SMALL_FONT, theme_shadow};
 use crate::types::SharedStr;
 use crate::ui::{
-    AnimTracks, AppFrame, AvailSize, Curve, Easing, Frame, HitId, Node, OverlayAnchor,
+    AnimTracks, AppFrame, Curve, Easing, Frame, HitId, Node, OverlayAnchor,
     OverlaySurface, PointerState, box_, text,
 };
 

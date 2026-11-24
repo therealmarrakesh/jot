@@ -8,6 +8,7 @@ mod files;
 mod find;
 mod geom;
 mod gfx;
+mod layout;
 mod menu;
 mod platform;
 mod shell;

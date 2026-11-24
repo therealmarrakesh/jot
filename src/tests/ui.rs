@@ -1,14 +1,15 @@
 use crate::command::AppCommand;
 use crate::editor::{EditCommand, RopeExt as _};
 use crate::geom::point;
+use crate::layout::{AvailSize, Space, snap_border_edges};
 use crate::platform::{
     Key, KeyEvent, Modifiers, MouseButton, PlatformEvent, PlatformHandler, WindowControlArea,
     hit_test_control_areas,
 };
 use crate::theme::{SMALL_FONT, TEXT_FONT};
 use crate::ui::{
-    AppFrame, AvailSize, CaptionHit, DialogHit, EditorSlot, FindHit, Focus, HitId, MenuHit,
-    MenuKind, Space, box_, row, snap_border_edges, text,
+    AppFrame, CaptionHit, DialogHit, EditorSlot, FindHit, Focus, HitId, MenuHit,
+    MenuKind, box_, row, text,
 };
 
 use super::{EDITOR_PADDING_LEFT, EDITOR_PADDING_TOP, TestHarness};
