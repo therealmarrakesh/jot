@@ -197,24 +197,22 @@ fn mods_match(spec: u8, m: Modifiers) -> bool {
     ctrl_ok && alt_ok && shift_ok
 }
 
-pub(crate) fn app_shortcut(ev: KeyEvent) -> Option<AppCommand> {
+fn shortcut<T>(ev: KeyEvent, pick: impl Fn(Command) -> Option<T>) -> Option<T> {
     if ev.modifiers.win || ev.modifiers.alt_gr {
         return None;
     }
-    KEYMAP.iter().find_map(|b| match b.command {
-        Command::App(cmd) if b.key == ev.key && mods_match(b.mods, ev.modifiers) => Some(cmd),
-        _ => None,
-    })
+    KEYMAP
+        .iter()
+        .filter(|b| b.key == ev.key && mods_match(b.mods, ev.modifiers))
+        .find_map(|b| pick(b.command))
+}
+
+pub(crate) fn app_shortcut(ev: KeyEvent) -> Option<AppCommand> {
+    shortcut(ev, |c| if let App(cmd) = c { Some(cmd) } else { None })
 }
 
 pub(crate) fn edit_shortcut(ev: KeyEvent) -> Option<EditCommand> {
-    if ev.modifiers.win || ev.modifiers.alt_gr {
-        return None;
-    }
-    KEYMAP.iter().find_map(|b| match b.command {
-        Command::Edit(cmd) if b.key == ev.key && mods_match(b.mods, ev.modifiers) => Some(cmd),
-        _ => None,
-    })
+    shortcut(ev, |c| if let Edit(cmd) = c { Some(cmd) } else { None })
 }
 
 fn format_chord(mods: u8, key: Key) -> SharedStr {
@@ -232,10 +230,7 @@ fn format_chord(mods: u8, key: Key) -> SharedStr {
         K::Char('=') | K::Char('+') => out.push_str("Plus"),
         K::Char('-') => out.push_str("Minus"),
         K::Char(c) => out.push(c.to_ascii_uppercase()),
-        K::F(n) => {
-            out.push('F');
-            out.push_str(&n.to_string());
-        }
+        K::F(n) => out.push_str(&format!("F{n}")),
         K::Delete => out.push_str("Del"),
         _ => {}
     }
