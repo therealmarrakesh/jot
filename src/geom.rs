@@ -10,11 +10,6 @@ pub(crate) struct Point {
 
 impl Point {
     pub(crate) const ZERO: Self = Self { x: 0.0, y: 0.0 };
-
-    #[inline]
-    pub(crate) const fn new(x: f32, y: f32) -> Self {
-        Self { x, y }
-    }
 }
 
 #[inline]

@@ -1876,11 +1876,11 @@ mod tests {
 
     #[test]
     fn directwrite_status_bar_shapes_all_labels() {
-        use crate::gfx::{TextAlign, TextSystem, font};
+        use crate::gfx::{LabelLayout, TextAlign, TextStyle, TextSystem};
         use crate::types::SharedStr;
 
         let ts = TextSystem::new();
-        let f = font("Segoe UI Variable Small");
+        let style = TextStyle::regular("Segoe UI Variable Small", 12.0);
         let labels = ["Ln 1, Col 1", "0 characters", "100%", "Windows (CRLF)", "UTF-8"];
 
         let build = |engine: &mut LayoutEngine, scale: f32| {
@@ -1912,29 +1912,24 @@ mod tests {
 
         let measure_labels = |ids: [LayoutId; 5]| {
             let ts = &ts;
-            let f = &f;
+            let style = &style;
             move |id: LayoutId, kw: Option<f32>, _: Option<f32>, avail: AvailSize| {
                 let ix = ids.iter().position(|&x| x == id).unwrap();
                 let wrap_width = kw.or(match avail.width {
                     AvailableSpace::Definite(x) => Some(x),
                     _ => None,
                 });
-                let lines = ts.shape_wrapped(
+                ts.shape_label(
                     SharedStr::new_static(labels[ix]),
-                    12.0,
-                    f,
-                    wrap_width,
-                    None,
-                    None,
-                    TextAlign::Left,
-                );
-                let mut sz = Size::ZERO;
-                for line in &lines {
-                    let ls = line.size(16.0);
-                    sz.height += ls.height;
-                    sz.width = sz.width.max(ls.width).ceil();
-                }
-                sz
+                    style,
+                    LabelLayout {
+                        line_height: 16.0,
+                        wrap_width,
+                        line_clamp: None,
+                        align: TextAlign::Left,
+                    },
+                )
+                .size()
             }
         };
 

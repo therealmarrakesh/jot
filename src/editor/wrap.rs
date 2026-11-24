@@ -3,28 +3,32 @@ use std::ops::{Range, RangeInclusive};
 
 use ropey::Rope;
 
+use crate::color::Rgba;
 use crate::geom::{Point, Size, point, size};
-use crate::gfx::{Boundary, D2DRenderer, Font, ShapedLine, TextAlign, TextSystem};
+use crate::gfx::{
+    AdvanceTable, D2DRenderer, Font, ShapedRow, TextStyle, TextSystem, break_opportunities,
+};
 
 use super::buffer::{RopeExt, TextPoint};
 
 const CHUNK_SIZE: usize = 256;
+const MAX_WRAP_INDENT: u32 = 32;
 
 pub(crate) enum VisualRow {
-    Shaped(ShapedLine),
+    Shaped(ShapedRow),
     Windowed {
         start_byte: usize,
         end_byte: usize,
         total_bytes: usize,
         start_x: f32,
         total_width: f32,
-        line: ShapedLine,
+        line: ShapedRow,
     },
     Placeholder(usize),
 }
 
-impl From<ShapedLine> for VisualRow {
-    fn from(line: ShapedLine) -> Self {
+impl From<ShapedRow> for VisualRow {
+    fn from(line: ShapedRow) -> Self {
         Self::Shaped(line)
     }
 }
@@ -116,19 +120,31 @@ impl VisualRow {
         }
     }
 
-    pub(crate) fn paint(&self, origin: Point, line_height: f32, renderer: &mut D2DRenderer) {
+    pub(crate) fn paint(
+        &self,
+        origin: Point,
+        line_height: f32,
+        color: Rgba,
+        underline: Option<Range<usize>>,
+        renderer: &mut D2DRenderer,
+    ) {
         match self {
             Self::Shaped(line) => {
-                line.paint(origin, line_height, TextAlign::Left, None, renderer);
+                renderer.draw_row(line, origin, line_height, color, underline);
             }
-            Self::Windowed { start_x, line, .. } => {
-                line.paint(
-                    origin + point(*start_x, 0.0),
-                    line_height,
-                    TextAlign::Left,
-                    None,
-                    renderer,
-                );
+            Self::Windowed {
+                start_byte,
+                end_byte,
+                start_x,
+                line,
+                ..
+            } => {
+                let ul = underline.and_then(|r| {
+                    let s = r.start.max(*start_byte);
+                    let e = r.end.min(*end_byte);
+                    (s < e).then_some((s - *start_byte)..(e - *start_byte))
+                });
+                renderer.draw_row(line, origin + point(*start_x, 0.0), line_height, color, ul);
             }
             Self::Placeholder(_) => {}
         }
@@ -163,7 +179,7 @@ impl RowLayout {
         }
     }
 
-    pub(crate) fn from_shaped(lines: Vec<ShapedLine>) -> Self {
+    pub(crate) fn from_shaped(lines: Vec<ShapedRow>) -> Self {
         let total = lines.len();
         let rows: Vec<VisualRow> = lines.into_iter().map(VisualRow::from).collect();
         Self::from_slice(rows, 0, 0, total, 0.0)
@@ -267,14 +283,31 @@ impl RowLayout {
         size(width, self.total_sub_rows as f32 * line_height)
     }
 
-    pub(crate) fn paint(&self, origin: Point, line_height: f32, renderer: &mut D2DRenderer) {
+    pub(crate) fn paint(
+        &self,
+        origin: Point,
+        line_height: f32,
+        color: Rgba,
+        underline: Option<Range<usize>>,
+        renderer: &mut D2DRenderer,
+    ) {
+        let mut cursor = self.leading_bytes;
         for (ix, row) in self.rows.iter().enumerate() {
             let abs_sub = self.first_sub_row + ix;
+            let len = row.byte_len();
+            let sub_ul = underline.as_ref().and_then(|r| {
+                let s = r.start.max(cursor);
+                let e = r.end.min(cursor + len);
+                (s < e).then_some((s - cursor)..(e - cursor))
+            });
             row.paint(
                 origin + point(self.indent_for(abs_sub), abs_sub as f32 * line_height),
                 line_height,
+                color,
+                sub_ul,
                 renderer,
             );
+            cursor += len;
         }
     }
 }
@@ -328,7 +361,7 @@ impl LineRanges {
 #[derive(Debug, Clone)]
 pub(crate) struct WrappedLine {
     pub(crate) byte_len: usize,
-    pub(crate) indent_spaces: u32,
+    pub(crate) hanging_indent: f32,
     pub(crate) ranges: LineRanges,
 }
 
@@ -552,13 +585,118 @@ fn is_printable_ascii_or_tab(bytes: &[u8]) -> bool {
     bytes.iter().all(|&b| b == b'\t' || (0x20..=0x7e).contains(&b))
 }
 
-pub(crate) fn can_wrap_with_char_widths(text: &str) -> bool {
+pub(crate) fn can_wrap_with_advances(text: &str) -> bool {
     if is_printable_ascii_or_tab(text.as_bytes()) {
         return true;
     }
     text.chars().all(|c| {
         c == '\t' || CHAR_WIDTH_RANGES.iter().any(|r| r.contains(&(c as u32)))
     })
+}
+
+fn hanging_indent(line: &str, wrap_width: f32, advances: &mut AdvanceTable) -> f32 {
+    let mut chars: u32 = 0;
+    let mut width = 0.0f32;
+    for ch in line.chars() {
+        if (ch == ' ' || ch == '\t') && chars < MAX_WRAP_INDENT {
+            width += advances.advance(ch, width);
+            chars += 1;
+        } else {
+            break;
+        }
+    }
+    if width >= wrap_width * 0.5 {
+        0.0
+    } else {
+        width
+    }
+}
+
+fn wrap_line(
+    line: &str,
+    wrap_width: f32,
+    advances: &mut AdvanceTable,
+    out: &mut Vec<usize>,
+) -> f32 {
+    out.clear();
+    if line.is_empty() || !wrap_width.is_finite() || wrap_width <= 0.0 {
+        return 0.0;
+    }
+    let indent_px = hanging_indent(line, wrap_width, advances);
+    if !can_wrap_with_advances(line) {
+        let cont_width = (wrap_width - indent_px).max(1.0);
+        advances.dwrite_breaks(line, wrap_width, cont_width, out);
+        return if out.is_empty() { 0.0 } else { indent_px };
+    }
+
+    let break_offsets = break_opportunities(line);
+    let mut row_start = 0usize;
+    let mut row_width = 0.0f32;
+    let mut last_break_ix = 0usize;
+    let mut break_cursor = 0usize;
+
+    for (ix, ch) in line.char_indices() {
+        let char_end = ix + ch.len_utf8();
+        while break_cursor < break_offsets.len() && break_offsets[break_cursor] <= ix {
+            break_cursor += 1;
+        }
+        let w = advances.advance(ch, row_width);
+        if row_width + w > wrap_width && ix > row_start {
+            let split_at = if last_break_ix > row_start {
+                last_break_ix
+            } else {
+                ix
+            };
+            out.push(split_at);
+            row_start = split_at;
+            row_width = indent_px;
+            for c in line[split_at..char_end].chars() {
+                row_width += advances.advance(c, row_width);
+            }
+            last_break_ix = split_at;
+        } else {
+            row_width += w;
+        }
+        if break_cursor < break_offsets.len() && break_offsets[break_cursor] == char_end {
+            last_break_ix = char_end;
+            break_cursor += 1;
+        }
+    }
+    if out.is_empty() { 0.0 } else { indent_px }
+}
+
+pub(crate) fn horizontal_slice(
+    line: &str,
+    min_x: f32,
+    max_x: f32,
+    advances: &mut AdvanceTable,
+) -> (usize, usize, f32, f32) {
+    let mut x = 0.0f32;
+    let mut start_byte = 0usize;
+    let mut start_x = 0.0f32;
+    let mut found_start = false;
+    let mut end_byte = line.len();
+    let mut found_end = false;
+
+    for (ix, ch) in line.char_indices() {
+        let adv = advances.advance(ch, x);
+        if !found_start && x + adv >= min_x {
+            start_byte = ix;
+            start_x = x;
+            found_start = true;
+        }
+        x += adv;
+        if found_start && !found_end && x >= max_x {
+            end_byte = ix + ch.len_utf8();
+            found_end = true;
+        }
+    }
+    if !found_start {
+        start_byte = line.len();
+        start_x = x;
+        end_byte = line.len();
+    }
+    (start_byte, end_byte, start_x, x)
 }
 
 pub(crate) struct WrapIndex {
@@ -687,15 +825,14 @@ impl WrapIndex {
                 old_range,
                 inserted_bytes,
                 0,
-                &mut |_, _, _| {},
+                &mut |_, _, _| 0.0,
             );
             return;
         };
 
-        let font = self.font.clone();
-        let font_size = self.font_size;
-        ts.with_char_widths(&font, font_size, |char_widths, dw| {
-            let max_ascii = char_widths.max_printable_ascii();
+        let style = TextStyle::new(self.font.clone(), self.font_size);
+        ts.with_advances(&style, |advances| {
+            let max_ascii = advances.max_printable_ascii();
             let ascii_fit_len = if max_ascii > 0.0 {
                 (wrap_width / max_ascii).floor().max(0.0) as usize
             } else {
@@ -706,13 +843,7 @@ impl WrapIndex {
                 old_range,
                 inserted_bytes,
                 ascii_fit_len,
-                &mut |line_str, width, out| {
-                    if can_wrap_with_char_widths(line_str) {
-                        char_widths.wrap_line_into(line_str, width, dw, out);
-                    } else {
-                        dw.wrap_line_breaks(line_str, &font, font_size, width, true, out);
-                    }
-                },
+                &mut |line_str, width, out| wrap_line(line_str, width, advances, out),
             );
         });
     }
@@ -723,9 +854,9 @@ impl WrapIndex {
         old_range: &Range<usize>,
         inserted_bytes: usize,
         ascii_fit_len: usize,
-        wrap_line: &mut F,
+        wrap_fn: &mut F,
     ) where
-        F: FnMut(&str, f32, &mut Vec<Boundary>),
+        F: FnMut(&str, f32, &mut Vec<usize>) -> f32,
     {
         let existing_count = self.line_count();
         let old_start = self
@@ -759,7 +890,7 @@ impl WrapIndex {
                 None => updated_text.slice(0..0),
             };
             let byte_len = slice.len();
-            let mut indent_spaces = 0;
+            let mut indent_px = 0.0;
             let ranges = if let Some(width) = wrap_width
                 && byte_len > 0
             {
@@ -771,16 +902,15 @@ impl WrapIndex {
                 } else {
                     let line_str: Cow<str> = slice.into();
                     breaks.clear();
-                    wrap_line(&line_str, width, &mut breaks);
+                    indent_px = wrap_fn(&line_str, width, &mut breaks);
                     if breaks.is_empty() {
                         LineRanges::Single(byte_len)
                     } else {
                         let mut v = Vec::with_capacity(breaks.len() + 1);
                         let mut cursor = 0;
-                        for &b in &breaks {
-                            v.push(cursor..b.ix);
-                            cursor = b.ix;
-                            indent_spaces = b.next_indent;
+                        for &ix in &breaks {
+                            v.push(cursor..ix);
+                            cursor = ix;
                         }
                         if cursor < byte_len {
                             v.push(cursor..byte_len);
@@ -794,7 +924,7 @@ impl WrapIndex {
 
             replacement.push(WrappedLine {
                 byte_len,
-                indent_spaces,
+                hanging_indent: indent_px,
                 ranges,
             });
         }
@@ -865,13 +995,11 @@ mod tests {
     fn incremental_splice_longest_row_and_ascii_fast_fit() {
         let mut index = WrapIndex::new(test_font(), 14., Some(10.));
         let mut text = Rope::from("aa\nbbbb\nc");
-        let mut fake = |line: &str, _: f32, out: &mut Vec<Boundary>| {
+        let mut fake = |line: &str, _: f32, out: &mut Vec<usize>| -> f32 {
             if line.len() > 2 {
-                out.push(Boundary {
-                    ix: 2,
-                    next_indent: 0,
-                });
+                out.push(2);
             }
+            0.0
         };
         index.splice_lines(&text, &(0..0), text.len(), 0, &mut fake);
         assert_eq!(index.line_count(), 3);
@@ -901,6 +1029,7 @@ mod tests {
         let mut called = Vec::new();
         fast.splice_lines(&sample, &(0..0), sample.len(), 12, &mut |line, _, _| {
             called.push(line.to_string());
+            0.0
         });
         assert_eq!(called, vec!["longer ascii line", "日本語"]);
     }
@@ -912,12 +1041,12 @@ mod tests {
         index.chunks = LineChunks::from_vec(vec![
             WrappedLine {
                 byte_len: 10,
-                indent_spaces: 0,
+                hanging_indent: 0.0,
                 ranges: LineRanges::Single(10),
             },
             WrappedLine {
                 byte_len: 14,
-                indent_spaces: 0,
+                hanging_indent: 0.0,
                 ranges: LineRanges::Wrapped(vec![0..9, 9..14].into_boxed_slice()),
             },
         ]);
@@ -925,9 +1054,9 @@ mod tests {
         assert_eq!(index.offset_to_display(20, false), DisplayPos::new(2, 1, 0));
         assert_eq!(index.display_to_offset(DisplayPos::new(2, 1, 3)), 23);
 
-        let mut s1 = ShapedLine::default();
+        let mut s1 = ShapedRow::default();
         s1.len = 10;
-        let mut s2 = ShapedLine::default();
+        let mut s2 = ShapedRow::default();
         s2.len = 5;
         let layout = RowLayout::from_slice(
             vec![VisualRow::from(s1), VisualRow::from(s2)],

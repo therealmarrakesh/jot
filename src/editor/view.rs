@@ -7,14 +7,14 @@ use ropey::Rope;
 
 use crate::color::Rgba;
 use crate::geom::{Edges, Point, Rect, Size, point, size};
-use crate::gfx::{D2DRenderer, Font, TextRun, TextSystem, UnderlineStyle, fill};
+use crate::gfx::{D2DRenderer, Font, TextStyle, TextSystem, fill};
 use crate::platform::{Modifiers, MouseButton, TimerHandle, system_settings};
 use crate::scrollbar::ScrollbarViewport;
 use crate::theme::Palette;
 use crate::types::SharedStr;
 
 use super::buffer::RopeExt as _;
-use super::wrap::{LineRanges, RowLayout, VisualRow, can_wrap_with_char_widths};
+use super::wrap::{LineRanges, RowLayout, VisualRow, can_wrap_with_advances, horizontal_slice};
 use super::{Editor, EditorTimer, EditorTimers, MoveDirection};
 
 const BOTTOM_MARGIN_ROWS: usize = 3;
@@ -604,8 +604,9 @@ impl Editor {
     ) -> EditorPaintOutcome {
         let font = &style.font;
         let font_size = style.font_size;
+        let text_style = TextStyle::new(font.clone(), font_size);
         let line_height = style.line_height.max(1.0);
-        let space_width = ts.space_width(font, font_size);
+        let space_width = ts.measure(" ", &text_style);
 
         let wrap_width = (self.multi_line && self.soft_wrap)
             .then_some((input_bounds.size.width - RIGHT_MARGIN).max(1.0));
@@ -697,29 +698,19 @@ impl Editor {
             space_width,
         };
 
-        let base_run = TextRun {
-            len: display_text.len(),
-            font: font.clone(),
-            color: text_color,
-            underline: None,
-        };
-        let ime_underline = Some(UnderlineStyle {
-            thickness: 1.0,
-            color: Some(text_color),
-        });
-        let marked = self.composition.map(|c| {
-            let len = display_text.len();
-            c.start.min(len)..c.end.min(len)
-        });
-        let runs = split_ime_underline(base_run, 0..display_text.len(), marked, ime_underline);
+        let marked = (!is_empty)
+            .then_some(self.composition)
+            .flatten()
+            .map(|c| {
+                let len = display_text.len();
+                c.start.min(len)..c.end.min(len)
+            });
         let (rows, shaped_windowed) = self.shape_visible_lines(
             display_text,
             &layout,
             &shape_rows,
-            font,
-            font_size,
+            &text_style,
             input_bounds.size.width,
-            &runs,
             ts,
         );
         layout.rows = Rc::new(rows);
@@ -740,12 +731,12 @@ impl Editor {
                 Some((cached, w)) if *cached == key => *w,
                 _ => {
                     let s: Cow<str> = slice.into();
-                    let w = if s.len() > HUGE_UNWRAPPED_LINE_BYTES && can_wrap_with_char_widths(&s) {
-                        ts.with_char_widths(font, font_size, |cw, dw| {
-                            cw.horizontal_slice(&s, 0.0, 0.0, dw).3
+                    let w = if s.len() > HUGE_UNWRAPPED_LINE_BYTES && can_wrap_with_advances(&s) {
+                        ts.with_advances(&text_style, |adv| {
+                            horizontal_slice(&s, 0.0, 0.0, adv).3
                         })
                     } else {
-                        ts.measure_line_width(&s, &key.font, font_size)
+                        ts.measure(&s, &text_style)
                     };
                     self.longest_line_cache = Some((key, w));
                     w
@@ -822,8 +813,20 @@ impl Editor {
 
         let origin = content_bounds.origin;
         let mut y = layout.visible_top_rel;
-        for row_layout in layout.rows.iter() {
-            row_layout.paint(point(origin.x, origin.y + y), line_height, renderer);
+        for (vi, row_layout) in layout.rows.iter().enumerate() {
+            let line_base = layout.visible_byte_offsets[vi];
+            let line_marked = marked.as_ref().and_then(|m| {
+                (m.end > line_base).then(|| {
+                    m.start.saturating_sub(line_base)..m.end.saturating_sub(line_base)
+                })
+            });
+            row_layout.paint(
+                point(origin.x, origin.y + y),
+                line_height,
+                text_color,
+                line_marked,
+                renderer,
+            );
             y += row_layout.size(line_height).height;
         }
 
@@ -910,35 +913,27 @@ impl Editor {
         (line_range, lines, visible_top_rel, shape_rows)
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn shape_visible_lines(
         &self,
         display_text: &Rope,
         layout: &ViewLayout,
         shape_rows: &Range<usize>,
-        font: &Font,
-        font_size: f32,
+        text_style: &TextStyle,
         viewport_width: f32,
-        runs: &[TextRun],
         ts: &TextSystem,
     ) -> (Vec<RowLayout>, bool) {
         if !self.multi_line {
             let text: SharedStr = display_text.to_string().into();
-            let aligned = align_runs(&text, runs);
-            let line_runs = aligned.as_deref().unwrap_or(runs);
-            let shaped = ts.shape_line(text, font_size, line_runs);
+            let shaped = ts.shape_row(text, text_style);
             return (vec![RowLayout::from_shaped(vec![shaped])], false);
         }
 
         if self.text.len() == 0 {
             let text = display_text.to_string();
-            let mut shaped = Vec::new();
-            let mut off = 0;
-            for part in text.split('\n') {
-                let line_runs = slice_runs(runs, off, &(0..part.len()));
-                shaped.push(ts.shape_line(part.to_string().into(), font_size, &line_runs));
-                off += part.len() + 1;
-            }
+            let shaped = text
+                .split('\n')
+                .map(|part| ts.shape_row(part.to_string().into(), text_style))
+                .collect();
             return (vec![RowLayout::from_shaped(shaped)], false);
         }
 
@@ -959,12 +954,12 @@ impl Editor {
                 && line_len > HUGE_UNWRAPPED_LINE_BYTES
             {
                 let line_str: Cow<str> = line_slice.into();
-                if can_wrap_with_char_widths(&line_str) {
+                if can_wrap_with_advances(&line_str) {
                     let min_x = (-self.scroll_x - HORIZONTAL_WINDOW_PAD).max(0.0);
                     let max_x = (-self.scroll_x + viewport_width + HORIZONTAL_WINDOW_PAD).max(min_x);
                     let (mut start_b, mut end_b, start_x, total_w) =
-                        ts.with_char_widths(font, font_size, |cw, dw| {
-                            cw.horizontal_slice(&line_str, min_x, max_x, dw)
+                        ts.with_advances(text_style, |adv| {
+                            horizontal_slice(&line_str, min_x, max_x, adv)
                         });
                     if caret >= line_byte_start && caret <= line_byte_start + line_len {
                         let local_caret = caret - line_byte_start;
@@ -975,9 +970,7 @@ impl Editor {
                         }
                     }
                     let slice_str: SharedStr = line_str[start_b..end_b].to_string().into();
-                    let sub_runs = slice_runs(runs, line_byte_start, &(start_b..end_b));
-                    let sub_runs = align_runs(&slice_str, &sub_runs).unwrap_or(sub_runs);
-                    let shaped = ts.shape_line(slice_str, font_size, &sub_runs);
+                    let shaped = ts.shape_row(slice_str, text_style);
                     let vrow = VisualRow::Windowed {
                         start_byte: start_b,
                         end_byte: end_b,
@@ -1022,18 +1015,6 @@ impl Editor {
                 .get(slice_start)
                 .map_or(0, |r| r.start);
 
-            let hanging_indent = if wrapped.indent_spaces > 0 && total_sub_rows > 1 {
-                let indent_bytes: usize = line_slice
-                    .chars()
-                    .take(wrapped.indent_spaces as usize)
-                    .map(char::len_utf8)
-                    .sum();
-                let prefix: Cow<str> = line_slice.slice(..indent_bytes).into();
-                ts.measure_line_width(&prefix, font, font_size)
-            } else {
-                0.0
-            };
-
             let mut rows = Vec::with_capacity(slice_end.saturating_sub(slice_start));
             for sub_ix in slice_start..slice_end {
                 let range = match &wrapped.ranges {
@@ -1046,10 +1027,8 @@ impl Editor {
                 let has_caret = caret >= sub_start && caret <= sub_end;
                 let must_shape = shape_rows.contains(&visual_row) || has_caret;
                 if must_shape {
-                    let sub_runs = slice_runs(runs, line_byte_start, &range);
                     let sub_text: SharedStr = line_slice.slice(range).to_string().into();
-                    let sub_runs = align_runs(&sub_text, &sub_runs).unwrap_or(sub_runs);
-                    let shaped = ts.shape_line(sub_text, font_size, &sub_runs);
+                    let shaped = ts.shape_row(sub_text, text_style);
                     rows.push(VisualRow::from(shaped));
                 } else {
                     rows.push(VisualRow::Placeholder(range.len()));
@@ -1061,7 +1040,7 @@ impl Editor {
                 slice_start,
                 leading_bytes,
                 total_sub_rows,
-                hanging_indent,
+                wrapped.hanging_indent,
             ));
         }
         (result, shaped_windowed)
@@ -1133,98 +1112,6 @@ fn range_rects(range: &Range<usize>, layout: &ViewLayout) -> Option<Vec<Rect>> {
         line_y += row_layout.size(layout.line_height).height;
     }
     (!out.is_empty()).then_some(out)
-}
-
-fn slice_runs(runs: &[TextRun], line_offset: usize, range: &Range<usize>) -> Vec<TextRun> {
-    let mut out = Vec::new();
-    let target = (line_offset + range.start)..(line_offset + range.end);
-    let mut cursor = 0;
-    for run in runs {
-        let start = cursor;
-        let end = cursor + run.len;
-        if end <= target.start {
-            cursor = end;
-            continue;
-        }
-        if start >= target.end {
-            break;
-        }
-        let s = target.start.max(start) - start;
-        let e = target.end.min(end) - start;
-        if e > s {
-            out.push(TextRun {
-                len: e - s,
-                ..run.clone()
-            });
-        }
-        cursor = end;
-    }
-    out
-}
-
-fn align_runs(text: &str, runs: &[TextRun]) -> Option<Vec<TextRun>> {
-    let mut pos = 0;
-    if runs.iter().all(|r| {
-        pos += r.len;
-        pos <= text.len() && text.is_char_boundary(pos)
-    }) {
-        return None;
-    }
-    let mut out = Vec::with_capacity(runs.len());
-    let mut cursor = 0;
-    let mut raw = 0;
-    for run in runs {
-        raw = (raw + run.len).min(text.len());
-        let mut end = raw;
-        while !text.is_char_boundary(end) {
-            end += 1;
-        }
-        if end > cursor {
-            out.push(TextRun {
-                len: end - cursor,
-                ..run.clone()
-            });
-            cursor = end;
-        }
-    }
-    Some(out)
-}
-
-fn split_ime_underline(
-    run: TextRun,
-    total_range: Range<usize>,
-    marked: Option<Range<usize>>,
-    underline: Option<UnderlineStyle>,
-) -> Vec<TextRun> {
-    if run.len == 0 {
-        return Vec::new();
-    }
-    let Some(marked) = marked else {
-        return vec![run];
-    };
-    let s = total_range.start.max(marked.start);
-    let e = total_range.end.min(marked.end);
-    if s >= e {
-        return vec![run];
-    }
-    [
-        TextRun {
-            len: s - total_range.start,
-            ..run.clone()
-        },
-        TextRun {
-            len: e - s,
-            underline,
-            ..run.clone()
-        },
-        TextRun {
-            len: total_range.end - e,
-            ..run
-        },
-    ]
-    .into_iter()
-    .filter(|r| r.len > 0)
-    .collect()
 }
 
 #[cfg(test)]

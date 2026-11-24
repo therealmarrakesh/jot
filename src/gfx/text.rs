@@ -1,12 +1,13 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
+use std::ops::Range;
 
 use windows::Win32::Graphics::DirectWrite::{
     DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
     DWRITE_FONT_WEIGHT, DWRITE_HIT_TEST_METRICS, DWRITE_LINE_METRICS,
     DWRITE_LINE_SPACING_METHOD_UNIFORM, DWRITE_TEXT_ALIGNMENT_CENTER,
-    DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_TEXT_METRICS, DWRITE_TEXT_RANGE, DWRITE_TRIMMING,
+    DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_TEXT_METRICS, DWRITE_TRIMMING,
     DWRITE_TRIMMING_GRANULARITY_CHARACTER, DWRITE_WORD_WRAPPING_NO_WRAP, DWRITE_WORD_WRAPPING_WRAP,
     DWriteCreateFactory, IDWriteFactory5, IDWriteTextFormat, IDWriteTextLayout,
 };
@@ -17,12 +18,12 @@ use crate::geom::{Point, Rect, Size, point, size};
 use crate::types::SharedStr;
 
 use super::d2d::{D2DRenderer, fill};
-use super::wrap::CharWidths;
+use super::wrap::AdvanceTable;
 
 const MAX_LAYOUT_CACHE: usize = 512;
 const MAX_SHAPED_CACHE_BYTES: usize = 4 * 1024 * 1024;
 const MAX_CACHEABLE_LINE_BYTES: usize = 16 * 1024;
-pub(crate) const TAB_STOP_COLUMNS: f32 = 8.0;
+pub(super) const TAB_STOP_COLUMNS: f32 = 8.0;
 
 #[derive(Copy, Clone, Debug, PartialOrd)]
 pub(crate) struct FontWeight(pub(crate) f32);
@@ -75,18 +76,43 @@ pub(crate) fn font(family: impl Into<SharedStr>) -> Font {
     }
 }
 
-#[derive(Copy, Clone, Debug, Default, PartialEq)]
-pub(crate) struct UnderlineStyle {
-    pub(crate) thickness: f32,
-    pub(crate) color: Option<Rgba>,
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct TextStyle {
+    pub(crate) font: Font,
+    size_hundredths: u32,
 }
 
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) struct TextRun {
-    pub(crate) len: usize,
-    pub(crate) font: Font,
-    pub(crate) color: Rgba,
-    pub(crate) underline: Option<UnderlineStyle>,
+impl TextStyle {
+    pub(crate) fn new(font: Font, size: f32) -> Self {
+        let safe = if size.is_finite() {
+            size.clamp(1.0, 4096.0)
+        } else {
+            14.0
+        };
+        Self {
+            font,
+            size_hundredths: (safe * 100.0).round().max(1.0) as u32,
+        }
+    }
+
+    pub(crate) fn regular(family: impl Into<SharedStr>, size: f32) -> Self {
+        Self::new(font(family), size)
+    }
+
+    pub(crate) fn semibold(family: impl Into<SharedStr>, size: f32) -> Self {
+        Self::new(
+            Font {
+                family: family.into(),
+                weight: FontWeight::SEMIBOLD,
+            },
+            size,
+        )
+    }
+
+    #[inline]
+    pub(crate) fn size(&self) -> f32 {
+        self.size_hundredths as f32 / 100.0
+    }
 }
 
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash)]
@@ -96,28 +122,26 @@ pub(crate) enum TextAlign {
     Center,
 }
 
-#[derive(Copy, Clone, Debug)]
-struct UnderlineSpan {
-    start_utf8: usize,
-    end_utf8: usize,
-    thickness: f32,
-    color: Rgba,
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub(crate) struct LabelLayout {
+    pub(crate) line_height: f32,
+    pub(crate) wrap_width: Option<f32>,
+    pub(crate) line_clamp: Option<usize>,
+    pub(crate) align: TextAlign,
 }
 
 #[derive(Clone)]
-pub(crate) struct ShapedLine {
+pub(crate) struct ShapedRow {
     pub(crate) len: usize,
     pub(crate) width: f32,
-    pub(crate) ascent: f32,
-    pub(crate) descent: f32,
-    pub(crate) text: SharedStr,
+    ascent: f32,
+    descent: f32,
+    text: SharedStr,
     layout: Option<IDWriteTextLayout>,
-    default_color: Rgba,
-    underlines: Vec<UnderlineSpan>,
     is_ascii: bool,
 }
 
-impl Default for ShapedLine {
+impl Default for ShapedRow {
     fn default() -> Self {
         Self {
             len: 0,
@@ -126,14 +150,12 @@ impl Default for ShapedLine {
             descent: 3.0,
             text: SharedStr::default(),
             layout: None,
-            default_color: Rgba::new(0.0, 0.0, 0.0, 1.0),
-            underlines: Vec::new(),
             is_ascii: true,
         }
     }
 }
 
-impl ShapedLine {
+impl ShapedRow {
     pub(crate) fn x_for_index(&self, index: usize) -> f32 {
         let index = index.min(self.len);
         if index == 0 && self.is_ascii {
@@ -238,363 +260,113 @@ impl ShapedLine {
         };
         utf16_to_utf8_offset(self.text.as_str(), utf16_pos, self.is_ascii)
     }
-
-    pub(crate) fn paint(
-        &self,
-        origin: Point,
-        line_height: f32,
-        align: TextAlign,
-        align_width: Option<f32>,
-        renderer: &mut D2DRenderer,
-    ) {
-        let Some(layout) = &self.layout else {
-            return;
-        };
-        let align_offset_x = match (align, align_width) {
-            (TextAlign::Center, Some(w)) => (w - self.width) * 0.5,
-            _ => 0.0,
-        };
-        let glyph_height = self.ascent + self.descent;
-        let top_padding = ((line_height - glyph_height) * 0.5).max(0.0);
-        let draw_origin = point(origin.x + align_offset_x, origin.y + top_padding);
-
-        renderer.paint_text_layout(draw_origin, layout, self.default_color);
-
-        for ul in &self.underlines {
-            let x0 = self.x_for_index(ul.start_utf8);
-            let x1 = self.x_for_index(ul.end_utf8);
-            let (lo, hi) = if x0 <= x1 { (x0, x1) } else { (x1, x0) };
-            if hi > lo {
-                let y = draw_origin.y + self.ascent + 2.0;
-                let rect = Rect::new(
-                    point(draw_origin.x + lo, y),
-                    size(hi - lo, ul.thickness.max(1.0)),
-                );
-                renderer.paint_quad(fill(rect, ul.color));
-            }
-        }
-    }
 }
 
 #[derive(Clone)]
-pub(crate) struct WrappedLine {
+pub(crate) struct Label {
     pub(crate) width: f32,
     pub(crate) line_count: usize,
+    line_height: f32,
     layout_box_width: Option<f32>,
-    pub(crate) ascent: f32,
-    pub(crate) descent: f32,
-    uniform_spacing: bool,
+    align: TextAlign,
     clamped: bool,
     layout: Option<IDWriteTextLayout>,
 }
 
-impl WrappedLine {
-    pub(crate) fn size(&self, line_height: f32) -> Size {
-        size(self.width, line_height * self.line_count.max(1) as f32)
+impl Label {
+    pub(crate) fn size(&self) -> Size {
+        size(self.width.ceil(), self.line_height * self.line_count as f32)
     }
+}
 
-    pub(crate) fn paint(
-        &self,
+impl D2DRenderer {
+    pub(crate) fn draw_row(
+        &mut self,
+        row: &ShapedRow,
         origin: Point,
         line_height: f32,
-        align: TextAlign,
-        align_width: Option<f32>,
         color: Rgba,
-        renderer: &mut D2DRenderer,
+        underline: Option<Range<usize>>,
     ) {
-        let Some(layout) = &self.layout else {
+        let Some(layout) = &row.layout else {
             return;
         };
-        let align_offset_x = match (align, align_width) {
-            (TextAlign::Center, Some(w)) => {
-                let ref_w = self.layout_box_width.unwrap_or(self.width);
-                (w - ref_w) * 0.5
+        let glyph_height = row.ascent + row.descent;
+        let top_padding = ((line_height - glyph_height) * 0.5).max(0.0);
+        let draw_origin = point(origin.x, origin.y + top_padding);
+
+        self.draw_text_layout(draw_origin, layout, color);
+
+        if let Some(range) = underline
+            && range.start < range.end
+        {
+            let x0 = row.x_for_index(range.start);
+            let x1 = row.x_for_index(range.end);
+            let (lo, hi) = if x0 <= x1 { (x0, x1) } else { (x1, x0) };
+            if hi > lo {
+                let y = draw_origin.y + row.ascent + 2.0;
+                self.paint_quad(fill(
+                    Rect::new(point(draw_origin.x + lo, y), size(hi - lo, 1.0)),
+                    color,
+                ));
             }
-            _ => 0.0,
-        };
-        let top_padding = if self.uniform_spacing {
-            0.0
-        } else {
-            let glyph_height = self.ascent + self.descent;
-            ((line_height - glyph_height) * 0.5).max(0.0)
-        };
-        let clip_height = line_height * self.line_count.max(1) as f32;
-        if self.clamped {
-            let clip_w = align_width
-                .or(self.layout_box_width)
-                .unwrap_or(self.width)
-                .max(self.width)
-                + 2.0;
-            renderer.push_clip(Rect::new(origin, size(clip_w, clip_height)));
         }
-        renderer.paint_text_layout(
-            point(origin.x + align_offset_x, origin.y + top_padding),
-            layout,
-            color,
-        );
-        if self.clamped {
-            renderer.pop_clip();
+    }
+
+    pub(crate) fn draw_label(
+        &mut self,
+        label: &Label,
+        origin: Point,
+        align_width: f32,
+        color: Rgba,
+    ) {
+        let Some(layout) = &label.layout else {
+            return;
+        };
+        let align_offset_x = match label.align {
+            TextAlign::Center => {
+                let ref_w = label.layout_box_width.unwrap_or(label.width);
+                (align_width - ref_w) * 0.5
+            }
+            TextAlign::Left => 0.0,
+        };
+        if label.clamped {
+            let clip_w = label
+                .layout_box_width
+                .map_or(align_width, |bw| align_width.max(bw))
+                .max(label.width)
+                + 2.0;
+            self.push_clip(Rect::new(origin, size(clip_w, label.size().height)));
+        }
+        self.draw_text_layout(point(origin.x + align_offset_x, origin.y), layout, color);
+        if label.clamped {
+            self.pop_clip();
         }
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-struct FormatKey {
-    family: SharedStr,
-    weight: FontWeight,
-    size_hundredths: u32,
+struct FontEntry {
+    format: IDWriteTextFormat,
+    ascent: f32,
+    descent: f32,
+    space_width: f32,
+    advances: Option<AdvanceTable>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-struct ShapedCacheKey {
+struct RowCacheKey {
     text: SharedStr,
-    font_size_hundredths: u32,
-    family: SharedStr,
-    weight: FontWeight,
-    color_bits: [u32; 4],
-    has_underline: bool,
+    style: TextStyle,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-struct WrappedCacheKey {
+struct LabelCacheKey {
     text: SharedStr,
-    font_size_hundredths: u32,
-    family: SharedStr,
-    weight: FontWeight,
+    style: TextStyle,
+    line_height_tenths: u32,
     wrap_width_tenths: Option<u32>,
-    line_height_tenths: Option<u32>,
     line_clamp: Option<usize>,
     align: TextAlign,
-}
-
-pub(crate) struct DirectWriteCore {
-    factory: IDWriteFactory5,
-    formats: RefCell<HashMap<FormatKey, IDWriteTextFormat>>,
-    space_widths: RefCell<HashMap<FormatKey, f32>>,
-    font_metrics: RefCell<HashMap<FormatKey, (f32, f32)>>,
-}
-
-impl DirectWriteCore {
-    fn new() -> Self {
-        let factory: IDWriteFactory5 =
-            unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED) }
-                .expect("failed to create DirectWrite factory");
-        Self {
-            factory,
-            formats: RefCell::new(HashMap::new()),
-            space_widths: RefCell::new(HashMap::new()),
-            font_metrics: RefCell::new(HashMap::new()),
-        }
-    }
-
-    pub(super) fn sanitize_size(font_size: f32) -> f32 {
-        if font_size.is_finite() {
-            font_size.clamp(1.0, 4096.0)
-        } else {
-            14.0
-        }
-    }
-
-    pub(super) fn text_format(&self, font: &Font, font_size: f32) -> IDWriteTextFormat {
-        let safe_size = Self::sanitize_size(font_size);
-        let key = FormatKey {
-            family: font.family.clone(),
-            weight: font.weight,
-            size_hundredths: (safe_size * 100.0).round().max(1.0) as u32,
-        };
-        if let Some(existing) = self.formats.borrow().get(&key) {
-            return existing.clone();
-        }
-        let family = HSTRING::from(font.family.as_str());
-        let locale = HSTRING::from("");
-        let dw_weight = DWRITE_FONT_WEIGHT(font.weight.0.round().clamp(1.0, 999.0) as i32);
-        let format = unsafe {
-            self.factory
-                .CreateTextFormat(
-                    &family,
-                    None,
-                    dw_weight,
-                    DWRITE_FONT_STYLE_NORMAL,
-                    DWRITE_FONT_STRETCH_NORMAL,
-                    safe_size,
-                    &locale,
-                )
-                .or_else(|_| {
-                    let fallback = HSTRING::from("Segoe UI");
-                    self.factory.CreateTextFormat(
-                        &fallback,
-                        None,
-                        DWRITE_FONT_WEIGHT(400),
-                        DWRITE_FONT_STYLE_NORMAL,
-                        DWRITE_FONT_STRETCH_NORMAL,
-                        safe_size,
-                        &locale,
-                    )
-                })
-        }
-        .expect("CreateTextFormat fallback failed");
-        let _ = unsafe { format.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP) };
-        let space_w = self.measure_utf16(&[b' ' as u16], &format);
-        if space_w > 0.0 {
-            let _ = unsafe { format.SetIncrementalTabStop(space_w * TAB_STOP_COLUMNS) };
-            self.space_widths.borrow_mut().insert(key.clone(), space_w);
-        }
-        self.formats.borrow_mut().insert(key, format.clone());
-        format
-    }
-
-    fn primary_metrics(&self, font: &Font, font_size: f32) -> (f32, f32) {
-        let safe_size = Self::sanitize_size(font_size);
-        let key = FormatKey {
-            family: font.family.clone(),
-            weight: font.weight,
-            size_hundredths: (safe_size * 100.0).round().max(1.0) as u32,
-        };
-        if let Some(&m) = self.font_metrics.borrow().get(&key) {
-            return m;
-        }
-        let format = self.text_format(font, safe_size);
-        let sample = [b'H' as u16, b'g' as u16];
-        let metrics = unsafe { self.factory.CreateTextLayout(&sample, &format, f32::MAX, f32::MAX) }
-            .ok()
-            .map_or((safe_size * 0.8, safe_size * 0.2), |l| {
-                let (_, asc, desc) = extract_single_line_metrics(&l, safe_size);
-                (asc, desc)
-            });
-        self.font_metrics.borrow_mut().insert(key, metrics);
-        metrics
-    }
-
-    pub(super) fn measure_utf16(&self, utf16: &[u16], format: &IDWriteTextFormat) -> f32 {
-        if utf16.is_empty() {
-            return 0.0;
-        }
-        let Ok(layout) =
-            (unsafe { self.factory.CreateTextLayout(utf16, format, f32::MAX, f32::MAX) })
-        else {
-            return 0.0;
-        };
-        let mut metrics = DWRITE_TEXT_METRICS::default();
-        if unsafe { layout.GetMetrics(&mut metrics) }.is_ok() {
-            metrics.widthIncludingTrailingWhitespace
-        } else {
-            0.0
-        }
-    }
-
-    pub(crate) fn wrap_line_breaks(
-        &self,
-        text: &str,
-        font: &Font,
-        font_size: f32,
-        width: f32,
-        preserve_indent: bool,
-        out: &mut Vec<crate::gfx::Boundary>,
-    ) {
-        if text.is_empty() || !width.is_finite() || width <= 0.0 {
-            return;
-        }
-        let safe_size = Self::sanitize_size(font_size);
-        let format = self.text_format(font, safe_size);
-        let utf16 = encode_single_line_utf16(text);
-        if utf16.is_empty() {
-            return;
-        }
-
-        let indent = if preserve_indent {
-            text.chars()
-                .take_while(|&c| c == ' ')
-                .count()
-                .min(crate::gfx::MAX_WRAP_INDENT as usize)
-        } else {
-            0
-        };
-        let indent_width = if indent > 0 {
-            let spaces = vec![b' ' as u16; indent];
-            self.measure_utf16(&spaces, &format)
-        } else {
-            0.0
-        };
-
-        let collect_breaks = |u16_slice: &[u16], max_w: f32| -> Vec<usize> {
-            let Ok(layout) = (unsafe {
-                self.factory
-                    .CreateTextLayout(u16_slice, &format, max_w.max(1.0), f32::MAX)
-            }) else {
-                return Vec::new();
-            };
-            let _ = unsafe { layout.SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP) };
-            let mut m = DWRITE_TEXT_METRICS::default();
-            if unsafe { layout.GetMetrics(&mut m) }.is_err() || m.lineCount <= 1 {
-                return Vec::new();
-            }
-            let count = m.lineCount as usize;
-            let mut metrics = vec![DWRITE_LINE_METRICS::default(); count];
-            let mut actual = 0u32;
-            let _ = unsafe { layout.GetLineMetrics(Some(&mut metrics), &mut actual) };
-            let n = (actual as usize).min(metrics.len());
-            if n <= 1 {
-                return Vec::new();
-            }
-            let mut breaks = Vec::with_capacity(n - 1);
-            let mut acc = 0usize;
-            for lm in &metrics[..n - 1] {
-                acc += lm.length as usize;
-                if acc > 0 && acc < u16_slice.len() {
-                    breaks.push(acc);
-                }
-            }
-            breaks
-        };
-
-        let mut u16_breaks = collect_breaks(&utf16, width);
-        if u16_breaks.is_empty() {
-            return;
-        }
-        if indent > 0 && indent_width > 0.0 && indent_width < width {
-            let first = u16_breaks[0];
-            u16_breaks.truncate(1);
-            if first < utf16.len() {
-                let cont_w = (width - indent_width).max(1.0);
-                for rel in collect_breaks(&utf16[first..], cont_w) {
-                    u16_breaks.push(first + rel);
-                }
-            }
-        }
-
-        let mut bi = 0usize;
-        let mut u16_acc = 0usize;
-        let mut last_byte = 0usize;
-        for (byte_ix, ch) in text.char_indices() {
-            while bi < u16_breaks.len() && u16_acc >= u16_breaks[bi] {
-                if byte_ix > last_byte && byte_ix < text.len() {
-                    out.push(crate::gfx::Boundary {
-                        ix: byte_ix,
-                        next_indent: indent as u32,
-                    });
-                    last_byte = byte_ix;
-                }
-                bi += 1;
-            }
-            if bi >= u16_breaks.len() {
-                break;
-            }
-            u16_acc += ch.len_utf16();
-        }
-    }
-}
-
-pub(crate) fn encode_single_line_utf16(text: &str) -> Vec<u16> {
-    let mut out = Vec::with_capacity(text.len());
-    for ch in text.chars() {
-        let mapped = match ch {
-            '\u{000B}' | '\u{000C}' | '\u{0085}' | '\u{2028}' | '\u{2029}' => '\u{25A1}',
-            other => other,
-        };
-        let mut buf = [0u16; 2];
-        out.extend_from_slice(mapped.encode_utf16(&mut buf));
-    }
-    out
 }
 
 pub(crate) struct TextSystem {
@@ -602,139 +374,95 @@ pub(crate) struct TextSystem {
 }
 
 struct TextSystemState {
-    dw: DirectWriteCore,
-    char_widths: HashMap<(Font, u32), CharWidths>,
-    shaped_cache: HashMap<ShapedCacheKey, ShapedLine>,
-    shaped_cache_bytes: usize,
-    prev_wrapped_cache: HashMap<WrappedCacheKey, Vec<WrappedLine>>,
-    curr_wrapped_cache: HashMap<WrappedCacheKey, Vec<WrappedLine>>,
+    factory: IDWriteFactory5,
+    fonts: HashMap<TextStyle, FontEntry>,
+    rows: HashMap<RowCacheKey, ShapedRow>,
+    row_cache_bytes: usize,
+    prev_labels: HashMap<LabelCacheKey, Label>,
+    curr_labels: HashMap<LabelCacheKey, Label>,
+}
+
+impl TextSystemState {
+    fn font_entry(&mut self, style: &TextStyle) -> &mut FontEntry {
+        let factory = &self.factory;
+        self.fonts
+            .entry(style.clone())
+            .or_insert_with(|| create_font_entry(factory, style))
+    }
 }
 
 impl TextSystem {
     pub(crate) fn new() -> Self {
+        let factory: IDWriteFactory5 =
+            unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED) }
+                .expect("failed to create DirectWrite factory");
         Self {
             state: RefCell::new(TextSystemState {
-                dw: DirectWriteCore::new(),
-                char_widths: HashMap::new(),
-                shaped_cache: HashMap::new(),
-                shaped_cache_bytes: 0,
-                prev_wrapped_cache: HashMap::new(),
-                curr_wrapped_cache: HashMap::new(),
+                factory,
+                fonts: HashMap::new(),
+                rows: HashMap::new(),
+                row_cache_bytes: 0,
+                prev_labels: HashMap::new(),
+                curr_labels: HashMap::new(),
             }),
         }
     }
 
     pub(crate) fn finish_frame(&self) {
         let mut state = self.state.borrow_mut();
-        state.prev_wrapped_cache = std::mem::take(&mut state.curr_wrapped_cache);
+        state.prev_labels = std::mem::take(&mut state.curr_labels);
     }
 
-    pub(crate) fn space_width(&self, font: &Font, font_size: f32) -> f32 {
-        let state = self.state.borrow();
-        let safe_size = DirectWriteCore::sanitize_size(font_size);
-        let key = FormatKey {
-            family: font.family.clone(),
-            weight: font.weight,
-            size_hundredths: (safe_size * 100.0).round().max(1.0) as u32,
-        };
-        if let Some(&w) = state.dw.space_widths.borrow().get(&key) {
-            return w;
-        }
-        let format = state.dw.text_format(font, safe_size);
-        let w = state.dw.measure_utf16(&[b' ' as u16], &format);
-        state.dw.space_widths.borrow_mut().insert(key, w);
-        w
-    }
-
-    pub(crate) fn measure_line_width(&self, text: &str, font: &Font, font_size: f32) -> f32 {
+    pub(crate) fn measure(&self, text: &str, style: &TextStyle) -> f32 {
         if text.is_empty() {
             return 0.0;
         }
-        let state = self.state.borrow();
-        let format = state.dw.text_format(font, font_size);
+        let mut state = self.state.borrow_mut();
+        if text == " " {
+            return state.font_entry(style).space_width;
+        }
+        let format = state.font_entry(style).format.clone();
         let utf16 = encode_single_line_utf16(text);
-        state.dw.measure_utf16(&utf16, &format)
+        measure_utf16(&state.factory, &utf16, &format)
     }
 
-    pub(crate) fn text_width(&self, text: &str, family: &'static str, font_size: f32) -> f32 {
-        self.measure_line_width(text, &font(family), font_size).ceil()
-    }
-
-    pub(crate) fn text_width_weighted(
-        &self,
-        text: &str,
-        family: &'static str,
-        weight: FontWeight,
-        font_size: f32,
-    ) -> f32 {
-        let f = Font {
-            family: SharedStr::new_static(family),
-            weight,
-        };
-        self.measure_line_width(text, &f, font_size).ceil()
-    }
-
-    pub(crate) fn shape_line(
-        &self,
-        text: SharedStr,
-        font_size: f32,
-        runs: &[TextRun],
-    ) -> ShapedLine {
-        let base_run = runs.first();
-        let base_font = base_run.map(|r| r.font.clone()).unwrap_or_default();
-        let default_color = base_run.map_or(Rgba::new(0.0, 0.0, 0.0, 1.0), |r| r.color);
-        let safe_size = DirectWriteCore::sanitize_size(font_size);
-
+    pub(crate) fn shape_row(&self, text: SharedStr, style: &TextStyle) -> ShapedRow {
+        let mut state = self.state.borrow_mut();
         if text.is_empty() {
-            let (ascent, descent) = self.state.borrow().dw.primary_metrics(&base_font, safe_size);
-            return ShapedLine {
+            let entry = state.font_entry(style);
+            return ShapedRow {
                 len: 0,
                 width: 0.0,
-                ascent,
-                descent,
+                ascent: entry.ascent,
+                descent: entry.descent,
                 text,
                 layout: None,
-                default_color,
-                underlines: Vec::new(),
                 is_ascii: true,
             };
         }
 
-        let single_uniform_run = runs.len() <= 1 && text.len() <= MAX_CACHEABLE_LINE_BYTES;
-        let cache_key = single_uniform_run.then(|| ShapedCacheKey {
+        let cache_key = (text.len() <= MAX_CACHEABLE_LINE_BYTES).then(|| RowCacheKey {
             text: text.clone(),
-            font_size_hundredths: (safe_size * 100.0).round() as u32,
-            family: base_font.family.clone(),
-            weight: base_font.weight,
-            color_bits: [
-                default_color.r.to_bits(),
-                default_color.g.to_bits(),
-                default_color.b.to_bits(),
-                default_color.a.to_bits(),
-            ],
-            has_underline: base_run.is_some_and(|r| r.underline.is_some()),
+            style: style.clone(),
         });
-
-        let mut state = self.state.borrow_mut();
         if let Some(key) = &cache_key
-            && let Some(cached) = state.shaped_cache.get(key)
+            && let Some(cached) = state.rows.get(key)
         {
             return cached.clone();
         }
 
-        let format = state.dw.text_format(&base_font, safe_size);
-        let (ascent, descent) = state.dw.primary_metrics(&base_font, safe_size);
+        let (format, ascent, descent) = {
+            let entry = state.font_entry(style);
+            (entry.format.clone(), entry.ascent, entry.descent)
+        };
         let utf16 = encode_single_line_utf16(text.as_str());
         let is_ascii = text.as_str().is_ascii();
         let layout = unsafe {
             state
-                .dw
                 .factory
                 .CreateTextLayout(&utf16, &format, f32::MAX, f32::MAX)
         }
         .ok();
-
-        let mut underlines = Vec::new();
 
         if let Some(layout) = &layout {
             let _ = unsafe {
@@ -744,46 +472,6 @@ impl TextSystem {
                     ascent,
                 )
             };
-            let mut byte_pos = 0usize;
-            let mut utf16_pos = 0u32;
-            for run in runs {
-                let raw_end = (byte_pos + run.len).min(text.len());
-                let end_byte = text.as_str().floor_char_boundary(raw_end);
-                let slice = &text.as_str()[byte_pos..end_byte];
-                let utf16_len = if is_ascii {
-                    slice.len() as u32
-                } else {
-                    slice.encode_utf16().count() as u32
-                };
-                if utf16_len > 0 {
-                    let range = DWRITE_TEXT_RANGE {
-                        startPosition: utf16_pos,
-                        length: utf16_len,
-                    };
-                    if run.font.family != base_font.family {
-                        let fam = HSTRING::from(run.font.family.as_str());
-                        let _ = unsafe { layout.SetFontFamilyName(&fam, range) };
-                    }
-                    if run.font.weight != base_font.weight {
-                        let _ = unsafe {
-                            layout.SetFontWeight(
-                                DWRITE_FONT_WEIGHT(run.font.weight.0.round() as i32),
-                                range,
-                            )
-                        };
-                    }
-                    if let Some(ul) = run.underline {
-                        underlines.push(UnderlineSpan {
-                            start_utf8: byte_pos,
-                            end_utf8: end_byte,
-                            thickness: ul.thickness,
-                            color: ul.color.unwrap_or(run.color),
-                        });
-                    }
-                }
-                byte_pos = end_byte;
-                utf16_pos = utf16_pos.saturating_add(utf16_len);
-            }
         }
 
         let width = layout.as_ref().map_or(0.0, |l| {
@@ -795,199 +483,248 @@ impl TextSystem {
             }
         });
 
-        let shaped = ShapedLine {
+        let shaped = ShapedRow {
             len: text.len(),
             width,
             ascent,
             descent,
             text,
             layout,
-            default_color,
-            underlines,
             is_ascii,
         };
 
         if let Some(key) = cache_key {
             let entry_bytes = key.text.len().max(64);
-            if state.shaped_cache.len() >= MAX_LAYOUT_CACHE
-                || state.shaped_cache_bytes.saturating_add(entry_bytes) > MAX_SHAPED_CACHE_BYTES
+            if state.rows.len() >= MAX_LAYOUT_CACHE
+                || state.row_cache_bytes.saturating_add(entry_bytes) > MAX_SHAPED_CACHE_BYTES
             {
-                state.shaped_cache.clear();
-                state.shaped_cache_bytes = 0;
+                state.rows.clear();
+                state.row_cache_bytes = 0;
             }
-            state.shaped_cache_bytes += entry_bytes;
-            state.shaped_cache.insert(key, shaped.clone());
+            state.row_cache_bytes += entry_bytes;
+            state.rows.insert(key, shaped.clone());
         }
         shaped
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn shape_wrapped(
+    pub(crate) fn shape_label(
         &self,
         text: SharedStr,
-        font_size: f32,
-        font: &Font,
-        wrap_width: Option<f32>,
-        line_height: Option<f32>,
-        line_clamp: Option<usize>,
-        align: TextAlign,
-    ) -> Vec<WrappedLine> {
-        let safe_size = DirectWriteCore::sanitize_size(font_size);
-        let key = WrappedCacheKey {
+        style: &TextStyle,
+        opts: LabelLayout,
+    ) -> Label {
+        let lh = opts.line_height.max(1.0);
+        let box_w = opts.wrap_width.map(|w| w.max(1.0));
+        let key = LabelCacheKey {
             text: text.clone(),
-            font_size_hundredths: (safe_size * 100.0).round().max(1.0) as u32,
-            family: font.family.clone(),
-            weight: font.weight,
-            wrap_width_tenths: wrap_width.map(|w| (w.max(1.0) * 10.0).round() as u32),
-            line_height_tenths: line_height.map(|h| (h.max(1.0) * 10.0).round() as u32),
-            line_clamp,
-            align,
+            style: style.clone(),
+            line_height_tenths: (lh * 10.0).round() as u32,
+            wrap_width_tenths: box_w.map(|w| (w * 10.0).round() as u32),
+            line_clamp: opts.line_clamp,
+            align: opts.align,
         };
 
         let mut state = self.state.borrow_mut();
-        if let Some(cached) = state.curr_wrapped_cache.get(&key) {
+        if let Some(cached) = state.curr_labels.get(&key) {
             return cached.clone();
         }
-        if let Some(cached) = state.prev_wrapped_cache.remove(&key) {
-            state.curr_wrapped_cache.insert(key, cached.clone());
+        if let Some(cached) = state.prev_labels.remove(&key) {
+            state.curr_labels.insert(key, cached.clone());
             return cached;
         }
 
-        let format = state.dw.text_format(font, safe_size);
-        let (ascent, descent) = state.dw.primary_metrics(font, safe_size);
-        let glyph_h = (ascent + descent).max(1.0);
-        let ellipsis_sign = if line_clamp.is_some() {
-            unsafe { state.dw.factory.CreateEllipsisTrimmingSign(&format) }.ok()
-        } else {
-            None
+        let (format, ascent, descent) = {
+            let entry = state.font_entry(style);
+            (entry.format.clone(), entry.ascent, entry.descent)
         };
-        let mut out = Vec::new();
-        let mut remaining_lines = line_clamp;
+        let glyph_h = (ascent + descent).max(1.0);
+        let utf16: Vec<u16> = text.as_str().encode_utf16().collect();
+        let max_w = box_w.unwrap_or(f32::MAX);
+        let layout = unsafe {
+            state
+                .factory
+                .CreateTextLayout(&utf16, &format, max_w, f32::MAX)
+        }
+        .ok();
 
-        for segment in text.as_str().split('\n') {
-            if remaining_lines == Some(0) {
-                break;
-            }
-            let utf16: Vec<u16> = segment.encode_utf16().collect();
-            let box_w = wrap_width.map(|w| w.max(1.0));
-            let max_w = box_w.unwrap_or(f32::MAX);
-            let layout = unsafe {
-                state
-                    .dw
-                    .factory
-                    .CreateTextLayout(&utf16, &format, max_w, f32::MAX)
-            }
-            .ok();
-            let uniform_spacing = line_height.is_some();
-            if let Some(layout) = &layout {
-                unsafe {
-                    let _ = layout.SetWordWrapping(if wrap_width.is_some() {
-                        DWRITE_WORD_WRAPPING_WRAP
-                    } else {
-                        DWRITE_WORD_WRAPPING_NO_WRAP
-                    });
-                    if let Some(lh) = line_height {
-                        let top_pad = ((lh - glyph_h) * 0.5).max(0.0);
-                        let _ = layout.SetLineSpacing(
-                            DWRITE_LINE_SPACING_METHOD_UNIFORM,
-                            lh.max(1.0),
-                            top_pad + ascent,
-                        );
-                    }
-                    if box_w.is_some() {
-                        let dw_align = match align {
-                            TextAlign::Left => DWRITE_TEXT_ALIGNMENT_LEADING,
-                            TextAlign::Center => DWRITE_TEXT_ALIGNMENT_CENTER,
-                        };
-                        let _ = layout.SetTextAlignment(dw_align);
-                    }
+        if let Some(layout) = &layout {
+            let top_pad = ((lh - glyph_h) * 0.5).max(0.0);
+            unsafe {
+                let _ = layout.SetWordWrapping(if box_w.is_some() {
+                    DWRITE_WORD_WRAPPING_WRAP
+                } else {
+                    DWRITE_WORD_WRAPPING_NO_WRAP
+                });
+                let _ = layout.SetLineSpacing(
+                    DWRITE_LINE_SPACING_METHOD_UNIFORM,
+                    lh,
+                    top_pad + ascent,
+                );
+                if box_w.is_some() {
+                    let dw_align = match opts.align {
+                        TextAlign::Left => DWRITE_TEXT_ALIGNMENT_LEADING,
+                        TextAlign::Center => DWRITE_TEXT_ALIGNMENT_CENTER,
+                    };
+                    let _ = layout.SetTextAlignment(dw_align);
                 }
             }
-            let (width, raw_lines) = layout.as_ref().map_or((0.0, 1), |l| {
-                let mut m = DWRITE_TEXT_METRICS::default();
-                let _ = unsafe { l.GetMetrics(&mut m) };
-                (m.widthIncludingTrailingWhitespace, m.lineCount.max(1) as usize)
-            });
-            let (line_count, clamped) = match remaining_lines {
-                Some(cap) => {
-                    let clamped_lines = raw_lines.min(cap);
-                    remaining_lines = Some(cap.saturating_sub(clamped_lines));
-                    let did_clamp = clamped_lines < raw_lines;
-                    if did_clamp && let Some(layout) = &layout {
-                        let effective_lh = line_height.unwrap_or(glyph_h);
-                        unsafe {
-                            let _ = layout.SetMaxHeight(effective_lh * clamped_lines as f32);
-                            if let Some(sign) = &ellipsis_sign {
-                                let trimming = DWRITE_TRIMMING {
-                                    granularity: DWRITE_TRIMMING_GRANULARITY_CHARACTER,
-                                    delimiter: 0,
-                                    delimiterCount: 0,
-                                };
-                                let _ = layout.SetTrimming(&trimming, sign);
-                            }
+        }
+
+        let (width, raw_lines) = layout.as_ref().map_or((0.0, 1), |l| {
+            let mut m = DWRITE_TEXT_METRICS::default();
+            let _ = unsafe { l.GetMetrics(&mut m) };
+            (m.widthIncludingTrailingWhitespace, m.lineCount.max(1) as usize)
+        });
+
+        let (line_count, clamped) = match opts.line_clamp {
+            Some(cap) if raw_lines > cap => {
+                let clamped_lines = cap.max(1);
+                if let Some(layout) = &layout {
+                    unsafe {
+                        let _ = layout.SetMaxHeight(lh * clamped_lines as f32);
+                        if let Ok(sign) = state.factory.CreateEllipsisTrimmingSign(&format) {
+                            let trimming = DWRITE_TRIMMING {
+                                granularity: DWRITE_TRIMMING_GRANULARITY_CHARACTER,
+                                delimiter: 0,
+                                delimiterCount: 0,
+                            };
+                            let _ = layout.SetTrimming(&trimming, &sign);
                         }
                     }
-                    (clamped_lines, did_clamp)
                 }
-                None => (raw_lines, false),
-            };
-            out.push(WrappedLine {
-                width,
-                line_count,
-                layout_box_width: box_w,
-                ascent,
-                descent,
-                uniform_spacing,
-                clamped,
-                layout,
-            });
-        }
+                (clamped_lines, true)
+            }
+            _ => (raw_lines, false),
+        };
 
-        if state.curr_wrapped_cache.len() < MAX_LAYOUT_CACHE {
-            state.curr_wrapped_cache.insert(key, out.clone());
+        let label = Label {
+            width,
+            line_count,
+            line_height: lh,
+            layout_box_width: box_w,
+            align: opts.align,
+            clamped,
+            layout,
+        };
+        if state.curr_labels.len() < MAX_LAYOUT_CACHE {
+            state.curr_labels.insert(key, label.clone());
         }
-        out
+        label
     }
 
-    pub(crate) fn with_char_widths<R>(
+    pub(crate) fn with_advances<R>(
         &self,
-        font: &Font,
-        font_size: f32,
-        f: impl FnOnce(&mut CharWidths, &DirectWriteCore) -> R,
+        style: &TextStyle,
+        f: impl FnOnce(&mut AdvanceTable) -> R,
     ) -> R {
         let mut state = self.state.borrow_mut();
-        let key = (font.clone(), (font_size * 100.0).round() as u32);
-        let TextSystemState {
-            dw, char_widths, ..
-        } = &mut *state;
-        let widths = char_widths
-            .entry(key)
-            .or_insert_with(|| CharWidths::new(font.clone(), font_size, dw));
-        f(widths, dw)
+        let factory = state.factory.clone();
+        let entry = state.font_entry(style);
+        let format = entry.format.clone();
+        let advances = entry
+            .advances
+            .get_or_insert_with(|| AdvanceTable::new(factory, format));
+        f(advances)
     }
 
     #[cfg(test)]
-    pub(crate) fn wrapped_cache_counts(&self) -> (usize, usize) {
+    pub(crate) fn label_cache_counts(&self) -> (usize, usize) {
         let state = self.state.borrow();
-        (state.curr_wrapped_cache.len(), state.prev_wrapped_cache.len())
+        (state.curr_labels.len(), state.prev_labels.len())
     }
 }
 
-fn extract_single_line_metrics(layout: &IDWriteTextLayout, font_size: f32) -> (f32, f32, f32) {
-    let mut metrics = DWRITE_TEXT_METRICS::default();
-    let _ = unsafe { layout.GetMetrics(&mut metrics) };
-    let mut line_metrics = [DWRITE_LINE_METRICS::default(); 2];
-    let mut count = 0u32;
+fn create_font_entry(factory: &IDWriteFactory5, style: &TextStyle) -> FontEntry {
+    let safe_size = style.size();
+    let family = HSTRING::from(style.font.family.as_str());
+    let locale = HSTRING::from("");
+    let dw_weight = DWRITE_FONT_WEIGHT(style.font.weight.0.round().clamp(1.0, 999.0) as i32);
+    let format = unsafe {
+        factory
+            .CreateTextFormat(
+                &family,
+                None,
+                dw_weight,
+                DWRITE_FONT_STYLE_NORMAL,
+                DWRITE_FONT_STRETCH_NORMAL,
+                safe_size,
+                &locale,
+            )
+            .or_else(|_| {
+                let fallback = HSTRING::from("Segoe UI");
+                factory.CreateTextFormat(
+                    &fallback,
+                    None,
+                    DWRITE_FONT_WEIGHT(400),
+                    DWRITE_FONT_STYLE_NORMAL,
+                    DWRITE_FONT_STRETCH_NORMAL,
+                    safe_size,
+                    &locale,
+                )
+            })
+    }
+    .expect("CreateTextFormat fallback failed");
+    let _ = unsafe { format.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP) };
+    let space_width = measure_utf16(factory, &[b' ' as u16], &format);
+    if space_width > 0.0 {
+        let _ = unsafe { format.SetIncrementalTabStop(space_width * TAB_STOP_COLUMNS) };
+    }
+    let sample = [b'H' as u16, b'g' as u16];
     let (ascent, descent) =
-        if unsafe { layout.GetLineMetrics(Some(&mut line_metrics), &mut count) }.is_ok()
-            && count > 0
-        {
-            let lm = line_metrics[0];
-            (lm.baseline, (lm.height - lm.baseline).max(0.0))
-        } else {
-            (font_size * 0.8, font_size * 0.2)
+        unsafe { factory.CreateTextLayout(&sample, &format, f32::MAX, f32::MAX) }
+            .ok()
+            .map_or((safe_size * 0.8, safe_size * 0.2), |l| {
+                let mut line_metrics = [DWRITE_LINE_METRICS::default(); 2];
+                let mut count = 0u32;
+                if unsafe { l.GetLineMetrics(Some(&mut line_metrics), &mut count) }.is_ok()
+                    && count > 0
+                {
+                    let lm = line_metrics[0];
+                    (lm.baseline, (lm.height - lm.baseline).max(0.0))
+                } else {
+                    (safe_size * 0.8, safe_size * 0.2)
+                }
+            });
+    FontEntry {
+        format,
+        ascent,
+        descent,
+        space_width,
+        advances: None,
+    }
+}
+
+pub(super) fn measure_utf16(
+    factory: &IDWriteFactory5,
+    utf16: &[u16],
+    format: &IDWriteTextFormat,
+) -> f32 {
+    if utf16.is_empty() {
+        return 0.0;
+    }
+    let Ok(layout) = (unsafe { factory.CreateTextLayout(utf16, format, f32::MAX, f32::MAX) })
+    else {
+        return 0.0;
+    };
+    let mut metrics = DWRITE_TEXT_METRICS::default();
+    if unsafe { layout.GetMetrics(&mut metrics) }.is_ok() {
+        metrics.widthIncludingTrailingWhitespace
+    } else {
+        0.0
+    }
+}
+
+pub(super) fn encode_single_line_utf16(text: &str) -> Vec<u16> {
+    let mut out = Vec::with_capacity(text.len());
+    for ch in text.chars() {
+        let mapped = match ch {
+            '\u{000B}' | '\u{000C}' | '\u{0085}' | '\u{2028}' | '\u{2029}' => '\u{25A1}',
+            other => other,
         };
-    (metrics.widthIncludingTrailingWhitespace, ascent, descent)
+        let mut buf = [0u16; 2];
+        out.extend_from_slice(mapped.encode_utf16(&mut buf));
+    }
+    out
 }
 
 #[inline]
@@ -1017,7 +754,7 @@ pub(crate) fn utf16_to_utf8_offset(text: &str, utf16_offset: u32, is_ascii: bool
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gfx::wrap::line_break_opportunities;
+    use crate::gfx::wrap::break_opportunities;
 
     #[test]
     fn utf8_utf16_roundtrip_handles_ascii_cjk_and_surrogate_emoji() {
@@ -1031,26 +768,18 @@ mod tests {
     #[test]
     fn directwrite_line_breaks_and_shaping_work() {
         let ts = TextSystem::new();
-        let shaped = ts.shape_line(
-            SharedStr::new_static("Hello 🎉 world"),
-            14.0,
-            &[TextRun {
-                len: "Hello 🎉 world".len(),
-                font: font("Segoe UI Variable Text"),
-                color: Rgba::new(0.0, 0.0, 0.0, 1.0),
-                underline: None,
-            }],
-        );
+        let style = TextStyle::regular("Segoe UI Variable Text", 14.0);
+        let shaped = ts.shape_row(SharedStr::new_static("Hello 🎉 world"), &style);
         assert!(shaped.width > 0.0);
         let mid_x = shaped.x_for_index(6);
         assert!(mid_x > 0.0 && mid_x < shaped.width);
         let hit = shaped.closest_index_for_x(mid_x);
         assert!(hit <= shaped.len);
 
-        let breaks = line_break_opportunities("hello world");
+        let breaks = break_opportunities("hello world");
         assert!(breaks.contains(&6));
-        assert!(line_break_opportunities("foo\u{00A0}bar").is_empty());
-        assert_eq!(line_break_opportunities("foo-bar"), vec![4]);
+        assert!(break_opportunities("foo\u{00A0}bar").is_empty());
+        assert_eq!(break_opportunities("foo-bar"), vec![4]);
     }
 
     #[test]
@@ -1058,52 +787,38 @@ mod tests {
         use windows::core::Interface;
 
         let ts = TextSystem::new();
-        let f = font("Segoe UI Variable Small");
+        let style = TextStyle::regular("Segoe UI Variable Small", 12.0);
+        let left = LabelLayout {
+            line_height: 16.0,
+            wrap_width: None,
+            line_clamp: None,
+            align: TextAlign::Left,
+        };
+        let center = LabelLayout {
+            align: TextAlign::Center,
+            ..left
+        };
 
-        let a = ts.shape_wrapped(
-            SharedStr::new_static("Ln 1, Col 1"),
-            12.0,
-            &f,
-            None,
-            None,
-            None,
-            TextAlign::Left,
-        );
-        let b = ts.shape_wrapped(
-            SharedStr::new_static("Ln 1, Col 1"),
-            12.0,
-            &f,
-            None,
-            None,
-            None,
-            TextAlign::Center,
-        );
+        let a = ts.shape_label(SharedStr::new_static("Ln 1, Col 1"), &style, left);
+        let b = ts.shape_label(SharedStr::new_static("Ln 1, Col 1"), &style, center);
         assert_ne!(
-            a[0].layout.as_ref().unwrap().as_raw(),
-            b[0].layout.as_ref().unwrap().as_raw()
+            a.layout.as_ref().unwrap().as_raw(),
+            b.layout.as_ref().unwrap().as_raw()
         );
-        assert_eq!(ts.wrapped_cache_counts(), (2, 0));
+        assert_eq!(ts.label_cache_counts(), (2, 0));
 
         ts.finish_frame();
-        assert_eq!(ts.wrapped_cache_counts(), (0, 2));
-        let a2 = ts.shape_wrapped(
-            SharedStr::new_static("Ln 1, Col 1"),
-            12.0,
-            &f,
-            None,
-            None,
-            None,
-            TextAlign::Left,
-        );
+        assert_eq!(ts.label_cache_counts(), (0, 2));
+        let a2 = ts.shape_label(SharedStr::new_static("Ln 1, Col 1"), &style, left);
         assert_eq!(
-            a[0].layout.as_ref().unwrap().as_raw(),
-            a2[0].layout.as_ref().unwrap().as_raw()
+            a.layout.as_ref().unwrap().as_raw(),
+            a2.layout.as_ref().unwrap().as_raw()
         );
-        assert_eq!(ts.wrapped_cache_counts(), (1, 1));
+        assert_eq!(ts.label_cache_counts(), (1, 1));
 
         ts.finish_frame();
-        assert_eq!(ts.wrapped_cache_counts(), (0, 1));
+        assert_eq!(ts.label_cache_counts(), (0, 1));
         ts.finish_frame();
-        assert_eq!(ts.wrapped_cache_counts(), (0, 0));
+        assert_eq!(ts.label_cache_counts(), (0, 0));
     }
 }

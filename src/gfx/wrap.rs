@@ -5,48 +5,40 @@ use std::rc::Rc;
 use windows::Win32::Graphics::DirectWrite::{
     DWRITE_BREAK_CONDITION_CAN_BREAK, DWRITE_BREAK_CONDITION_MAY_NOT_BREAK,
     DWRITE_BREAK_CONDITION_MUST_BREAK, DWRITE_FACTORY_TYPE_SHARED, DWRITE_LINE_BREAKPOINT,
-    DWRITE_READING_DIRECTION, DWRITE_READING_DIRECTION_LEFT_TO_RIGHT, DWRITE_SCRIPT_ANALYSIS,
-    DWriteCreateFactory, IDWriteFactory5, IDWriteNumberSubstitution, IDWriteTextAnalysisSink,
+    DWRITE_LINE_METRICS, DWRITE_READING_DIRECTION, DWRITE_READING_DIRECTION_LEFT_TO_RIGHT,
+    DWRITE_SCRIPT_ANALYSIS, DWRITE_TEXT_METRICS, DWRITE_WORD_WRAPPING_WRAP, DWriteCreateFactory,
+    IDWriteFactory5, IDWriteNumberSubstitution, IDWriteTextAnalysisSink,
     IDWriteTextAnalysisSink_Impl, IDWriteTextAnalysisSource, IDWriteTextAnalysisSource_Impl,
-    IDWriteTextAnalyzer,
+    IDWriteTextAnalyzer, IDWriteTextFormat,
 };
 use windows::core::{HSTRING, implement};
 
-use super::text::{DirectWriteCore, Font, TAB_STOP_COLUMNS};
+use super::text::{TAB_STOP_COLUMNS, encode_single_line_utf16, measure_utf16};
 
-pub(crate) const MAX_WRAP_INDENT: u32 = 32;
-
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct Boundary {
-    pub(crate) ix: usize,
-    pub(crate) next_indent: u32,
-}
-
-pub(crate) struct CharWidths {
-    font: Font,
-    font_size: f32,
+pub(crate) struct AdvanceTable {
+    factory: IDWriteFactory5,
+    format: IDWriteTextFormat,
     ascii: [f32; 95],
     max_ascii: f32,
     non_ascii: HashMap<char, f32>,
 }
 
-impl CharWidths {
-    pub(super) fn new(font: Font, font_size: f32, dwrite: &DirectWriteCore) -> Self {
+impl AdvanceTable {
+    pub(super) fn new(factory: IDWriteFactory5, format: IDWriteTextFormat) -> Self {
         let mut ascii = [0.0f32; 95];
         let mut max_ascii = 0.0f32;
-        let format = dwrite.text_format(&font, font_size);
         let mut buf = [0u16; 1];
         for (i, byte) in (0x20u8..=0x7Eu8).enumerate() {
             buf[0] = u16::from(byte);
-            let w = dwrite.measure_utf16(&buf, &format);
+            let w = measure_utf16(&factory, &buf, &format);
             ascii[i] = w;
             if w > max_ascii {
                 max_ascii = w;
             }
         }
         Self {
-            font,
-            font_size,
+            factory,
+            format,
             ascii,
             max_ascii,
             non_ascii: HashMap::new(),
@@ -64,16 +56,12 @@ impl CharWidths {
     }
 
     #[inline]
-    pub(crate) fn advance_at(&mut self, ch: char, current_x: f32, dwrite: &DirectWriteCore) -> f32 {
+    pub(crate) fn advance(&mut self, ch: char, current_x: f32) -> f32 {
         if ch == '\t' {
             let stop = self.tab_stop_width();
             let next = ((current_x / stop).floor() + 1.0) * stop;
             return (next - current_x).max(self.ascii[0].max(1.0));
         }
-        self.char_width(ch, dwrite)
-    }
-
-    fn char_width(&mut self, ch: char, dwrite: &DirectWriteCore) -> f32 {
         let code = ch as u32;
         if (0x20..=0x7E).contains(&code) {
             return self.ascii[(code - 0x20) as usize];
@@ -81,115 +69,89 @@ impl CharWidths {
         if let Some(&w) = self.non_ascii.get(&ch) {
             return w;
         }
-        let format = dwrite.text_format(&self.font, self.font_size);
         let mut buf = [0u16; 2];
         let slice = ch.encode_utf16(&mut buf);
-        let w = dwrite.measure_utf16(slice, &format);
+        let w = measure_utf16(&self.factory, slice, &self.format);
         self.non_ascii.insert(ch, w);
         w
     }
 
-    pub(crate) fn wrap_line_into(
-        &mut self,
-        line: &str,
-        wrap_width: f32,
-        dwrite: &DirectWriteCore,
-        out: &mut Vec<Boundary>,
+    pub(crate) fn dwrite_breaks(
+        &self,
+        text: &str,
+        first_width: f32,
+        cont_width: f32,
+        out: &mut Vec<usize>,
     ) {
-        out.clear();
-        if line.is_empty() || wrap_width <= 0.0 {
+        if text.is_empty() || !first_width.is_finite() || first_width <= 0.0 {
             return;
         }
-        let mut indent_chars: u32 = 0;
-        let mut indent_width = 0.0f32;
-        for ch in line.chars() {
-            if ch == ' ' || ch == '\t' {
-                let adv = self.advance_at(ch, indent_width, dwrite);
-                if indent_chars < MAX_WRAP_INDENT {
-                    indent_chars += 1;
-                    indent_width += adv;
+        let utf16 = encode_single_line_utf16(text);
+        if utf16.is_empty() {
+            return;
+        }
+
+        let collect = |slice: &[u16], max_w: f32| -> Vec<usize> {
+            let Ok(layout) = (unsafe {
+                self.factory
+                    .CreateTextLayout(slice, &self.format, max_w.max(1.0), f32::MAX)
+            }) else {
+                return Vec::new();
+            };
+            let _ = unsafe { layout.SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP) };
+            let mut m = DWRITE_TEXT_METRICS::default();
+            if unsafe { layout.GetMetrics(&mut m) }.is_err() || m.lineCount <= 1 {
+                return Vec::new();
+            }
+            let count = m.lineCount as usize;
+            let mut metrics = vec![DWRITE_LINE_METRICS::default(); count];
+            let mut actual = 0u32;
+            let _ = unsafe { layout.GetLineMetrics(Some(&mut metrics), &mut actual) };
+            let n = (actual as usize).min(metrics.len());
+            if n <= 1 {
+                return Vec::new();
+            }
+            let mut breaks = Vec::with_capacity(n - 1);
+            let mut acc = 0usize;
+            for lm in &metrics[..n - 1] {
+                acc += lm.length as usize;
+                if acc > 0 && acc < slice.len() {
+                    breaks.push(acc);
                 }
-            } else {
+            }
+            breaks
+        };
+
+        let mut u16_breaks = collect(&utf16, first_width);
+        if u16_breaks.is_empty() {
+            return;
+        }
+        if (cont_width - first_width).abs() > 0.01 {
+            let first = u16_breaks[0];
+            u16_breaks.truncate(1);
+            if first < utf16.len() {
+                for rel in collect(&utf16[first..], cont_width.max(1.0)) {
+                    u16_breaks.push(first + rel);
+                }
+            }
+        }
+
+        let mut bi = 0usize;
+        let mut u16_acc = 0usize;
+        let mut last_byte = 0usize;
+        for (byte_ix, ch) in text.char_indices() {
+            while bi < u16_breaks.len() && u16_acc >= u16_breaks[bi] {
+                if byte_ix > last_byte && byte_ix < text.len() {
+                    out.push(byte_ix);
+                    last_byte = byte_ix;
+                }
+                bi += 1;
+            }
+            if bi >= u16_breaks.len() {
                 break;
             }
+            u16_acc += ch.len_utf16();
         }
-        if indent_width >= wrap_width * 0.5 {
-            indent_chars = 0;
-            indent_width = 0.0;
-        }
-
-        let break_offsets = line_break_opportunities(line);
-
-        let mut row_start = 0usize;
-        let mut row_width = 0.0f32;
-        let mut last_break_ix = 0usize;
-        let mut break_cursor = 0usize;
-
-        for (ix, ch) in line.char_indices() {
-            let char_end = ix + ch.len_utf8();
-            while break_cursor < break_offsets.len() && break_offsets[break_cursor] <= ix {
-                break_cursor += 1;
-            }
-            let w = self.advance_at(ch, row_width, dwrite);
-            if row_width + w > wrap_width && ix > row_start {
-                let split_at = if last_break_ix > row_start {
-                    last_break_ix
-                } else {
-                    ix
-                };
-                out.push(Boundary {
-                    ix: split_at,
-                    next_indent: indent_chars,
-                });
-                row_start = split_at;
-                row_width = indent_width;
-                for c in line[split_at..char_end].chars() {
-                    row_width += self.advance_at(c, row_width, dwrite);
-                }
-                last_break_ix = split_at;
-            } else {
-                row_width += w;
-            }
-            if break_cursor < break_offsets.len() && break_offsets[break_cursor] == char_end {
-                last_break_ix = char_end;
-                break_cursor += 1;
-            }
-        }
-    }
-
-    pub(crate) fn horizontal_slice(
-        &mut self,
-        line: &str,
-        min_x: f32,
-        max_x: f32,
-        dwrite: &DirectWriteCore,
-    ) -> (usize, usize, f32, f32) {
-        let mut x = 0.0f32;
-        let mut start_byte = 0usize;
-        let mut start_x = 0.0f32;
-        let mut found_start = false;
-        let mut end_byte = line.len();
-        let mut found_end = false;
-
-        for (ix, ch) in line.char_indices() {
-            let adv = self.advance_at(ch, x, dwrite);
-            if !found_start && x + adv >= min_x {
-                start_byte = ix;
-                start_x = x;
-                found_start = true;
-            }
-            x += adv;
-            if found_start && !found_end && x >= max_x {
-                end_byte = ix + ch.len_utf8();
-                found_end = true;
-            }
-        }
-        if !found_start {
-            start_byte = line.len();
-            start_x = x;
-            end_byte = line.len();
-        }
-        (start_byte, end_byte, start_x, x)
     }
 }
 
@@ -329,7 +291,7 @@ thread_local! {
     static TEXT_ANALYZER: RefCell<Option<IDWriteTextAnalyzer>> = const { RefCell::new(None) };
 }
 
-pub(crate) fn line_break_opportunities(text: &str) -> Vec<usize> {
+pub(crate) fn break_opportunities(text: &str) -> Vec<usize> {
     let mut out = Vec::new();
     if text.is_empty() {
         return out;

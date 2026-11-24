@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 
 use crate::app::AppEvent;
 use crate::geom::{ScreenPoint, ScreenRect, Size, size};
-use crate::gfx::{Gpu, TextAlign, TextSystem, font};
+use crate::gfx::{Gpu, LabelLayout, TextAlign, TextStyle, TextSystem};
 use crate::platform::{
     Jobs, Modifiers, TimerHandle, WindowAppearance, WindowId, cursor_screen_pos,
     monitor_work_area_and_scale, system_settings,
@@ -439,23 +439,24 @@ fn show_delay(reshow: bool) -> Duration {
 fn measure_tooltip(content: &SharedStr, ts: &TextSystem) -> Size {
     let chrome = 2. * (PADDING_X + BORDER);
     let wrap = MAX_WIDTH - chrome;
-    let lines = ts.shape_wrapped(
+    let label = ts.shape_label(
         content.clone(),
-        FONT_SIZE,
-        &font(SMALL_FONT),
-        Some(wrap),
-        Some(LINE_HEIGHT),
-        None,
-        TextAlign::Left,
+        &TextStyle::regular(SMALL_FONT, FONT_SIZE),
+        LabelLayout {
+            line_height: LINE_HEIGHT,
+            wrap_width: Some(wrap),
+            line_clamp: None,
+            align: TextAlign::Left,
+        },
     );
-    let count: usize = lines.iter().map(|l| l.line_count.max(1)).sum();
-    let widest = lines
-        .iter()
-        .map(|l| if l.line_count <= 1 { l.width } else { wrap })
-        .fold(0., f32::max);
+    let widest = if label.line_count > 1 && !content.contains('\n') {
+        wrap
+    } else {
+        label.width
+    };
     size(
         (widest.ceil() + chrome).min(MAX_WIDTH),
-        SINGLE_HEIGHT + count.saturating_sub(1) as f32 * LINE_HEIGHT,
+        SINGLE_HEIGHT + label.line_count.saturating_sub(1) as f32 * LINE_HEIGHT,
     )
 }
 

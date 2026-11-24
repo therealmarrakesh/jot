@@ -5,7 +5,7 @@ use crate::APP_NAME;
 use crate::document::Format;
 use crate::editor::{Editor, Rope};
 use crate::files::{FilePrompt, LOSSY_ANSI_WARNING, WorkflowGen, discard_prompt_text};
-use crate::gfx::{FontWeight, TextSystem};
+use crate::gfx::{TextStyle, TextSystem};
 use crate::platform::CursorStyle;
 use crate::tabs::TabId;
 use crate::theme::{Palette, theme_shadow};
@@ -349,6 +349,8 @@ impl Dialogs {
             })
             .collect();
 
+        let body_style = TextStyle::regular(TEXT_FONT, BODY_SIZE);
+        let title_style = TextStyle::semibold(TITLE_FONT, TITLE_SIZE);
         let (width, title, body) = match &dialog.kind {
             DialogKind::GoTo => (
                 GO_TO_WIDTH,
@@ -356,31 +358,33 @@ impl Dialogs {
                 self.render_go_to_body(focus, p, s, ui),
             ),
             DialogKind::LineOutOfRange => (
-                ts.text_width(OUT_OF_RANGE_MESSAGE, TEXT_FONT, BODY_SIZE),
+                ts.measure(OUT_OF_RANGE_MESSAGE, &body_style).ceil(),
                 SharedStr::new_static(GO_TO_TITLE),
                 message_body(OUT_OF_RANGE_MESSAGE.into(), s),
             ),
             DialogKind::Error { title, message } => (
-                ts.text_width(message, TEXT_FONT, BODY_SIZE).max(
-                    ts.text_width_weighted(title, TITLE_FONT, FontWeight::SEMIBOLD, TITLE_SIZE),
-                ),
+                ts.measure(message, &body_style)
+                    .max(ts.measure(title, &title_style))
+                    .ceil(),
                 title.clone(),
                 message_body(message.clone(), s),
             ),
             DialogKind::ConfirmDiscard { name, .. } => {
                 let (title, message) = discard_prompt_text(name);
-                let w = ts.text_width(&message, TEXT_FONT, BODY_SIZE).max(
-                    ts.text_width_weighted(&title, TITLE_FONT, FontWeight::SEMIBOLD, TITLE_SIZE),
-                );
+                let w = ts
+                    .measure(&message, &body_style)
+                    .max(ts.measure(&title, &title_style))
+                    .ceil();
                 (w, title, message_body(message, s))
             }
             DialogKind::ConfirmLossyAnsi { path, .. } => {
                 let title: SharedStr = APP_NAME.into();
                 let message: SharedStr =
                     format!("{}\n{LOSSY_ANSI_WARNING}", path.display()).into();
-                let w = ts.text_width(&message, TEXT_FONT, BODY_SIZE).max(
-                    ts.text_width_weighted(&title, TITLE_FONT, FontWeight::SEMIBOLD, TITLE_SIZE),
-                );
+                let w = ts
+                    .measure(&message, &body_style)
+                    .max(ts.measure(&title, &title_style))
+                    .ceil();
                 (w, title, message_body(message, s))
             }
         };

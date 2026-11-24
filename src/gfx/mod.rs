@@ -4,7 +4,6 @@ pub(crate) mod wrap;
 
 pub(crate) use d2d::{D2DRenderer, Gpu, PaintQuad, Surface, fill};
 pub(crate) use text::{
-    Font, FontWeight, ShapedLine, TextAlign, TextRun, TextSystem, UnderlineStyle, WrappedLine,
-    font,
+    Font, FontWeight, Label, LabelLayout, ShapedRow, TextAlign, TextStyle, TextSystem, font,
 };
-pub(crate) use wrap::{Boundary, MAX_WRAP_INDENT};
+pub(crate) use wrap::{AdvanceTable, break_opportunities};

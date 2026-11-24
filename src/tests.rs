@@ -7,7 +7,6 @@ use std::sync::{
 use std::time::Duration;
 
 use crate::app::{App, AppEvent};
-use crate::color::rgba;
 use crate::document;
 use crate::editor::RopeExt as _;
 use crate::find;
@@ -1429,16 +1428,7 @@ fn wrap_handles_tabs_emoji_combining_marks_and_u2028_single_line() {
     wrap_zero.sync_layout(&rope, font("Consolas"), 14.0, Some(0.0), &ts);
     assert!(wrap_zero.visual_row_count() >= 1);
 
-    let shaped = ts.shape_line(
-        sample.into(),
-        14.0,
-        &[crate::gfx::TextRun {
-            len: sample.len(),
-            font: font("Consolas"),
-            color: rgba(0xFFFFFFFF),
-            underline: None,
-        }],
-    );
+    let shaped = ts.shape_row(sample.into(), &crate::gfx::TextStyle::regular("Consolas", 14.0));
     assert!(shaped.width > 0.0);
 }
 

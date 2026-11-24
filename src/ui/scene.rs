@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 use crate::color::{Rgba, black, transparent_black};
 use crate::geom::{Corners, Edges, Point, Rect, Shadows, Size};
 use crate::gfx::{
-    D2DRenderer, Font, FontWeight, PaintQuad, TextAlign, TextSystem, WrappedLine,
+    D2DRenderer, Font, FontWeight, Label, LabelLayout, PaintQuad, TextAlign, TextStyle, TextSystem,
 };
 use crate::platform::{CursorStyle, MouseButton, WindowControlArea};
 use crate::theme::Palette;
@@ -567,7 +567,7 @@ enum FlatKind {
     Text {
         content: SharedStr,
         style: ResolvedTextStyle,
-        lines: Vec<WrappedLine>,
+        label: Option<Label>,
     },
     Custom(CustomDraw),
 }
@@ -633,7 +633,7 @@ impl Frame {
             let FlatKind::Text {
                 content,
                 style,
-                lines,
+                label,
             } = &mut frame.nodes[flat_idx].kind
             else {
                 return Size::ZERO;
@@ -646,21 +646,18 @@ impl Frame {
                     _ => None,
                 })
             };
-            *lines = text_system.shape_wrapped(
+            let shaped = text_system.shape_label(
                 content.clone(),
-                style.size,
-                &style.font,
-                wrap_width,
-                Some(style.line_height),
-                style.line_clamp,
-                style.align,
+                &TextStyle::new(style.font.clone(), style.size),
+                LabelLayout {
+                    line_height: style.line_height,
+                    wrap_width,
+                    line_clamp: style.line_clamp,
+                    align: style.align,
+                },
             );
-            let mut sz = Size::ZERO;
-            for line in lines.iter() {
-                let ls = line.size(style.line_height);
-                sz.height += ls.height;
-                sz.width = sz.width.max(ls.width).ceil();
-            }
+            let sz = shaped.size();
+            *label = Some(shaped);
             sz
         });
 
@@ -774,7 +771,7 @@ impl Frame {
                     kind: FlatKind::Text {
                         content,
                         style: resolved_text,
-                        lines: Vec::new(),
+                        label: None,
                     },
                 });
             }
@@ -956,22 +953,9 @@ impl Frame {
                     self.paint_node(child_idx, renderer, draw_custom);
                 }
             }
-            FlatKind::Text {
-                style,
-                lines,
-                ..
-            } => {
-                let mut y = node.rect.origin.y;
-                for line in lines {
-                    line.paint(
-                        Point::new(node.rect.origin.x, y),
-                        style.line_height,
-                        style.align,
-                        Some(node.rect.size.width),
-                        style.color,
-                        renderer,
-                    );
-                    y += style.line_height * line.line_count.max(1) as f32;
+            FlatKind::Text { style, label, .. } => {
+                if let Some(label) = label {
+                    renderer.draw_label(label, node.rect.origin, node.rect.size.width, style.color);
                 }
             }
             FlatKind::Custom(token) => {

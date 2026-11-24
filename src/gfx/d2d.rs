@@ -1070,7 +1070,7 @@ impl D2DRenderer {
         Some((blurred_bmp, pad_dip))
     }
 
-    pub(crate) fn paint_text_layout(
+    pub(super) fn draw_text_layout(
         &mut self,
         origin: Point,
         layout: &IDWriteTextLayout,

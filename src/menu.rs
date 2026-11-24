@@ -5,7 +5,7 @@ use crate::color::transparent_black;
 use crate::command::{Command, shortcut_label};
 use crate::editor::Editor;
 use crate::geom::{Edges, Point, Rect, Size, point, size};
-use crate::gfx::TextSystem;
+use crate::gfx::{TextStyle, TextSystem};
 use crate::keytips::{self, KeyTip, round_half_up};
 use crate::platform::{
     CursorStyle, Jobs, Key, KeyEvent, TimerHandle, WindowId, clipboard::clipboard_has_text,
@@ -338,15 +338,17 @@ impl Panel {
                 Entry::Toggle { .. } | Entry::Command { icon: Some(_), .. }
             )
         });
+        let label_style = TextStyle::regular(TEXT_FONT, LABEL_SIZE);
+        let shortcut_style = TextStyle::regular(SMALL_FONT, SHORTCUT_SIZE);
         let content = entries
             .iter()
             .zip(&labels)
             .zip(&shortcuts)
             .map(|((entry, label), shortcut)| {
-                let lw = ts.text_width(label, TEXT_FONT, LABEL_SIZE);
+                let lw = ts.measure(label, &label_style).ceil();
                 let trailing = match (entry, shortcut) {
                     (Entry::Submenu(..), _) => SHORTCUT_GAP + CHEVRON_WIDTH,
-                    (_, Some(sc)) => SHORTCUT_GAP + ts.text_width(sc, SMALL_FONT, SHORTCUT_SIZE),
+                    (_, Some(sc)) => SHORTCUT_GAP + ts.measure(sc, &shortcut_style).ceil(),
                     _ => 0.,
                 };
                 lw + trailing
@@ -1655,7 +1657,12 @@ fn render_command_button(
     } else {
         p.text_primary
     };
-    let label_width = ts.text_width(command.label, SMALL_FONT, COMMAND_LABEL_SIZE);
+    let label_width = ts
+        .measure(
+            command.label,
+            &TextStyle::regular(SMALL_FONT, COMMAND_LABEL_SIZE),
+        )
+        .ceil();
     let label_left = (face_w - COMMAND_LABEL_PANEL) / 2.
         + round_half_up((COMMAND_LABEL_PANEL - label_width) / 2.);
 

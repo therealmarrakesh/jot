@@ -1,7 +1,7 @@
 use std::rc::Rc;
 
 use crate::geom::{Rect, ScreenPoint, ScreenRect, point, size};
-use crate::gfx::{Gpu, TextSystem};
+use crate::gfx::{Gpu, TextStyle, TextSystem};
 use crate::platform::{WindowAppearance, WindowId};
 use crate::theme::Palette;
 use crate::ui::{AvailSize, Frame, Node, OverlaySurface, box_, text};
@@ -36,7 +36,8 @@ pub(crate) fn layout_tip(
     placement: Placement,
 ) -> KeyTip {
     let mut buf = [0u8; 4];
-    let width = ts.text_width(key.encode_utf8(&mut buf), FONT, FONT_SIZE);
+    let style = TextStyle::regular(FONT, FONT_SIZE);
+    let width = ts.measure(key.encode_utf8(&mut buf), &style).ceil();
     let fill = size(width + 2. * PADDING, LINE_HEIGHT + 2. * PADDING);
     let (outer_w, outer_h) = (fill.width + 2. * MARGIN, fill.height + 2. * MARGIN);
     let (x, y) = match placement {
