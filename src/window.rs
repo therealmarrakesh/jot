@@ -296,7 +296,7 @@ impl MainWindow {
 
     #[cfg(test)]
     pub(crate) fn find_match_case(&self) -> bool {
-        self.find.match_case()
+        self.find.match_case
     }
 
     #[cfg(test)]
@@ -807,11 +807,11 @@ impl MainWindow {
                 }
             }
             AppCommand::ToggleMatchCase => {
-                self.find.toggle_match_case();
+                self.find.match_case = !self.find.match_case;
                 self.refocus_find(cx.shell);
             }
             AppCommand::ToggleWrapAround => {
-                self.find.toggle_wrap_around();
+                self.find.wrap_around = !self.find.wrap_around;
                 self.refocus_find(cx.shell);
             }
             AppCommand::ReplaceNext => self.replace_next(cx.shell),
@@ -922,7 +922,7 @@ impl MainWindow {
     fn refocus_find(&mut self, shell: &Shell) {
         if self.find.is_open() {
             let slot =
-                if self.find.is_replace() && self.focus == Focus::Editor(EditorSlot::FindReplace) {
+                if self.find.replace && self.focus == Focus::Editor(EditorSlot::FindReplace) {
                     EditorSlot::FindReplace
                 } else {
                     EditorSlot::FindQuery
@@ -1300,7 +1300,7 @@ impl MainWindow {
                 self.set_focus(Focus::Editor(slot), cx.shell);
             }
             Some(HitId::Find(FindHit::ToggleReplace)) => {
-                self.find.toggle_replace();
+                self.find.replace = !self.find.replace;
                 self.refocus_find(cx.shell);
             }
             Some(HitId::Find(FindHit::Next)) => self.find_step(true, cx.shell),
@@ -1308,7 +1308,7 @@ impl MainWindow {
             Some(HitId::Find(FindHit::Options)) => {
                 let out = self
                     .menus
-                    .open_find_options(self.find.match_case(), self.find.wrap_around());
+                    .open_find_options(self.find.match_case, self.find.wrap_around);
                 let _ = self.apply_menu_outcome(out, cx);
             }
             Some(HitId::Find(FindHit::Close)) => self.close_find(cx.shell),

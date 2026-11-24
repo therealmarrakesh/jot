@@ -84,9 +84,9 @@ pub(crate) enum FindOutcome {
 
 pub(crate) struct FindBar {
     transition: Transition,
-    replace: bool,
-    match_case: bool,
-    wrap_around: bool,
+    pub(crate) replace: bool,
+    pub(crate) match_case: bool,
+    pub(crate) wrap_around: bool,
     pub(crate) query: Editor,
     pub(crate) replacement: Editor,
     notice: Option<SharedStr>,
@@ -95,31 +95,22 @@ pub(crate) struct FindBar {
     buffer: String,
 }
 
-impl Default for FindBar {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl FindBar {
     pub(crate) fn new() -> Self {
-        let query = Editor::field(FieldOptions {
-            placeholder: "Find".into(),
-            caret_height: FIELD_CARET,
-            validate: None,
-        });
-        let replacement = Editor::field(FieldOptions {
-            placeholder: "Replace".into(),
-            caret_height: FIELD_CARET,
-            validate: None,
-        });
+        let field = |placeholder: &'static str| {
+            Editor::field(FieldOptions {
+                placeholder: placeholder.into(),
+                caret_height: FIELD_CARET,
+                validate: None,
+            })
+        };
         Self {
             transition: Transition::default(),
             replace: false,
             match_case: false,
             wrap_around: true,
-            query,
-            replacement,
+            query: field("Find"),
+            replacement: field("Replace"),
             notice: None,
             notice_timer: None,
             matcher: None,
@@ -129,30 +120,6 @@ impl FindBar {
 
     pub(crate) fn is_open(&self) -> bool {
         self.transition.is_open()
-    }
-
-    pub(crate) fn is_replace(&self) -> bool {
-        self.replace
-    }
-
-    pub(crate) fn match_case(&self) -> bool {
-        self.match_case
-    }
-
-    pub(crate) fn wrap_around(&self) -> bool {
-        self.wrap_around
-    }
-
-    pub(crate) fn toggle_replace(&mut self) {
-        self.replace = !self.replace;
-    }
-
-    pub(crate) fn toggle_match_case(&mut self) {
-        self.match_case = !self.match_case;
-    }
-
-    pub(crate) fn toggle_wrap_around(&mut self) {
-        self.wrap_around = !self.wrap_around;
     }
 
     pub(crate) fn on_key(&self, ev: KeyEvent, focus: Focus) -> FindKey {
