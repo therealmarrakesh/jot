@@ -10,8 +10,7 @@ use std::ops::Range;
 use std::time::{Duration, Instant};
 
 use buffer::{
-    Bias, next_grapheme_boundary, next_word_end, prev_grapheme_boundary,
-    prev_word_start,
+    Bias, next_grapheme_boundary, next_word_end, prev_grapheme_boundary, prev_word_start,
 };
 use frame::{FrameLayout, RowLayout, VisibleLine, VisualRow};
 use model::{EditPolicy, LineChange, ValidateFn};
