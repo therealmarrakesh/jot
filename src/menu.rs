@@ -1945,7 +1945,7 @@ fn reveal_card(
         .h(shown)
         .border(BORDER, p.flyout_stroke)
         .rounded(OVERLAY_RADIUS)
-        .shadows(theme_shadow(p.dark, z, 1.))
+        .shadows(theme_shadow(p.dark, z))
         .child(
             box_()
                 .size_full()

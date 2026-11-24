@@ -2103,18 +2103,10 @@ impl MainWindow {
             line_height: self.line_height(),
             color: p.text_primary,
         };
-        let find_scale = self.find.scale();
-        let find_field_style = EditorPaintStyle {
+        let field_style = EditorPaintStyle {
             font: font(TEXT_FONT),
-            font_size: BODY_SIZE * find_scale,
-            line_height: (BODY_LINE + 2.) * find_scale,
-            color: p.text_primary,
-        };
-        let dialog_scale = self.dialogs.active_scale();
-        let dialog_field_style = EditorPaintStyle {
-            font: font(TEXT_FONT),
-            font_size: BODY_SIZE * dialog_scale,
-            line_height: (BODY_LINE + 2.) * dialog_scale,
+            font_size: BODY_SIZE,
+            line_height: BODY_LINE + 2.,
             color: p.text_primary,
         };
         let caret_height = self.caret_height();
@@ -2129,41 +2121,40 @@ impl MainWindow {
         self.active_editor_mut().set_caret_height(caret_height);
         self.active_editor_mut().set_caret_hidden(caret_hidden);
 
+        let focus = self.focus;
+        let active = self.active;
+        let tabs = &mut self.tabs;
+        let find = &mut self.find;
+        let dialogs = &mut self.dialogs;
         let needs_retry = self.surface.draw(p.window_clear, |renderer| {
             frame.paint(renderer, &mut |token, rect, renderer| {
                 match token {
-                    CustomDraw::Editor(slot) => match slot {
-                        EditorSlot::Tab(id) => {
-                            if let Some(ix) = self.tabs.iter().position(|t| t.data.id == id) {
-                                let mut timers = WindowEditorTimers::new(jobs, wid, slot);
-                                let outcome = self.tabs[ix].data.editor.paint(
-                                    rect,
-                                    &editor_style,
-                                    p,
-                                    window_active,
-                                    editor_focused,
-                                    show_selection,
-                                    scale,
-                                    reduce_motion,
-                                    now,
-                                    ts,
-                                    renderer,
-                                    &mut timers,
-                                );
-                                editor_needs_redraw |= outcome.needs_redraw;
-                                editor_needs_vsync |= outcome.needs_vsync;
+                    CustomDraw::Editor(slot) => {
+                        let (style, focused, show_sel) = match slot {
+                            EditorSlot::Tab(_) => (&editor_style, editor_focused, show_selection),
+                            _ => {
+                                let f = focus == Focus::Editor(slot);
+                                (&field_style, f, f)
                             }
-                        }
-                        EditorSlot::FindQuery => {
-                            let focused = self.focus == Focus::Editor(slot);
+                        };
+                        let ed = match slot {
+                            EditorSlot::Tab(id) => tabs
+                                .iter_mut()
+                                .find(|t| t.data.id == id)
+                                .map(|t| &mut t.data.editor),
+                            EditorSlot::FindQuery => Some(&mut find.query),
+                            EditorSlot::FindReplace => Some(&mut find.replacement),
+                            EditorSlot::GoToLine => Some(&mut dialogs.line),
+                        };
+                        if let Some(ed) = ed {
                             let mut timers = WindowEditorTimers::new(jobs, wid, slot);
-                            let outcome = self.find.query.paint(
+                            let outcome = ed.paint(
                                 rect,
-                                &find_field_style,
+                                style,
                                 p,
                                 window_active,
                                 focused,
-                                focused,
+                                show_sel,
                                 scale,
                                 reduce_motion,
                                 now,
@@ -2174,49 +2165,9 @@ impl MainWindow {
                             editor_needs_redraw |= outcome.needs_redraw;
                             editor_needs_vsync |= outcome.needs_vsync;
                         }
-                        EditorSlot::FindReplace => {
-                            let focused = self.focus == Focus::Editor(slot);
-                            let mut timers = WindowEditorTimers::new(jobs, wid, slot);
-                            let outcome = self.find.replacement.paint(
-                                rect,
-                                &find_field_style,
-                                p,
-                                window_active,
-                                focused,
-                                focused,
-                                scale,
-                                reduce_motion,
-                                now,
-                                ts,
-                                renderer,
-                                &mut timers,
-                            );
-                            editor_needs_redraw |= outcome.needs_redraw;
-                            editor_needs_vsync |= outcome.needs_vsync;
-                        }
-                        EditorSlot::GoToLine => {
-                            let focused = self.focus == Focus::Editor(slot);
-                            let mut timers = WindowEditorTimers::new(jobs, wid, slot);
-                            let outcome = self.dialogs.line.paint(
-                                rect,
-                                &dialog_field_style,
-                                p,
-                                window_active,
-                                focused,
-                                focused,
-                                scale,
-                                reduce_motion,
-                                now,
-                                ts,
-                                renderer,
-                                &mut timers,
-                            );
-                            editor_needs_redraw |= outcome.needs_redraw;
-                            editor_needs_vsync |= outcome.needs_vsync;
-                        }
-                    },
+                    }
                     CustomDraw::Scrollbar => {
-                        self.tabs[self.active].data.editor.paint_scrollbar(renderer);
+                        tabs[active].data.editor.paint_scrollbar(renderer);
                     }
                     CustomDraw::StatusSpacer => {
                         let width = rect.size.width;

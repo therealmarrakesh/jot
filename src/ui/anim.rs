@@ -128,6 +128,31 @@ impl Lerp for Rgba {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum Presence {
+    #[default]
+    Hidden,
+    Open,
+    Closing,
+}
+
+impl Presence {
+    #[inline]
+    pub(crate) fn is_visible(self) -> bool {
+        !matches!(self, Self::Hidden)
+    }
+
+    #[inline]
+    pub(crate) fn is_open(self) -> bool {
+        matches!(self, Self::Open)
+    }
+
+    #[inline]
+    pub(crate) fn is_closing(self) -> bool {
+        matches!(self, Self::Closing)
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum AnimStatus {
     Idle,
@@ -280,6 +305,8 @@ impl<T: Lerp> AnimTrack<T> {
 
 pub(crate) struct AnimTracks<K: Copy + Eq + Hash> {
     frame: u64,
+    now: Instant,
+    reduce_motion: bool,
     running_this_frame: bool,
     scalars: HashMap<K, AnimTrack<f32>>,
     colors: HashMap<K, AnimTrack<Rgba>>,
@@ -289,6 +316,8 @@ impl<K: Copy + Eq + Hash> Default for AnimTracks<K> {
     fn default() -> Self {
         Self {
             frame: 0,
+            now: Instant::now(),
+            reduce_motion: false,
             running_this_frame: false,
             scalars: HashMap::new(),
             colors: HashMap::new(),
@@ -297,8 +326,10 @@ impl<K: Copy + Eq + Hash> Default for AnimTracks<K> {
 }
 
 impl<K: Copy + Eq + Hash> AnimTracks<K> {
-    pub(crate) fn begin_frame(&mut self) {
+    pub(crate) fn begin_frame(&mut self, now: Instant, reduce_motion: bool) {
         self.frame = self.frame.wrapping_add(1);
+        self.now = now;
+        self.reduce_motion = reduce_motion;
         self.running_this_frame = false;
     }
 
@@ -315,14 +346,11 @@ impl<K: Copy + Eq + Hash> AnimTracks<K> {
         target: f32,
         duration: Duration,
         easing: Easing,
-        now: Instant,
-        reduce_motion: bool,
     ) -> f32 {
-        self.animate_f32_from(key, target, target, duration, easing, now, reduce_motion)
+        self.animate_f32_from(key, target, target, duration, easing)
             .value
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn animate_f32_from(
         &mut self,
         key: K,
@@ -330,10 +358,10 @@ impl<K: Copy + Eq + Hash> AnimTracks<K> {
         target: f32,
         duration: Duration,
         easing: Easing,
-        now: Instant,
-        reduce_motion: bool,
     ) -> AnimSample<f32> {
         let frame = self.frame;
+        let now = self.now;
+        let reduce_motion = self.reduce_motion;
         let track = self.scalars.entry(key).or_insert_with(|| AnimTrack {
             from: initial,
             target,
@@ -355,10 +383,10 @@ impl<K: Copy + Eq + Hash> AnimTracks<K> {
         target: Rgba,
         duration: Duration,
         easing: Easing,
-        now: Instant,
-        reduce_motion: bool,
     ) -> Rgba {
         let frame = self.frame;
+        let now = self.now;
+        let reduce_motion = self.reduce_motion;
         let track = self.colors.entry(key).or_insert_with(|| AnimTrack {
             from: target,
             target,
@@ -510,28 +538,28 @@ mod tests {
         let dur = Duration::from_millis(100);
         let mut tracks: AnimTracks<u32> = AnimTracks::default();
 
-        tracks.begin_frame();
-        let s0 = tracks.animate_f32_from(1, 0.0, 100.0, dur, Easing::Linear, t0, false);
+        tracks.begin_frame(t0, false);
+        let s0 = tracks.animate_f32_from(1, 0.0, 100.0, dur, Easing::Linear);
         assert_eq!(s0.status, AnimStatus::Running);
         assert_eq!(s0.value, 0.0);
         assert!(tracks.end_frame());
         assert_eq!(tracks.track_count(), 1);
 
         let t_mid = t0 + Duration::from_millis(50);
-        tracks.begin_frame();
-        let s1 = tracks.animate_f32_from(1, 0.0, 0.0, dur, Easing::Linear, t_mid, false);
+        tracks.begin_frame(t_mid, false);
+        let s1 = tracks.animate_f32_from(1, 0.0, 0.0, dur, Easing::Linear);
         assert_eq!(s1.status, AnimStatus::Running);
         assert!((s1.value - 50.0).abs() < 1e-3);
         assert!(tracks.end_frame());
 
         let t_done = t_mid + Duration::from_millis(50);
-        tracks.begin_frame();
-        let s2 = tracks.animate_f32_from(1, 0.0, 0.0, dur, Easing::Linear, t_done, false);
+        tracks.begin_frame(t_done, false);
+        let s2 = tracks.animate_f32_from(1, 0.0, 0.0, dur, Easing::Linear);
         assert_eq!(s2.status, AnimStatus::Finished);
         assert_eq!(s2.value, 0.0);
         assert!(!tracks.end_frame());
 
-        tracks.begin_frame();
+        tracks.begin_frame(t_done, false);
         assert!(!tracks.end_frame());
         assert_eq!(tracks.track_count(), 0);
     }

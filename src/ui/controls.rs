@@ -41,7 +41,6 @@ pub(crate) fn subtle_brushes(p: Palette) -> Brushes {
 pub(crate) struct ButtonStyle {
     pub(crate) surface: Surface,
     pub(crate) accent: Rgba,
-    pub(crate) scale: f32,
 }
 
 pub(crate) fn button<H: Copy + Eq + Hash, C: Copy, K: Copy + Eq + Hash + From<H>>(
@@ -53,12 +52,7 @@ pub(crate) fn button<H: Copy + Eq + Hash, C: Copy, K: Copy + Eq + Hash + From<H>
     focused: bool,
     ui: &mut UiState<H, C, K>,
 ) -> Node<H, C> {
-    let ButtonStyle {
-        surface,
-        accent,
-        scale: s,
-    } = style;
-    let u = |v: f32| v * s;
+    let ButtonStyle { surface, accent } = style;
     let ring = focused && ui.last_input_was_keyboard();
     let pressed = ui.is_pressed(hit);
 
@@ -101,19 +95,19 @@ pub(crate) fn button<H: Copy + Eq + Hash, C: Copy, K: Copy + Eq + Hash + From<H>
     box_()
         .hit(hit)
         .relative()
-        .h(u(CONTROL_HEIGHT))
-        .rounded(u(CONTROL_RADIUS))
+        .h(CONTROL_HEIGHT)
+        .rounded(CONTROL_RADIUS)
         .bg(if pressed { pressed_bottom } else { bottom })
         .pb(1.)
         .cursor(CursorStyle::Arrow)
         .font_family(TEXT_FONT)
-        .text_size(u(BODY_SIZE))
+        .text_size(BODY_SIZE)
         .child(
             row()
                 .items_center()
                 .justify_center()
                 .size_full()
-                .rounded(u(CONTROL_RADIUS))
+                .rounded(CONTROL_RADIUS)
                 .border_widths(
                     Edges {
                         top: 1.,
@@ -128,7 +122,7 @@ pub(crate) fn button<H: Copy + Eq + Hash, C: Copy, K: Copy + Eq + Hash + From<H>
                 .child(text(label)),
         )
         .when(ring, |this| {
-            this.child(focus_ring(p, Edges::all(3.), u(CONTROL_RADIUS + 3.)))
+            this.child(focus_ring(p, Edges::all(3.), CONTROL_RADIUS + 3.))
         })
 }
 
@@ -192,38 +186,45 @@ pub(crate) fn focus_ring<H, C>(p: Palette, outset: Edges<f32>, radius: f32) -> N
         )
 }
 
-fn field_glyph<H, C>(p: Palette, glyph: &'static str, right: f32, s: f32) -> Node<H, C> {
-    let u = |v: f32| v * s;
+fn field_glyph<H, C>(p: Palette, glyph: &'static str, right: f32) -> Node<H, C> {
     row()
         .absolute()
-        .top(u(2.))
-        .bottom(u(2.))
-        .right(u(right))
-        .w(u(FIELD_GLYPH_WIDTH))
+        .top(2.)
+        .bottom(2.)
+        .right(right)
+        .w(FIELD_GLYPH_WIDTH)
         .items_center()
         .justify_center()
-        .rounded(u(CONTROL_RADIUS))
+        .rounded(CONTROL_RADIUS)
         .cursor(CursorStyle::Arrow)
         .font_family(ICON_FONT)
-        .text_size(u(FIELD_GLYPH_SIZE))
+        .text_size(FIELD_GLYPH_SIZE)
         .text_color(p.text_secondary)
         .child(text(glyph))
 }
 
-#[allow(clippy::too_many_arguments)]
+#[derive(Clone, Copy)]
+pub(crate) struct TextFieldStyle {
+    pub(crate) surface: Surface,
+    pub(crate) focused: bool,
+    pub(crate) empty: bool,
+    pub(crate) search_icon: bool,
+}
+
 pub(crate) fn text_field_frame<H: Copy + Eq + Hash, C: Copy, K: Copy + Eq + Hash>(
     p: Palette,
     field_hit: H,
     clear_hit: H,
-    surface: Surface,
-    scale: f32,
-    focused: bool,
-    empty: bool,
-    search_icon: bool,
+    style: TextFieldStyle,
     editor_node: Node<H, C>,
     ui: &UiState<H, C, K>,
 ) -> Node<H, C> {
-    let u = |v: f32| v * scale;
+    let TextFieldStyle {
+        surface,
+        focused,
+        empty,
+        search_icon,
+    } = style;
     let hovered = ui.is_hovered(field_hit);
     let (trailing, clear_right) = if search_icon {
         (
@@ -247,8 +248,8 @@ pub(crate) fn text_field_frame<H: Copy + Eq + Hash, C: Copy, K: Copy + Eq + Hash
         .hit(field_hit)
         .cursor(CursorStyle::IBeam)
         .relative()
-        .h(u(CONTROL_HEIGHT))
-        .rounded(u(CONTROL_RADIUS))
+        .h(CONTROL_HEIGHT)
+        .rounded(CONTROL_RADIUS)
         .overflow_hidden()
         .bg(bg)
         .border_widths(
@@ -265,11 +266,11 @@ pub(crate) fn text_field_frame<H: Copy + Eq + Hash, C: Copy, K: Copy + Eq + Hash
             row()
                 .h_full()
                 .items_center()
-                .pl(u(FIELD_PADDING - 1.))
-                .pr(u(trailing))
+                .pl(FIELD_PADDING - 1.)
+                .pr(trailing)
                 .font_family(TEXT_FONT)
-                .text_size(u(BODY_SIZE))
-                .line_height(u(BODY_LINE + 2.))
+                .text_size(BODY_SIZE)
+                .line_height(BODY_LINE + 2.)
                 .text_color(p.text_primary)
                 .child(editor_node),
         )
@@ -280,7 +281,7 @@ pub(crate) fn text_field_frame<H: Copy + Eq + Hash, C: Copy, K: Copy + Eq + Hash
                 .right(0.)
                 .bottom(0.)
                 .h(if focused { 2. } else { 1. })
-                .rounded_b(CONTROL_RADIUS * scale)
+                .rounded_b(CONTROL_RADIUS)
                 .bg(if focused {
                     p.accent
                 } else {
@@ -289,13 +290,13 @@ pub(crate) fn text_field_frame<H: Copy + Eq + Hash, C: Copy, K: Copy + Eq + Hash
         )
         .when(search_icon, |this| {
             this.child(
-                field_glyph(p, SEARCH_GLYPH, FIELD_GLYPH_RIGHT, scale)
+                field_glyph(p, SEARCH_GLYPH, FIELD_GLYPH_RIGHT)
                     .when(!focused, |g| g.text_color(p.text_primary)),
             )
         })
         .when(focused && !empty, |this| {
             this.child(
-                field_glyph(p, CLEAR_GLYPH, clear_right, scale)
+                field_glyph(p, CLEAR_GLYPH, clear_right)
                     .hit(clear_hit)
                     .when(clear_pressed, |g| {
                         g.bg(p.subtle_tertiary).text_color(p.text_tertiary)

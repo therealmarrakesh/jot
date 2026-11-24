@@ -12,8 +12,8 @@ use crate::tabs::TabId;
 use crate::theme::{Palette, theme_shadow};
 use crate::types::SharedStr;
 use crate::ui::controls::{
-    BODY_LINE, BODY_SIZE, ButtonStyle, FIELD_CARET, OVERLAY_RADIUS, TEXT_FONT, button,
-    text_field_frame,
+    BODY_LINE, BODY_SIZE, ButtonStyle, FIELD_CARET, OVERLAY_RADIUS, TEXT_FONT, TextFieldStyle,
+    button, text_field_frame,
 };
 use crate::ui::{AnimStatus, Easing, box_, col, row, text};
 use crate::window::Focus;
@@ -188,10 +188,6 @@ impl Dialogs {
         self.open.iter().rev().find(|d| !d.closing)
     }
 
-    pub(crate) fn active_scale(&self) -> f32 {
-        self.active().map_or(1., |d| d.scale)
-    }
-
     pub(crate) fn active_button_count(&self) -> usize {
         self.active().map_or(0, |d| d.kind.buttons().len())
     }
@@ -319,11 +315,9 @@ impl Dialogs {
         ts: &TextSystem,
         ui: &mut UiState,
     ) -> Node {
-        let s = dialog.scale;
         let style = ButtonStyle {
             surface: p.command_surface,
             accent: p.accent,
-            scale: s,
         };
         let focused_btn = match focus {
             Focus::DialogButton(ix) => Some(ix),
@@ -354,19 +348,19 @@ impl Dialogs {
             DialogKind::GoTo => (
                 GO_TO_WIDTH,
                 SharedStr::new_static(GO_TO_TITLE),
-                self.render_go_to_body(focus, p, s, ui),
+                self.render_go_to_body(focus, p, ui),
             ),
             DialogKind::LineOutOfRange => (
                 ts.measure(OUT_OF_RANGE_MESSAGE, &body_style).ceil(),
                 SharedStr::new_static(GO_TO_TITLE),
-                message_body(OUT_OF_RANGE_MESSAGE.into(), s),
+                message_body(OUT_OF_RANGE_MESSAGE.into()),
             ),
             DialogKind::Error { title, message } => (
                 ts.measure(message, &body_style)
                     .max(ts.measure(title, &title_style))
                     .ceil(),
                 title.clone(),
-                message_body(message.clone(), s),
+                message_body(message.clone()),
             ),
             DialogKind::ConfirmDiscard { name, .. } => {
                 let (title, message) = discard_prompt_text(name);
@@ -374,7 +368,7 @@ impl Dialogs {
                     .measure(&message, &body_style)
                     .max(ts.measure(&title, &title_style))
                     .ceil();
-                (w, title, message_body(message, s))
+                (w, title, message_body(message))
             }
             DialogKind::ConfirmLossyAnsi { path, .. } => {
                 let title: SharedStr = APP_NAME.into();
@@ -384,7 +378,7 @@ impl Dialogs {
                     .measure(&message, &body_style)
                     .max(ts.measure(&title, &title_style))
                     .ceil();
-                (w, title, message_body(message, s))
+                (w, title, message_body(message))
             }
         };
 
@@ -400,78 +394,76 @@ impl Dialogs {
             .when(!dialog.closing, |this| {
                 this.hit(HitId::DialogBackdrop).cursor(CursorStyle::Arrow)
             })
-            .child(dialog_frame(p, s, width, title, body, buttons).when(dialog.closing, Node::inert))
+            .child(
+                dialog_frame(p, width, title, body, buttons)
+                    .scale(dialog.scale, dialog.scale)
+                    .when(dialog.closing, Node::inert),
+            )
     }
 
-    fn render_go_to_body(&self, focus: Focus, p: Palette, s: f32, ui: &UiState) -> Node {
-        let u = |v: f32| v * s;
+    fn render_go_to_body(&self, focus: Focus, p: Palette, ui: &UiState) -> Node {
         let slot = EditorSlot::GoToLine;
         let line_editor = self.line.view(
             HitId::Editor(slot),
             CustomDraw::Editor(slot),
             None,
-            u(BODY_LINE + 2.),
+            BODY_LINE + 2.,
         );
         let field = text_field_frame(
             p,
             HitId::Editor(slot),
             HitId::FieldClear(slot),
-            p.content_surface,
-            s,
-            focus == Focus::Editor(slot),
-            self.line.text().len() == 0,
-            false,
+            TextFieldStyle {
+                surface: p.content_surface,
+                focused: focus == Focus::Editor(slot),
+                empty: self.line.text().len() == 0,
+                search_icon: false,
+            },
             line_editor,
             ui,
         );
         col()
-            .child(
-                message_body("Line number".into(), s)
-                    .h(u(BODY_LINE))
-                    .mb(u(HEADER_GAP)),
-            )
+            .child(message_body("Line number".into()).h(BODY_LINE).mb(HEADER_GAP))
             .child(field)
     }
 }
 
-fn message_body(message: SharedStr, s: f32) -> Node {
+fn message_body(message: SharedStr) -> Node {
     box_()
         .relative()
         .top(BODY_BASELINE_SNAP)
-        .line_height(BODY_LINE * s)
+        .line_height(BODY_LINE)
         .child(text(message))
 }
 
 fn dialog_frame(
     p: Palette,
-    s: f32,
     content_width: f32,
     title: SharedStr,
     body: Node,
     buttons: Vec<Node>,
 ) -> Node {
-    let u = |v: f32| v * s;
     let width = (content_width + 2. * PADDING + 2. * BORDER).clamp(MIN_WIDTH, MAX_WIDTH);
     let spacer = (buttons.len() == 1).then(|| box_().flex_1().min_w_0());
     box_()
         .hit(HitId::DialogCard)
-        .w(u(width))
+        .w(width)
         .max_w_full()
         .border(BORDER, p.surface_stroke)
-        .rounded(u(OVERLAY_RADIUS))
-        .shadows(theme_shadow(p.dark, DIALOG_Z, s))
+        .rounded(OVERLAY_RADIUS)
+        .shadows(theme_shadow(p.dark, DIALOG_Z))
         .child(
             col()
-                .rounded(u(OVERLAY_RADIUS - BORDER))
+                .rounded(OVERLAY_RADIUS - BORDER)
                 .bg(p.command_surface.panel)
                 .font_family(TEXT_FONT)
-                .text_size(u(BODY_SIZE))
+                .text_size(BODY_SIZE)
                 .text_color(p.text_primary)
-                .child(dialog_content(p, s, title, body))
+                .child(dialog_content(p, title, body))
                 .child(
                     row()
-                        .p(u(PADDING))
-                        .gap(u(BUTTON_GAP))
+                        .p(PADDING)
+                        .gap(BUTTON_GAP)
                         .when_some(spacer, |this, sp| this.child(sp))
                         .children(
                             buttons
@@ -482,21 +474,20 @@ fn dialog_frame(
         )
 }
 
-fn dialog_content(p: Palette, s: f32, title: SharedStr, body: Node) -> Node {
-    let u = |v: f32| v * s;
+fn dialog_content(p: Palette, title: SharedStr, body: Node) -> Node {
     col()
-        .p(u(PADDING))
-        .rounded_t(u(OVERLAY_RADIUS - BORDER))
+        .p(PADDING)
+        .rounded_t(OVERLAY_RADIUS - BORDER)
         .bg(p.content_surface.panel)
         .border_b(1.)
         .border_color(p.dialog_divider)
         .child(
             box_()
-                .mb(u(TITLE_GAP))
+                .mb(TITLE_GAP)
                 .font_family(TITLE_FONT)
                 .font_semibold()
-                .text_size(u(TITLE_SIZE))
-                .line_height(u(TITLE_LINE))
+                .text_size(TITLE_SIZE)
+                .line_height(TITLE_LINE)
                 .line_clamp(2)
                 .child(text(title)),
         )

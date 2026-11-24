@@ -305,7 +305,7 @@ pub(crate) const DARK: Palette = Palette {
 const BLUR_RADIUS_PER_SIGMA: f32 = 3.;
 const CASTER_INSET: f32 = 1.;
 
-pub(crate) fn theme_shadow(dark: bool, z: f32, scale: f32) -> Shadows {
+pub(crate) fn theme_shadow(dark: bool, z: f32) -> Shadows {
     let elevation = (z / 2.).min(64.);
     let (ambient, directional) = match (elevation, dark) {
         (e, _) if e < 2. => (0., 0.),
@@ -317,9 +317,9 @@ pub(crate) fn theme_shadow(dark: bool, z: f32, scale: f32) -> Shadows {
     let make = |opacity: f32, blur: f32, y: f32| -> Option<BoxShadow> {
         (opacity > 0.).then(|| BoxShadow {
             color: black().alpha((opacity * 255.).floor() / 255.),
-            offset: point(0., y * scale),
-            blur_radius: (blur + CASTER_INSET) * scale / BLUR_RADIUS_PER_SIGMA,
-            spread_radius: -CASTER_INSET * scale,
+            offset: point(0., y),
+            blur_radius: (blur + CASTER_INSET) / BLUR_RADIUS_PER_SIGMA,
+            spread_radius: -CASTER_INSET,
         })
     };
     Shadows([

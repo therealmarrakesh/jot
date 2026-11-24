@@ -377,10 +377,23 @@ pub(crate) fn fill(bounds: Rect, background: Rgba) -> PaintQuad {
     }
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq)]
 enum RenderScope {
     Clip,
     Layer,
+    Transform(Matrix3x2),
+}
+
+#[inline]
+fn mul_matrix(a: Matrix3x2, b: Matrix3x2) -> Matrix3x2 {
+    Matrix3x2 {
+        M11: a.M11 * b.M11 + a.M12 * b.M21,
+        M12: a.M11 * b.M12 + a.M12 * b.M22,
+        M21: a.M21 * b.M11 + a.M22 * b.M21,
+        M22: a.M21 * b.M12 + a.M22 * b.M22,
+        M31: a.M31 * b.M11 + a.M32 * b.M21 + b.M31,
+        M32: a.M31 * b.M12 + a.M32 * b.M22 + b.M32,
+    }
 }
 
 pub(crate) struct D2DRenderer {
@@ -399,6 +412,7 @@ pub(crate) struct D2DRenderer {
     physical_width: u32,
     physical_height: u32,
     scale_factor: f32,
+    transform: Matrix3x2,
     scopes: Vec<RenderScope>,
     needs_recreate: bool,
 }
@@ -489,6 +503,7 @@ impl D2DRenderer {
             physical_width: width,
             physical_height: height,
             scale_factor,
+            transform: Matrix3x2::identity(),
             scopes: Vec::with_capacity(8),
             needs_recreate: false,
         };
@@ -572,12 +587,13 @@ impl D2DRenderer {
 
     fn begin_frame(&mut self, clear_color: Rgba) {
         self.scopes.clear();
+        self.transform = Matrix3x2::identity();
         if self.target_bitmap.is_none() && self.attach_backbuffer(self.scale_factor).is_err() {
             self.needs_recreate = true;
         }
         unsafe {
             self.context.BeginDraw();
-            self.context.SetTransform(&Matrix3x2::identity());
+            self.context.SetTransform(&self.transform);
             self.context.Clear(Some(&to_d2d_color(clear_color)));
         }
     }
@@ -590,6 +606,10 @@ impl D2DRenderer {
                 }
                 RenderScope::Layer => {
                     unsafe { self.context.PopLayer() }
+                }
+                RenderScope::Transform(prev) => {
+                    self.transform = prev;
+                    unsafe { self.context.SetTransform(&prev) }
                 }
             }
         }
@@ -668,6 +688,33 @@ impl D2DRenderer {
             self.scopes.pop();
             unsafe {
                 self.context.PopLayer();
+            }
+        }
+    }
+
+    pub(crate) fn push_scale(&mut self, origin: Point, sx: f32, sy: f32) {
+        let local = Matrix3x2 {
+            M11: sx,
+            M12: 0.0,
+            M21: 0.0,
+            M22: sy,
+            M31: origin.x * (1.0 - sx),
+            M32: origin.y * (1.0 - sy),
+        };
+        let prev = self.transform;
+        self.transform = mul_matrix(local, prev);
+        unsafe {
+            self.context.SetTransform(&self.transform);
+        }
+        self.scopes.push(RenderScope::Transform(prev));
+    }
+
+    pub(crate) fn pop_transform(&mut self) {
+        if let Some(RenderScope::Transform(prev)) = self.scopes.last().copied() {
+            self.scopes.pop();
+            self.transform = prev;
+            unsafe {
+                self.context.SetTransform(&prev);
             }
         }
     }

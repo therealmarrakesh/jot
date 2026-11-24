@@ -111,6 +111,7 @@ pub(crate) struct Node<H, C> {
     corners: Corners,
     shadows: Shadows,
     opacity: f32,
+    scale: (f32, f32),
     inert: bool,
     text: TextOverrides,
     hit: Option<H>,
@@ -145,6 +146,7 @@ impl<H, C> Node<H, C> {
             corners: Corners::ZERO,
             shadows: Shadows::NONE,
             opacity: 1.0,
+            scale: (1.0, 1.0),
             inert: false,
             text: TextOverrides::default(),
             hit: None,
@@ -233,6 +235,7 @@ impl<H, C> Node<H, C> {
         rounded_b(r: f32) => |s| { s.corners = Corners::bottom(r); }
         shadows(shadows: Shadows) => |s| { s.shadows = shadows; }
         opacity(opacity: f32) => |s| { s.opacity = opacity; }
+        scale(sx: f32, sy: f32) => |s| { s.scale = (sx, sy); }
         inert() => |s| { s.inert = true; }
         font_semibold() => |s| { s.text.weight = Some(FontWeight::SEMIBOLD); }
         text_size(size: f32) => |s| { s.text.size = Some(size); }
@@ -343,6 +346,7 @@ struct FlatNode<H, C> {
     corners: Corners,
     shadows: Shadows,
     opacity: f32,
+    scale: (f32, f32),
     inert: bool,
     clip: bool,
     hit: Option<H>,
@@ -480,6 +484,7 @@ impl<H: Copy + Eq, C: Copy> Frame<H, C> {
             corners,
             shadows,
             opacity,
+            scale: node_scale,
             inert,
             hit,
             cursor,
@@ -499,6 +504,7 @@ impl<H: Copy + Eq, C: Copy> Frame<H, C> {
             corners,
             shadows,
             opacity,
+            scale: node_scale,
             inert,
             clip,
             hit,
@@ -562,12 +568,16 @@ impl<H: Copy + Eq, C: Copy> Frame<H, C> {
     }
 
     fn collect_hits(&mut self, idx: usize, clip: Rect) {
-        if self.nodes[idx].inert {
+        let node = &self.nodes[idx];
+        if node.inert
+            || (node.scale.0 - 1.0).abs() > 1e-4
+            || (node.scale.1 - 1.0).abs() > 1e-4
+        {
             return;
         }
-        let rect = self.nodes[idx].rect;
+        let rect = node.rect;
         let clipped = rect.intersect(clip);
-        let child_clip = if self.nodes[idx].clip { clipped } else { clip };
+        let child_clip = if node.clip { clipped } else { clip };
 
         if !clipped.is_empty() {
             if let Some(area) = self.nodes[idx].window_area {
@@ -681,12 +691,17 @@ impl<H: Copy + Eq, C: Copy> Frame<H, C> {
         draw_custom: &mut impl FnMut(C, Rect, &mut D2DRenderer),
     ) {
         let node = &self.nodes[idx];
-        if node.opacity <= 0.0 {
+        if node.opacity <= 0.0 || node.scale.0 <= 1e-3 || node.scale.1 <= 1e-3 {
             return;
         }
         let pushed_layer = node.opacity < 1.0 - 1e-4;
         if pushed_layer {
             renderer.push_opacity_layer(node.opacity);
+        }
+        let pushed_transform =
+            (node.scale.0 - 1.0).abs() > 1e-4 || (node.scale.1 - 1.0).abs() > 1e-4;
+        if pushed_transform {
+            renderer.push_scale(node.rect.center(), node.scale.0, node.scale.1);
         }
 
         if !node.shadows.is_empty() {
@@ -733,6 +748,9 @@ impl<H: Copy + Eq, C: Copy> Frame<H, C> {
         if pushed_clip {
             renderer.pop_clip();
         }
+        if pushed_transform {
+            renderer.pop_transform();
+        }
         if pushed_layer {
             renderer.pop_layer();
         }
@@ -746,8 +764,6 @@ pub(crate) struct UiState<H: Copy + Eq + Hash, C: Copy, K: Copy + Eq + Hash> {
     pressed: Option<H>,
     last_input_was_keyboard: bool,
     anims: AnimTracks<K>,
-    now: Instant,
-    reduce_motion: bool,
 }
 
 impl<H: Copy + Eq + Hash, C: Copy, K: Copy + Eq + Hash> Default for UiState<H, C, K> {
@@ -759,8 +775,6 @@ impl<H: Copy + Eq + Hash, C: Copy, K: Copy + Eq + Hash> Default for UiState<H, C
             pressed: None,
             last_input_was_keyboard: false,
             anims: AnimTracks::default(),
-            now: Instant::now(),
-            reduce_motion: false,
         }
     }
 }
@@ -787,9 +801,7 @@ impl<H: Copy + Eq + Hash, C: Copy, K: Copy + Eq + Hash> UiState<H, C, K> {
     }
 
     pub(crate) fn begin_frame(&mut self, now: Instant, reduce_motion: bool) {
-        self.now = now;
-        self.reduce_motion = reduce_motion;
-        self.anims.begin_frame();
+        self.anims.begin_frame(now, reduce_motion);
     }
 
     pub(crate) fn finish_frame(&mut self, frame: Frame<H, C>) -> bool {
@@ -892,14 +904,8 @@ impl<H: Copy + Eq + Hash, C: Copy, K: Copy + Eq + Hash> UiState<H, C, K> {
         } else {
             brushes.rest
         };
-        self.anims.animate_color(
-            K::from(hit),
-            target,
-            BRUSH_FADE_DURATION,
-            Easing::Linear,
-            self.now,
-            self.reduce_motion,
-        )
+        self.anims
+            .animate_color(K::from(hit), target, BRUSH_FADE_DURATION, Easing::Linear)
     }
 
     pub(crate) fn animate_f32_from(
@@ -910,15 +916,8 @@ impl<H: Copy + Eq + Hash, C: Copy, K: Copy + Eq + Hash> UiState<H, C, K> {
         duration: Duration,
         easing: Easing,
     ) -> AnimSample<f32> {
-        self.anims.animate_f32_from(
-            key,
-            initial,
-            target,
-            duration,
-            easing,
-            self.now,
-            self.reduce_motion,
-        )
+        self.anims
+            .animate_f32_from(key, initial, target, duration, easing)
     }
 
     #[cfg(test)]

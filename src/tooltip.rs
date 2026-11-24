@@ -391,14 +391,12 @@ impl Tooltips {
         let fade = &mut self.fade;
         let mut animating = false;
         let needs_retry = self.overlay.paint(|logical, scale, renderer| {
-            fade.begin_frame();
+            fade.begin_frame(now, reduce_motion);
             let opacity = fade.animate_f32(
                 (),
                 if visible { 1. } else { 0. },
                 FADE,
                 Easing::EaseOutCubic,
-                now,
-                reduce_motion,
             );
             let tree: GenericNode<(), ()> = box_().size_full().opacity(opacity).child(
                 box_()
@@ -463,7 +461,7 @@ fn tooltip_card(p: Palette, content: SharedStr, sz: Size) -> GenericNode<(), ()>
         .h(sz.height)
         .rounded(CONTROL_RADIUS)
         .border(BORDER, p.flyout_stroke)
-        .shadows(theme_shadow(p.dark, ELEVATION * 2., 1.))
+        .shadows(theme_shadow(p.dark, ELEVATION * 2.))
         .child(
             box_()
                 .relative()
