@@ -147,7 +147,7 @@ impl DocumentView {
             soft_wrap: opts.soft_wrap,
             last_line_height: 20.0,
             paddings: opts.paddings,
-            scrollbar: ScrollbarState::new(),
+            scrollbar: ScrollbarState::default(),
             auto_scroll: AutoScroll::default(),
             longest_line_cache: None,
             pending_context_menu: None,
@@ -173,35 +173,32 @@ pub(crate) struct Editor {
 
 impl Editor {
     pub(crate) fn document(rope: Rope, opts: DocOptions) -> Self {
-        Self {
-            model: TextModel::new(EditPolicy {
-                multi_line: true,
-                validate: None,
-            })
-            .with_rope(rope),
-            doc: Some(Box::new(DocumentView::new(opts))),
-            blink: BlinkState::new(),
-            goal: None,
-            word_anchor: None,
-            selecting: false,
-            scroll: Scroll::default(),
-            reveal: None,
-            input_bounds: Rect::ZERO,
-            frame: None,
-            caret_height: 0.0,
-            caret_hidden: false,
-            placeholder: SharedStr::default(),
-        }
+        let model = TextModel::new(EditPolicy {
+            multi_line: true,
+            validate: None,
+        });
+        let doc = Some(Box::new(DocumentView::new(opts)));
+        Self::new(model.with_rope(rope), doc, 0.0, SharedStr::default())
     }
 
     pub(crate) fn field(opts: FieldOptions) -> Self {
+        let model = TextModel::new(EditPolicy {
+            multi_line: false,
+            validate: opts.validate,
+        });
+        Self::new(model, None, opts.caret_height, opts.placeholder)
+    }
+
+    fn new(
+        model: TextModel,
+        doc: Option<Box<DocumentView>>,
+        caret_height: f32,
+        placeholder: SharedStr,
+    ) -> Self {
         Self {
-            model: TextModel::new(EditPolicy {
-                multi_line: false,
-                validate: opts.validate,
-            }),
-            doc: None,
-            blink: BlinkState::new(),
+            model,
+            doc,
+            blink: BlinkState::default(),
             goal: None,
             word_anchor: None,
             selecting: false,
@@ -209,9 +206,9 @@ impl Editor {
             reveal: None,
             input_bounds: Rect::ZERO,
             frame: None,
-            caret_height: opts.caret_height,
+            caret_height,
             caret_hidden: false,
-            placeholder: opts.placeholder,
+            placeholder,
         }
     }
 
@@ -401,6 +398,7 @@ impl Editor {
     }
 }
 
+#[derive(Default)]
 pub(crate) struct BlinkState {
     active: bool,
     visible: bool,
@@ -409,23 +407,7 @@ pub(crate) struct BlinkState {
     timer: Option<TimerHandle>,
 }
 
-impl Default for BlinkState {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl BlinkState {
-    pub(crate) fn new() -> Self {
-        Self {
-            active: false,
-            visible: false,
-            paused: false,
-            started_at: None,
-            timer: None,
-        }
-    }
-
     #[inline]
     pub(crate) fn visible(&self) -> bool {
         self.paused || self.visible
@@ -2761,21 +2743,24 @@ impl TextModel {
         } else {
             EditKind::Atomic
         };
-        self.commit(Edit {
-            source: EditSource::Changes(ChangeSet::single(range, normalized)),
-            selection: SelectionAfter::AfterLastEdit,
-            record: Record::Undoable(kind),
-            validate: true,
-        })
+        self.replace_range(range, normalized, kind)
     }
 
     pub(crate) fn replace_selection(&mut self, text: &str) -> Option<LineChange> {
         self.commit_composition();
-        let range = self.selected_range();
+        self.replace_range(self.selected_range(), text, EditKind::Atomic)
+    }
+
+    fn replace_range(
+        &mut self,
+        range: Range<usize>,
+        text: impl Into<String>,
+        kind: EditKind,
+    ) -> Option<LineChange> {
         self.commit(Edit {
             source: EditSource::Changes(ChangeSet::single(range, text)),
             selection: SelectionAfter::AfterLastEdit,
-            record: Record::Undoable(EditKind::Atomic),
+            record: Record::Undoable(kind),
             validate: true,
         })
     }
@@ -2856,12 +2841,7 @@ impl TextModel {
         } else {
             (self.selection.range(), EditKind::Atomic)
         };
-        self.commit(Edit {
-            source: EditSource::Changes(ChangeSet::single(range, "")),
-            selection: SelectionAfter::AfterLastEdit,
-            record: Record::Undoable(kind),
-            validate: true,
-        })
+        self.replace_range(range, "", kind)
     }
 
     pub(crate) fn delete_backward(&mut self) -> Option<LineChange> {
@@ -2889,13 +2869,7 @@ impl TextModel {
         if !self.policy.multi_line {
             return None;
         }
-        let range = self.selected_range();
-        self.commit(Edit {
-            source: EditSource::Changes(ChangeSet::single(range, "\n")),
-            selection: SelectionAfter::AfterLastEdit,
-            record: Record::Undoable(EditKind::Atomic),
-            validate: true,
-        })
+        self.replace_range(self.selected_range(), "\n", EditKind::Atomic)
     }
 
     pub(crate) fn indent(&mut self, block: bool) -> Option<Option<LineChange>> {
@@ -2908,13 +2882,7 @@ impl TextModel {
             && self.text.offset_to_point(before.start()).row
                 != self.text.offset_to_point(before.end()).row;
         if !block && !spans_multiple_lines {
-            let range = before.range();
-            return Some(self.commit(Edit {
-                source: EditSource::Changes(ChangeSet::single(range, "\t")),
-                selection: SelectionAfter::AfterLastEdit,
-                record: Record::Undoable(EditKind::Atomic),
-                validate: true,
-            }));
+            return Some(self.replace_range(before.range(), "\t", EditKind::Atomic));
         }
         let (start_row, end_row) = self.selected_line_bounds(before);
         let changes = ChangeSet::new(
@@ -2996,11 +2964,7 @@ impl TextModel {
 
     fn replay(&mut self, is_undo: bool) -> Option<LineChange> {
         self.commit_composition();
-        let replay = if is_undo {
-            self.history.undo()
-        } else {
-            self.history.redo()
-        }?;
+        let replay = self.history.replay(is_undo)?;
         let source = match replay.payload {
             ReplayPayload::Changes(changes) => EditSource::Changes(changes),
             ReplayPayload::Snapshot(rope) => EditSource::ReplaceRope(rope),
@@ -3373,13 +3337,7 @@ impl History {
     }
 
     pub(crate) fn clear(&mut self) {
-        self.undo_stack.clear();
-        self.redo_stack.clear();
-        self.total_bytes = 0;
-        self.coalesce_broken = false;
-        self.next_version = 1;
-        self.current_version = 0;
-        self.saved_version = 0;
+        *self = Self::new();
     }
 
     pub(crate) fn begin_save(&mut self) -> u64 {
@@ -3403,36 +3361,29 @@ impl History {
         !self.redo_stack.is_empty()
     }
 
-    pub(crate) fn undo(&mut self) -> Option<HistoryReplay> {
-        let entry = self.undo_stack.pop()?;
-        self.current_version = entry.version_before;
-        let payload = match &entry.payload {
-            TxPayload::Changes { undo, .. } => ReplayPayload::Changes(undo.clone()),
-            TxPayload::Snapshot { before, .. } => ReplayPayload::Snapshot(before.clone()),
+    pub(crate) fn replay(&mut self, is_undo: bool) -> Option<HistoryReplay> {
+        let (from, to) = if is_undo {
+            (&mut self.undo_stack, &mut self.redo_stack)
+        } else {
+            (&mut self.redo_stack, &mut self.undo_stack)
         };
-        let replay = HistoryReplay {
-            payload,
-            selection: entry.selection_before,
+        let entry = from.pop()?;
+        let (version, selection) = if is_undo {
+            (entry.version_before, entry.selection_before)
+        } else {
+            (entry.version_after, entry.selection_after)
         };
-        self.redo_stack.push(entry);
+        let payload = match (&entry.payload, is_undo) {
+            (TxPayload::Changes { undo: c, .. }, true) | (TxPayload::Changes { redo: c, .. }, false) => {
+                ReplayPayload::Changes(c.clone())
+            }
+            (TxPayload::Snapshot { before: r, .. }, true)
+            | (TxPayload::Snapshot { after: r, .. }, false) => ReplayPayload::Snapshot(r.clone()),
+        };
+        to.push(entry);
+        self.current_version = version;
         self.coalesce_broken = true;
-        Some(replay)
-    }
-
-    pub(crate) fn redo(&mut self) -> Option<HistoryReplay> {
-        let entry = self.redo_stack.pop()?;
-        self.current_version = entry.version_after;
-        let payload = match &entry.payload {
-            TxPayload::Changes { redo, .. } => ReplayPayload::Changes(redo.clone()),
-            TxPayload::Snapshot { after, .. } => ReplayPayload::Snapshot(after.clone()),
-        };
-        let replay = HistoryReplay {
-            payload,
-            selection: entry.selection_after,
-        };
-        self.undo_stack.push(entry);
-        self.coalesce_broken = true;
-        Some(replay)
+        Some(HistoryReplay { payload, selection })
     }
 }
 
@@ -4672,10 +4623,6 @@ impl Default for ScrollbarState {
 }
 
 impl ScrollbarState {
-    pub(crate) fn new() -> Self {
-        Self::default()
-    }
-
     fn new_at(now: Instant) -> Self {
         Self {
             drag: None,
@@ -4986,7 +4933,6 @@ mod tests {
     use crate::ui::TabId;
 
     use super::*;
-    use super::remap_offset;
 
     #[test]
     fn editor_direct_typing_undo_redo_and_word_navigation() {
@@ -5297,7 +5243,7 @@ mod tests {
     }
 
     fn undo_changes(h: &mut History) -> ChangeSet {
-        match h.undo().unwrap().payload {
+        match h.replay(true).unwrap().payload {
             ReplayPayload::Changes(c) => c,
             ReplayPayload::Snapshot(_) => panic!("expected changes"),
         }
@@ -5309,7 +5255,7 @@ mod tests {
         h.push(insert_tx(0, "a", EditKind::Insert));
         h.push(insert_tx(1, "b", EditKind::Insert));
         assert_eq!(undo_changes(&mut h), ChangeSet::single(0..2, ""));
-        assert!(h.undo().is_none());
+        assert!(h.replay(true).is_none());
 
         let mut h = History::new();
         for i in 0..1_100 {
@@ -5323,7 +5269,7 @@ mod tests {
             undo_changes(&mut h),
             ChangeSet::single(0..MAX_CHANGES_PER_ENTRY, "")
         );
-        assert!(h.undo().is_none());
+        assert!(h.replay(true).is_none());
     }
 
     #[test]
@@ -5376,9 +5322,9 @@ mod tests {
             capped.push(insert_tx(i, "a", EditKind::Atomic));
         }
         for _ in 0..MAX_HISTORY_ENTRIES {
-            assert!(capped.undo().is_some());
+            assert!(capped.replay(true).is_some());
         }
-        assert!(capped.undo().is_none());
+        assert!(capped.replay(true).is_none());
     }
 
     #[test]
@@ -5388,10 +5334,10 @@ mod tests {
 
         h.push(insert_tx(0, "a", EditKind::Insert));
         assert!(!h.is_clean());
-        assert!(h.undo().is_some());
+        assert!(h.replay(true).is_some());
         assert!(h.is_clean());
         assert!(h.can_redo());
-        assert!(h.redo().is_some());
+        assert!(h.replay(false).is_some());
         assert!(!h.is_clean());
 
         let saved = h.begin_save();
@@ -5406,13 +5352,13 @@ mod tests {
         h.push(insert_tx(1, "c", EditKind::Insert));
         h.mark_saved(snapshot);
         assert!(!h.is_clean());
-        assert!(h.undo().is_some());
+        assert!(h.replay(true).is_some());
         assert!(h.is_clean());
 
-        assert!(h.undo().is_some());
+        assert!(h.replay(true).is_some());
         h.push(insert_tx(0, "z", EditKind::Insert));
         assert!(!h.is_clean());
-        assert!(h.undo().is_some());
+        assert!(h.replay(true).is_some());
         assert!(!h.is_clean());
     }
 
