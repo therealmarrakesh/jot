@@ -6,6 +6,7 @@ use crate::document::Format;
 use crate::editor::{Editor, Rope};
 use crate::files::{FilePrompt, LOSSY_ANSI_WARNING, WorkflowGen, discard_prompt_text};
 use crate::gfx::{TextStyle, TextSystem};
+use crate::ids::{AnimKey, CustomDraw, EditorSlot, HitId, Node, UiState};
 use crate::platform::CursorStyle;
 use crate::tabs::TabId;
 use crate::theme::{Palette, theme_shadow};
@@ -14,9 +15,7 @@ use crate::ui::controls::{
     BODY_LINE, BODY_SIZE, ButtonStyle, FIELD_CARET, OVERLAY_RADIUS, TEXT_FONT, button,
     text_field_frame,
 };
-use crate::ui::{
-    AnimKey, AnimStatus, Easing, EditorSlot, HitId, Node, UiState, box_, col, row, text,
-};
+use crate::ui::{AnimStatus, Easing, box_, col, row, text};
 use crate::window::Focus;
 
 const TITLE_FONT: &str = "Segoe UI Variable Display";
@@ -401,21 +400,25 @@ impl Dialogs {
             .when(!dialog.closing, |this| {
                 this.hit(HitId::DialogBackdrop).cursor(CursorStyle::Arrow)
             })
-            .child(
-                dialog_frame(p, s, width, title, body, buttons)
-                    .when(dialog.closing, Node::strip_hits),
-            )
+            .child(dialog_frame(p, s, width, title, body, buttons).when(dialog.closing, Node::inert))
     }
 
     fn render_go_to_body(&self, focus: Focus, p: Palette, s: f32, ui: &UiState) -> Node {
         let u = |v: f32| v * s;
-        let line_editor = self.line.view(EditorSlot::GoToLine, u(BODY_LINE + 2.));
+        let slot = EditorSlot::GoToLine;
+        let line_editor = self.line.view(
+            HitId::Editor(slot),
+            CustomDraw::Editor(slot),
+            None,
+            u(BODY_LINE + 2.),
+        );
         let field = text_field_frame(
             p,
-            EditorSlot::GoToLine,
+            HitId::Editor(slot),
+            HitId::FieldClear(slot),
             p.content_surface,
             s,
-            focus == Focus::Editor(EditorSlot::GoToLine),
+            focus == Focus::Editor(slot),
             self.line.text().len() == 0,
             false,
             line_editor,

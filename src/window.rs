@@ -17,8 +17,9 @@ use crate::files::{
 use crate::find::FindBar;
 use crate::geom::{Edges, Point, Rect, Size, point, size};
 use crate::gfx::{Surface, TextSystem, fill, font};
+use crate::ids::{CustomDraw, EditorSlot, Frame, HitId, Node, UiState};
 use crate::keytips::KeyTip;
-use crate::menu::{MenuBar, MenuKind, MenuOutcome};
+use crate::menu::{MenuBar, MenuOutcome};
 use crate::platform::{
     CursorStyle, Jobs, Key, KeyEvent, Modifiers, MouseButton, NativeWindow, TimerHandle,
     WindowControlArea, WindowId, format_local_time_date,
@@ -28,14 +29,12 @@ use crate::tabs::{
     SCROLL_STEP, STRIP_TOP, TAB_HEIGHT, Tab, TabData, TabId, TabSaveState, TabStrip, WHEEL_SHARE,
 };
 use crate::theme::Palette;
+use crate::tooltip::TooltipProbe;
 use crate::ui::controls::{
     BODY_LINE, BODY_SIZE, CONTROL_RADIUS, ICON_FONT, IconButtonStyle, SMALL_FONT, TEXT_FONT,
     icon_button,
 };
-use crate::ui::{
-    AvailSize, Brushes, CustomDraw, EditorSlot, Frame, HitId, Node, UiState, box_, col, custom,
-    row, text,
-};
+use crate::ui::{AvailSize, Brushes, box_, col, custom, row, text};
 
 pub(crate) const WINDOW_WIDTH: f32 = 2213.;
 pub(crate) const WINDOW_HEIGHT: f32 = 1107.;
@@ -171,9 +170,6 @@ pub(crate) struct MainWindow {
     pub(crate) dirty: bool,
     pub(crate) has_painted: bool,
     pub(crate) pending_close: bool,
-    pub(crate) pointer_hovered: bool,
-    pub(crate) pointer_pressed: bool,
-    pub(crate) last_mouse_pos: Point,
     middle_pressed_tab: Option<TabId>,
     min_size_cache: Option<MinSizeCache>,
 }
@@ -204,14 +200,11 @@ impl MainWindow {
             dialogs: Dialogs::new(),
             pending_prompts: VecDeque::new(),
             open_dialog_active: false,
-            focus: Focus::Editor(EditorSlot::Tab(active_id.0)),
+            focus: Focus::Editor(EditorSlot::Tab(active_id)),
             file_workflow: None,
             dirty: true,
             has_painted: false,
             pending_close: false,
-            pointer_hovered: false,
-            pointer_pressed: false,
-            last_mouse_pos: Point::ZERO,
             middle_pressed_tab: None,
             min_size_cache: None,
         };
@@ -222,6 +215,28 @@ impl MainWindow {
     #[inline]
     pub(crate) fn id(&self) -> WindowId {
         self.native.id
+    }
+
+    pub(crate) fn tooltip_probe(&self) -> TooltipProbe<'_> {
+        TooltipProbe {
+            window: self.id(),
+            pointer: self.ui.pointer(),
+            origin: self.native.hwnd().client_origin(),
+            scale: self.native.scale_factor(),
+            frame: self.ui.frame(),
+        }
+    }
+
+    fn sync_cursor(&self, pos: Point) {
+        let cursor = if !self.menu_bar.is_open()
+            && !self.dialogs.is_open()
+            && self.active_editor().hits_scrollbar_track(pos)
+        {
+            CursorStyle::Arrow
+        } else {
+            self.ui.frame().cursor_at(pos)
+        };
+        self.native.set_cursor(cursor);
     }
 
     #[cfg(test)]
@@ -244,6 +259,11 @@ impl MainWindow {
         &mut self.tabs[self.active].data.editor
     }
 
+    #[inline]
+    pub(crate) fn active_slot(&self) -> EditorSlot {
+        EditorSlot::Tab(self.active_tab_id())
+    }
+
     pub(crate) fn tab_index(&self, id: TabId) -> Option<usize> {
         self.tabs.iter().position(|t| t.data.id == id)
     }
@@ -254,7 +274,7 @@ impl MainWindow {
 
     pub(crate) fn editor_by_slot(&self, slot: EditorSlot) -> Option<&Editor> {
         match slot {
-            EditorSlot::Tab(raw) => self.tab_index(TabId(raw)).map(|ix| &self.tabs[ix].data.editor),
+            EditorSlot::Tab(id) => self.tab_index(id).map(|ix| &self.tabs[ix].data.editor),
             EditorSlot::FindQuery => Some(&self.find.query),
             EditorSlot::FindReplace => Some(&self.find.replacement),
             EditorSlot::GoToLine => Some(&self.dialogs.line),
@@ -263,8 +283,8 @@ impl MainWindow {
 
     pub(crate) fn editor_by_slot_mut(&mut self, slot: EditorSlot) -> Option<&mut Editor> {
         match slot {
-            EditorSlot::Tab(raw) => self
-                .tab_index(TabId(raw))
+            EditorSlot::Tab(id) => self
+                .tab_index(id)
                 .map(|ix| &mut self.tabs[ix].data.editor),
             EditorSlot::FindQuery => Some(&mut self.find.query),
             EditorSlot::FindReplace => Some(&mut self.find.replacement),
@@ -321,8 +341,7 @@ impl MainWindow {
     }
 
     pub(crate) fn focus_active_editor(&mut self, jobs: &Jobs<AppEvent>) {
-        let slot = EditorSlot::Tab(self.active_tab_id().0);
-        self.set_focus(Focus::Editor(slot), jobs);
+        self.set_focus(Focus::Editor(self.active_slot()), jobs);
     }
 
     pub(crate) fn refresh_title(&self) {
@@ -417,11 +436,12 @@ impl MainWindow {
                 .retain(|d| d.referenced_tab() != Some(removed_id));
         }
         if ix < self.tabs.len()
-            && self
-                .ui
-                .frame
-                .rect_of(HitId::TabStrip)
-                .is_some_and(|r| r.contains(self.last_mouse_pos))
+            && self.ui.pointer().is_some_and(|p| {
+                self.ui
+                    .frame()
+                    .rect_of(HitId::TabStrip)
+                    .is_some_and(|r| r.contains(p.pos))
+            })
         {
             self.strip.freeze(width);
         }
@@ -1127,7 +1147,7 @@ impl MainWindow {
     }
 
     pub(crate) fn key_tips(&self, ts: &TextSystem) -> Vec<KeyTip> {
-        self.menu_bar.key_tips(&self.ui.frame, ts)
+        self.menu_bar.key_tips(self.ui.frame(), ts)
     }
 
     pub(crate) fn cancel_menu(&mut self, jobs: &Jobs<AppEvent>) {
@@ -1138,8 +1158,7 @@ impl MainWindow {
         if let Some(f) = out.focus {
             self.set_focus(f, jobs);
         } else if out.restore_editor_focus {
-            let slot = EditorSlot::Tab(self.active_tab_id().0);
-            self.set_focus(Focus::Editor(slot), jobs);
+            self.set_focus(Focus::Editor(self.active_slot()), jobs);
         }
     }
 
@@ -1163,8 +1182,7 @@ impl MainWindow {
         if let Some(f) = out.focus {
             self.set_focus(f, jobs);
         } else if out.restore_editor_focus {
-            let slot = EditorSlot::Tab(self.active_tab_id().0);
-            self.set_focus(Focus::Editor(slot), jobs);
+            self.set_focus(Focus::Editor(self.active_slot()), jobs);
         }
         if let Some(cmd) = out.command {
             let (_, action) = self.dispatch_command(cmd, view, tab_dragging, ts, jobs);
@@ -1198,10 +1216,7 @@ impl MainWindow {
         ts: &TextSystem,
         jobs: &Jobs<AppEvent>,
     ) {
-        self.pointer_hovered = true;
-        self.last_mouse_pos = pos;
-        let hover_changed = self.ui.update_hover(pos);
-        if hover_changed {
+        if self.ui.on_mouse_move(pos, pressed_button.is_some()) {
             self.dirty = true;
         }
 
@@ -1225,7 +1240,7 @@ impl MainWindow {
         if self.strip.is_frozen()
             && !self
                 .ui
-                .frame
+                .frame()
                 .rect_of(HitId::TabStrip)
                 .is_some_and(|r| r.contains(pos))
             && self.strip.thaw(self.tabs.len())
@@ -1234,7 +1249,7 @@ impl MainWindow {
         }
 
         let dragging_left = pressed_button == Some(MouseButton::Left);
-        let active_slot = EditorSlot::Tab(self.active_tab_id().0);
+        let active_slot = self.active_slot();
         if let Some(slot) = self.focused_editor_slot()
             && slot != active_slot
         {
@@ -1259,20 +1274,11 @@ impl MainWindow {
             }
         }
 
-        let cursor = if !self.menu_bar.is_open()
-            && !self.dialogs.is_open()
-            && self.active_editor().hits_scrollbar_track(pos)
-        {
-            CursorStyle::Arrow
-        } else {
-            self.ui.frame.cursor_at(pos)
-        };
-        self.native.set_cursor(cursor);
+        self.sync_cursor(pos);
     }
 
     pub(crate) fn on_mouse_leave(&mut self) {
-        self.pointer_hovered = false;
-        if self.ui.clear_hover() {
+        if self.ui.on_mouse_leave() {
             self.dirty = true;
         }
         self.strip.stop_repeat();
@@ -1285,10 +1291,9 @@ impl MainWindow {
     }
 
     pub(crate) fn on_capture_lost(&mut self) {
-        self.pointer_pressed = false;
         self.middle_pressed_tab = None;
         self.strip.stop_repeat();
-        if self.ui.clear_hover() {
+        if self.ui.on_capture_lost() {
             self.dirty = true;
         }
     }
@@ -1304,31 +1309,33 @@ impl MainWindow {
         ts: &TextSystem,
         jobs: &Jobs<AppEvent>,
     ) -> Option<WindowAction> {
-        self.pointer_hovered = true;
-        self.pointer_pressed = true;
-        self.last_mouse_pos = pos;
         let menu_out = self.menu_bar.pointer_down();
         let _ = self.apply_menu_outcome(menu_out, view, false, ts, jobs);
-        let top = self.ui.on_mouse_down(pos, button);
-        let chain = self.ui.frame.hit_chain(pos);
-        self.dirty = true;
-
+        let chain = self.ui.on_mouse_down(pos, button);
+        let top = chain.first().copied();
         let in_menu_ui = chain.iter().any(|h| {
             matches!(
                 h,
                 HitId::MenuPanel | HitId::SubmenuPanel | HitId::MenuTrigger(_)
             )
         });
+        let tab_hit = chain.iter().find_map(|hit| match hit {
+            HitId::Tab(id) => Some(*id),
+            _ => None,
+        });
+        let editor_hit = chain.iter().find_map(|hit| match hit {
+            HitId::Editor(slot) => Some(*slot),
+            _ => None,
+        });
+        self.dirty = true;
+
         if self.menu_bar.is_open() && !in_menu_ui {
             let out = self.menu_bar.close();
             let _ = self.apply_menu_outcome(out, view, false, ts, jobs);
         }
 
         if button == MouseButton::Middle && !self.dialogs.is_open() {
-            self.middle_pressed_tab = chain.iter().find_map(|hit| match hit {
-                HitId::Tab(raw) => Some(TabId(*raw)),
-                _ => None,
-            });
+            self.middle_pressed_tab = tab_hit;
             return None;
         }
 
@@ -1348,34 +1355,31 @@ impl MainWindow {
                     | HitId::FindReplace
                     | HitId::FindReplaceAll,
                 ) => return None,
-                Some(HitId::MenuTrigger(ix)) => {
-                    if let Some(kind) = MenuKind::from_index(ix) {
-                        let out = self.menu_bar.toggle_trigger(
-                            kind,
-                            &self.tabs[self.active].data.editor,
-                            view,
-                            ts,
-                        );
-                        let _ = self.apply_menu_outcome(out, view, false, ts, jobs);
-                    }
+                Some(HitId::MenuTrigger(kind)) => {
+                    let out = self.menu_bar.toggle_trigger(
+                        kind,
+                        &self.tabs[self.active].data.editor,
+                        view,
+                        ts,
+                    );
+                    let _ = self.apply_menu_outcome(out, view, false, ts, jobs);
                     return None;
                 }
                 Some(
                     HitId::MenuPanel
-                    | HitId::MenuItem(_)
-                    | HitId::MenuCommand(_)
+                    | HitId::MenuItem { .. }
+                    | HitId::MenuCommand { .. }
                     | HitId::SubmenuPanel
-                    | HitId::SubmenuItem(_),
+                    | HitId::SubmenuItem { .. },
                 ) => return None,
                 Some(HitId::TabClose(_)) => return None,
-                Some(HitId::Tab(raw)) => {
-                    let id = TabId(raw);
+                Some(HitId::Tab(id)) => {
                     if let Some(ix) = self.tab_index(id) {
                         self.activate_tab(ix, jobs);
                         let left = self
                             .ui
-                            .frame
-                            .rect_of(HitId::Tab(raw))
+                            .frame()
+                            .rect_of(HitId::Tab(id))
                             .map_or(pos.x, |r| r.origin.x);
                         let grab = point(pos.x - left, pos.y - STRIP_TOP);
                         return Some(WindowAction::StartTabDrag {
@@ -1421,10 +1425,7 @@ impl MainWindow {
             return None;
         }
 
-        if let Some(slot) = chain.iter().find_map(|hit| match hit {
-            HitId::Editor(slot) => Some(*slot),
-            _ => None,
-        }) {
+        if let Some(slot) = editor_hit {
             self.native.hwnd().complete_ime_composition();
             self.set_focus(Focus::Editor(slot), jobs);
             let wid = self.id();
@@ -1447,16 +1448,21 @@ impl MainWindow {
         ts: &TextSystem,
         jobs: &Jobs<AppEvent>,
     ) -> Option<WindowAction> {
-        self.pointer_pressed = false;
-        self.last_mouse_pos = pos;
-        let clicked = self.ui.on_mouse_up(pos, button);
+        let (clicked, chain) = self.ui.on_mouse_up(pos, button);
+        let top = chain.first().copied();
+        let tab_over = chain.iter().find_map(|hit| match hit {
+            HitId::Tab(id) => Some(*id),
+            _ => None,
+        });
         let menu_release = if button == MouseButton::Left
             && clicked.is_none()
             && self.menu_bar.is_open()
         {
-            match self.ui.frame.hit_chain(pos).first().copied() {
+            match top {
                 hit @ Some(
-                    HitId::MenuItem(_) | HitId::SubmenuItem(_) | HitId::MenuCommand(_),
+                    HitId::MenuItem { .. }
+                    | HitId::SubmenuItem { .. }
+                    | HitId::MenuCommand { .. },
                 ) => hit,
                 _ => None,
             }
@@ -1469,14 +1475,8 @@ impl MainWindow {
 
         if button == MouseButton::Middle {
             let pressed = self.middle_pressed_tab.take();
-            let over = self.ui.frame.hit_chain(pos).into_iter().find_map(|hit| {
-                match hit {
-                    HitId::Tab(raw) => Some(TabId(raw)),
-                    _ => None,
-                }
-            });
             if let Some(id) = pressed
-                && pressed == over
+                && pressed == tab_over
                 && let Some(ix) = self.tab_index(id)
             {
                 return self
@@ -1487,7 +1487,7 @@ impl MainWindow {
         }
 
         let wid = self.id();
-        let active_slot = EditorSlot::Tab(self.active_tab_id().0);
+        let active_slot = self.active_slot();
         if let Some(slot) = self.focused_editor_slot()
             && slot != active_slot
         {
@@ -1541,7 +1541,7 @@ impl MainWindow {
                 self.find_step(false, ts, jobs);
             }
             Some(HitId::FindOptions) => {
-                if let Some(target) = self.ui.frame.rect_of(HitId::FindOptions) {
+                if let Some(target) = self.ui.frame().rect_of(HitId::FindOptions) {
                     let entries = self.find.options_entries();
                     let out = self.menu_bar.open_flyout_above(
                         entries,
@@ -1556,23 +1556,23 @@ impl MainWindow {
             Some(HitId::FindClose) => self.close_find(jobs),
             Some(HitId::FindReplace) => self.replace_next(ts, jobs),
             Some(HitId::FindReplaceAll) => self.replace_all(ts, jobs),
-            Some(HitId::MenuItem(ix)) => {
+            Some(HitId::MenuItem { ix, .. }) => {
                 let out = self.menu_bar.click_item((ix, None), ts);
                 let (_, action) = self.apply_menu_outcome(out, view, false, ts, jobs);
                 return action;
             }
-            Some(HitId::SubmenuItem(sub_ix)) => {
+            Some(HitId::SubmenuItem { ix: sub_ix, .. }) => {
                 let out = self.menu_bar.click_item((0, Some(sub_ix)), ts);
                 let (_, action) = self.apply_menu_outcome(out, view, false, ts, jobs);
                 return action;
             }
-            Some(HitId::MenuCommand(ix)) => {
+            Some(HitId::MenuCommand { ix, .. }) => {
                 let out = self.menu_bar.click_command(ix);
                 let (_, action) = self.apply_menu_outcome(out, view, false, ts, jobs);
                 return action;
             }
-            Some(HitId::TabClose(raw)) => {
-                if let Some(ix) = self.tab_index(TabId(raw)) {
+            Some(HitId::TabClose(id)) => {
+                if let Some(ix) = self.tab_index(id) {
                     return self
                         .close_tab(ix, jobs)
                         .map(WindowAction::ForgetTabDrag);
@@ -1595,7 +1595,7 @@ impl MainWindow {
         if self.dialogs.is_open() {
             return;
         }
-        let chain = self.ui.frame.hit_chain(pos);
+        let chain = self.ui.frame().hit_chain(pos);
         if self.strip.overflow && chain.contains(&HitId::TabList) {
             let viewport = self.strip.scroll_viewport();
             let notches = if delta_lines.y != 0. {
@@ -1637,7 +1637,7 @@ impl MainWindow {
         ts: &TextSystem,
         jobs: &Jobs<AppEvent>,
     ) -> (bool, Option<WindowAction>) {
-        self.ui.last_input_was_keyboard = true;
+        self.ui.mark_keyboard_input();
 
         if self.dialogs.is_open() {
             let m = ev.modifiers;
@@ -1862,8 +1862,7 @@ impl MainWindow {
                 return (false, None);
             }
             Command::ShowContextMenu => {
-                let active_slot = EditorSlot::Tab(self.active_tab_id().0);
-                if self.focus != Focus::Editor(active_slot) {
+                if self.focus != Focus::Editor(self.active_slot()) {
                     return (false, None);
                 }
                 if let Some(caret) = self.active_editor().caret_bounds() {
@@ -1948,7 +1947,7 @@ impl MainWindow {
             Command::ReplaceNext => self.replace_next(ts, jobs),
             other => {
                 let wid = self.id();
-                let active_slot = EditorSlot::Tab(self.active_tab_id().0);
+                let active_slot = self.active_slot();
                 let mut timers = WindowEditorTimers::new(jobs, wid, active_slot);
                 if self.active_editor_mut().handle_command(other, ts, &mut timers) {
                     self.dirty = true;
@@ -2119,8 +2118,7 @@ impl MainWindow {
             color: p.text_primary,
         };
         let caret_height = self.caret_height();
-        let active_id = self.active_tab_id();
-        let active_slot = EditorSlot::Tab(active_id.0);
+        let active_slot = self.active_slot();
         let editor_focused = self.focus == Focus::Editor(active_slot);
         let show_selection = editor_focused || self.menu_bar.is_open() || self.find.is_open();
         let caret_hidden = self.menu_bar.access_active();
@@ -2135,8 +2133,8 @@ impl MainWindow {
             frame.paint(renderer, &mut |token, rect, renderer| {
                 match token {
                     CustomDraw::Editor(slot) => match slot {
-                        EditorSlot::Tab(raw) => {
-                            if let Some(ix) = self.tabs.iter().position(|t| t.data.id == TabId(raw)) {
+                        EditorSlot::Tab(id) => {
+                            if let Some(ix) = self.tabs.iter().position(|t| t.data.id == id) {
                                 let mut timers = WindowEditorTimers::new(jobs, wid, slot);
                                 let outcome = self.tabs[ix].data.editor.paint(
                                     rect,
@@ -2243,22 +2241,12 @@ impl MainWindow {
             .set_text_caret(ime_caret, window_active && !caret_hidden);
 
         self.has_painted = true;
-        let ui_animating = self.ui.finish_frame(frame);
-        let mut hover_shifted = false;
-        if self.pointer_hovered {
-            hover_shifted = self.ui.update_hover(self.last_mouse_pos);
-            let cursor = if !self.menu_bar.is_open()
-                && !self.dialogs.is_open()
-                && self.active_editor().hits_scrollbar_track(self.last_mouse_pos)
-            {
-                CursorStyle::Arrow
-            } else {
-                self.ui.frame.cursor_at(self.last_mouse_pos)
-            };
-            self.native.set_cursor(cursor);
+        let ui_needs_vsync = self.ui.finish_frame(frame);
+        if let Some(ptr) = self.ui.pointer() {
+            self.sync_cursor(ptr.pos);
         }
         let needs_vsync =
-            ui_animating || editor_needs_vsync || editor_needs_redraw || hover_shifted || needs_retry;
+            ui_needs_vsync || editor_needs_vsync || editor_needs_redraw || needs_retry;
         if needs_vsync {
             self.dirty = true;
         }
@@ -2337,9 +2325,14 @@ impl MainWindow {
     }
 
     fn editor_area(&self, find: Option<Node>, p: Palette) -> Node {
-        let slot = EditorSlot::Tab(self.active_tab_id().0);
+        let slot = self.active_slot();
         let lh = self.line_height();
-        let editor_view = self.active_editor().view(slot, lh);
+        let editor_view = self.active_editor().view(
+            HitId::Editor(slot),
+            CustomDraw::Editor(slot),
+            Some(CustomDraw::Scrollbar),
+            lh,
+        );
         box_()
             .hit(HitId::EditorArea)
             .relative()

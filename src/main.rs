@@ -11,6 +11,7 @@ mod files;
 mod find;
 mod geom;
 mod gfx;
+mod ids;
 mod keytips;
 mod menu;
 mod platform;

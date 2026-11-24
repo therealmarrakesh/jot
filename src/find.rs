@@ -6,6 +6,7 @@ use crate::command::Command;
 use crate::editor::{Editor, Rope};
 use crate::geom::{Point, point};
 use crate::gfx::TextSystem;
+use crate::ids::{AnimKey, CustomDraw, EditorSlot, HitId, Node, UiState};
 use crate::menu::Entry;
 use crate::platform::{CursorStyle, Jobs, TimerHandle, WindowId};
 use crate::tabs::CLOSE_GLYPH;
@@ -15,9 +16,7 @@ use crate::ui::controls::{
     BODY_LINE, BODY_SIZE, ButtonStyle, CONTROL_HEIGHT, CONTROL_RADIUS, FIELD_CARET,
     IconButtonStyle, OVERLAY_RADIUS, TEXT_FONT, button, icon_button, text_field_frame,
 };
-use crate::ui::{
-    AnimKey, AnimStatus, Easing, EditorSlot, HitId, Node, UiState, box_, col, row, text,
-};
+use crate::ui::{AnimStatus, Easing, box_, col, row, text};
 
 const EXPAND_DURATION: Duration = Duration::from_millis(300);
 const CONTRACT_DURATION: Duration = Duration::from_millis(200);
@@ -724,13 +723,20 @@ impl FindBar {
             s,
             ui,
         );
-        let query_editor = self.query.view(EditorSlot::FindQuery, u(BODY_LINE + 2.));
+        let query_slot = EditorSlot::FindQuery;
+        let query_editor = self.query.view(
+            HitId::Editor(query_slot),
+            CustomDraw::Editor(query_slot),
+            None,
+            u(BODY_LINE + 2.),
+        );
         let query_field = text_field_frame(
             p,
-            EditorSlot::FindQuery,
+            HitId::Editor(query_slot),
+            HitId::FieldClear(query_slot),
             p.card_surface,
             s,
-            focused_slot == Some(EditorSlot::FindQuery),
+            focused_slot == Some(query_slot),
             self.query.text().len() == 0,
             true,
             query_editor,
@@ -793,15 +799,20 @@ impl FindBar {
     ) -> Node {
         let s = buttons.scale;
         let u = |v: f32| v * s;
-        let replace_editor = self
-            .replacement
-            .view(EditorSlot::FindReplace, u(BODY_LINE + 2.));
+        let replace_slot = EditorSlot::FindReplace;
+        let replace_editor = self.replacement.view(
+            HitId::Editor(replace_slot),
+            CustomDraw::Editor(replace_slot),
+            None,
+            u(BODY_LINE + 2.),
+        );
         let replace_field = text_field_frame(
             p,
-            EditorSlot::FindReplace,
+            HitId::Editor(replace_slot),
+            HitId::FieldClear(replace_slot),
             p.card_surface,
             s,
-            focused_slot == Some(EditorSlot::FindReplace),
+            focused_slot == Some(replace_slot),
             self.replacement.text().len() == 0,
             false,
             replace_editor,

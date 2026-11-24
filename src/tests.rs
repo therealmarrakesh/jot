@@ -12,6 +12,7 @@ use crate::editor::RopeExt as _;
 use crate::find;
 use crate::geom::{Point, Rect, ScreenRect, point, size};
 use crate::gfx::{Gpu, Surface, font};
+use crate::ids::{EditorSlot, Frame, HitId};
 use crate::menu::MenuKind;
 use crate::platform::window::hit_test_control_areas;
 use crate::platform::{
@@ -20,7 +21,7 @@ use crate::platform::{
 };
 use crate::tabs::TabId;
 use crate::ui::controls::{SMALL_FONT, TEXT_FONT};
-use crate::ui::{AvailSize, EditorSlot, Frame, HitId, box_, col, row, text};
+use crate::ui::{AvailSize, box_, col, row, text};
 use crate::window::{EDITOR_PADDINGS, Focus, MainWindow};
 
 const EDITOR_PADDING_LEFT: f32 = EDITOR_PADDINGS.left;
@@ -115,7 +116,39 @@ impl TestHarness {
 
     fn hit_rect(&self, hit: HitId) -> Option<Rect> {
         let app = self.app.borrow();
-        app.window(self.window_id)?.ui.frame.rect_of(hit)
+        app.window(self.window_id)?.ui.frame().rect_of(hit)
+    }
+
+    fn click_matching(&mut self, pred: impl Fn(HitId) -> bool, desc: &str) {
+        let bounds = {
+            let app = self.app.borrow();
+            app.window(self.window_id)
+                .and_then(|w| w.ui.frame().find_rect(&pred))
+                .unwrap_or_else(|| panic!("{desc} was not laid out"))
+        };
+        assert!(!bounds.is_empty(), "{desc} laid out with empty bounds {bounds:?}");
+        self.click_point(bounds.center(), MouseButton::Left);
+    }
+
+    fn click_menu_item(&mut self, ix: usize) {
+        self.click_matching(
+            |h| matches!(h, HitId::MenuItem { ix: i, .. } if i == ix),
+            &format!("MenuItem({ix})"),
+        );
+    }
+
+    fn click_submenu_item(&mut self, ix: usize) {
+        self.click_matching(
+            |h| matches!(h, HitId::SubmenuItem { ix: i, .. } if i == ix),
+            &format!("SubmenuItem({ix})"),
+        );
+    }
+
+    fn click_menu_command(&mut self, ix: usize) {
+        self.click_matching(
+            |h| matches!(h, HitId::MenuCommand { ix: i, .. } if i == ix),
+            &format!("MenuCommand({ix})"),
+        );
     }
 
     fn move_mouse(&mut self, pos: Point) {
@@ -257,9 +290,9 @@ fn tab_close_button_new_tab_hover_and_middle_click() {
         w.tabs.iter().map(|t| t.data.id).collect()
     });
 
-    h.click_hit(HitId::Tab(ids[0].0));
+    h.click_hit(HitId::Tab(ids[0]));
     h.read(|w, _| assert_eq!(w.active, 0));
-    h.click_hit(HitId::TabClose(ids[0].0));
+    h.click_hit(HitId::TabClose(ids[0]));
     h.read(|w, app| {
         assert_eq!(w.tabs.len(), 2, "clicking active tab 'x' must close tab");
         assert!(w.tab_index(ids[0]).is_none());
@@ -269,12 +302,12 @@ fn tab_close_button_new_tab_hover_and_middle_click() {
         );
     });
 
-    h.hover_hit(HitId::Tab(ids[2].0));
+    h.hover_hit(HitId::Tab(ids[2]));
     assert!(
-        h.hit_rect(HitId::TabClose(ids[2].0)).is_some(),
+        h.hit_rect(HitId::TabClose(ids[2])).is_some(),
         "hovering inactive tab must reveal its 'x' button"
     );
-    h.click_hit(HitId::TabClose(ids[2].0));
+    h.click_hit(HitId::TabClose(ids[2]));
     h.read(|w, _| {
         assert_eq!(
             w.tabs.len(),
@@ -289,13 +322,13 @@ fn tab_close_button_new_tab_hover_and_middle_click() {
         assert_eq!(w.tabs.len(), 2);
         w.tabs[1].data.id
     });
-    h.middle_click_hit(HitId::Tab(second_id.0));
+    h.middle_click_hit(HitId::Tab(second_id));
     h.read(|w, _| assert_eq!(w.tabs.len(), 1, "middle-clicking tab must close it"));
 
     h.type_text("unsaved text");
     let last_id = h.read(|w, _| w.tabs[0].data.id);
-    h.hover_hit(HitId::Tab(last_id.0));
-    h.click_hit(HitId::TabClose(last_id.0));
+    h.hover_hit(HitId::Tab(last_id));
+    h.click_hit(HitId::TabClose(last_id));
     h.read(|w, _| {
         assert!(
             w.dialogs.is_open(),
@@ -310,7 +343,7 @@ fn tab_close_button_new_tab_hover_and_middle_click() {
 
     let mut h2 = TestHarness::new();
     let sole_id = h2.read(|w, _| w.tabs[0].data.id);
-    h2.click_hit(HitId::TabClose(sole_id.0));
+    h2.click_hit(HitId::TabClose(sole_id));
     assert!(
         !h2.window_open(),
         "clicking 'x' on sole clean tab must close the window"
@@ -321,17 +354,17 @@ fn tab_close_button_new_tab_hover_and_middle_click() {
 fn menus_shortcuts_toggles_submenus_and_context_menu() {
     let mut h = TestHarness::new();
 
-    h.click_hit(HitId::MenuTrigger(MenuKind::File.index()));
+    h.click_hit(HitId::MenuTrigger(MenuKind::File));
     h.read(|w, _| assert!(w.menu_bar.is_open()));
-    h.click_hit(HitId::MenuItem(0));
+    h.click_menu_item(0);
     h.read(|w, _| {
         assert_eq!(w.tabs.len(), 2, "File -> New tab must add a tab");
         assert!(!w.menu_bar.is_open(), "menu must close after activation");
     });
 
-    h.click_hit(HitId::MenuTrigger(MenuKind::View.index()));
-    h.click_hit(HitId::MenuItem(0));
-    h.click_hit(HitId::SubmenuItem(0));
+    h.click_hit(HitId::MenuTrigger(MenuKind::View));
+    h.click_menu_item(0);
+    h.click_submenu_item(0);
     h.read(|w, _| {
         assert_eq!(
             (w.zoom() * 100.).round() as u32,
@@ -340,16 +373,16 @@ fn menus_shortcuts_toggles_submenus_and_context_menu() {
         );
     });
 
-    h.click_hit(HitId::MenuTrigger(MenuKind::View.index()));
-    h.click_hit(HitId::MenuItem(2));
+    h.click_hit(HitId::MenuTrigger(MenuKind::View));
+    h.click_menu_item(2);
     h.read(|_, app| assert!(!app.view.word_wrap));
 
-    h.click_hit(HitId::MenuTrigger(MenuKind::View.index()));
-    h.click_hit(HitId::MenuItem(1));
+    h.click_hit(HitId::MenuTrigger(MenuKind::View));
+    h.click_menu_item(1);
     h.read(|_, app| assert!(!app.view.status_bar));
 
-    h.click_hit(HitId::MenuTrigger(MenuKind::File.index()));
-    h.hover_hit(HitId::MenuTrigger(MenuKind::Edit.index()));
+    h.click_hit(HitId::MenuTrigger(MenuKind::File));
+    h.hover_hit(HitId::MenuTrigger(MenuKind::Edit));
     h.read(|w, _| {
         assert_eq!(w.menu_bar.open_kind(), Some(MenuKind::Edit));
     });
@@ -387,7 +420,7 @@ fn menus_shortcuts_toggles_submenus_and_context_menu() {
             "right-click must open context menu"
         )
     });
-    h.click_hit(HitId::MenuCommand(4));
+    h.click_menu_command(4);
     h.read(|w, _| {
         assert!(!w.menu_bar.is_open());
         assert_eq!(
@@ -429,10 +462,10 @@ fn find_replace_bar_clear_button_and_key_contexts() {
     h.type_text("ALPHA");
     h.click_hit(HitId::FindOptions);
     h.read(|w, _| assert!(w.menu_bar.is_open(), "find-options must open flyout"));
-    h.click_hit(HitId::MenuItem(0));
+    h.click_menu_item(0);
     h.read(|w, _| assert!(w.find.match_case));
     h.click_hit(HitId::FindOptions);
-    h.click_hit(HitId::MenuItem(0));
+    h.click_menu_item(0);
     h.read(|w, _| assert!(!w.find.match_case));
 
     h.click_hit(HitId::FindToggleReplace);
@@ -618,7 +651,7 @@ fn theme_zoom_editing_undo_scrollbar_and_caption_hit_tests() {
     let max_pt = h.hit_rect(HitId::CaptionMax).unwrap().center();
     let min_pt = h.hit_rect(HitId::CaptionMin).unwrap().center();
     h.read(|w, _| {
-        let areas = w.ui.frame.control_areas();
+        let areas = w.ui.frame().control_areas();
         assert_eq!(
             hit_test_control_areas(&areas, close_pt),
             Some(WindowControlArea::Close)
@@ -780,20 +813,20 @@ fn status_bar_min_width_and_no_vertical_char_wrapping() {
             .text_size(12.)
             .text_color(p.text_secondary)
             .nowrap()
-            .child(box_().hit(HitId::MenuItem(0)).child(text("Ln 1, Col 1")))
-            .child(box_().hit(HitId::MenuItem(1)).child(text("1 character")))
+            .child(box_().hit(HitId::MenuItem { serial: 0, ix: 0 }).child(text("Ln 1, Col 1")))
+            .child(box_().hit(HitId::MenuItem { serial: 0, ix: 1 }).child(text("1 character")))
             .child(box_().flex_1().min_w(1.).h(16.))
-            .child(box_().hit(HitId::MenuItem(2)).child(text("100%")))
+            .child(box_().hit(HitId::MenuItem { serial: 0, ix: 2 }).child(text("100%")))
             .child(
                 box_()
-                    .hit(HitId::MenuItem(3))
+                    .hit(HitId::MenuItem { serial: 0, ix: 3 })
                     .child(text("Windows (CRLF)")),
             )
-            .child(box_().hit(HitId::MenuItem(4)).child(text("UTF-8")));
+            .child(box_().hit(HitId::MenuItem { serial: 0, ix: 4 }).child(text("UTF-8")));
         let frame = Frame::layout(bar, AvailSize::definite(test_width, 31.), scale, ts);
         for ix in 0..5 {
             let b = frame
-                .rect_of(HitId::MenuItem(ix))
+                .rect_of(HitId::MenuItem { serial: 0, ix })
                 .expect("status bar label rect missing");
             assert!(
                 b.size.height <= 31.0,
@@ -930,10 +963,10 @@ fn real_win32_message_loop_wakes_timers_and_quits_cleanly() {
 #[test]
 fn window_anim_tracks_prune_unused_tracks_and_word_wrap_updates_tabs() {
     let mut h = TestHarness::new();
-    let baseline_tracks = h.read(|w, _| w.ui.anims.track_count());
+    let baseline_tracks = h.read(|w, _| w.ui.track_count());
 
     h.press_key("ctrl-g");
-    let open_tracks = h.read(|w, _| w.ui.anims.track_count());
+    let open_tracks = h.read(|w, _| w.ui.track_count());
     assert!(
         open_tracks > baseline_tracks,
         "dialog open must allocate anim tracks ({open_tracks} > {baseline_tracks})"
@@ -941,7 +974,7 @@ fn window_anim_tracks_prune_unused_tracks_and_word_wrap_updates_tabs() {
 
     h.press_key("escape");
     h.draw();
-    let closed_tracks = h.read(|w, _| w.ui.anims.track_count());
+    let closed_tracks = h.read(|w, _| w.ui.track_count());
     assert_eq!(
         closed_tracks, baseline_tracks,
         "closing dialog must prune unused anim tracks back to baseline"
@@ -955,8 +988,8 @@ fn window_anim_tracks_prune_unused_tracks_and_word_wrap_updates_tabs() {
             assert!(tab.data.editor.soft_wrap_enabled());
         }
     });
-    h.click_hit(HitId::MenuTrigger(MenuKind::View.index()));
-    h.click_hit(HitId::MenuItem(2));
+    h.click_hit(HitId::MenuTrigger(MenuKind::View));
+    h.click_menu_item(2);
     h.read(|w, app| {
         assert!(!app.view.word_wrap);
         for tab in &w.tabs {
@@ -986,7 +1019,7 @@ fn tab_drag_pop_out_and_reattach_does_not_panic() {
 
     let (hwnd1, scale, tab_rect, tab_id) = h.read(|w, _| {
         let id = w.tabs[1].data.id;
-        let rect = w.ui.frame.rect_of(HitId::Tab(id.0)).expect("tab 1 rect");
+        let rect = w.ui.frame().rect_of(HitId::Tab(id)).expect("tab 1 rect");
         (w.native.hwnd(), w.native.scale_factor(), rect, id)
     });
 
@@ -1361,7 +1394,7 @@ fn keyboard_system_chords_altgr_menu_gate_popup_occlusion_and_fractional_borders
         event: alt_f4,
     }));
 
-    h.click_hit(HitId::MenuTrigger(MenuKind::File.index()));
+    h.click_hit(HitId::MenuTrigger(MenuKind::File));
     h.read(|w, _| assert!(w.menu_bar.is_open()));
     h.press_key("ctrl-w");
     h.read(|w, _| {
@@ -1395,7 +1428,7 @@ fn keyboard_system_chords_altgr_menu_gate_popup_occlusion_and_fractional_borders
     let close_pt = h.hit_rect(HitId::CaptionClose).unwrap().center();
     h.read(|w, _| {
         assert_eq!(
-            hit_test_control_areas(&w.ui.frame.control_areas(), close_pt),
+            hit_test_control_areas(&w.ui.frame().control_areas(), close_pt),
             None,
             "modal dialog backdrop must occlude caption buttons"
         );

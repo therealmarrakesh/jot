@@ -6,6 +6,7 @@ use crate::command::{Command, shortcut_label};
 use crate::editor::Editor;
 use crate::geom::{Edges, Point, Rect, Size, point, size};
 use crate::gfx::{TextStyle, TextSystem};
+use crate::ids::{AnimKey, Frame, HitId, Node, UiState};
 use crate::keytips::{self, KeyTip, round_half_up};
 use crate::platform::{
     CursorStyle, Jobs, Key, KeyEvent, TimerHandle, WindowId, clipboard::clipboard_has_text,
@@ -14,11 +15,9 @@ use crate::platform::{
 use crate::theme::{Palette, theme_shadow};
 use crate::types::SharedStr;
 use crate::ui::controls::{
-    CONTROL_RADIUS, ICON_FONT, OVERLAY_RADIUS, SMALL_FONT, TEXT_FONT, focus_ring,
+    CONTROL_RADIUS, ICON_FONT, OVERLAY_RADIUS, SMALL_FONT, TEXT_FONT, focus_ring, subtle_brushes,
 };
-use crate::ui::{
-    AnimKey, AnimStatus, Brushes, Easing, Frame, HitId, Node, UiState, box_, col, row, text,
-};
+use crate::ui::{AnimStatus, Easing, box_, col, row, text};
 use crate::window::{Focus, MENU_BAR_HEIGHT};
 
 const OPEN_DURATION: Duration = Duration::from_millis(250);
@@ -172,7 +171,7 @@ impl Entry {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum MenuKind {
     File,
     Edit,
@@ -194,16 +193,8 @@ impl MenuKind {
         self.title().chars().next()
     }
 
-    pub(crate) fn index(self) -> usize {
-        self as usize
-    }
-
-    pub(crate) fn from_index(ix: usize) -> Option<Self> {
-        Self::ALL.get(ix).copied()
-    }
-
     fn cycle(self, delta: isize) -> Self {
-        cycle(Some(self.index()), Self::ALL.len(), delta, true, |_| true)
+        cycle(Some(self as usize), Self::ALL.len(), delta, true, |_| true)
             .map_or(self, |ix| Self::ALL[ix])
     }
 
@@ -803,8 +794,7 @@ impl MenuBar {
         ts: &TextSystem,
         jobs: &Jobs<AppEvent>,
     ) -> MenuOutcome {
-        if let Some(HitId::MenuTrigger(ix)) = top
-            && let Some(kind) = MenuKind::from_index(ix)
+        if let Some(HitId::MenuTrigger(kind)) = top
             && self.open_kind().is_some_and(|open| open != kind)
         {
             return self.open_kind_menu(kind, editor, view, ts);
@@ -815,8 +805,10 @@ impl MenuBar {
             return MenuOutcome::default();
         };
         let row_path = match top {
-            Some(HitId::MenuItem(ix)) => Some((ix, None)),
-            Some(HitId::SubmenuItem(sub_ix)) => open.live_submenu().map(|s| (s.ix, Some(sub_ix))),
+            Some(HitId::MenuItem { ix, .. }) => Some((ix, None)),
+            Some(HitId::SubmenuItem { ix: sub_ix, .. }) => {
+                open.live_submenu().map(|s| (s.ix, Some(sub_ix)))
+            }
             _ => None,
         };
         if row_path == self.hovered_row {
@@ -1417,13 +1409,13 @@ impl MenuBar {
         let triggers: Vec<Node> = MenuKind::ALL
             .into_iter()
             .map(|kind| {
-                let hit = HitId::MenuTrigger(kind.index());
+                let hit = HitId::MenuTrigger(kind);
                 let active = self.open_kind() == Some(kind);
                 let ring = bar_focused == Some(kind);
                 let bg = if active {
                     p.subtle_tertiary
                 } else {
-                    ui.brush(hit, Brushes::subtle(p), true)
+                    ui.brush(hit, subtle_brushes(p), true)
                 };
                 row()
                     .hit(hit)
@@ -1477,7 +1469,7 @@ impl MenuBar {
                 (anchor, open.upward)
             }
         } else if let Some(kind) = open.kind {
-            let pos = if let Some(tr) = ui.frame.rect_of(HitId::MenuTrigger(kind.index())) {
+            let pos = if let Some(tr) = ui.frame().rect_of(HitId::MenuTrigger(kind)) {
                 point(tr.left(), tr.top() + MENU_BAR_HEIGHT)
             } else {
                 point(4., crate::tabs::STRIP_TOP + crate::tabs::TAB_HEIGHT + MENU_BAR_HEIGHT)
@@ -1533,7 +1525,7 @@ impl MenuBar {
                 .opacity(open.motion.opacity)
                 .children(reveal_card(p, MENU_Z, height, top, height - hidden, offset, content))
                 .when_some(sub_node, |this, sub| this.child(sub))
-                .when(open.is_closing(), Node::strip_hits),
+                .when(open.is_closing(), Node::inert),
         )
     }
 
@@ -1546,7 +1538,7 @@ impl MenuBar {
                 .into_iter()
                 .filter_map(|kind| {
                     let key = kind.access_key()?;
-                    let anchor = frame.rect_of(HitId::MenuTrigger(kind.index()))?;
+                    let anchor = frame.rect_of(HitId::MenuTrigger(kind))?;
                     Some(keytips::layout_tip(ts, key, anchor, keytips::Placement::Below))
                 })
                 .collect();
@@ -1609,6 +1601,7 @@ fn render_command_row(open: &OpenMenu, p: Palette, ts: &TextSystem, ui: &mut UiS
         }
         children.push(render_command_button(
             p,
+            open.motion.serial,
             ix,
             button,
             cell,
@@ -1636,8 +1629,10 @@ fn render_command_row(open: &OpenMenu, p: Palette, ts: &TextSystem, ui: &mut UiS
         )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_command_button(
     p: Palette,
+    serial: usize,
     ix: usize,
     button: &CommandButton,
     cell: f32,
@@ -1648,8 +1643,8 @@ fn render_command_button(
     let face_w = cell - 2. * (COMMAND_GAP + COMMAND_INSET);
     let CommandButton { command, glyph } = button;
     let enabled = command.enabled;
-    let hit = HitId::MenuCommand(ix);
-    let bg = ui.brush(hit, Brushes::subtle(p), enabled);
+    let hit = HitId::MenuCommand { serial, ix };
+    let bg = ui.brush(hit, subtle_brushes(p), enabled);
     let fg = if !enabled {
         p.text_disabled
     } else if ui.is_pressed(hit) {
@@ -1754,7 +1749,7 @@ fn render_submenu_popup(
         .h(sub_h)
         .opacity(submenu.motion.opacity)
         .children(reveal_card(p, SUBMENU_Z, sub_h, 0., sub_h - hidden, -hidden, rows))
-        .when(submenu.motion.closing, Node::strip_hits)
+        .when(submenu.motion.closing, Node::inert)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1786,14 +1781,13 @@ fn render_panel_rows(
                     .child(box_().h(1.).bg(p.menu_separator));
             }
             let hit = match parent {
-                Some(_) => HitId::SubmenuItem(ix),
-                None => HitId::MenuItem(ix),
+                Some(_) => HitId::SubmenuItem { serial, ix },
+                None => HitId::MenuItem { serial, ix },
             };
             let ring = focus_visible && panel.focused == Some(ix);
             let face = render_row_face(
                 p,
                 panel,
-                serial,
                 ix,
                 hit,
                 fade && entry.selectable(),
@@ -1822,11 +1816,9 @@ fn render_panel_rows(
         .children(rows)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn render_row_face(
     p: Palette,
     panel: &Panel,
-    serial: usize,
     ix: usize,
     hit: HitId,
     fade: bool,
@@ -1871,7 +1863,7 @@ fn render_row_face(
         p.text_primary
     };
     let bg = if fade {
-        ui.brush_keyed(AnimKey::MenuHover(serial, ix), hit, Brushes::subtle(p), enabled)
+        ui.brush(hit, subtle_brushes(p), enabled)
     } else if enabled && pressed {
         p.subtle_tertiary
     } else if (enabled && hovered) || expanded {

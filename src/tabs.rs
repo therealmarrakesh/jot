@@ -6,16 +6,15 @@ use crate::color::transparent_black;
 use crate::document::{self, Format};
 use crate::editor::{Editor, Rope};
 use crate::geom::Edges;
+use crate::ids::{AnimKey, HitId, Node, UiState};
 use crate::platform::{CursorStyle, TimerHandle};
 use crate::theme::Palette;
 use crate::types::SharedStr;
 use crate::ui::controls::{CONTROL_RADIUS, IconButtonStyle, OVERLAY_RADIUS, SMALL_FONT, icon_button};
-use crate::ui::{
-    AnimKey, AnimStatus, Brushes, Easing, HitId, Node, UiState, box_, row, text,
-};
+use crate::ui::{AnimStatus, Brushes, Easing, box_, row, text};
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct TabId(pub(crate) u64);
+pub(crate) struct TabId(u64);
 
 impl TabId {
     pub(crate) fn next() -> Self {
@@ -525,9 +524,7 @@ impl TabStrip {
             let (x, width) = sampled.tabs[ix];
             (shift + x, shift + x + width)
         });
-        let hovered_ix = tabs
-            .iter()
-            .position(|t| ui.is_hovered(HitId::Tab(t.data.id.0)));
+        let hovered_ix = tabs.iter().position(|t| ui.is_hovered(HitId::Tab(t.data.id)));
 
         let ghosts: Vec<Node> = sampled
             .ghosts
@@ -712,7 +709,7 @@ fn render_tab(
         .map_or_else(|| name.clone(), |path| path.display().to_string())
         .into();
 
-    let hit = HitId::Tab(id.0);
+    let hit = HitId::Tab(id);
     let face_bg = if active {
         p.layer
     } else {
@@ -730,7 +727,7 @@ fn render_tab(
     let close_node = show_close.then(|| {
         strip_button(
             p,
-            HitId::TabClose(id.0),
+            HitId::TabClose(id),
             "Close tab (Ctrl+W)",
             CLOSE_GLYPH,
             BUTTON_GLYPH_SIZE,

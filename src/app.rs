@@ -9,6 +9,7 @@ use crate::editor::{EditorTimer, Rope};
 use crate::files::{self, WorkflowGen};
 use crate::geom::{Rect, ScreenPoint, Size, point, size};
 use crate::gfx::{Gpu, TextSystem};
+use crate::ids::{EditorSlot, HitId};
 use crate::keytips::KeyTips;
 use crate::platform::{
     HandoffCommand, Jobs, MouseButton, NativeWindow, Platform, PlatformEvent, PlatformHandler,
@@ -18,8 +19,7 @@ use crate::platform::{
 use crate::tab_drag::TabDragState;
 use crate::tabs::{TabData, TabId};
 use crate::theme::Palette;
-use crate::tooltip::Tooltips;
-use crate::ui::{EditorSlot, HitId};
+use crate::tooltip::{TooltipTarget, Tooltips};
 use crate::window::{
     MainWindow, WINDOW_HEIGHT, WINDOW_MAX_SCREEN_SHARE, WINDOW_WIDTH, WindowAction,
 };
@@ -488,21 +488,10 @@ impl App {
         }
     }
 
-    fn evaluate_tooltip_for(&mut self, ix: usize, pressed_any: bool) {
-        let w = &self.windows[ix];
-        let wid = w.id();
-        let hovered = w.pointer_hovered;
-        let pos = w.last_mouse_pos;
-        let origin = w.native.hwnd().client_origin();
-        let scale = w.native.scale_factor();
+    fn evaluate_tooltip_for(&mut self, ix: usize) {
+        let probe = self.windows[ix].tooltip_probe();
         self.tooltips.evaluate(
-            wid,
-            hovered,
-            pressed_any,
-            pos,
-            origin,
-            scale,
-            &w.ui.frame,
+            probe,
             &self.gpu,
             self.appearance,
             &self.text_system,
@@ -530,9 +519,8 @@ impl App {
             self.keytips
                 .sync(wid, origin, scale, tips, &self.gpu, self.appearance);
         }
-        if self.windows[ix].pointer_hovered {
-            let pressed = self.windows[ix].pointer_pressed;
-            self.evaluate_tooltip_for(ix, pressed);
+        if self.windows[ix].ui.pointer().is_some() {
+            self.evaluate_tooltip_for(ix);
         }
         needs_vsync
     }
@@ -601,7 +589,7 @@ impl PlatformHandler for App {
                         &self.text_system,
                         &self.jobs,
                     );
-                    self.evaluate_tooltip_for(ix, pressed_button.is_some());
+                    self.evaluate_tooltip_for(ix);
                 }
             }
             PlatformEvent::MouseLeave { window_id } => {
@@ -775,8 +763,8 @@ impl PlatformHandler for App {
             match ev {
                 AppEvent::EditorTimer { window, slot, kind } => {
                     let target_ix = match slot {
-                        EditorSlot::Tab(raw) => self
-                            .find_tab_owner(TabId(raw))
+                        EditorSlot::Tab(id) => self
+                            .find_tab_owner(id)
                             .map(|(wix, _)| wix)
                             .or_else(|| self.window_ix(window)),
                         _ => self.window_ix(window),
@@ -801,20 +789,12 @@ impl PlatformHandler for App {
                     }
                 }
                 AppEvent::TooltipShowTimer { window, hit } => {
-                    let state = self.window_ix(window).map(|ix| {
-                        let w = &self.windows[ix];
-                        (
-                            w.pointer_hovered,
-                            w.last_mouse_pos,
-                            w.native.hwnd().client_origin(),
-                            w.native.scale_factor(),
-                            &w.ui.frame,
-                        )
-                    });
+                    let probe = self
+                        .window_ix(window)
+                        .map(|ix| self.windows[ix].tooltip_probe());
                     self.tooltips.on_show_timer(
-                        window,
-                        hit,
-                        state,
+                        TooltipTarget { window, hit },
+                        probe,
                         &self.gpu,
                         self.appearance,
                         &self.text_system,

@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 use crate::app::AppEvent;
 use crate::geom::{ScreenPoint, ScreenRect, Size, size};
 use crate::gfx::{Gpu, LabelLayout, TextAlign, TextStyle, TextSystem};
+use crate::ids::{Frame, HitId};
 use crate::platform::{
     Jobs, Modifiers, TimerHandle, WindowAppearance, WindowId, cursor_screen_pos,
     monitor_work_area_and_scale, system_settings,
@@ -12,7 +13,8 @@ use crate::theme::{Palette, theme_shadow};
 use crate::types::SharedStr;
 use crate::ui::controls::{CONTROL_RADIUS, SMALL_FONT};
 use crate::ui::{
-    AnimKey, AvailSize, Easing, Frame, HitId, Node, OverlaySurface, UiState, box_, text,
+    AnimTracks, AvailSize, Easing, Frame as GenericFrame, Node as GenericNode, OverlaySurface,
+    PointerState, box_, text,
 };
 
 const PADDING_X: f32 = 9.;
@@ -34,9 +36,19 @@ const RESHOW_WINDOW: Duration = Duration::from_millis(200);
 const FADE: Duration = Duration::from_millis(167);
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-struct Key {
-    window: WindowId,
-    hit: HitId,
+pub(crate) struct TooltipTarget {
+    pub(crate) window: WindowId,
+    pub(crate) hit: HitId,
+}
+
+type Key = TooltipTarget;
+
+pub(crate) struct TooltipProbe<'a> {
+    pub(crate) window: WindowId,
+    pub(crate) pointer: Option<PointerState>,
+    pub(crate) origin: ScreenPoint,
+    pub(crate) scale: f32,
+    pub(crate) frame: &'a Frame,
 }
 
 #[derive(Clone)]
@@ -119,10 +131,9 @@ struct Shown {
 #[derive(Default)]
 pub(crate) struct Tooltips {
     overlay: OverlaySurface,
-    ui: UiState,
+    fade: AnimTracks<()>,
     text: SharedStr,
     card_size: Size,
-    visible: bool,
     dirty: bool,
     state: State,
     pressed: bool,
@@ -170,22 +181,24 @@ impl Tooltips {
         self.apply_report(Report::NoneIn(window), jobs);
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn evaluate(
         &mut self,
-        window: WindowId,
-        hovered: bool,
-        pressed_any: bool,
-        pos: crate::geom::Point,
-        origin: ScreenPoint,
-        scale: f32,
-        frame: &Frame,
+        probe: TooltipProbe<'_>,
         gpu: &Rc<Gpu>,
         appearance: WindowAppearance,
         ts: &TextSystem,
         jobs: &Jobs<AppEvent>,
     ) {
-        self.pressed = pressed_any;
+        let TooltipProbe {
+            window,
+            pointer,
+            origin,
+            scale,
+            frame,
+        } = probe;
+        if let Some(ptr) = pointer {
+            self.pressed = ptr.pressed;
+        }
         let gone = self
             .state
             .key()
@@ -197,12 +210,10 @@ impl Tooltips {
                     })
                 })
             });
-        let observed = if !hovered {
-            Some(Report::NoneIn(window))
-        } else if self.pressed {
-            None
-        } else {
-            Some(match frame.tooltip_at(pos) {
+        let observed = match pointer {
+            None => Some(Report::NoneIn(window)),
+            Some(_) if self.pressed => None,
+            Some(ptr) => Some(match frame.tooltip_at(ptr.pos) {
                 Some((hit, tip, rect)) => Report::Owner(Snap {
                     key: Key { window, hit },
                     text: tip,
@@ -210,7 +221,7 @@ impl Tooltips {
                     entered: cursor_screen_pos(),
                 }),
                 None => Report::NoneIn(window),
-            })
+            }),
         };
 
         if let Some(key) = gone {
@@ -222,40 +233,26 @@ impl Tooltips {
         self.sync(gpu, appearance, ts, jobs);
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn on_show_timer(
         &mut self,
-        window: WindowId,
-        hit: HitId,
-        window_state: Option<(bool, crate::geom::Point, ScreenPoint, f32, &Frame)>,
+        target: TooltipTarget,
+        probe: Option<TooltipProbe<'_>>,
         gpu: &Rc<Gpu>,
         appearance: WindowAppearance,
         ts: &TextSystem,
         jobs: &Jobs<AppEvent>,
     ) {
-        match window_state {
-            Some((hovered, pos, origin, scale, frame)) => {
-                self.evaluate(
-                    window,
-                    hovered,
-                    self.pressed,
-                    pos,
-                    origin,
-                    scale,
-                    frame,
-                    gpu,
-                    appearance,
-                    ts,
-                    jobs,
-                );
+        match probe {
+            Some(probe) => {
+                self.evaluate(probe, gpu, appearance, ts, jobs);
             }
             None => {
-                if let Some(key) = self.state.key().filter(|k| k.window == window) {
+                if let Some(key) = self.state.key().filter(|k| k.window == target.window) {
                     self.transition(Report::Gone(key));
                 }
             }
         }
-        self.transition(Report::Timer(Key { window, hit }));
+        self.transition(Report::Timer(target));
         self.sync(gpu, appearance, ts, jobs);
     }
 
@@ -336,7 +333,6 @@ impl Tooltips {
             return;
         }
         self.closed_at = Some(Instant::now());
-        self.visible = false;
         self.dirty = true;
         self.hiding = Some(jobs.after(FADE, AppEvent::TooltipHideTimer));
     }
@@ -369,7 +365,6 @@ impl Tooltips {
 
         self.text = snap.text;
         self.card_size = measured;
-        self.visible = true;
         self.dirty = true;
         self.hiding = None;
         self.shown = Some(Shown {
@@ -390,34 +385,36 @@ impl Tooltips {
             return false;
         }
         self.dirty = false;
-        let visible = self.visible;
+        let visible = self.shown.is_some();
         let text = self.text.clone();
         let card_size = self.card_size;
-        let ui = &mut self.ui;
+        let fade = &mut self.fade;
         let mut animating = false;
         let needs_retry = self.overlay.paint(|logical, scale, renderer| {
-            ui.begin_frame(now, reduce_motion);
-            let opacity = ui.animate_f32(
-                AnimKey::TooltipFade,
+            fade.begin_frame();
+            let opacity = fade.animate_f32(
+                (),
                 if visible { 1. } else { 0. },
                 FADE,
                 Easing::EaseOutCubic,
+                now,
+                reduce_motion,
             );
-            let tree = box_().size_full().opacity(opacity).child(
+            let tree: GenericNode<(), ()> = box_().size_full().opacity(opacity).child(
                 box_()
                     .absolute()
                     .left(SHADOW_SIDE)
                     .top(SHADOW_TOP)
                     .child(tooltip_card(p, text, card_size)),
             );
-            let frame = Frame::layout(
+            let frame = GenericFrame::layout(
                 tree,
                 AvailSize::definite(logical.width, logical.height),
                 scale,
                 ts,
             );
             frame.paint(renderer, &mut |_, _, _| {});
-            animating = ui.finish_frame(frame);
+            animating = fade.end_frame();
         });
         if animating || needs_retry {
             self.dirty = true;
@@ -460,7 +457,7 @@ fn measure_tooltip(content: &SharedStr, ts: &TextSystem) -> Size {
     )
 }
 
-fn tooltip_card(p: Palette, content: SharedStr, sz: Size) -> Node {
+fn tooltip_card(p: Palette, content: SharedStr, sz: Size) -> GenericNode<(), ()> {
     box_()
         .w(sz.width)
         .h(sz.height)
@@ -491,7 +488,7 @@ fn tooltip_card(p: Palette, content: SharedStr, sz: Size) -> Node {
                         .text_size(FONT_SIZE)
                         .line_height(LINE_HEIGHT)
                         .text_color(p.text_primary)
-                        .when(sz.height <= SINGLE_HEIGHT, Node::nowrap)
+                        .when(sz.height <= SINGLE_HEIGHT, GenericNode::nowrap)
                         .child(text(content)),
                 ),
         )

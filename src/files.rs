@@ -443,8 +443,8 @@ mod tests {
 
     #[test]
     fn file_workflow_queues_prepends_and_drains_steps_in_order() {
-        let id1 = TabId(10);
-        let id2 = TabId(20);
+        let id1 = TabId::next();
+        let id2 = TabId::next();
         let mut wf = FileWorkflow::batch(
             [
                 WorkflowStep::ConfirmDiscard {

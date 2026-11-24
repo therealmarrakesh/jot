@@ -18,7 +18,7 @@ use crate::gfx::{Font, TextSystem};
 use crate::platform::{Key, KeyEvent, TimerHandle};
 use crate::scrollbar::ScrollbarState;
 use crate::types::SharedStr;
-use crate::ui::{CustomDraw, EditorSlot, HitId, Node, box_, custom};
+use crate::ui::{Node, box_, custom};
 
 use buffer::CaretSelection;
 use history::History;
@@ -416,28 +416,34 @@ impl Editor {
         self.reset_pointer_selection_state();
     }
 
-    pub(crate) fn view(&self, slot: EditorSlot, line_height: f32) -> Node {
+    pub(crate) fn view<H, C>(
+        &self,
+        hit: H,
+        editor_draw: C,
+        scrollbar_draw: Option<C>,
+        line_height: f32,
+    ) -> Node<H, C> {
         let cursor = crate::platform::CursorStyle::IBeam;
         let text_leaf = if self.multi_line {
-            custom(CustomDraw::Editor(slot))
+            custom(editor_draw)
                 .w_full()
                 .h_full()
                 .flex_1()
                 .min_h(2.0 * line_height)
         } else {
-            custom(CustomDraw::Editor(slot)).w_full().h(line_height)
+            custom(editor_draw).w_full().h(line_height)
         };
 
         box_()
-            .hit(HitId::Editor(slot))
+            .hit(hit)
             .cursor(cursor)
             .flex_1()
             .overflow_x_hidden()
             .when(self.multi_line, |b| b.h_full().padding(self.paddings))
             .when(!self.multi_line, |b| b.row().min_h_full().items_center())
             .child(text_leaf)
-            .when(self.multi_line, |b| {
-                b.child(custom(CustomDraw::Scrollbar).absolute().size_full())
+            .when_some(scrollbar_draw.filter(|_| self.multi_line), |b, sb| {
+                b.child(custom(sb).absolute().size_full())
             })
     }
 }

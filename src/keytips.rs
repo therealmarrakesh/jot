@@ -143,7 +143,7 @@ impl KeyTips {
     }
 }
 
-fn render_tips(tips: &[KeyTip], p: Palette) -> Node {
+fn render_tips(tips: &[KeyTip], p: Palette) -> Node<(), ()> {
     box_().size_full().children(tips.iter().map(|tip| {
         box_()
             .absolute()

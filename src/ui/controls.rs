@@ -1,10 +1,12 @@
-use crate::color::{Rgba, black, white};
+use std::hash::Hash;
+
+use crate::color::{Rgba, black, transparent_black, white};
 use crate::geom::Edges;
 use crate::platform::CursorStyle;
 use crate::theme::{Palette, Surface};
 use crate::types::SharedStr;
 
-use super::scene::{Brushes, EditorSlot, HitId, Node, UiState, box_, row, text};
+use super::scene::{Brushes, Node, UiState, box_, row, text};
 
 pub(crate) const TEXT_FONT: &str = "Segoe UI Variable Text";
 pub(crate) const SMALL_FONT: &str = "Segoe UI Variable Small";
@@ -27,6 +29,14 @@ const FIELD_GLYPH_SIZE: f32 = 12.;
 const CLEAR_GLYPH: &str = "\u{E894}";
 const SEARCH_GLYPH: &str = "\u{E721}";
 
+pub(crate) fn subtle_brushes(p: Palette) -> Brushes {
+    Brushes {
+        rest: transparent_black(),
+        hover: p.subtle_secondary,
+        pressed: p.subtle_tertiary,
+    }
+}
+
 #[derive(Clone, Copy)]
 pub(crate) struct ButtonStyle {
     pub(crate) surface: Surface,
@@ -34,22 +44,22 @@ pub(crate) struct ButtonStyle {
     pub(crate) scale: f32,
 }
 
-pub(crate) fn button(
+pub(crate) fn button<H: Copy + Eq + Hash, C: Copy, K: Copy + Eq + Hash + From<H>>(
     p: Palette,
     style: ButtonStyle,
-    hit: HitId,
+    hit: H,
     label: impl Into<SharedStr>,
     accented: bool,
     focused: bool,
-    ui: &mut UiState,
-) -> Node {
+    ui: &mut UiState<H, C, K>,
+) -> Node<H, C> {
     let ButtonStyle {
         surface,
         accent,
         scale: s,
     } = style;
     let u = |v: f32| v * s;
-    let ring = focused && ui.last_input_was_keyboard;
+    let ring = focused && ui.last_input_was_keyboard();
     let pressed = ui.is_pressed(hit);
 
     let (fill, hover, pressed_fill, edge, bottom, text_color) = if accented {
@@ -130,16 +140,16 @@ pub(crate) struct IconButtonStyle {
     pub(crate) radius: f32,
 }
 
-pub(crate) fn icon_button(
+pub(crate) fn icon_button<H: Copy + Eq + Hash, C: Copy, K: Copy + Eq + Hash + From<H>>(
     p: Palette,
-    hit: HitId,
+    hit: H,
     tip: impl Into<SharedStr>,
     glyph: &'static str,
     style: IconButtonStyle,
     enabled: bool,
-    ui: &mut UiState,
-) -> Node {
-    let bg = ui.brush(hit, Brushes::subtle(p), enabled);
+    ui: &mut UiState<H, C, K>,
+) -> Node<H, C> {
+    let bg = ui.brush(hit, subtle_brushes(p), enabled);
     let fg = if !enabled {
         p.text_disabled
     } else if ui.is_pressed(hit) {
@@ -165,7 +175,7 @@ pub(crate) fn icon_button(
         .child(text(glyph))
 }
 
-pub(crate) fn focus_ring(p: Palette, outset: Edges<f32>, radius: f32) -> Node {
+pub(crate) fn focus_ring<H, C>(p: Palette, outset: Edges<f32>, radius: f32) -> Node<H, C> {
     box_()
         .absolute()
         .top(-outset.top)
@@ -182,7 +192,7 @@ pub(crate) fn focus_ring(p: Palette, outset: Edges<f32>, radius: f32) -> Node {
         )
 }
 
-fn field_glyph(p: Palette, glyph: &'static str, right: f32, s: f32) -> Node {
+fn field_glyph<H, C>(p: Palette, glyph: &'static str, right: f32, s: f32) -> Node<H, C> {
     let u = |v: f32| v * s;
     row()
         .absolute()
@@ -201,19 +211,19 @@ fn field_glyph(p: Palette, glyph: &'static str, right: f32, s: f32) -> Node {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn text_field_frame(
+pub(crate) fn text_field_frame<H: Copy + Eq + Hash, C: Copy, K: Copy + Eq + Hash>(
     p: Palette,
-    slot: EditorSlot,
+    field_hit: H,
+    clear_hit: H,
     surface: Surface,
     scale: f32,
     focused: bool,
     empty: bool,
     search_icon: bool,
-    editor_node: Node,
-    ui: &UiState,
-) -> Node {
+    editor_node: Node<H, C>,
+    ui: &UiState<H, C, K>,
+) -> Node<H, C> {
     let u = |v: f32| v * scale;
-    let field_hit = HitId::Editor(slot);
     let hovered = ui.is_hovered(field_hit);
     let (trailing, clear_right) = if search_icon {
         (
@@ -230,7 +240,6 @@ pub(crate) fn text_field_frame(
     } else {
         surface.fill
     };
-    let clear_hit = HitId::FieldClear(slot);
     let clear_hovered = ui.is_hovered(clear_hit);
     let clear_pressed = ui.is_pressed(clear_hit);
 
@@ -289,8 +298,7 @@ pub(crate) fn text_field_frame(
                 field_glyph(p, CLEAR_GLYPH, clear_right, scale)
                     .hit(clear_hit)
                     .when(clear_pressed, |g| {
-                        g.bg(p.subtle_tertiary)
-                            .text_color(p.text_tertiary)
+                        g.bg(p.subtle_tertiary).text_color(p.text_tertiary)
                     })
                     .when(!clear_pressed && clear_hovered, |g| {
                         g.bg(p.subtle_secondary)
