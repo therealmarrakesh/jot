@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use ropey::Rope;
 
-use crate::color::{Rgba, rgb, rgba};
+use crate::color::Rgba;
 use crate::geom::{Edges, Point, Rect, Size, point, size};
 use crate::gfx::{D2DRenderer, Font, TextRun, TextSystem, UnderlineStyle, fill};
 use crate::platform::{Modifiers, MouseButton, TimerHandle, system_settings};
@@ -672,7 +672,7 @@ impl Editor {
         let placeholder_rope = Rope::from(self.placeholder.as_str());
         let is_empty = self.text.len() == 0;
         let (display_text, text_color) = if is_empty {
-            (&placeholder_rope, rgba(p.text_secondary))
+            (&placeholder_rope, p.text_secondary)
         } else {
             (&self.text, style.color)
         };
@@ -815,9 +815,8 @@ impl Editor {
 
         renderer.push_clip(input_bounds);
         if !selection_rects.is_empty() {
-            let sel_color = p.selection();
             for rect in selection_rects {
-                renderer.paint_quad(fill(rect, sel_color));
+                renderer.paint_quad(fill(rect, p.selection));
             }
         }
 
@@ -830,7 +829,7 @@ impl Editor {
 
         let show_caret = focused && window_active && self.blink.visible() && !self.caret_hidden;
         if show_caret && (self.selection.is_empty() || self.composition.is_some()) {
-            renderer.paint_quad(fill(caret_rect, rgb(p.caret)));
+            renderer.paint_quad(fill(caret_rect, p.caret));
         }
         renderer.pop_clip();
 

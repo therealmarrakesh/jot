@@ -2,7 +2,6 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::APP_NAME;
-use crate::color::{Rgba, rgb, rgba};
 use crate::document::Format;
 use crate::editor::{Editor, Rope};
 use crate::files::{FilePrompt, LOSSY_ANSI_WARNING, WorkflowGen, discard_prompt_text};
@@ -298,11 +297,10 @@ impl Dialogs {
         if self.open.is_empty() {
             return None;
         }
-        let accent = rgb(p.accent);
         let layers: Vec<Node> = self
             .open
             .iter()
-            .map(|d| self.render_layer(d, focus, accent, p, ts, ui))
+            .map(|d| self.render_layer(d, focus, p, ts, ui))
             .collect();
         Some(
             box_()
@@ -318,7 +316,6 @@ impl Dialogs {
         &self,
         dialog: &OpenDialog,
         focus: Focus,
-        accent: Rgba,
         p: Palette,
         ts: &TextSystem,
         ui: &mut UiState,
@@ -326,7 +323,7 @@ impl Dialogs {
         let s = dialog.scale;
         let style = ButtonStyle {
             surface: p.command_surface,
-            accent,
+            accent: p.accent,
             scale: s,
         };
         let focused_btn = match focus {
@@ -395,7 +392,7 @@ impl Dialogs {
             .size_full()
             .items_center()
             .justify_center()
-            .bg(rgba(p.smoke))
+            .bg(p.smoke)
             .opacity(dialog.opacity)
             .when(!dialog.closing, |this| {
                 this.hit(HitId::DialogBackdrop).cursor(CursorStyle::Arrow)
@@ -453,16 +450,16 @@ fn dialog_frame(
         .hit(HitId::DialogCard)
         .w(u(width))
         .max_w_full()
-        .border(BORDER, rgba(p.surface_stroke))
+        .border(BORDER, p.surface_stroke)
         .rounded(u(OVERLAY_RADIUS))
         .shadows(theme_shadow(p.dark, DIALOG_Z, s))
         .child(
             col()
                 .rounded(u(OVERLAY_RADIUS - BORDER))
-                .bg(rgb(p.command_surface.panel))
+                .bg(p.command_surface.panel)
                 .font_family(TEXT_FONT)
                 .text_size(u(BODY_SIZE))
-                .text_color(rgba(p.text_primary))
+                .text_color(p.text_primary)
                 .child(dialog_content(p, s, title, body))
                 .child(
                     row()
@@ -483,9 +480,9 @@ fn dialog_content(p: Palette, s: f32, title: SharedStr, body: Node) -> Node {
     col()
         .p(u(PADDING))
         .rounded_t(u(OVERLAY_RADIUS - BORDER))
-        .bg(rgb(p.content_surface.panel))
+        .bg(p.content_surface.panel)
         .border_b(1.)
-        .border_color(rgb(p.dialog_divider))
+        .border_color(p.dialog_divider)
         .child(
             box_()
                 .mb(u(TITLE_GAP))

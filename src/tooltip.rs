@@ -2,7 +2,6 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use crate::app::AppEvent;
-use crate::color::{rgb, rgba};
 use crate::geom::{ScreenPoint, ScreenRect, Size, size};
 use crate::gfx::{Gpu, TextAlign, TextSystem, font};
 use crate::platform::{
@@ -465,7 +464,7 @@ fn tooltip_card(p: Palette, content: SharedStr, sz: Size) -> Node {
         .w(sz.width)
         .h(sz.height)
         .rounded(CONTROL_RADIUS)
-        .border(BORDER, rgba(p.flyout_stroke))
+        .border(BORDER, p.flyout_stroke)
         .shadows(theme_shadow(p.dark, ELEVATION * 2., 1.))
         .child(
             box_()
@@ -473,12 +472,12 @@ fn tooltip_card(p: Palette, content: SharedStr, sz: Size) -> Node {
                 .size_full()
                 .rounded(CONTROL_RADIUS - BORDER)
                 .overflow_hidden()
-                .bg(rgb(p.acrylic_fallback))
+                .bg(p.acrylic_fallback)
                 .child(
                     box_()
                         .absolute()
                         .size_full()
-                        .bg(rgba(p.acrylic_luminosity)),
+                        .bg(p.acrylic_luminosity),
                 )
                 .child(
                     box_()
@@ -490,7 +489,7 @@ fn tooltip_card(p: Palette, content: SharedStr, sz: Size) -> Node {
                         .font_family(SMALL_FONT)
                         .text_size(FONT_SIZE)
                         .line_height(LINE_HEIGHT)
-                        .text_color(rgba(p.text_primary))
+                        .text_color(p.text_primary)
                         .when(sz.height <= SINGLE_HEIGHT, Node::nowrap)
                         .child(text(content)),
                 ),

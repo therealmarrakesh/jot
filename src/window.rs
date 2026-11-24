@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use crate::APP_NAME;
 use crate::app::{AppEvent, ViewSettings};
-use crate::color::{rgb, rgba, transparent_black};
+use crate::color::transparent_black;
 use crate::command::{Command, window_shortcut};
 use crate::dialog::{DialogKind, Dialogs};
 use crate::document::{self, Format};
@@ -2102,21 +2102,21 @@ impl MainWindow {
             font: font("Consolas"),
             font_size: EDITOR_FONT_SIZE * self.zoom(),
             line_height: self.line_height(),
-            color: rgba(p.text_primary),
+            color: p.text_primary,
         };
         let find_scale = self.find.scale();
         let find_field_style = EditorPaintStyle {
             font: font(TEXT_FONT),
             font_size: BODY_SIZE * find_scale,
             line_height: (BODY_LINE + 2.) * find_scale,
-            color: rgba(p.text_primary),
+            color: p.text_primary,
         };
         let dialog_scale = self.dialogs.active_scale();
         let dialog_field_style = EditorPaintStyle {
             font: font(TEXT_FONT),
             font_size: BODY_SIZE * dialog_scale,
             line_height: (BODY_LINE + 2.) * dialog_scale,
-            color: rgba(p.text_primary),
+            color: p.text_primary,
         };
         let caret_height = self.caret_height();
         let active_id = self.active_tab_id();
@@ -2131,12 +2131,7 @@ impl MainWindow {
         self.active_editor_mut().set_caret_height(caret_height);
         self.active_editor_mut().set_caret_hidden(caret_hidden);
 
-        let clear = if p.high_contrast {
-            rgb(p.editor)
-        } else {
-            transparent_black()
-        };
-        let needs_retry = self.surface.draw(clear, |renderer| {
+        let needs_retry = self.surface.draw(p.window_clear, |renderer| {
             frame.paint(renderer, &mut |token, rect, renderer| {
                 match token {
                     CustomDraw::Editor(slot) => match slot {
@@ -2233,7 +2228,7 @@ impl MainWindow {
                                 point(x, rect.origin.y),
                                 size(STATUS_DIVIDER_WIDTH, rect.size.height),
                             );
-                            renderer.paint_quad(fill(line, rgba(p.stroke)));
+                            renderer.paint_quad(fill(line, p.stroke));
                         }
                     }
                 }
@@ -2333,7 +2328,7 @@ impl MainWindow {
                     .h(MENU_BAR_HEIGHT)
                     .pl(MENU_BAR_LEFT)
                     .pr(THEME_BUTTON_RIGHT)
-                    .bg(rgba(p.layer))
+                    .bg(p.layer)
                     .child(menu)
                     .child(box_().flex_1())
                     .child(theme_btn),
@@ -2350,7 +2345,7 @@ impl MainWindow {
             .relative()
             .flex_1()
             .min_h(self.editor_min_height())
-            .bg(rgb(p.editor))
+            .bg(p.editor)
             .child(
                 box_()
                     .relative()
@@ -2362,7 +2357,7 @@ impl MainWindow {
                             .font_family("Consolas")
                             .text_size(EDITOR_FONT_SIZE * self.zoom())
                             .line_height(lh)
-                            .text_color(rgba(p.text_primary))
+                            .text_color(p.text_primary)
                             .child(editor_view),
                     ),
             )
@@ -2376,10 +2371,10 @@ impl MainWindow {
                 .gap(24.)
                 .h(STATUS_BAR_HEIGHT)
                 .px(22.)
-                .bg(rgba(p.layer))
+                .bg(p.layer)
                 .font_family(SMALL_FONT)
                 .text_size(12.)
-                .text_color(rgba(p.text_secondary))
+                .text_color(p.text_secondary)
                 .nowrap()
                 .text_child(format!("Ln {}, Col {}", metrics.line, metrics.column))
                 .child(status_divider(p))
@@ -2403,7 +2398,7 @@ fn separator(p: Palette) -> Node {
     box_()
         .flex_none()
         .h(SEPARATOR_HEIGHT)
-        .bg(rgba(p.stroke_on_layer))
+        .bg(p.stroke_on_layer)
 }
 
 fn status_divider(p: Palette) -> Node {
@@ -2411,7 +2406,7 @@ fn status_divider(p: Palette) -> Node {
         .flex_none()
         .w(STATUS_DIVIDER_WIDTH)
         .h(STATUS_DIVIDER_HEIGHT)
-        .bg(rgba(p.stroke))
+        .bg(p.stroke)
 }
 
 fn group_thousands(n: usize) -> String {
@@ -2502,8 +2497,8 @@ impl Caption {
             hit,
             Brushes {
                 rest: transparent_black(),
-                hover: rgba(hover_bg),
-                pressed: rgba(pressed_bg),
+                hover: hover_bg,
+                pressed: pressed_bg,
             },
             true,
         );
@@ -2525,7 +2520,7 @@ impl Caption {
             .bg(bg)
             .font_family(ICON_FONT)
             .text_size(10.)
-            .text_color(rgba(fg))
+            .text_color(fg)
             .window_area(self.area())
             .child(
                 box_()

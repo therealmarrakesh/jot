@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use crate::color::{rgba, transparent_black};
+use crate::color::transparent_black;
 use crate::document::{self, Format};
 use crate::editor::{Editor, Rope};
 use crate::geom::Edges;
@@ -534,7 +534,7 @@ impl TabStrip {
             .iter()
             .map(|(name, x, width, was_active)| {
                 let bg = if *was_active {
-                    rgba(p.layer)
+                    p.layer
                 } else {
                     transparent_black()
                 };
@@ -628,7 +628,7 @@ impl TabStrip {
         };
         let button = strip_button(p, hit, tip, glyph, SCROLL_GLYPH_SIZE, enabled, ui)
             .mt(BUTTON_TOP)
-            .when(enabled, |this| this.text_color(rgba(p.text_secondary)));
+            .when(enabled, |this| this.text_color(p.text_secondary));
         box_()
             .flex_none()
             .h_full()
@@ -714,14 +714,14 @@ fn render_tab(
 
     let hit = HitId::Tab(id.0);
     let face_bg = if active {
-        rgba(p.layer)
+        p.layer
     } else {
         ui.brush(
             hit,
             Brushes {
                 rest: transparent_black(),
-                hover: rgba(p.layer_hover),
-                pressed: rgba(p.layer_hover),
+                hover: p.layer_hover,
+                pressed: p.layer_hover,
             },
             true,
         )
@@ -753,7 +753,7 @@ fn render_tab(
             this.border_t(1.)
                 .border_l(1.)
                 .border_r(1.)
-                .border_color(rgba(p.stroke))
+                .border_color(p.stroke)
                 .rounded_t(OVERLAY_RADIUS)
         })
         .child(tab_face(p, active, face_bg, trailing, name))
@@ -779,12 +779,12 @@ fn tab_face(
         .bg(bg)
         .when(active, |this| {
             this.rounded_t(OVERLAY_RADIUS - 1.)
-                .text_color(rgba(p.text_primary))
+                .text_color(p.text_primary)
                 .font_semibold()
         })
         .when(!active, |this| {
             this.rounded_t(OVERLAY_RADIUS)
-                .text_color(rgba(p.text_secondary))
+                .text_color(p.text_secondary)
         })
         .child(
             box_()
@@ -803,7 +803,7 @@ fn unsaved_dot(p: Palette, inset: f32) -> Node {
         .right(UNSAVED_DOT_RIGHT - inset)
         .size(UNSAVED_DOT)
         .rounded_full()
-        .bg(rgba(p.text_tertiary))
+        .bg(p.text_tertiary)
 }
 
 fn strip_button(
@@ -838,7 +838,7 @@ fn tab_separator(p: Palette) -> Node {
         .top(8.)
         .w(1.)
         .h(16.)
-        .bg(rgba(p.divider))
+        .bg(p.divider)
 }
 
 #[cfg(test)]

@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-use crate::color::{Rgba, black, rgba, transparent_black};
+use crate::color::{Rgba, black, transparent_black};
 use crate::geom::{Corners, Edges, Point, Rect, Shadows, Size};
 use crate::gfx::{
     D2DRenderer, Font, FontWeight, PaintQuad, TextAlign, TextSystem, WrappedLine,
@@ -99,8 +99,8 @@ impl Brushes {
     pub(crate) fn subtle(p: Palette) -> Self {
         Self {
             rest: transparent_black(),
-            hover: rgba(p.subtle_secondary),
-            pressed: rgba(p.subtle_tertiary),
+            hover: p.subtle_secondary,
+            pressed: p.subtle_tertiary,
         }
     }
 }

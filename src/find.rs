@@ -2,7 +2,6 @@ use std::ops::Range;
 use std::time::Duration;
 
 use crate::app::AppEvent;
-use crate::color::{rgb, rgba};
 use crate::command::Command;
 use crate::editor::{Editor, Rope};
 use crate::geom::{Point, point};
@@ -669,7 +668,7 @@ impl FindBar {
         let card = box_()
             .w(width * scale.x)
             .h(height * scale.y)
-            .border(BORDER, rgba(p.surface_stroke))
+            .border(BORDER, p.surface_stroke)
             .rounded(OVERLAY_RADIUS * scale.x.min(scale.y))
             .shadows(theme_shadow(p.dark, CARD_Z, s));
         if s < MIN_VISIBLE_SCALE {
@@ -677,7 +676,7 @@ impl FindBar {
         }
         let buttons = ButtonStyle {
             surface: p.card_surface,
-            accent: rgb(p.accent),
+            accent: p.accent,
             scale: s,
         };
         let query_row = self.render_query_row(p, s, focused_slot, ui);
@@ -693,7 +692,7 @@ impl FindBar {
                 .justify_center()
                 .p(u(CARD_PADDING))
                 .rounded(u(OVERLAY_RADIUS - BORDER))
-                .bg(rgb(p.card_surface.panel))
+                .bg(p.card_surface.panel)
                 .child(query_row)
                 .when_some(replace_row, |this, r| this.child(r)),
         )
@@ -854,7 +853,7 @@ fn render_notice(p: Palette, msg: SharedStr, top: f32) -> Node {
         .justify_center()
         .child(
             box_()
-                .border(BORDER, rgba(p.flyout_stroke))
+                .border(BORDER, p.flyout_stroke)
                 .rounded(OVERLAY_RADIUS)
                 .shadows(theme_shadow(p.dark, NOTICE_Z, 1.))
                 .child(
@@ -863,11 +862,11 @@ fn render_notice(p: Palette, msg: SharedStr, top: f32) -> Node {
                         .pt(NOTICE_PADDING_TOP)
                         .pb(NOTICE_PADDING_BOTTOM)
                         .rounded(OVERLAY_RADIUS - BORDER)
-                        .bg(rgb(p.notice_fill))
+                        .bg(p.notice_fill)
                         .font_family(TEXT_FONT)
                         .text_size(BODY_SIZE)
                         .line_height(NOTICE_LINE)
-                        .text_color(rgba(p.text_primary))
+                        .text_color(p.text_primary)
                         .child(text(msg)),
                 ),
         )

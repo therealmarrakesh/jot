@@ -147,11 +147,7 @@ impl App {
         let settings = system_settings();
         let appearance = settings.appearance;
         let dark = matches!(appearance, WindowAppearance::Dark);
-        let palette = if let Some(hc) = settings.high_contrast {
-            Palette::from_high_contrast(hc)
-        } else {
-            Palette::for_appearance(dark, settings.accent(dark))
-        };
+        let palette = Palette::resolve(dark, settings.accent(dark), settings.high_contrast);
         let reduce_motion = settings.reduce_motion;
 
         Self {
@@ -407,11 +403,7 @@ impl App {
         let next = self.appearance_override.unwrap_or(settings.appearance);
         let dark = matches!(next, WindowAppearance::Dark);
         self.appearance = next;
-        self.palette = if let Some(hc) = settings.high_contrast {
-            Palette::from_high_contrast(hc)
-        } else {
-            Palette::for_appearance(dark, settings.accent(dark))
-        };
+        self.palette = Palette::resolve(dark, settings.accent(dark), settings.high_contrast);
         for w in &mut self.windows {
             w.native.set_appearance(next);
             w.dirty = true;

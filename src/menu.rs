@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use crate::app::{AppEvent, ViewSettings};
-use crate::color::{rgb, rgba, transparent_black};
+use crate::color::transparent_black;
 use crate::command::{Command, shortcut_label};
 use crate::editor::Editor;
 use crate::geom::{Edges, Point, Rect, Size, point, size};
@@ -1419,7 +1419,7 @@ impl MenuBar {
                 let active = self.open_kind() == Some(kind);
                 let ring = bar_focused == Some(kind);
                 let bg = if active {
-                    rgba(p.subtle_tertiary)
+                    p.subtle_tertiary
                 } else {
                     ui.brush(hit, Brushes::subtle(p), true)
                 };
@@ -1451,7 +1451,7 @@ impl MenuBar {
             .gap(BAR_GAP)
             .font_family(TEXT_FONT)
             .text_size(LABEL_SIZE)
-            .text_color(rgba(p.text_primary))
+            .text_color(p.text_primary)
             .children(triggers)
     }
 
@@ -1602,7 +1602,7 @@ fn render_command_row(open: &OpenMenu, p: Palette, ts: &TextSystem, ui: &mut UiS
                     .w(1.)
                     .h(COMMAND_DIVIDER_HEIGHT)
                     .mt(COMMAND_DIVIDER_TOP)
-                    .bg(rgb(p.menu_separator)),
+                    .bg(p.menu_separator),
             );
         }
         children.push(render_command_button(
@@ -1630,7 +1630,7 @@ fn render_command_row(open: &OpenMenu, p: Palette, ts: &TextSystem, ui: &mut UiS
                 .right(BORDER + COMMAND_OUTSET)
                 .bottom(-1.)
                 .h(1.)
-                .bg(rgb(p.menu_separator)),
+                .bg(p.menu_separator),
         )
 }
 
@@ -1676,7 +1676,7 @@ fn render_command_button(
                 .pt(COMMAND_ICON_TOP)
                 .rounded(CONTROL_RADIUS)
                 .bg(bg)
-                .text_color(rgba(fg))
+                .text_color(fg)
                 .child(
                     box_()
                         .h(COMMAND_LINE)
@@ -1776,7 +1776,7 @@ fn render_panel_rows(
                 return box_()
                     .h(ROW_SEPARATOR)
                     .py(1.)
-                    .child(box_().h(1.).bg(rgb(p.menu_separator)));
+                    .child(box_().h(1.).bg(p.menu_separator));
             }
             let hit = match parent {
                 Some(_) => HitId::SubmenuItem(ix),
@@ -1866,9 +1866,9 @@ fn render_row_face(
     let bg = if fade {
         ui.brush_keyed(AnimKey::MenuHover(serial, ix), hit, Brushes::subtle(p), enabled)
     } else if enabled && pressed {
-        rgba(p.subtle_tertiary)
+        p.subtle_tertiary
     } else if (enabled && hovered) || expanded {
-        rgba(p.subtle_secondary)
+        p.subtle_secondary
     } else {
         transparent_black()
     };
@@ -1879,7 +1879,7 @@ fn render_row_face(
         .px(ROW_PADDING)
         .rounded(CONTROL_RADIUS)
         .bg(bg)
-        .text_color(rgba(p.text_primary))
+        .text_color(p.text_primary)
         .when(checks, |this| {
             this.child(
                 box_()
@@ -1888,7 +1888,7 @@ fn render_row_face(
                     .font_family(ICON_FONT)
                     .text_size(mark_size)
                     .line_height(mark_size)
-                    .text_color(rgba(mark_color))
+                    .text_color(mark_color)
                     .when_some(mark, |b, g| b.child(text(g))),
             )
         })
@@ -1898,7 +1898,7 @@ fn render_row_face(
                 .font_family(TEXT_FONT)
                 .text_size(LABEL_SIZE)
                 .nowrap()
-                .text_color(rgba(label_color))
+                .text_color(label_color)
                 .child(text(label)),
         )
         .when_some(shortcut, |this, sc| {
@@ -1908,11 +1908,11 @@ fn render_row_face(
                     .font_family(SMALL_FONT)
                     .text_size(SHORTCUT_SIZE)
                     .nowrap()
-                    .text_color(rgba(if enabled {
+                    .text_color(if enabled {
                         p.text_secondary
                     } else {
                         p.text_disabled
-                    }))
+                    })
                     .child(text(sc)),
             )
         })
@@ -1923,7 +1923,7 @@ fn render_row_face(
                     .font_family(ICON_FONT)
                     .text_size(GLYPH_SIZE)
                     .line_height(GLYPH_SIZE)
-                    .text_color(rgba(p.text_secondary))
+                    .text_color(p.text_secondary)
                     .child(text(CHEVRON_GLYPH)),
             )
         })
@@ -1944,14 +1944,14 @@ fn reveal_card(
         .left(0.)
         .w_full()
         .h(shown)
-        .border(BORDER, rgba(p.flyout_stroke))
+        .border(BORDER, p.flyout_stroke)
         .rounded(OVERLAY_RADIUS)
         .shadows(theme_shadow(p.dark, z, 1.))
         .child(
             box_()
                 .size_full()
                 .rounded(OVERLAY_RADIUS - BORDER)
-                .bg(rgb(p.menu_fill)),
+                .bg(p.menu_fill),
         );
     [
         card,

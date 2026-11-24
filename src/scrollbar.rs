@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-use crate::color::{Rgba, rgba};
+use crate::color::Rgba;
 use crate::geom::{Axis, Corners, Point, Rect, Size, point, size};
 use crate::gfx::{D2DRenderer, fill};
 use crate::platform::TimerHandle;
@@ -329,11 +329,11 @@ impl ScrollbarState {
             let is_dragged = self.dragged_axis == Some(axis);
             let is_thumb_hovered = self.hovered_thumb == Some(axis);
             let (thumb_color, target_thickness, radius) = if is_dragged {
-                (rgba(p.text_primary), THUMB_ACTIVE_THICKNESS, THUMB_ACTIVE_RADIUS)
+                (p.text_primary, THUMB_ACTIVE_THICKNESS, THUMB_ACTIVE_RADIUS)
             } else if is_thumb_hovered {
-                (rgba(p.text_secondary), THUMB_ACTIVE_THICKNESS, THUMB_ACTIVE_RADIUS)
+                (p.text_secondary, THUMB_ACTIVE_THICKNESS, THUMB_ACTIVE_RADIUS)
             } else {
-                (rgba(p.text_tertiary), THUMB_REST_THICKNESS, THUMB_REST_RADIUS)
+                (p.text_tertiary, THUMB_REST_THICKNESS, THUMB_REST_RADIUS)
             };
 
             let (thickness, thickness_running) =

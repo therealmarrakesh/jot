@@ -42,7 +42,7 @@ impl Rgba {
 }
 
 #[inline]
-pub(crate) fn rgb(hex: u32) -> Rgba {
+pub(crate) const fn rgb(hex: u32) -> Rgba {
     Rgba {
         r: ((hex >> 16) & 0xFF) as f32 / 255.0,
         g: ((hex >> 8) & 0xFF) as f32 / 255.0,
@@ -52,7 +52,7 @@ pub(crate) fn rgb(hex: u32) -> Rgba {
 }
 
 #[inline]
-pub(crate) fn rgba(hex: u32) -> Rgba {
+pub(crate) const fn rgba(hex: u32) -> Rgba {
     Rgba {
         r: ((hex >> 24) & 0xFF) as f32 / 255.0,
         g: ((hex >> 16) & 0xFF) as f32 / 255.0,
@@ -66,7 +66,6 @@ pub(crate) const fn black() -> Rgba {
     Rgba::new(0.0, 0.0, 0.0, 1.0)
 }
 
-#[cfg(test)]
 #[inline]
 pub(crate) const fn white() -> Rgba {
     Rgba::new(1.0, 1.0, 1.0, 1.0)

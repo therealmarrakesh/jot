@@ -779,7 +779,7 @@ fn status_bar_min_width_and_no_vertical_char_wrapping() {
             .px(22.)
             .font_family(SMALL_FONT)
             .text_size(12.)
-            .text_color(rgba(p.text_secondary))
+            .text_color(p.text_secondary)
             .nowrap()
             .child(box_().hit(HitId::MenuItem(0)).child(text("Ln 1, Col 1")))
             .child(box_().hit(HitId::MenuItem(1)).child(text("1 character")))

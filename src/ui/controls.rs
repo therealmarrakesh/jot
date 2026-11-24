@@ -1,4 +1,4 @@
-use crate::color::{Rgba, rgb, rgba};
+use crate::color::{Rgba, black, white};
 use crate::geom::Edges;
 use crate::platform::CursorStyle;
 use crate::theme::{Palette, Surface};
@@ -53,29 +53,29 @@ pub(crate) fn button(
     let pressed = ui.is_pressed(hit);
 
     let (fill, hover, pressed_fill, edge, bottom, text_color) = if accented {
-        let panel = rgb(surface.panel);
+        let panel = surface.panel;
         (
             accent,
             accent.mix_opaque(panel, 1. - ACCENT_HOVER_OPACITY),
             accent.mix_opaque(panel, 1. - ACCENT_PRESSED_OPACITY),
-            accent.mix_opaque(rgb(0xffffff), ACCENT_TOP_EDGE),
-            accent.mix_opaque(rgb(0x000000), p.accent_bottom_edge),
-            rgb(p.on_accent),
+            accent.mix_opaque(white(), ACCENT_TOP_EDGE),
+            accent.mix_opaque(black(), p.accent_bottom_edge),
+            p.on_accent,
         )
     } else {
         (
-            rgb(surface.fill),
-            rgb(surface.hover),
-            rgb(surface.button_pressed),
-            rgb(surface.button_stroke),
-            rgb(surface.button_bottom),
-            rgba(p.text_primary),
+            surface.fill,
+            surface.hover,
+            surface.button_pressed,
+            surface.button_stroke,
+            surface.button_bottom,
+            p.text_primary,
         )
     };
     let (pressed_edge, pressed_bottom, pressed_text) = if accented {
-        (pressed_fill, pressed_fill, rgba(p.on_accent_secondary))
+        (pressed_fill, pressed_fill, p.on_accent_secondary)
     } else {
-        (edge, edge, rgba(p.text_secondary))
+        (edge, edge, p.text_secondary)
     };
 
     let face_bg = ui.brush(
@@ -160,7 +160,7 @@ pub(crate) fn icon_button(
         .font_family(ICON_FONT)
         .text_size(style.glyph_size)
         .line_height(style.glyph_size)
-        .text_color(rgba(fg))
+        .text_color(fg)
         .tooltip(tip)
         .child(text(glyph))
 }
@@ -173,12 +173,12 @@ pub(crate) fn focus_ring(p: Palette, outset: Edges<f32>, radius: f32) -> Node {
         .right(-outset.right)
         .bottom(-outset.bottom)
         .rounded(radius)
-        .border(2., rgb(p.focus_outer))
+        .border(2., p.focus_outer)
         .child(
             box_()
                 .size_full()
                 .rounded((radius - 2.).max(0.))
-                .border(1., rgb(p.focus_inner)),
+                .border(1., p.focus_inner),
         )
 }
 
@@ -196,7 +196,7 @@ fn field_glyph(p: Palette, glyph: &'static str, right: f32, s: f32) -> Node {
         .cursor(CursorStyle::Arrow)
         .font_family(ICON_FONT)
         .text_size(u(FIELD_GLYPH_SIZE))
-        .text_color(rgba(p.text_secondary))
+        .text_color(p.text_secondary)
         .child(text(glyph))
 }
 
@@ -224,11 +224,11 @@ pub(crate) fn text_field_frame(
         (FIELD_GLYPH_WIDTH + FIELD_GLYPH_RIGHT, FIELD_GLYPH_RIGHT)
     };
     let bg = if focused {
-        rgba(p.field_focused)
+        p.field_focused
     } else if hovered {
-        rgb(surface.hover)
+        surface.hover
     } else {
-        rgb(surface.fill)
+        surface.fill
     };
     let clear_hit = HitId::FieldClear(slot);
     let clear_hovered = ui.is_hovered(clear_hit);
@@ -249,7 +249,7 @@ pub(crate) fn text_field_frame(
                 right: 1.,
                 bottom: 0.,
             },
-            rgb(surface.field_stroke),
+            surface.field_stroke,
         )
         .pb(1.)
         .child(
@@ -261,7 +261,7 @@ pub(crate) fn text_field_frame(
                 .font_family(TEXT_FONT)
                 .text_size(u(BODY_SIZE))
                 .line_height(u(BODY_LINE + 2.))
-                .text_color(rgba(p.text_primary))
+                .text_color(p.text_primary)
                 .child(editor_node),
         )
         .child(
@@ -273,15 +273,15 @@ pub(crate) fn text_field_frame(
                 .h(if focused { 2. } else { 1. })
                 .rounded_b(CONTROL_RADIUS * scale)
                 .bg(if focused {
-                    rgb(p.accent)
+                    p.accent
                 } else {
-                    rgb(surface.field_bottom)
+                    surface.field_bottom
                 }),
         )
         .when(search_icon, |this| {
             this.child(
                 field_glyph(p, SEARCH_GLYPH, FIELD_GLYPH_RIGHT, scale)
-                    .when(!focused, |g| g.text_color(rgba(p.text_primary))),
+                    .when(!focused, |g| g.text_color(p.text_primary)),
             )
         })
         .when(focused && !empty, |this| {
@@ -289,11 +289,11 @@ pub(crate) fn text_field_frame(
                 field_glyph(p, CLEAR_GLYPH, clear_right, scale)
                     .hit(clear_hit)
                     .when(clear_pressed, |g| {
-                        g.bg(rgba(p.subtle_tertiary))
-                            .text_color(rgba(p.text_tertiary))
+                        g.bg(p.subtle_tertiary)
+                            .text_color(p.text_tertiary)
                     })
                     .when(!clear_pressed && clear_hovered, |g| {
-                        g.bg(rgba(p.subtle_secondary))
+                        g.bg(p.subtle_secondary)
                     }),
             )
         })

@@ -1,6 +1,5 @@
 use std::rc::Rc;
 
-use crate::color::rgb;
 use crate::geom::{Rect, ScreenPoint, ScreenRect, point, size};
 use crate::gfx::{Gpu, TextSystem};
 use crate::platform::{WindowAppearance, WindowId};
@@ -151,13 +150,13 @@ fn render_tips(tips: &[KeyTip], p: Palette) -> Node {
             .top(tip.bounds.origin.y)
             .w(tip.bounds.size.width)
             .h(tip.bounds.size.height)
-            .bg(rgb(p.keytip_fill))
+            .bg(p.keytip_fill)
             .pl(PADDING)
             .pt(PADDING)
             .font_family(FONT)
             .text_size(FONT_SIZE)
             .line_height(LINE_HEIGHT)
-            .text_color(rgb(p.keytip_text))
+            .text_color(p.keytip_text)
             .nowrap()
             .child(text(tip.key.to_string()))
     }))
