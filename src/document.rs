@@ -1111,4 +1111,78 @@ mod tests {
             assert_eq!(loaded.text, original);
         }
     }
+
+    #[test]
+    fn byte_exact_document_round_trips_and_locked_target_fallback() {
+        let dir = std::env::temp_dir().join(format!("jot-roundtrip-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+
+        let cases: &[(&str, Vec<u8>)] = &[
+            ("empty.txt", b"".to_vec()),
+            ("bom_only.txt", b"\xEF\xBB\xBF".to_vec()),
+            ("utf8_crlf.txt", b"one\r\ntwo\r\n".to_vec()),
+            ("utf8_lf_notrail.txt", b"one\ntwo".to_vec()),
+            ("utf8_cr.txt", b"one\rtwo\r".to_vec()),
+            (
+                "utf8_bom.txt",
+                b"\xEF\xBB\xBFhello \xF0\x9F\x8E\x89\r\n".to_vec(),
+            ),
+            ("utf16le.txt", {
+                let mut v = vec![0xFF, 0xFE];
+                for u in "hi 日本語\r\n".encode_utf16() {
+                    v.extend_from_slice(&u.to_le_bytes());
+                }
+                v
+            }),
+            ("utf16be.txt", {
+                let mut v = vec![0xFE, 0xFF];
+                for u in "hi 日本語\n".encode_utf16() {
+                    v.extend_from_slice(&u.to_be_bytes());
+                }
+                v
+            }),
+        ];
+
+        for (name, bytes) in cases {
+            let p = dir.join(name);
+            std::fs::write(&p, bytes).unwrap();
+            let loaded = load(&p).unwrap();
+            assert!(
+                !loaded.format.mixed_line_endings,
+                "{name} should not be mixed"
+            );
+            write_rope(&p, &loaded.text, loaded.format).unwrap();
+            assert_eq!(
+                std::fs::read(&p).unwrap(),
+                *bytes,
+                "round-trip mismatch for {name}"
+            );
+        }
+
+        let mixed_path = dir.join("mixed.txt");
+        std::fs::write(&mixed_path, b"a\r\nb\nc\r\n").unwrap();
+        let mixed = load(&mixed_path).unwrap();
+        assert!(mixed.format.mixed_line_endings);
+
+        use std::os::windows::fs::OpenOptionsExt;
+        let locked_path = dir.join("locked.txt");
+        std::fs::write(&locked_path, b"before").unwrap();
+        let _holder = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0x0000_0001 | 0x0000_0002)
+            .open(&locked_path)
+            .unwrap();
+        let rope = crate::text::Rope::from("after locked write");
+        write_rope(&locked_path, &rope, Format::default()).unwrap();
+        drop(_holder);
+        assert_eq!(std::fs::read(&locked_path).unwrap(), b"after locked write");
+        let leftovers: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().contains(".jot-"))
+            .collect();
+        assert!(leftovers.is_empty(), "leftover temp files: {leftovers:?}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

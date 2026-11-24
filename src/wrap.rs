@@ -1443,4 +1443,23 @@ mod tests {
             Some(point(20., 20.))
         );
     }
+
+    #[test]
+    fn wrap_handles_tabs_emoji_combining_marks_and_u2028_single_line() {
+        let ts = TextSystem::new().unwrap();
+        let sample =
+            "\tindented e\u{0301} 👨‍👩‍👧\u{2028}after_lsep more words to wrap cleanly across rows";
+        let rope = Rope::from(sample);
+        let style = TextStyle::regular("Consolas", 14.0);
+        let mut wrap = WrapIndex::new(style.clone(), Some(180.0));
+        wrap.sync_layout(&rope, &style, Some(180.0), &ts);
+        assert!(wrap.visual_row_count() >= 2);
+
+        let mut wrap_zero = WrapIndex::new(style.clone(), Some(0.0));
+        wrap_zero.sync_layout(&rope, &style, Some(0.0), &ts);
+        assert!(wrap_zero.visual_row_count() >= 1);
+
+        let shaped = ts.shape_row(sample.into(), &style);
+        assert!(shaped.width > 0.0);
+    }
 }
