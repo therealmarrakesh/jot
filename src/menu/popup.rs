@@ -2,14 +2,14 @@ use std::time::Duration;
 
 use crate::geom::Point;
 use crate::ids::{AnimKey, EditorSlot, HitId, MenuKind, UiState};
-use crate::ui::{Anchor, AnimStatus, Easing};
+use crate::ui::{Anchor, AnimStatus, Curve, Easing, Transition};
 
 use super::MENU_BAR_HEIGHT;
 use super::bar::FocusRequest;
 use super::model::{CommandButton, Entry, PADDING_Y, Panel, cycle};
 
-const OPEN_DURATION: Duration = Duration::from_millis(250);
-const FADE_DURATION: Duration = Duration::from_millis(83);
+const OPEN_CURVE: Curve = Curve::new(Duration::from_millis(250), Easing::DECELERATE);
+const FADE_CURVE: Curve = Curve::new(Duration::from_millis(83), Easing::Linear);
 const FLYOUT_GAP: f32 = 3.;
 pub(super) const COMMAND_ROW: f32 = 59.;
 const OVERFLOW_TOP: f32 = 1.;
@@ -65,57 +65,53 @@ impl PopupKind {
 }
 
 pub(super) struct Motion {
-    pub(super) serial: usize,
-    pub(super) closing: bool,
+    pub(super) transition: Transition,
     fade_in: bool,
     pub(super) unroll: f32,
     pub(super) opacity: f32,
 }
 
 impl Motion {
-    pub(super) fn new(serial: usize, fade_in: bool) -> Self {
+    pub(super) fn new(fade_in: bool) -> Self {
         Self {
-            serial,
-            closing: false,
+            transition: Transition::open_new(),
             fade_in,
             unroll: 0.,
             opacity: 1.,
         }
     }
 
+    #[inline]
+    pub(super) fn serial(&self) -> usize {
+        self.transition.serial()
+    }
+
+    #[inline]
+    pub(super) fn is_closing(&self) -> bool {
+        self.transition.is_closing()
+    }
+
+    pub(super) fn close(&mut self) {
+        self.transition.close();
+    }
+
     pub(super) fn sample(&mut self, ui: &mut UiState) -> bool {
-        if !self.closing {
+        let serial = self.transition.serial();
+        let closing = self.transition.is_closing();
+        if !closing {
             self.unroll = ui
-                .animate_f32_from(
-                    AnimKey::MenuUnroll(self.serial),
-                    0.0,
-                    1.0,
-                    OPEN_DURATION,
-                    Easing::DECELERATE,
-                )
+                .progress(AnimKey::Transition { serial, track: 0 }, true, OPEN_CURVE)
                 .value;
         }
         let appear = if self.fade_in {
-            ui.animate_f32_from(
-                AnimKey::MenuAppear(self.serial),
-                0.0,
-                1.0,
-                FADE_DURATION,
-                Easing::Linear,
-            )
-            .value
+            ui.progress(AnimKey::Transition { serial, track: 1 }, true, FADE_CURVE)
+                .value
         } else {
             1.
         };
-        let fade = ui.animate_f32_from(
-            AnimKey::MenuFade(self.serial),
-            1.0,
-            if self.closing { 0. } else { 1. },
-            FADE_DURATION,
-            Easing::Linear,
-        );
-        self.opacity = fade.value * appear;
-        self.closing && fade.status == AnimStatus::Finished
+        let fade = ui.progress(AnimKey::Transition { serial, track: 2 }, closing, FADE_CURVE);
+        self.opacity = (1. - fade.value) * appear;
+        closing && fade.status == AnimStatus::Finished
     }
 }
 
@@ -134,27 +130,27 @@ pub(super) struct OpenMenu {
 }
 
 impl OpenMenu {
-    pub(super) fn new(kind: PopupKind, panel: Panel, serial: usize) -> Self {
+    pub(super) fn new(kind: PopupKind, panel: Panel) -> Self {
         let fade_in = !kind.commands().is_empty();
         Self {
             kind,
             panel,
             submenu: None,
-            motion: Motion::new(serial, fade_in),
+            motion: Motion::new(fade_in),
             focused_command: None,
         }
     }
 
     pub(super) fn is_closing(&self) -> bool {
-        self.motion.closing
+        self.motion.is_closing()
     }
 
     pub(super) fn live_submenu(&self) -> Option<&OpenSubmenu> {
-        self.submenu.as_ref().filter(|s| !s.motion.closing)
+        self.submenu.as_ref().filter(|s| !s.motion.is_closing())
     }
 
     pub(super) fn live_submenu_mut(&mut self) -> Option<&mut OpenSubmenu> {
-        self.submenu.as_mut().filter(|s| !s.motion.closing)
+        self.submenu.as_mut().filter(|s| !s.motion.is_closing())
     }
 
     pub(super) fn focused_submenu(&self) -> Option<&OpenSubmenu> {

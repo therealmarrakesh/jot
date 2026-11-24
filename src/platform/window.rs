@@ -75,6 +75,7 @@ use super::settings::{refresh_system_settings, system_settings};
 use super::{ACTIVE_HANDLER, DisplayId, WindowsDisplay};
 
 const WINDOW_CLASS: PCWSTR = w!("JotWindow");
+const OVERLAY_CLASS: PCWSTR = w!("JotOverlay");
 const DWMSBT_TABBEDWINDOW: i32 = 4;
 const SIZE_MOVE_TIMER_ID: usize = 1;
 
@@ -290,34 +291,19 @@ impl MouseButtons {
     }
 }
 
-struct WindowState {
-    scale_factor: Cell<f32>,
-    physical_size: Cell<(u32, u32)>,
-    logical_size: Cell<Size>,
-    origin: Cell<Point>,
-    active: Cell<bool>,
-    in_size_move: Cell<bool>,
-    ime_caret: Cell<Option<Rect>>,
-    sys_caret_px: Cell<Option<(i32, i32, i32, i32)>>,
-    block_shutdown: Cell<Option<&'static str>>,
+#[derive(Copy, Clone)]
+struct WindowMetrics {
+    scale: f32,
+    physical: (u32, u32),
 }
 
-impl WindowState {
-    fn set_metrics(&self, w: u32, h: u32, scale: f32) {
-        self.scale_factor.set(scale);
-        self.physical_size.set((w, h));
-        self.logical_size
-            .set(size(w as f32 / scale, h as f32 / scale));
-    }
-}
-
-struct HwndEntry {
-    window_id: WindowId,
-    state: Rc<WindowState>,
-    is_overlay: bool,
+struct WindowChrome {
     min_size: Option<Size>,
     cursor: CursorStyle,
     control_areas: Vec<(Rect, Option<WindowControlArea>)>,
+}
+
+struct WindowInput {
     hovered: bool,
     nc_button_down: Option<u32>,
     pending_surrogate: Option<u16>,
@@ -330,9 +316,80 @@ struct HwndEntry {
     tracking_nc_leave: bool,
 }
 
+struct WindowShared {
+    id: WindowId,
+    metrics: Cell<WindowMetrics>,
+    active: Cell<bool>,
+    in_size_move: Cell<bool>,
+    ime_caret: Cell<Option<Rect>>,
+    sys_caret_px: Cell<Option<(i32, i32, i32, i32)>>,
+    block_shutdown: Cell<Option<&'static str>>,
+    last_origin_px: Cell<Option<(i32, i32)>>,
+    chrome: RefCell<WindowChrome>,
+    input: RefCell<WindowInput>,
+}
+
+impl WindowShared {
+    fn new(id: WindowId, scale: f32, physical: (u32, u32), active: bool) -> Rc<Self> {
+        Rc::new(Self {
+            id,
+            metrics: Cell::new(WindowMetrics { scale, physical }),
+            active: Cell::new(active),
+            in_size_move: Cell::new(false),
+            ime_caret: Cell::new(None),
+            sys_caret_px: Cell::new(None),
+            block_shutdown: Cell::new(None),
+            last_origin_px: Cell::new(None),
+            chrome: RefCell::new(WindowChrome {
+                min_size: None,
+                cursor: CursorStyle::Arrow,
+                control_areas: Vec::new(),
+            }),
+            input: RefCell::new(WindowInput {
+                hovered: false,
+                nc_button_down: None,
+                pending_surrogate: None,
+                suppress_next_char: false,
+                last_modifiers: current_modifiers(),
+                clicks: ClickTracker::default(),
+                buttons: MouseButtons::default(),
+                releasing_capture: false,
+                tracking_leave: false,
+                tracking_nc_leave: false,
+            }),
+        })
+    }
+
+    #[inline]
+    fn scale(&self) -> f32 {
+        self.metrics.get().scale
+    }
+
+    fn set_metrics(&self, w: u32, h: u32, scale: f32) {
+        self.metrics.set(WindowMetrics {
+            scale,
+            physical: (w, h),
+        });
+    }
+
+    fn logical_size(&self) -> Size {
+        let m = self.metrics.get();
+        size(m.physical.0 as f32 / m.scale, m.physical.1 as f32 / m.scale)
+    }
+}
+
 thread_local! {
-    static HWND_REGISTRY: RefCell<HashMap<isize, HwndEntry>> = RefCell::new(HashMap::new());
+    static HWND_REGISTRY: RefCell<HashMap<isize, Rc<WindowShared>>> = RefCell::new(HashMap::new());
     static PENDING_EVENTS: RefCell<VecDeque<PlatformEvent>> = const { RefCell::new(VecDeque::new()) };
+}
+
+unsafe extern "system" fn overlay_wnd_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
 }
 
 pub(crate) fn register_window_class() -> Result<()> {
@@ -340,7 +397,7 @@ pub(crate) fn register_window_class() -> Result<()> {
         let hinstance: HINSTANCE = GetModuleHandleW(None)?.into();
         let hicon = LoadIconW(Some(hinstance), PCWSTR(std::ptr::without_provenance(1)))
             .unwrap_or_default();
-        let wc = WNDCLASSW {
+        let main_wc = WNDCLASSW {
             style: CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS,
             lpfnWndProc: Some(window_wnd_proc),
             hInstance: hinstance,
@@ -349,28 +406,37 @@ pub(crate) fn register_window_class() -> Result<()> {
             hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
             ..Default::default()
         };
-        RegisterClassW(&wc);
+        RegisterClassW(&main_wc);
+
+        let overlay_wc = WNDCLASSW {
+            lpfnWndProc: Some(overlay_wnd_proc),
+            hInstance: hinstance,
+            lpszClassName: OVERLAY_CLASS,
+            ..Default::default()
+        };
+        RegisterClassW(&overlay_wc);
     }
     Ok(())
 }
 
-fn with_entry<R>(hwnd: HWND, f: impl FnOnce(&HwndEntry) -> R) -> Option<R> {
-    HWND_REGISTRY.with(|map| map.borrow().get(&(hwnd.0 as isize)).map(f))
-}
-
-fn with_entry_mut<R>(hwnd: HWND, f: impl FnOnce(&mut HwndEntry) -> R) -> Option<R> {
-    HWND_REGISTRY.with(|map| map.borrow_mut().get_mut(&(hwnd.0 as isize)).map(f))
+fn lookup(hwnd: HWND) -> Option<Rc<WindowShared>> {
+    HWND_REGISTRY.with(|map| map.borrow().get(&(hwnd.0 as isize)).cloned())
 }
 
 #[cfg(test)]
 pub(crate) fn has_hwnd_entry(hwnd: WindowHwnd) -> bool {
-    with_entry(hwnd.raw(), |_| ()).is_some()
+    lookup(hwnd.raw()).is_some()
 }
 
 fn release_capture_suppressed(hwnd: HWND, release: impl FnOnce()) {
-    with_entry_mut(hwnd, |e| e.releasing_capture = true);
+    let shared = lookup(hwnd);
+    if let Some(s) = &shared {
+        s.input.borrow_mut().releasing_capture = true;
+    }
     release();
-    with_entry_mut(hwnd, |e| e.releasing_capture = false);
+    if let Some(s) = &shared {
+        s.input.borrow_mut().releasing_capture = false;
+    }
 }
 
 #[cfg(test)]
@@ -478,8 +544,7 @@ pub(super) fn dispatch(event: PlatformEvent) -> bool {
 pub(crate) struct NativeWindow {
     pub(crate) id: WindowId,
     hwnd: HWND,
-    is_overlay: bool,
-    state: Rc<WindowState>,
+    shared: Rc<WindowShared>,
     destroyed: bool,
 }
 
@@ -488,16 +553,31 @@ impl NativeWindow {
         config: &MainWindowConfig,
         appearance: WindowAppearance,
     ) -> Result<Self> {
-        let ex_style = WS_EX_APPWINDOW | WS_EX_NOREDIRECTIONBITMAP;
-        let style = WS_SYSMENU | WS_THICKFRAME | WS_MAXIMIZEBOX | WS_MINIMIZEBOX;
-        let (id, hwnd, state, init_scale) = Self::create_and_register(
-            ex_style,
-            style,
-            config.title.as_str(),
-            (CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT),
-            false,
-            config.show && config.focus,
-        )?;
+        let id = WindowId::next();
+        let hinstance: HINSTANCE = unsafe { GetModuleHandleW(None)? }.into();
+        let wide_title = HSTRING::from(config.title.as_str());
+        let hwnd = unsafe {
+            CreateWindowExW(
+                WS_EX_APPWINDOW | WS_EX_NOREDIRECTIONBITMAP,
+                WINDOW_CLASS,
+                &wide_title,
+                WS_SYSMENU | WS_THICKFRAME | WS_MAXIMIZEBOX | WS_MINIMIZEBOX,
+                CW_USEDEFAULT,
+                CW_USEDEFAULT,
+                CW_USEDEFAULT,
+                CW_USEDEFAULT,
+                None,
+                None,
+                Some(hinstance),
+                None,
+            )?
+        };
+
+        let init_scale = query_scale(hwnd);
+        let shared = WindowShared::new(id, init_scale, (1, 1), config.show && config.focus);
+        HWND_REGISTRY.with(|map| {
+            map.borrow_mut().insert(hwnd.0 as isize, shared.clone());
+        });
 
         configure_backdrop(hwnd);
         configure_dark_mode(hwnd, appearance);
@@ -528,7 +608,15 @@ impl NativeWindow {
         }
 
         unsafe { DragAcceptFiles(hwnd, true) };
-        let win = Self::finish_create(id, hwnd, false, state);
+        let scale = query_scale(hwnd);
+        let (pw, ph) = query_physical_size(hwnd);
+        shared.set_metrics(pw, ph, scale);
+        let win = Self {
+            id,
+            hwnd,
+            shared,
+            destroyed: false,
+        };
         if config.show {
             win.show(config.focus);
         }
@@ -536,14 +624,30 @@ impl NativeWindow {
     }
 
     pub(crate) fn create_overlay() -> Result<Self> {
-        let ex_style = WS_EX_NOACTIVATE
-            | WS_EX_TOOLWINDOW
-            | WS_EX_TOPMOST
-            | WS_EX_TRANSPARENT
-            | WS_EX_LAYERED
-            | WS_EX_NOREDIRECTIONBITMAP;
-        let (id, hwnd, state, _) =
-            Self::create_and_register(ex_style, WS_POPUP, "", (0, 0, 1, 1), true, false)?;
+        let id = WindowId::next();
+        let hinstance: HINSTANCE = unsafe { GetModuleHandleW(None)? }.into();
+        let wide_title = HSTRING::from("");
+        let hwnd = unsafe {
+            CreateWindowExW(
+                WS_EX_NOACTIVATE
+                    | WS_EX_TOOLWINDOW
+                    | WS_EX_TOPMOST
+                    | WS_EX_TRANSPARENT
+                    | WS_EX_LAYERED
+                    | WS_EX_NOREDIRECTIONBITMAP,
+                OVERLAY_CLASS,
+                &wide_title,
+                WS_POPUP,
+                0,
+                0,
+                1,
+                1,
+                None,
+                None,
+                Some(hinstance),
+                None,
+            )?
+        };
 
         set_dwm_u32(
             hwnd,
@@ -556,90 +660,15 @@ impl NativeWindow {
             let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), 255, LWA_ALPHA);
         }
 
-        Ok(Self::finish_create(id, hwnd, true, state))
-    }
-
-    fn create_and_register(
-        ex_style: windows::Win32::UI::WindowsAndMessaging::WINDOW_EX_STYLE,
-        style: windows::Win32::UI::WindowsAndMessaging::WINDOW_STYLE,
-        title: &str,
-        (x, y, w, h): (i32, i32, i32, i32),
-        is_overlay: bool,
-        active: bool,
-    ) -> Result<(WindowId, HWND, Rc<WindowState>, f32)> {
-        let id = WindowId::next();
-        let hinstance: HINSTANCE = unsafe { GetModuleHandleW(None)? }.into();
-        let wide_title = HSTRING::from(title);
-        let hwnd = unsafe {
-            CreateWindowExW(
-                ex_style,
-                WINDOW_CLASS,
-                &wide_title,
-                style,
-                x,
-                y,
-                w,
-                h,
-                None,
-                None,
-                Some(hinstance),
-                None,
-            )?
-        };
-
-        let dpi = unsafe { GetDpiForWindow(hwnd) }.max(USER_DEFAULT_SCREEN_DPI);
-        let init_scale = dpi as f32 / USER_DEFAULT_SCREEN_DPI as f32;
-        let state = Rc::new(WindowState {
-            scale_factor: Cell::new(init_scale),
-            physical_size: Cell::new((1, 1)),
-            logical_size: Cell::new(Size::ZERO),
-            origin: Cell::new(Point::ZERO),
-            active: Cell::new(active),
-            in_size_move: Cell::new(false),
-            ime_caret: Cell::new(None),
-            sys_caret_px: Cell::new(None),
-            block_shutdown: Cell::new(None),
-        });
-        HWND_REGISTRY.with(|map| {
-            map.borrow_mut().insert(
-                hwnd.0 as isize,
-                HwndEntry {
-                    window_id: id,
-                    state: state.clone(),
-                    is_overlay,
-                    min_size: None,
-                    cursor: CursorStyle::Arrow,
-                    control_areas: Vec::new(),
-                    hovered: false,
-                    nc_button_down: None,
-                    pending_surrogate: None,
-                    suppress_next_char: false,
-                    last_modifiers: current_modifiers(),
-                    clicks: ClickTracker::default(),
-                    buttons: MouseButtons::default(),
-                    releasing_capture: false,
-                    tracking_leave: false,
-                    tracking_nc_leave: false,
-                },
-            );
-        });
-        Ok((id, hwnd, state, init_scale))
-    }
-
-    fn finish_create(id: WindowId, hwnd: HWND, is_overlay: bool, state: Rc<WindowState>) -> Self {
-        let final_dpi = unsafe { GetDpiForWindow(hwnd) }.max(USER_DEFAULT_SCREEN_DPI);
-        let scale_factor = final_dpi as f32 / USER_DEFAULT_SCREEN_DPI as f32;
-        let (phys_w, phys_h) = query_physical_size(hwnd);
-        let (_, origin) = query_client_metrics(hwnd, scale_factor);
-        state.set_metrics(phys_w, phys_h, scale_factor);
-        state.origin.set(origin);
-        Self {
+        let scale = query_scale(hwnd);
+        let (pw, ph) = query_physical_size(hwnd);
+        let shared = WindowShared::new(id, scale, (pw, ph), false);
+        Ok(Self {
             id,
             hwnd,
-            is_overlay,
-            state,
+            shared,
             destroyed: false,
-        }
+        })
     }
 
     pub(crate) fn show(&self, focus: bool) {
@@ -656,29 +685,24 @@ impl NativeWindow {
     }
 
     pub(crate) fn set_appearance(&self, appearance: WindowAppearance) {
-        if !self.is_overlay {
-            configure_dark_mode(self.hwnd, appearance);
-        }
+        configure_dark_mode(self.hwnd, appearance);
     }
 
     pub(crate) fn set_cursor(&self, style: CursorStyle) {
-        let changed = with_entry_mut(self.hwnd, |e| {
-            let diff = e.cursor != style;
-            e.cursor = style;
-            diff
-        })
-        .unwrap_or(false);
-        if changed {
+        let mut chrome = self.shared.chrome.borrow_mut();
+        if chrome.cursor != style {
+            chrome.cursor = style;
+            drop(chrome);
             apply_cursor(style);
         }
     }
 
     pub(crate) fn set_min_size(&self, min_size: Option<Size>) {
-        with_entry_mut(self.hwnd, |e| e.min_size = min_size);
+        self.shared.chrome.borrow_mut().min_size = min_size;
     }
 
     pub(crate) fn set_control_areas(&self, areas: Vec<(Rect, Option<WindowControlArea>)>) {
-        with_entry_mut(self.hwnd, |e| e.control_areas = areas);
+        self.shared.chrome.borrow_mut().control_areas = areas;
     }
 
     pub(crate) fn is_maximized(&self) -> bool {
@@ -691,33 +715,33 @@ impl NativeWindow {
 
     #[inline]
     pub(crate) fn scale_factor(&self) -> f32 {
-        self.state.scale_factor.get()
+        self.shared.scale()
     }
 
     #[inline]
     pub(crate) fn physical_size(&self) -> (u32, u32) {
-        self.state.physical_size.get()
+        self.shared.metrics.get().physical
     }
 
     #[inline]
     pub(crate) fn logical_size(&self) -> Size {
-        self.state.logical_size.get()
+        self.shared.logical_size()
     }
 
     #[inline]
     pub(crate) fn is_active(&self) -> bool {
-        self.state.active.get()
+        self.shared.active.get()
     }
 
     #[cfg(test)]
     #[inline]
     pub(crate) fn in_size_move(&self) -> bool {
-        self.state.in_size_move.get()
+        self.shared.in_size_move.get()
     }
 
     pub(crate) fn set_text_caret(&self, ime_rect: Option<Rect>, show_system_caret: bool) {
-        self.state.ime_caret.set(ime_rect);
-        let scale = self.state.scale_factor.get();
+        self.shared.ime_caret.set(ime_rect);
+        let scale = self.shared.scale();
         let next_px = show_system_caret.then_some(ime_rect).flatten().map(|r| {
             (
                 (r.origin.x * scale).round() as i32,
@@ -726,10 +750,10 @@ impl NativeWindow {
                 (r.size.height * scale).round().max(1.0) as i32,
             )
         });
-        if next_px == self.state.sys_caret_px.get() {
+        if next_px == self.shared.sys_caret_px.get() {
             return;
         }
-        self.state.sys_caret_px.set(next_px);
+        self.shared.sys_caret_px.set(next_px);
         match next_px {
             Some((x, y, w, h)) => unsafe {
                 let _ = CreateCaret(self.hwnd, None, w.max(1), h.max(1));
@@ -742,7 +766,7 @@ impl NativeWindow {
     }
 
     pub(crate) fn set_block_shutdown(&self, reason: Option<&'static str>) {
-        let prev = self.state.block_shutdown.replace(reason);
+        let prev = self.shared.block_shutdown.replace(reason);
         if prev.is_some() && reason.is_none() {
             let _ = unsafe { ShutdownBlockReasonDestroy(self.hwnd) };
         }
@@ -758,10 +782,9 @@ impl NativeWindow {
         if w <= 0 || h <= 0 {
             return None;
         }
-        let dpi = unsafe { GetDpiForWindow(self.hwnd) }.max(USER_DEFAULT_SCREEN_DPI);
-        let scale = dpi as f32 / USER_DEFAULT_SCREEN_DPI as f32;
+        let scale = query_scale(self.hwnd);
         let (pw, ph) = (w as u32, h as u32);
-        self.state.set_metrics(pw, ph, scale);
+        self.shared.set_metrics(pw, ph, scale);
         Some((pw, ph, scale))
     }
 
@@ -773,7 +796,7 @@ impl NativeWindow {
         let in_size_move = HWND_REGISTRY.with(|map| {
             map.borrow_mut()
                 .remove(&(self.hwnd.0 as isize))
-                .is_some_and(|e| e.state.in_size_move.get())
+                .is_some_and(|s| s.in_size_move.get())
         });
         if in_size_move {
             let _ = unsafe { KillTimer(Some(self.hwnd), SIZE_MOVE_TIMER_ID) };
@@ -788,28 +811,17 @@ impl Drop for NativeWindow {
     }
 }
 
+fn query_scale(hwnd: HWND) -> f32 {
+    let dpi = unsafe { GetDpiForWindow(hwnd) }.max(USER_DEFAULT_SCREEN_DPI);
+    dpi as f32 / USER_DEFAULT_SCREEN_DPI as f32
+}
+
 fn query_physical_size(hwnd: HWND) -> (u32, u32) {
     let mut rc = RECT::default();
     let _ = unsafe { GetClientRect(hwnd, &mut rc) };
     (
         (rc.right - rc.left).max(1) as u32,
         (rc.bottom - rc.top).max(1) as u32,
-    )
-}
-
-fn query_client_metrics(hwnd: HWND, scale: f32) -> (Size, Point) {
-    let mut client = RECT::default();
-    let mut win_rc = RECT::default();
-    unsafe {
-        let _ = GetClientRect(hwnd, &mut client);
-        let _ = GetWindowRect(hwnd, &mut win_rc);
-    }
-    (
-        size(
-            (client.right - client.left).max(1) as f32 / scale,
-            (client.bottom - client.top).max(1) as f32 / scale,
-        ),
-        point(win_rc.left as f32 / scale, win_rc.top as f32 / scale),
     )
 }
 
@@ -910,92 +922,90 @@ fn is_relevant_setting_change(lparam: LPARAM) -> bool {
 }
 
 fn update_ime_pos(hwnd: HWND) {
-    if let Some((Some(rect), scale)) =
-        with_entry(hwnd, |e| (e.state.ime_caret.get(), e.state.scale_factor.get()))
+    if let Some(s) = lookup(hwnd)
+        && let Some(rect) = s.ime_caret.get()
     {
-        set_ime_candidate_pos(hwnd, rect, scale);
+        set_ime_candidate_pos(hwnd, rect, s.scale());
     }
 }
 
 fn handle_mouse_move(hwnd: HWND, lparam: LPARAM, live_buttons: Option<MouseButtons>) {
+    let Some(s) = lookup(hwnd) else {
+        return;
+    };
+    if s.in_size_move.get() {
+        return;
+    }
     let non_client = live_buttons.is_none();
-    let info = with_entry_mut(hwnd, |e| {
-        if e.state.in_size_move.get() {
-            return None;
-        }
-        let scale = e.state.scale_factor.get();
+    let scale = s.scale();
+    let (need_track, ev) = {
+        let mut input = s.input.borrow_mut();
         let (need_track, position, pressed_button) = match live_buttons {
             None => (
-                !e.tracking_nc_leave,
+                !input.tracking_nc_leave,
                 screen_to_client_point(hwnd, lparam, scale),
-                e.buttons.primary(),
+                input.buttons.primary(),
             ),
             Some(live) => {
-                e.buttons = live;
+                input.buttons = live;
                 (
-                    !e.tracking_leave,
+                    !input.tracking_leave,
                     client_point_from_lparam(lparam, scale).2,
                     live.primary(),
                 )
             }
         };
-        e.hovered = true;
-        Some((
+        input.hovered = true;
+        (
             need_track,
             PlatformEvent::MouseMove {
-                window_id: e.window_id,
+                window_id: s.id,
                 position,
                 pressed_button,
             },
-        ))
-    })
-    .flatten();
-    if let Some((need_track, ev)) = info {
-        if need_track {
-            let mut tme = TRACKMOUSEEVENT {
-                cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
-                dwFlags: if non_client {
-                    TME_LEAVE | TME_NONCLIENT
-                } else {
-                    TME_LEAVE
-                },
-                hwndTrack: hwnd,
-                dwHoverTime: 0,
-            };
-            if unsafe { TrackMouseEvent(&mut tme) }.is_ok() {
-                with_entry_mut(hwnd, |e| {
-                    if non_client {
-                        e.tracking_nc_leave = true;
-                    } else {
-                        e.tracking_leave = true;
-                    }
-                });
+        )
+    };
+    if need_track {
+        let mut tme = TRACKMOUSEEVENT {
+            cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+            dwFlags: if non_client {
+                TME_LEAVE | TME_NONCLIENT
+            } else {
+                TME_LEAVE
+            },
+            hwndTrack: hwnd,
+            dwHoverTime: 0,
+        };
+        if unsafe { TrackMouseEvent(&mut tme) }.is_ok() {
+            let mut input = s.input.borrow_mut();
+            if non_client {
+                input.tracking_nc_leave = true;
+            } else {
+                input.tracking_leave = true;
             }
         }
-        dispatch(ev);
     }
+    dispatch(ev);
 }
 
 fn handle_mouse_leave(hwnd: HWND, non_client: bool) {
-    let check_leave = with_entry_mut(hwnd, |e| {
+    let Some(s) = lookup(hwnd) else {
+        return;
+    };
+    let check_leave = {
+        let mut input = s.input.borrow_mut();
         if non_client {
-            e.tracking_nc_leave = false;
-            e.nc_button_down = None;
-            !e.tracking_leave
+            input.tracking_nc_leave = false;
+            input.nc_button_down = None;
+            !input.tracking_leave
         } else {
-            e.tracking_leave = false;
-            !e.tracking_nc_leave
+            input.tracking_leave = false;
+            !input.tracking_nc_leave
         }
-    })
-    .unwrap_or(false);
+    };
     if check_leave && !cursor_is_over_hwnd(hwnd) {
-        let window_id = with_entry_mut(hwnd, |e| {
-            e.hovered = false;
-            e.window_id
-        });
-        if let Some(window_id) = window_id {
-            dispatch(PlatformEvent::MouseLeave { window_id });
-        }
+        s.input.borrow_mut().hovered = false;
+        dispatch(PlatformEvent::MouseLeave { window_id: s.id });
     }
 }
 
@@ -1008,17 +1018,16 @@ fn dispatch_key_message(
 ) -> LRESULT {
     let vk = (wparam.0 & 0xFFFF) as u16;
     let modifiers = current_modifiers();
-    let prep = with_entry_mut(hwnd, |e| {
-        e.suppress_next_char = false;
-        let mods_changed = (modifiers != e.last_modifiers).then(|| {
-            e.last_modifiers = modifiers;
-            PlatformEvent::ModifiersChanged { modifiers }
-        });
-        (e.window_id, mods_changed)
-    });
-
     let mut handled = false;
-    if let Some((window_id, mods_changed)) = prep {
+    if let Some(s) = lookup(hwnd) {
+        let mods_changed = {
+            let mut input = s.input.borrow_mut();
+            input.suppress_next_char = false;
+            (modifiers != input.last_modifiers).then(|| {
+                input.last_modifiers = modifiers;
+                PlatformEvent::ModifiersChanged { modifiers }
+            })
+        };
         if let Some(ev) = mods_changed {
             dispatch(ev);
         }
@@ -1036,13 +1045,19 @@ fn dispatch_key_message(
                 if is_held && matches!(key, Key::Alt | Key::F(10)) {
                     handled = true;
                 } else {
-                    handled = dispatch(PlatformEvent::KeyDown { window_id, event });
+                    handled = dispatch(PlatformEvent::KeyDown {
+                        window_id: s.id,
+                        event,
+                    });
                     if handled {
-                        with_entry_mut(hwnd, |e| e.suppress_next_char = true);
+                        s.input.borrow_mut().suppress_next_char = true;
                     }
                 }
             } else {
-                dispatch(PlatformEvent::KeyUp { window_id, event });
+                dispatch(PlatformEvent::KeyUp {
+                    window_id: s.id,
+                    event,
+                });
             }
         }
     }
@@ -1072,16 +1087,13 @@ fn window_wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
 
         WM_PAINT => {
             let _ = unsafe { ValidateRect(Some(hwnd), None) };
-            if let Some(window_id) = with_entry(hwnd, |e| e.window_id) {
-                dispatch(PlatformEvent::PaintRequested { window_id });
+            if let Some(s) = lookup(hwnd) {
+                dispatch(PlatformEvent::PaintRequested { window_id: s.id });
             }
             LRESULT(0)
         }
 
         WM_NCCALCSIZE if wparam.0 != 0 => {
-            if with_entry(hwnd, |e| e.is_overlay).unwrap_or(false) {
-                return LRESULT(0);
-            }
             let params = unsafe { &mut *(lparam.0 as *mut NCCALCSIZE_PARAMS) };
             let saved_top = params.rgrc[0].top;
             let result = unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
@@ -1095,7 +1107,9 @@ fn window_wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
         }
 
         WM_GETMINMAXINFO => {
-            if let Some(min_size) = with_entry(hwnd, |e| e.min_size).flatten() {
+            if let Some(s) = lookup(hwnd)
+                && let Some(min_size) = s.chrome.borrow().min_size
+            {
                 let dpi = unsafe { GetDpiForWindow(hwnd) }.max(USER_DEFAULT_SCREEN_DPI);
                 let scale = dpi as f32 / USER_DEFAULT_SCREEN_DPI as f32;
                 let (bx, by) = frame_thickness_for_dpi(dpi);
@@ -1112,10 +1126,7 @@ fn window_wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
             if def_hit.0 != HTCLIENT as isize {
                 return def_hit;
             }
-            let hit = with_entry(hwnd, |e| {
-                if e.is_overlay {
-                    return HTCLIENT;
-                }
+            let hit = lookup(hwnd).map(|s| {
                 let mut rc = RECT::default();
                 let _ = unsafe { GetWindowRect(hwnd, &mut rc) };
                 let sx = (lparam.0 & 0xFFFF) as i16 as i32;
@@ -1133,8 +1144,8 @@ fn window_wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
                         return HTTOP;
                     }
                 }
-                let local = screen_to_client_point(hwnd, lparam, e.state.scale_factor.get());
-                match hit_test_control_areas(&e.control_areas, local) {
+                let local = screen_to_client_point(hwnd, lparam, s.scale());
+                match hit_test_control_areas(&s.chrome.borrow().control_areas, local) {
                     Some(WindowControlArea::Close) => HTCLOSE,
                     Some(WindowControlArea::Max) => HTMAXBUTTON,
                     Some(WindowControlArea::Min) => HTMINBUTTON,
@@ -1146,8 +1157,8 @@ fn window_wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
         }
 
         WM_SETCURSOR if (lparam.0 & 0xFFFF) as u32 == HTCLIENT => {
-            if let Some(cursor) = with_entry(hwnd, |e| e.cursor) {
-                apply_cursor(cursor);
+            if let Some(s) = lookup(hwnd) {
+                apply_cursor(s.chrome.borrow().cursor);
             }
             LRESULT(1)
         }
@@ -1168,22 +1179,22 @@ fn window_wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
                 return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
             }
             if matches!(area, HTMINBUTTON | HTMAXBUTTON | HTCLOSE | HTCAPTION) {
-                let ev = with_entry_mut(hwnd, |e| {
-                    if area != HTCAPTION {
-                        e.nc_button_down = Some(area);
+                if let Some(s) = lookup(hwnd) {
+                    {
+                        let mut input = s.input.borrow_mut();
+                        if area != HTCAPTION {
+                            input.nc_button_down = Some(area);
+                        }
+                        input.hovered = true;
                     }
-                    e.hovered = true;
-                    let position = screen_to_client_point(hwnd, lparam, e.state.scale_factor.get());
-                    PlatformEvent::MouseDown {
-                        window_id: e.window_id,
+                    let position = screen_to_client_point(hwnd, lparam, s.scale());
+                    dispatch(PlatformEvent::MouseDown {
+                        window_id: s.id,
                         button: MouseButton::Left,
                         position,
                         modifiers: current_modifiers(),
                         click_count: 1,
-                    }
-                });
-                if let Some(ev) = ev {
-                    dispatch(ev);
+                    });
                 }
                 if area != HTCAPTION {
                     return LRESULT(0);
@@ -1195,21 +1206,15 @@ fn window_wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
         WM_NCLBUTTONUP => {
             let area = wparam.0 as u32;
             if matches!(area, HTMINBUTTON | HTMAXBUTTON | HTCLOSE) {
-                let info = with_entry_mut(hwnd, |e| {
-                    let was = e.nc_button_down.take();
-                    let position = screen_to_client_point(hwnd, lparam, e.state.scale_factor.get());
-                    (
-                        PlatformEvent::MouseUp {
-                            window_id: e.window_id,
-                            button: MouseButton::Left,
-                            position,
-                        },
-                        was == Some(area),
-                    )
-                });
-                if let Some((ev, matched)) = info {
-                    dispatch(ev);
-                    if matched {
+                if let Some(s) = lookup(hwnd) {
+                    let was = s.input.borrow_mut().nc_button_down.take();
+                    let position = screen_to_client_point(hwnd, lparam, s.scale());
+                    dispatch(PlatformEvent::MouseUp {
+                        window_id: s.id,
+                        button: MouseButton::Left,
+                        position,
+                    });
+                    if was == Some(area) {
                         let cmd = match area {
                             HTMINBUTTON => SC_MINIMIZE,
                             HTMAXBUTTON => {
@@ -1250,16 +1255,19 @@ fn window_wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
         }
 
         WM_CAPTURECHANGED => {
-            let window_id = with_entry_mut(hwnd, |e| {
-                if e.releasing_capture {
-                    return None;
+            if let Some(s) = lookup(hwnd) {
+                let emit = {
+                    let mut input = s.input.borrow_mut();
+                    if input.releasing_capture {
+                        false
+                    } else {
+                        input.buttons.clear();
+                        true
+                    }
+                };
+                if emit {
+                    dispatch(PlatformEvent::CaptureLost { window_id: s.id });
                 }
-                e.buttons.clear();
-                Some(e.window_id)
-            })
-            .flatten();
-            if let Some(window_id) = window_id {
-                dispatch(PlatformEvent::CaptureLost { window_id });
             }
             LRESULT(0)
         }
@@ -1273,20 +1281,20 @@ fn window_wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
             unsafe {
                 SetCapture(hwnd);
             }
-            let ev = with_entry_mut(hwnd, |e| {
-                e.buttons.press(button);
-                let (x, y, position) = client_point_from_lparam(lparam, e.state.scale_factor.get());
-                let click_count = e.clicks.record(button, x, y);
-                PlatformEvent::MouseDown {
-                    window_id: e.window_id,
+            if let Some(s) = lookup(hwnd) {
+                let (x, y, position) = client_point_from_lparam(lparam, s.scale());
+                let click_count = {
+                    let mut input = s.input.borrow_mut();
+                    input.buttons.press(button);
+                    input.clicks.record(button, x, y)
+                };
+                dispatch(PlatformEvent::MouseDown {
+                    window_id: s.id,
                     button,
                     position,
                     modifiers: current_modifiers(),
                     click_count,
-                }
-            });
-            if let Some(ev) = ev {
-                dispatch(ev);
+                });
             }
             LRESULT(0)
         }
@@ -1297,19 +1305,24 @@ fn window_wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
                 WM_RBUTTONUP => MouseButton::Right,
                 _ => MouseButton::Middle,
             };
-            let (release_cap, ev) = with_entry_mut(hwnd, |e| {
-                e.buttons.release(button);
-                let (_, _, position) = client_point_from_lparam(lparam, e.state.scale_factor.get());
+            let (release_cap, ev) = if let Some(s) = lookup(hwnd) {
+                let release_cap = {
+                    let mut input = s.input.borrow_mut();
+                    input.buttons.release(button);
+                    input.buttons.is_empty()
+                };
+                let (_, _, position) = client_point_from_lparam(lparam, s.scale());
                 (
-                    e.buttons.is_empty(),
-                    PlatformEvent::MouseUp {
-                        window_id: e.window_id,
+                    release_cap,
+                    Some(PlatformEvent::MouseUp {
+                        window_id: s.id,
                         button,
                         position,
-                    },
+                    }),
                 )
-            })
-            .map_or((true, None), |(rel, ev)| (rel, Some(ev)));
+            } else {
+                (true, None)
+            };
             if release_cap {
                 release_capture_suppressed(hwnd, || {
                     let _ = unsafe { ReleaseCapture() };
@@ -1342,18 +1355,15 @@ fn window_wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
             } else {
                 point(0.0, notches * amount)
             };
-            let ev = with_entry(hwnd, |e| {
-                let position = screen_to_client_point(hwnd, lparam, e.state.scale_factor.get());
-                PlatformEvent::ScrollWheel {
-                    window_id: e.window_id,
+            if let Some(s) = lookup(hwnd) {
+                let position = screen_to_client_point(hwnd, lparam, s.scale());
+                dispatch(PlatformEvent::ScrollWheel {
+                    window_id: s.id,
                     position,
                     delta_lines,
                     page_scroll,
                     modifiers,
-                }
-            });
-            if let Some(ev) = ev {
-                dispatch(ev);
+                });
             }
             LRESULT(0)
         }
@@ -1372,32 +1382,32 @@ fn window_wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
 
         WM_CHAR => {
             let code = (wparam.0 & 0xFFFF) as u16;
-            let text_ev = with_entry_mut(hwnd, |e| {
-                if std::mem::take(&mut e.suppress_next_char) {
-                    return None;
-                }
-                if (0xD800..=0xDBFF).contains(&code) {
-                    e.pending_surrogate = Some(code);
-                    return None;
-                }
-                let text = if (0xDC00..=0xDFFF).contains(&code) {
-                    let high = e.pending_surrogate.take()?;
-                    String::from_utf16(&[high, code]).ok()?
-                } else {
-                    e.pending_surrogate = None;
-                    if code < 0x20 || code == 0x7F {
-                        return None;
+            if let Some(s) = lookup(hwnd) {
+                let text = {
+                    let mut input = s.input.borrow_mut();
+                    if std::mem::take(&mut input.suppress_next_char) {
+                        None
+                    } else if (0xD800..=0xDBFF).contains(&code) {
+                        input.pending_surrogate = Some(code);
+                        None
+                    } else if (0xDC00..=0xDFFF).contains(&code) {
+                        input
+                            .pending_surrogate
+                            .take()
+                            .and_then(|high| String::from_utf16(&[high, code]).ok())
+                    } else {
+                        input.pending_surrogate = None;
+                        (code >= 0x20 && code != 0x7F)
+                            .then(|| char::from_u32(u32::from(code)).map(|c| c.to_string()))
+                            .flatten()
                     }
-                    char::from_u32(u32::from(code))?.to_string()
                 };
-                Some(PlatformEvent::TextInput {
-                    window_id: e.window_id,
-                    text,
-                })
-            })
-            .flatten();
-            if let Some(ev) = text_ev {
-                dispatch(ev);
+                if let Some(text) = text {
+                    dispatch(PlatformEvent::TextInput {
+                        window_id: s.id,
+                        text,
+                    });
+                }
             }
             LRESULT(0)
         }
@@ -1409,13 +1419,16 @@ fn window_wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
 
         WM_IME_COMPOSITION => {
             let flags = lparam.0 as u32;
-            if let Some(window_id) = with_entry(hwnd, |e| e.window_id) {
+            if let Some(s) = lookup(hwnd) {
                 let himc = unsafe { ImmGetContext(hwnd) };
                 if !himc.is_invalid() {
                     if (flags & GCS_RESULTSTR.0) != 0
                         && let Some(text) = read_ime_string(himc, GCS_RESULTSTR)
                     {
-                        dispatch(PlatformEvent::TextInput { window_id, text });
+                        dispatch(PlatformEvent::TextInput {
+                            window_id: s.id,
+                            text,
+                        });
                     }
                     if (flags & GCS_COMPSTR.0) != 0 {
                         let text = read_ime_string(himc, GCS_COMPSTR).unwrap_or_default();
@@ -1424,7 +1437,7 @@ fn window_wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
                         }
                         .max(0) as usize;
                         dispatch(PlatformEvent::ImeComposition {
-                            window_id,
+                            window_id: s.id,
                             text,
                             cursor,
                         });
@@ -1437,9 +1450,9 @@ fn window_wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
         }
 
         WM_IME_ENDCOMPOSITION => {
-            if let Some(window_id) = with_entry(hwnd, |e| e.window_id) {
+            if let Some(s) = lookup(hwnd) {
                 dispatch(PlatformEvent::ImeComposition {
-                    window_id,
+                    window_id: s.id,
                     text: String::new(),
                     cursor: 0,
                 });
@@ -1452,14 +1465,12 @@ fn window_wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
             let h = ((lparam.0 >> 16) & 0xFFFF) as u32;
             if w > 0
                 && h > 0
-                && let Some((window_id, scale)) = with_entry(hwnd, |e| {
-                    let s = e.state.scale_factor.get();
-                    e.state.set_metrics(w, h, s);
-                    (e.window_id, s)
-                })
+                && let Some(s) = lookup(hwnd)
             {
+                let scale = s.scale();
+                s.set_metrics(w, h, scale);
                 dispatch(PlatformEvent::Resized {
-                    window_id,
+                    window_id: s.id,
                     physical_width: w,
                     physical_height: h,
                     scale,
@@ -1469,13 +1480,12 @@ fn window_wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
         }
 
         WM_MOVE => {
-            if let Some((window_id, changed)) = with_entry(hwnd, |e| {
-                let (_, origin) = query_client_metrics(hwnd, e.state.scale_factor.get());
-                let prev = e.state.origin.replace(origin);
-                (e.window_id, prev != origin)
-            }) && changed
+            let x = (lparam.0 & 0xFFFF) as i16 as i32;
+            let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
+            if let Some(s) = lookup(hwnd)
+                && s.last_origin_px.replace(Some((x, y))) != Some((x, y))
             {
-                dispatch(PlatformEvent::Moved { window_id });
+                dispatch(PlatformEvent::Moved { window_id: s.id });
             }
             LRESULT(0)
         }
@@ -1484,30 +1494,26 @@ fn window_wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
             let new_dpi = (wparam.0 & 0xFFFF) as u32;
             let scale =
                 new_dpi.max(USER_DEFAULT_SCREEN_DPI) as f32 / USER_DEFAULT_SCREEN_DPI as f32;
-            // Update scale_factor before SetWindowPos so nested WM_SIZE sees the new DPI; never resize overlays.
-            let info = with_entry(hwnd, |e| {
-                e.state.scale_factor.set(scale);
-                (e.window_id, e.is_overlay)
-            });
-            if let Some((window_id, is_overlay)) = info {
-                if !is_overlay {
-                    let suggested = unsafe { &*(lparam.0 as *const RECT) };
-                    unsafe {
-                        let _ = SetWindowPos(
-                            hwnd,
-                            None,
-                            suggested.left,
-                            suggested.top,
-                            suggested.right - suggested.left,
-                            suggested.bottom - suggested.top,
-                            SWP_NOZORDER | SWP_NOACTIVATE,
-                        );
-                    }
+            // Update scale before SetWindowPos so nested WM_SIZE sees the new DPI.
+            if let Some(s) = lookup(hwnd) {
+                let (pw, ph) = s.metrics.get().physical;
+                s.set_metrics(pw, ph, scale);
+                let suggested = unsafe { &*(lparam.0 as *const RECT) };
+                unsafe {
+                    let _ = SetWindowPos(
+                        hwnd,
+                        None,
+                        suggested.left,
+                        suggested.top,
+                        suggested.right - suggested.left,
+                        suggested.bottom - suggested.top,
+                        SWP_NOZORDER | SWP_NOACTIVATE,
+                    );
                 }
                 let (w, h) = query_physical_size(hwnd);
-                with_entry(hwnd, |e| e.state.set_metrics(w, h, scale));
+                s.set_metrics(w, h, scale);
                 dispatch(PlatformEvent::Resized {
-                    window_id,
+                    window_id: s.id,
                     physical_width: w,
                     physical_height: h,
                     scale,
@@ -1518,19 +1524,20 @@ fn window_wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
 
         WM_ACTIVATE => {
             let active = (wparam.0 & 0xFFFF) != 0;
-            if let Some(window_id) = with_entry(hwnd, |e| {
-                e.state.active.set(active);
-                e.window_id
-            }) {
-                dispatch(PlatformEvent::Activated { window_id, active });
+            if let Some(s) = lookup(hwnd) {
+                s.active.set(active);
+                dispatch(PlatformEvent::Activated {
+                    window_id: s.id,
+                    active,
+                });
             }
             LRESULT(0)
         }
 
         WM_SETTINGCHANGE | WM_THEMECHANGED => {
-            let relevant = with_entry(hwnd, |e| !e.is_overlay).unwrap_or(false)
-                && (msg == WM_THEMECHANGED || is_relevant_setting_change(lparam));
-            if relevant {
+            if lookup(hwnd).is_some()
+                && (msg == WM_THEMECHANGED || is_relevant_setting_change(lparam))
+            {
                 refresh_system_settings();
                 dispatch(PlatformEvent::ThemeChanged);
             }
@@ -1538,17 +1545,14 @@ fn window_wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
         }
 
         WM_ENTERSIZEMOVE | WM_ENTERMENULOOP => {
-            if let Some((window_id, was_hovered)) = with_entry_mut(hwnd, |e| {
-                e.state.in_size_move.set(true);
-                let h = e.hovered;
-                e.hovered = false;
-                (e.window_id, h)
-            }) {
+            if let Some(s) = lookup(hwnd) {
+                s.in_size_move.set(true);
+                let was_hovered = std::mem::take(&mut s.input.borrow_mut().hovered);
                 if was_hovered {
-                    dispatch(PlatformEvent::MouseLeave { window_id });
+                    dispatch(PlatformEvent::MouseLeave { window_id: s.id });
                 }
                 dispatch(PlatformEvent::SizeMoveChanged {
-                    window_id,
+                    window_id: s.id,
                     entering: true,
                 });
             }
@@ -1566,12 +1570,10 @@ fn window_wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
 
         WM_EXITSIZEMOVE | WM_EXITMENULOOP => {
             let _ = unsafe { KillTimer(Some(hwnd), SIZE_MOVE_TIMER_ID) };
-            if let Some(window_id) = with_entry(hwnd, |e| {
-                e.state.in_size_move.set(false);
-                e.window_id
-            }) {
+            if let Some(s) = lookup(hwnd) {
+                s.in_size_move.set(false);
                 dispatch(PlatformEvent::SizeMoveChanged {
-                    window_id,
+                    window_id: s.id,
                     entering: false,
                 });
             }
@@ -1582,13 +1584,13 @@ fn window_wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
             let block_reason = HWND_REGISTRY.with(|map| {
                 map.borrow()
                     .values()
-                    .find_map(|e| e.state.block_shutdown.get())
+                    .find_map(|s| s.block_shutdown.get())
             });
             if let Some(reason) = block_reason {
                 let wide = HSTRING::from(reason);
                 let _ = unsafe { ShutdownBlockReasonCreate(hwnd, &wide) };
-                if let Some(window_id) = with_entry(hwnd, |e| e.window_id) {
-                    dispatch(PlatformEvent::CloseRequested { window_id });
+                if let Some(s) = lookup(hwnd) {
+                    dispatch(PlatformEvent::CloseRequested { window_id: s.id });
                 }
                 LRESULT(0)
             } else {
@@ -1611,16 +1613,19 @@ fn window_wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
             let paths = collect_drop_paths(hdrop);
             unsafe { DragFinish(hdrop) };
             if !paths.is_empty()
-                && let Some(window_id) = with_entry(hwnd, |e| e.window_id)
+                && let Some(s) = lookup(hwnd)
             {
-                dispatch(PlatformEvent::FilesDropped { window_id, paths });
+                dispatch(PlatformEvent::FilesDropped {
+                    window_id: s.id,
+                    paths,
+                });
             }
             LRESULT(0)
         }
 
         WM_CLOSE => {
-            if let Some(window_id) = with_entry(hwnd, |e| e.window_id) {
-                dispatch(PlatformEvent::CloseRequested { window_id });
+            if let Some(s) = lookup(hwnd) {
+                dispatch(PlatformEvent::CloseRequested { window_id: s.id });
             }
             LRESULT(0)
         }

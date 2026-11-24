@@ -46,7 +46,6 @@ pub(crate) enum AppEvent {
         window: WindowId,
         hit: HitId,
     },
-    TooltipHideTimer,
     TabDragPoll,
     File(FileEvent),
     #[cfg(test)]

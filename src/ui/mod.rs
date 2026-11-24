@@ -4,7 +4,7 @@ pub(crate) mod layout;
 mod overlay;
 pub(crate) mod scene;
 
-pub(crate) use anim::{AnimStatus, AnimTracks, Easing, Presence};
+pub(crate) use anim::{AnimStatus, AnimTracks, Curve, Easing, Transition};
 pub(crate) use layout::AvailSize;
 pub(crate) use overlay::OverlaySurface;
 pub(crate) use scene::{

@@ -11,14 +11,14 @@ use crate::ui::controls::{
     BODY_LINE, BODY_SIZE, ButtonStyle, FIELD_CARET, OVERLAY_RADIUS, TEXT_FONT, TextFieldStyle,
     button, text_field_frame,
 };
-use crate::ui::{AnimStatus, Easing, box_, row, text};
+use crate::ui::{AnimStatus, Curve, Easing, Transition, box_, row, text};
 
 const TITLE_FONT: &str = "Segoe UI Variable Display";
 const OPEN_SCALE: f32 = 1.05;
 const DIALOG_Z: f32 = 128.;
-const SHOW_DURATION: Duration = Duration::from_millis(250);
-const HIDE_DURATION: Duration = Duration::from_millis(167);
-const FADE_DURATION: Duration = Duration::from_millis(83);
+const SHOW_CURVE: Curve = Curve::new(Duration::from_millis(250), Easing::DECELERATE);
+const HIDE_CURVE: Curve = Curve::new(Duration::from_millis(167), Easing::DECELERATE);
+const FADE_CURVE: Curve = Curve::new(Duration::from_millis(83), Easing::Linear);
 const MIN_WIDTH: f32 = 320.;
 const MAX_WIDTH: f32 = 548.;
 const PADDING: f32 = 24.;
@@ -74,57 +74,35 @@ impl DialogKind {
 
 struct OpenDialog {
     kind: DialogKind,
-    serial: usize,
-    closing: bool,
+    transition: Transition,
     scale: f32,
     opacity: f32,
 }
 
 impl OpenDialog {
     fn sample(&mut self, ui: &mut UiState) -> bool {
+        let serial = self.transition.serial();
+        let closing = self.transition.is_closing();
         let shown = ui
-            .animate_f32_from(
-                AnimKey::DialogShow(self.serial),
-                0.0,
-                1.0,
-                SHOW_DURATION,
-                Easing::DECELERATE,
-            )
+            .progress(AnimKey::Transition { serial, track: 0 }, true, SHOW_CURVE)
             .value;
         let faded_in = ui
-            .animate_f32_from(
-                AnimKey::DialogFadeIn(self.serial),
-                0.0,
-                1.0,
-                FADE_DURATION,
-                Easing::Linear,
-            )
+            .progress(AnimKey::Transition { serial, track: 1 }, true, FADE_CURVE)
             .value;
-        let hidden = ui.animate_f32_from(
-            AnimKey::DialogHide(self.serial),
-            0.0,
-            if self.closing { 1. } else { 0. },
-            HIDE_DURATION,
-            Easing::DECELERATE,
-        );
-        let fade_out = ui.animate_f32_from(
-            AnimKey::DialogFadeOut(self.serial),
-            1.0,
-            if self.closing { 0. } else { 1. },
-            FADE_DURATION,
-            Easing::Linear,
-        );
+        let hidden = ui
+            .progress(AnimKey::Transition { serial, track: 2 }, closing, HIDE_CURVE)
+            .value;
+        let fade_out = ui.progress(AnimKey::Transition { serial, track: 3 }, closing, FADE_CURVE);
         let growth = OPEN_SCALE - 1.;
-        self.scale = 1. + growth * (1. - shown) + growth * hidden.value;
-        self.opacity = faded_in * fade_out.value;
-        self.closing && fade_out.status == AnimStatus::Finished
+        self.scale = 1. + growth * (1. - shown) + growth * hidden;
+        self.opacity = faded_in * (1. - fade_out.value);
+        closing && fade_out.status == AnimStatus::Finished
     }
 }
 
 pub(crate) struct Dialogs {
     open: Vec<OpenDialog>,
     pending: VecDeque<DialogKind>,
-    serial: usize,
     pub(crate) line: Editor,
 }
 
@@ -136,7 +114,6 @@ impl Dialogs {
         Self {
             open: Vec::new(),
             pending: VecDeque::new(),
-            serial: 0,
             line,
         }
     }
@@ -146,7 +123,7 @@ impl Dialogs {
     }
 
     fn active(&self) -> Option<&OpenDialog> {
-        self.open.iter().rev().find(|d| !d.closing)
+        self.open.iter().rev().find(|d| d.transition.is_open())
     }
 
     fn active_button_count(&self) -> usize {
@@ -163,7 +140,6 @@ impl Dialogs {
 
     pub(crate) fn show_now(&mut self, kind: DialogKind) -> Focus {
         self.hide();
-        self.serial += 1;
         let initial_focus = if kind.is_go_to() {
             Focus::Editor(EditorSlot::GoToLine)
         } else {
@@ -171,8 +147,7 @@ impl Dialogs {
         };
         self.open.push(OpenDialog {
             kind,
-            serial: self.serial,
-            closing: false,
+            transition: Transition::open_new(),
             scale: OPEN_SCALE,
             opacity: 0.,
         });
@@ -186,21 +161,21 @@ impl Dialogs {
 
     pub(crate) fn hide(&mut self) {
         for d in &mut self.open {
-            d.closing = true;
+            d.transition.close();
         }
     }
 
     pub(crate) fn close_for_tab(&mut self, id: TabId) {
         for d in &mut self.open {
-            if !d.closing && d.kind.referenced_tab() == Some(id) {
-                d.closing = true;
+            if d.transition.is_open() && d.kind.referenced_tab() == Some(id) {
+                d.transition.close();
             }
         }
         self.pending.retain(|d| d.referenced_tab() != Some(id));
     }
 
     pub(crate) fn take_active(&mut self) -> Option<DialogKind> {
-        let ix = self.open.iter().rposition(|d| !d.closing)?;
+        let ix = self.open.iter().rposition(|d| d.transition.is_open())?;
         Some(self.open[ix].kind.clone())
     }
 
@@ -289,12 +264,13 @@ impl Dialogs {
             _ => None,
         };
         let labels = dialog.kind.buttons();
+        let closing = dialog.transition.is_closing();
         let buttons: Vec<Node> = labels
             .iter()
             .enumerate()
             .map(|(ix, &label)| {
                 let accented = ix == 0 && focused_btn.is_none_or(|f| f == ix);
-                let is_focused = !dialog.closing && focused_btn == Some(ix);
+                let is_focused = !closing && focused_btn == Some(ix);
                 button(
                     p,
                     style,
@@ -332,13 +308,13 @@ impl Dialogs {
             .justify_center()
             .bg(p.smoke)
             .opacity(dialog.opacity)
-            .when(!dialog.closing, |this| {
+            .when(!closing, |this| {
                 this.hit(HitId::DialogBackdrop).cursor(CursorStyle::Arrow)
             })
             .child(
                 dialog_frame(p, fixed_width, title, body, buttons)
                     .scale(dialog.scale, dialog.scale)
-                    .when(dialog.closing, Node::inert),
+                    .when(closing, Node::inert),
             )
     }
 

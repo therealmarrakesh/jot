@@ -148,8 +148,8 @@ impl MenuBar {
             return Vec::new();
         }
         let (panel, serial, is_sub, motion) = match open.focused_submenu() {
-            Some(sub) => (&sub.panel, sub.motion.serial, true, &sub.motion),
-            None => (&open.panel, open.motion.serial, false, &open.motion),
+            Some(sub) => (&sub.panel, sub.motion.serial(), true, &sub.motion),
+            None => (&open.panel, open.motion.serial(), false, &open.motion),
         };
         if motion.unroll < 1. {
             return Vec::new();
@@ -224,7 +224,7 @@ fn render_command_button(
     let focused = ui.last_input_was_keyboard() && open.focused_command == Some(ix);
     let enabled = command.enabled;
     let hit = HitId::MenuCommand {
-        serial: open.motion.serial,
+        serial: open.motion.serial(),
         ix,
     };
     let bg = ui.brush(hit, subtle_brushes(p), enabled);
@@ -304,7 +304,7 @@ fn render_submenu_popup(
         .cursor(CursorStyle::Arrow)
         .anchored(Anchor::SideOf {
             target: HitId::MenuItem {
-                serial: open.motion.serial,
+                serial: open.motion.serial(),
                 ix: submenu.ix,
             },
             overlap: SUBMENU_OVERLAP - BORDER,
@@ -314,7 +314,7 @@ fn render_submenu_popup(
         .h(sub_h)
         .opacity(submenu.motion.opacity)
         .children(reveal_card(p, SUBMENU_Z, sub_h, sub_h - hidden, -hidden, rows))
-        .when(submenu.motion.closing, Node::inert)
+        .when(submenu.motion.is_closing(), Node::inert)
 }
 
 fn render_panel_rows(
@@ -325,10 +325,10 @@ fn render_panel_rows(
     ui: &mut UiState,
 ) -> Node {
     let (panel, serial, is_sub, fade) = match sub {
-        Some(sub) => (&sub.panel, sub.motion.serial, true, false),
+        Some(sub) => (&sub.panel, sub.motion.serial(), true, false),
         None => (
             &open.panel,
-            open.motion.serial,
+            open.motion.serial(),
             false,
             !open.kind.commands().is_empty(),
         ),

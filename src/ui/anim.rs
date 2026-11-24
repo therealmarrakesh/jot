@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::hash::Hash;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::color::Rgba;
@@ -128,6 +129,18 @@ impl Lerp for Rgba {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Curve {
+    pub(crate) duration: Duration,
+    pub(crate) easing: Easing,
+}
+
+impl Curve {
+    pub(crate) const fn new(duration: Duration, easing: Easing) -> Self {
+        Self { duration, easing }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) enum Presence {
     #[default]
@@ -150,6 +163,65 @@ impl Presence {
     #[inline]
     pub(crate) fn is_closing(self) -> bool {
         matches!(self, Self::Closing)
+    }
+}
+
+fn next_transition_serial() -> usize {
+    static NEXT: AtomicUsize = AtomicUsize::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct Transition {
+    serial: usize,
+    phase: Presence,
+}
+
+impl Transition {
+    pub(crate) fn open_new() -> Self {
+        Self {
+            serial: next_transition_serial(),
+            phase: Presence::Open,
+        }
+    }
+
+    pub(crate) fn open(&mut self) {
+        if !self.phase.is_open() {
+            self.serial = next_transition_serial();
+            self.phase = Presence::Open;
+        }
+    }
+
+    pub(crate) fn close(&mut self) -> bool {
+        if !self.phase.is_open() {
+            return false;
+        }
+        self.phase = Presence::Closing;
+        true
+    }
+
+    pub(crate) fn finish(&mut self) {
+        self.phase = Presence::Hidden;
+    }
+
+    #[inline]
+    pub(crate) fn serial(self) -> usize {
+        self.serial
+    }
+
+    #[inline]
+    pub(crate) fn is_visible(self) -> bool {
+        self.phase.is_visible()
+    }
+
+    #[inline]
+    pub(crate) fn is_open(self) -> bool {
+        self.phase.is_open()
+    }
+
+    #[inline]
+    pub(crate) fn is_closing(self) -> bool {
+        self.phase.is_closing()
     }
 }
 
@@ -287,15 +359,14 @@ impl<K: Copy + Eq + Hash> AnimTracks<K> {
         self.running_this_frame
     }
 
-    pub(crate) fn animate_f32(
-        &mut self,
-        key: K,
-        target: f32,
-        duration: Duration,
-        easing: Easing,
-    ) -> f32 {
-        self.animate_f32_from(key, target, target, duration, easing)
-            .value
+    pub(crate) fn progress(&mut self, key: K, active: bool, curve: Curve) -> AnimSample<f32> {
+        self.animate_f32_from(
+            key,
+            0.0,
+            if active { 1.0 } else { 0.0 },
+            curve.duration,
+            curve.easing,
+        )
     }
 
     pub(crate) fn animate_f32_from(

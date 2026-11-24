@@ -88,7 +88,6 @@ enum HoveredTarget {
 
 pub(crate) struct MenuBar {
     open: Option<OpenMenu>,
-    serial: usize,
     bar_cursor: MenuKind,
     key_tips: bool,
     alt_armed: bool,
@@ -99,7 +98,6 @@ impl Default for MenuBar {
     fn default() -> Self {
         Self {
             open: None,
-            serial: 0,
             bar_cursor: MenuKind::File,
             key_tips: false,
             alt_armed: false,
@@ -127,11 +125,6 @@ impl MenuBar {
 
     pub(super) fn bar_focused(&self, focus: Focus) -> Option<MenuKind> {
         (focus == Focus::MenuBar && self.live_open().is_none()).then_some(self.bar_cursor)
-    }
-
-    fn next_serial(&mut self) -> usize {
-        self.serial += 1;
-        self.serial
     }
 
     pub(super) fn live_open(&self) -> Option<&OpenMenu> {
@@ -183,7 +176,7 @@ impl MenuBar {
         let focus = self
             .live_open_mut()
             .map(|open| {
-                open.motion.closing = true;
+                open.motion.close();
                 open.kind.return_focus()
             })
             .unwrap_or(FocusRequest::RestoreEditor);
@@ -217,8 +210,7 @@ impl MenuBar {
     ) -> MenuOutcome {
         let entries = kind.entries(state);
         let panel = Panel::new(entries, MIN_WIDTH, true, ts);
-        let serial = self.next_serial();
-        self.show(OpenMenu::new(PopupKind::Bar(kind), panel, serial), false)
+        self.show(OpenMenu::new(PopupKind::Bar(kind), panel), false)
     }
 
     fn open_by_keyboard(
@@ -231,8 +223,7 @@ impl MenuBar {
         let entries = kind.entries(state);
         let mut panel = Panel::new(entries, MIN_WIDTH, true, ts);
         panel.step(1);
-        let serial = self.next_serial();
-        let open = OpenMenu::new(PopupKind::Bar(kind), panel, serial);
+        let open = OpenMenu::new(PopupKind::Bar(kind), panel);
         self.show(open, key_tips)
     }
 
@@ -245,8 +236,7 @@ impl MenuBar {
         let (commands, entries) = context_menu_items(state);
         let panel = Panel::new(entries, CONTEXT_WIDTH, false, ts);
         let focused_command = commands.iter().position(|b| b.command.enabled);
-        let serial = self.next_serial();
-        let mut open = OpenMenu::new(PopupKind::Context { anchor, commands }, panel, serial);
+        let mut open = OpenMenu::new(PopupKind::Context { anchor, commands }, panel);
         open.focused_command = focused_command;
         self.show(open, false)
     }
@@ -259,7 +249,6 @@ impl MenuBar {
         ts: &TextSystem,
     ) -> MenuOutcome {
         let panel = Panel::new(entries, FLYOUT_MIN_WIDTH, true, ts);
-        let serial = self.next_serial();
         self.show(
             OpenMenu::new(
                 PopupKind::Flyout {
@@ -267,7 +256,6 @@ impl MenuBar {
                     return_slot,
                 },
                 panel,
-                serial,
             ),
             false,
         )
@@ -296,7 +284,7 @@ impl MenuBar {
         let Some(kind) = open.kind.bar_kind() else {
             return self.close();
         };
-        open.motion.closing = true;
+        open.motion.close();
         self.hovered_target = None;
         self.bar_cursor = kind;
         MenuOutcome {
@@ -456,7 +444,6 @@ impl MenuBar {
     }
 
     fn open_submenu(&mut self, ix: usize, focus_first: bool, ts: &TextSystem) -> bool {
-        let serial = self.next_serial();
         let Some(open) = self.live_open_mut() else {
             return false;
         };
@@ -468,7 +455,7 @@ impl MenuBar {
             open.submenu = Some(OpenSubmenu {
                 ix,
                 panel: Panel::new(entries.clone(), MIN_WIDTH, true, ts),
-                motion: Motion::new(serial, false),
+                motion: Motion::new(false),
             });
         }
         if let Some(sub) = open.live_submenu_mut() {
@@ -482,7 +469,7 @@ impl MenuBar {
 
     fn close_submenu(&mut self) -> bool {
         if let Some(sub) = self.open.as_mut().and_then(OpenMenu::live_submenu_mut) {
-            sub.motion.closing = true;
+            sub.motion.close();
             true
         } else {
             false

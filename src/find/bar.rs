@@ -13,12 +13,28 @@ use crate::ui::controls::{
     IconButtonStyle, OVERLAY_RADIUS, TEXT_FONT, TextFieldStyle, button, icon_button,
     text_field_frame,
 };
-use crate::ui::{AnimStatus, Easing, Presence, box_, row, text};
+use crate::ui::{AnimStatus, Curve, Easing, Transition, box_, row, text};
 
 use super::matcher::Matcher;
 
-const EXPAND_DURATION: Duration = Duration::from_millis(300);
-const CONTRACT_DURATION: Duration = Duration::from_millis(200);
+const EXPAND_CURVE: Curve = Curve::new(
+    Duration::from_millis(300),
+    Easing::CubicBezier {
+        x1: 0.1,
+        y1: 0.9,
+        x2: 0.2,
+        y2: 1.,
+    },
+);
+const CONTRACT_CURVE: Curve = Curve::new(
+    Duration::from_millis(200),
+    Easing::CubicBezier {
+        x1: 0.7,
+        y1: 0.,
+        x2: 1.,
+        y2: 0.5,
+    },
+);
 const CARD_Z: f32 = 32.;
 const NOTICE_Z: f32 = 16.;
 const COLLAPSED_SIZE: f32 = 20.;
@@ -66,9 +82,8 @@ pub(crate) struct FindOutcome {
 }
 
 pub(crate) struct FindBar {
-    presence: Presence,
+    transition: Transition,
     replace: bool,
-    serial: usize,
     match_case: bool,
     wrap_around: bool,
     pub(crate) query: Editor,
@@ -94,9 +109,8 @@ impl FindBar {
             .with_caret_height(FIELD_CARET)
             .with_placeholder("Replace");
         Self {
-            presence: Presence::Hidden,
+            transition: Transition::default(),
             replace: false,
-            serial: 0,
             match_case: false,
             wrap_around: true,
             query,
@@ -109,7 +123,7 @@ impl FindBar {
     }
 
     pub(crate) fn is_open(&self) -> bool {
-        self.presence.is_open()
+        self.transition.is_open()
     }
 
     pub(crate) fn is_replace(&self) -> bool {
@@ -196,19 +210,15 @@ impl FindBar {
         {
             self.query.set_value(selected, ts);
         }
-        if !self.is_open() {
-            self.serial += 1;
-            self.presence = Presence::Open;
-        }
+        self.transition.open();
         self.replace = replace;
         self.query.select_all();
     }
 
     pub(crate) fn close(&mut self) -> bool {
-        if !self.is_open() {
+        if !self.transition.close() {
             return false;
         }
-        self.presence = Presence::Closing;
         self.clear_notice();
         true
     }
@@ -317,35 +327,18 @@ impl FindBar {
     }
 
     fn sample(&mut self, viewport_width: f32, ui: &mut UiState) -> Option<Point> {
-        if !self.presence.is_visible() {
+        if !self.transition.is_visible() {
             return None;
         }
-        let closing = self.presence.is_closing();
+        let serial = self.transition.serial();
+        let closing = self.transition.is_closing();
         let shown = ui
-            .animate_f32_from(
-                AnimKey::FindShow(self.serial),
-                0.0,
-                1.0,
-                EXPAND_DURATION,
-                Easing::CubicBezier {
-                    x1: 0.1,
-                    y1: 0.9,
-                    x2: 0.2,
-                    y2: 1.,
-                },
-            )
+            .progress(AnimKey::Transition { serial, track: 0 }, true, EXPAND_CURVE)
             .value;
-        let hidden = ui.animate_f32_from(
-            AnimKey::FindHide(self.serial),
-            0.0,
-            if closing { 1. } else { 0. },
-            CONTRACT_DURATION,
-            Easing::CubicBezier {
-                x1: 0.7,
-                y1: 0.,
-                x2: 1.,
-                y2: 0.5,
-            },
+        let hidden = ui.progress(
+            AnimKey::Transition { serial, track: 1 },
+            closing,
+            CONTRACT_CURVE,
         );
         let (width, height) = self.card_size(viewport_width);
         let axis = |sz: f32| {
@@ -359,7 +352,7 @@ impl FindBar {
         };
         let scale = point(axis(width), axis(height));
         if closing && hidden.status == AnimStatus::Finished {
-            self.presence = Presence::Hidden;
+            self.transition.finish();
             return None;
         }
         Some(scale)
@@ -377,12 +370,12 @@ impl FindBar {
         let notice_node = self
             .notice
             .clone()
-            .filter(|_| self.presence.is_open())
+            .filter(|_| self.transition.is_open())
             .map(|msg| render_notice(p, msg, CARD_TOP + height + NOTICE_GAP));
         let card = self
             .render_card(p, width, height, focused_slot, ui)
             .scale(scale.x, scale.y)
-            .when(self.presence.is_closing(), Node::inert);
+            .when(self.transition.is_closing(), Node::inert);
 
         Some(
             box_()

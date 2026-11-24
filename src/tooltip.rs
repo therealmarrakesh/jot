@@ -13,8 +13,8 @@ use crate::theme::{Palette, theme_shadow};
 use crate::types::SharedStr;
 use crate::ui::controls::{CONTROL_RADIUS, SMALL_FONT};
 use crate::ui::{
-    AnimTracks, AvailSize, Easing, Frame as GenericFrame, Node as GenericNode, OverlaySurface,
-    PointerState, box_, text,
+    AnimTracks, AvailSize, Curve, Easing, Frame as GenericFrame, Node as GenericNode,
+    OverlaySurface, PointerState, box_, text,
 };
 
 const PADDING_X: f32 = 9.;
@@ -32,7 +32,7 @@ const POINTER_OFFSET: f32 = 20.;
 const SHOW_DELAY_FACTOR: f32 = 2.;
 const RESHOW_DELAY_FACTOR: f32 = 1.5;
 const RESHOW_WINDOW: Duration = Duration::from_millis(200);
-const FADE: Duration = Duration::from_millis(167);
+const FADE_CURVE: Curve = Curve::new(Duration::from_millis(167), Easing::EaseOutCubic);
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub(crate) struct TooltipTarget {
@@ -137,7 +137,6 @@ pub(crate) struct Tooltips {
     closed_at: Option<Instant>,
     control_only: bool,
     opening: Option<(TooltipTarget, TimerHandle)>,
-    hiding: Option<TimerHandle>,
 }
 
 impl Tooltips {
@@ -250,13 +249,6 @@ impl Tooltips {
         self.sync(gpu, ts, jobs);
     }
 
-    pub(crate) fn on_hide_timer(&mut self) {
-        if self.shown.is_none() {
-            self.overlay.hide();
-        }
-        self.hiding = None;
-    }
-
     fn transition(&mut self, report: Report) {
         let prev = std::mem::take(&mut self.state);
         self.state = transition_state(prev, report);
@@ -277,7 +269,7 @@ impl Tooltips {
             .as_ref()
             .is_some_and(|shown| showing != Some(shown.key))
         {
-            self.hide(jobs);
+            self.hide();
         }
         let waiting = match &self.state {
             State::Waiting { snap } => Some(snap.key),
@@ -316,13 +308,12 @@ impl Tooltips {
         }
     }
 
-    fn hide(&mut self, jobs: &Jobs<AppEvent>) {
+    fn hide(&mut self) {
         if self.shown.take().is_none() {
             return;
         }
         self.closed_at = Some(Instant::now());
         self.dirty = true;
-        self.hiding = Some(jobs.after(FADE, AppEvent::TooltipHideTimer));
     }
 
     fn show(&mut self, snap: Snap, gpu: &Rc<Gpu>, ts: &TextSystem) {
@@ -352,7 +343,6 @@ impl Tooltips {
 
         self.text = snap.text;
         self.dirty = true;
-        self.hiding = None;
         self.shown = Some(Shown {
             key: snap.key,
             owner: snap.owner,
@@ -377,12 +367,7 @@ impl Tooltips {
         let mut animating = false;
         let needs_retry = self.overlay.paint(|logical, scale, renderer| {
             fade.begin_frame(now, reduce_motion);
-            let opacity = fade.animate_f32(
-                (),
-                if visible { 1. } else { 0. },
-                FADE,
-                Easing::EaseOutCubic,
-            );
+            let opacity = fade.progress((), visible, FADE_CURVE).value;
             let tree: GenericNode<(), ()> = box_().size_full().opacity(opacity).child(
                 box_()
                     .absolute()
@@ -399,6 +384,9 @@ impl Tooltips {
             frame.paint(renderer, &mut |_, _, _| {});
             animating = fade.end_frame();
         });
+        if !visible && !animating && !needs_retry {
+            self.overlay.hide();
+        }
         if animating || needs_retry {
             self.dirty = true;
         }

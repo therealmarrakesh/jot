@@ -9,7 +9,7 @@ use crate::gfx::{
 use crate::platform::{CursorStyle, MouseButton, WindowControlArea};
 use crate::types::SharedStr;
 
-use super::anim::{AnimSample, AnimTracks, Easing};
+use super::anim::{AnimSample, AnimTracks, Curve, Easing};
 use super::layout::{
     AlignItems, AvailSize, AvailableSpace, Dim, FlexDirection, FlexStyle, JustifyContent,
     LayoutEngine, LayoutId, Overflow, Position, snap_border_edges,
@@ -1005,6 +1005,10 @@ impl<H: Copy + Eq + Hash, C: Copy, K: Copy + Eq + Hash> UiState<H, C, K> {
         };
         self.anims
             .animate_color(K::from(hit), target, BRUSH_FADE_DURATION, Easing::Linear)
+    }
+
+    pub(crate) fn progress(&mut self, key: K, active: bool, curve: Curve) -> AnimSample<f32> {
+        self.anims.progress(key, active, curve)
     }
 
     pub(crate) fn animate_f32_from(

@@ -777,9 +777,6 @@ impl PlatformHandler for App {
                         &self.shell.jobs,
                     );
                 }
-                AppEvent::TooltipHideTimer => {
-                    self.tooltips.on_hide_timer();
-                }
                 AppEvent::TabDragPoll => self.tab_drag_poll(),
                 AppEvent::File(fe) => {
                     self.run_file_ops(|ops, host, io| ops.on_event(fe, host, io));
