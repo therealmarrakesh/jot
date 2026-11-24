@@ -373,7 +373,7 @@ fn status_bar_min_width_and_no_vertical_char_wrapping() {
     let mut mmi = MINMAXINFO::default();
     unsafe {
         let _ = SendMessageW(
-            hwnd.raw_hwnd(),
+            hwnd.raw(),
             WM_GETMINMAXINFO,
             Some(WPARAM(0)),
             Some(LPARAM((&raw mut mmi) as isize)),

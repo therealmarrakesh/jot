@@ -168,13 +168,13 @@ fn tab_drag_pop_out_and_reattach_does_not_panic() {
         let cy = (tab_rect.center().y * scale).round() as i32;
         let down_lp = LPARAM((((cy as u16 as u32) << 16) | (cx as u16 as u32)) as isize);
         unsafe {
-            let _ = SendMessageW(hwnd1.raw_hwnd(), WM_LBUTTONDOWN, Some(WPARAM(1)), Some(down_lp));
+            let _ = SendMessageW(hwnd1.raw(), WM_LBUTTONDOWN, Some(WPARAM(1)), Some(down_lp));
         }
 
         let move_y = ((tab_rect.center().y + 200.0) * scale).round() as i32;
         let move_lp = LPARAM((((move_y as u16 as u32) << 16) | (cx as u16 as u32)) as isize);
         unsafe {
-            let _ = SendMessageW(hwnd1.raw_hwnd(), WM_MOUSEMOVE, Some(WPARAM(1)), Some(move_lp));
+            let _ = SendMessageW(hwnd1.raw(), WM_MOUSEMOVE, Some(WPARAM(1)), Some(move_lp));
         }
 
         let hwnd2 = {
@@ -196,9 +196,9 @@ fn tab_drag_pop_out_and_reattach_does_not_panic() {
         };
 
         unsafe {
-            let _ = SendMessageW(hwnd1.raw_hwnd(), WM_MOUSELEAVE, Some(WPARAM(0)), Some(LPARAM(0)));
-            let _ = SendMessageW(hwnd1.raw_hwnd(), WM_NCMOUSELEAVE, Some(WPARAM(0)), Some(LPARAM(0)));
-            let _ = SendMessageW(hwnd2.raw_hwnd(), WM_NCHITTEST, Some(WPARAM(0)), Some(LPARAM(0)));
+            let _ = SendMessageW(hwnd1.raw(), WM_MOUSELEAVE, Some(WPARAM(0)), Some(LPARAM(0)));
+            let _ = SendMessageW(hwnd1.raw(), WM_NCMOUSELEAVE, Some(WPARAM(0)), Some(LPARAM(0)));
+            let _ = SendMessageW(hwnd2.raw(), WM_NCHITTEST, Some(WPARAM(0)), Some(LPARAM(0)));
         }
 
         {

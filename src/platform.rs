@@ -148,21 +148,6 @@ use windows::core::{BOOL, HSTRING, Interface, Owned, PCWSTR, PWSTR, w};
 use crate::geom::{Point, Rect, ScreenPoint, ScreenRect, Size, point, size};
 use crate::types::{Error, Result, SharedStr};
 
-pub(crate) use arbitrate as arbitrate_instance;
-
-pub(crate) fn output_debug_string(message: &str) {
-    let wide = HSTRING::from(message);
-    unsafe { OutputDebugStringW(&wide) };
-}
-
-pub(crate) fn message_box_error(title: &str, message: &str) {
-    let title_w = HSTRING::from(title);
-    let msg_w = HSTRING::from(message);
-    unsafe {
-        let _ = MessageBoxW(None, &msg_w, &title_w, MB_OK | MB_ICONERROR);
-    }
-}
-
 crate::types::id_type!(WindowId);
 
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
@@ -324,12 +309,10 @@ pub(crate) struct Modifiers {
 }
 
 impl Modifiers {
-    #[inline]
     pub(crate) const fn none(self) -> bool {
         !self.ctrl && !self.alt && !self.shift && !self.win
     }
 
-    #[inline]
     pub(crate) const fn ctrl_only(self) -> bool {
         self.ctrl && !self.alt && !self.shift && !self.win && !self.alt_gr
     }
@@ -511,12 +494,15 @@ pub(crate) fn complete_ime_composition(hwnd: HWND) {
     }
 }
 
+#[cold]
 pub(crate) fn debug_log(message: &str) {
-    output_debug_string(&format!("[Jot] {message}\n"));
+    unsafe { OutputDebugStringW(&HSTRING::from(format!("[Jot] {message}\n"))) };
 }
 
+#[cold]
 pub(crate) fn show_error_dialog(title: &str, message: &str) {
-    message_box_error(title, message);
+    let (message, title) = (HSTRING::from(message), HSTRING::from(title));
+    let _ = unsafe { MessageBoxW(None, &message, &title, MB_OK | MB_ICONERROR) };
 }
 
 pub(crate) fn panic_message(payload: &(dyn Any + Send)) -> String {
@@ -586,16 +572,6 @@ thread_local! {
     static PUMP: RefCell<PumpState> = RefCell::new(PumpState::default());
 }
 
-fn register_window(hwnd: HWND, shared: Rc<WindowShared>) {
-    PUMP.with(|p| {
-        p.borrow_mut().windows.insert(hwnd.0 as isize, shared);
-    });
-}
-
-fn unregister_window(hwnd: HWND) -> Option<Rc<WindowShared>> {
-    PUMP.with(|p| p.borrow_mut().windows.remove(&(hwnd.0 as isize)))
-}
-
 fn lookup_window(hwnd: HWND) -> Option<Rc<WindowShared>> {
     PUMP.with(|p| p.borrow().windows.get(&(hwnd.0 as isize)).cloned())
 }
@@ -615,10 +591,6 @@ fn set_cached_settings(settings: SystemSettings) {
 
 fn mark_wake_pending() {
     PUMP.with(|p| p.borrow_mut().wake_pending = true);
-}
-
-fn shutdown_block() -> Option<&'static str> {
-    PUMP.with(|p| p.borrow().shutdown_block)
 }
 
 fn active_handler() -> Option<Rc<RefCell<dyn PlatformHandler>>> {
@@ -1030,29 +1002,13 @@ impl MouseButtons {
 
     fn from_wparam(wparam: WPARAM) -> Self {
         let bits = wparam.0 as u32;
-        let mut mask = 0u8;
-        if (bits & 0x0001) != 0 {
-            mask |= 0x1;
-        }
-        if (bits & 0x0002) != 0 {
-            mask |= 0x2;
-        }
-        if (bits & 0x0010) != 0 {
-            mask |= 0x4;
-        }
-        Self(mask)
+        Self((bits & 0x3) as u8 | if bits & 0x10 != 0 { 0x4 } else { 0 })
     }
 
     fn primary(self) -> Option<MouseButton> {
-        if (self.0 & 0x1) != 0 {
-            Some(MouseButton::Left)
-        } else if (self.0 & 0x2) != 0 {
-            Some(MouseButton::Right)
-        } else if (self.0 & 0x4) != 0 {
-            Some(MouseButton::Middle)
-        } else {
-            None
-        }
+        [MouseButton::Left, MouseButton::Right, MouseButton::Middle]
+            .into_iter()
+            .find(|&b| self.0 & Self::bit(b) != 0)
     }
 }
 
@@ -1062,12 +1018,14 @@ struct WindowMetrics {
     physical: (u32, u32),
 }
 
+#[derive(Default)]
 struct WindowChrome {
     min_size: Option<Size>,
     cursor: CursorStyle,
     control_areas: Vec<(Rect, WindowControlArea)>,
 }
 
+#[derive(Default)]
 struct WindowInput {
     hovered: bool,
     nc_button_down: Option<u32>,
@@ -1103,27 +1061,14 @@ impl WindowShared {
             ime_caret: Cell::new(None),
             sys_caret_px: Cell::new(None),
             last_origin_px: Cell::new(None),
-            chrome: RefCell::new(WindowChrome {
-                min_size: None,
-                cursor: CursorStyle::Arrow,
-                control_areas: Vec::new(),
-            }),
+            chrome: RefCell::default(),
             input: RefCell::new(WindowInput {
-                hovered: false,
-                nc_button_down: None,
-                pending_surrogate: None,
-                suppress_next_char: false,
                 last_modifiers: current_modifiers(),
-                clicks: ClickTracker::default(),
-                buttons: MouseButtons::default(),
-                releasing_capture: false,
-                tracking_leave: false,
-                tracking_nc_leave: false,
+                ..Default::default()
             }),
         })
     }
 
-    #[inline]
     fn scale(&self) -> f32 {
         self.metrics.get().scale
     }
@@ -1211,7 +1156,7 @@ impl NativeWindow {
 
         let init_scale = query_scale(hwnd);
         let shared = WindowShared::new(id, init_scale, (1, 1), config.show && config.focus);
-        register_window(hwnd, shared.clone());
+        PUMP.with(|p| p.borrow_mut().windows.insert(hwnd.0 as isize, shared.clone()));
 
         configure_backdrop(hwnd);
         configure_dark_mode(hwnd, appearance);
@@ -1283,13 +1228,9 @@ impl NativeWindow {
             )?
         };
 
-        set_dwm_u32(
-            hwnd,
-            DWMWA_WINDOW_CORNER_PREFERENCE,
-            DWMWCP_DONOTROUND.0 as u32,
-        );
-        set_dwm_u32(hwnd, DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE);
-        set_dwm_u32(hwnd, DWMWA_TRANSITIONS_FORCEDISABLED, 1);
+        set_dwm(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND.0 as u32);
+        set_dwm(hwnd, DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE);
+        set_dwm(hwnd, DWMWA_TRANSITIONS_FORCEDISABLED, 1u32);
         unsafe {
             let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), 255, LWA_ALPHA);
         }
@@ -1347,28 +1288,23 @@ impl NativeWindow {
         WindowHandle::from_raw(self.hwnd)
     }
 
-    #[inline]
     pub(crate) fn scale_factor(&self) -> f32 {
         self.shared.scale()
     }
 
-    #[inline]
     pub(crate) fn physical_size(&self) -> (u32, u32) {
         self.shared.metrics.get().physical
     }
 
-    #[inline]
     pub(crate) fn logical_size(&self) -> Size {
         self.shared.logical_size()
     }
 
-    #[inline]
     pub(crate) fn is_active(&self) -> bool {
         self.shared.active.get()
     }
 
     #[cfg(test)]
-    #[inline]
     fn in_size_move(&self) -> bool {
         self.shared.in_size_move.get()
     }
@@ -1420,7 +1356,7 @@ impl NativeWindow {
             return;
         }
         self.destroyed = true;
-        let in_size_move = unregister_window(self.hwnd)
+        let in_size_move = PUMP.with(|p| p.borrow_mut().windows.remove(&(self.hwnd.0 as isize)))
             .is_some_and(|s| s.in_size_move.get());
         if in_size_move {
             let _ = unsafe { KillTimer(Some(self.hwnd), SIZE_MOVE_TIMER_ID) };
@@ -1449,27 +1385,14 @@ fn query_physical_size(hwnd: HWND) -> (u32, u32) {
     )
 }
 
-fn set_dwm_u32(hwnd: HWND, attr: DWMWINDOWATTRIBUTE, value: u32) {
-    let _ = unsafe {
-        DwmSetWindowAttribute(
-            hwnd,
-            attr,
-            (&raw const value).cast(),
-            std::mem::size_of::<u32>() as u32,
-        )
-    };
+fn set_dwm<T>(hwnd: HWND, attr: DWMWINDOWATTRIBUTE, value: T) {
+    let size = size_of::<T>() as u32;
+    let _ = unsafe { DwmSetWindowAttribute(hwnd, attr, (&raw const value).cast(), size) };
 }
 
 fn configure_dark_mode(hwnd: HWND, appearance: WindowAppearance) {
-    let dark = BOOL(i32::from(matches!(appearance, WindowAppearance::Dark)));
-    let _ = unsafe {
-        DwmSetWindowAttribute(
-            hwnd,
-            DWMWA_USE_IMMERSIVE_DARK_MODE,
-            (&raw const dark).cast(),
-            std::mem::size_of::<BOOL>() as u32,
-        )
-    };
+    let dark = BOOL(i32::from(appearance == WindowAppearance::Dark));
+    set_dwm(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, dark);
 }
 
 fn frame_thickness_for_dpi(dpi: u32) -> (i32, i32) {
@@ -1489,15 +1412,7 @@ fn configure_backdrop(hwnd: HWND) {
         cyBottomHeight: -1,
     };
     let _ = unsafe { DwmExtendFrameIntoClientArea(hwnd, &margins) };
-    let b = DWM_SYSTEMBACKDROP_TYPE(DWMSBT_TABBEDWINDOW);
-    let _ = unsafe {
-        DwmSetWindowAttribute(
-            hwnd,
-            DWMWA_SYSTEMBACKDROP_TYPE,
-            (&raw const b).cast(),
-            std::mem::size_of::<DWM_SYSTEMBACKDROP_TYPE>() as u32,
-        )
-    };
+    set_dwm(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, DWM_SYSTEMBACKDROP_TYPE(DWMSBT_TABBEDWINDOW));
 }
 
 fn apply_cursor(style: CursorStyle) {
@@ -2217,7 +2132,7 @@ fn window_wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
         }
 
         WM_QUERYENDSESSION => {
-            if let Some(reason) = shutdown_block() {
+            if let Some(reason) = PUMP.with(|p| p.borrow().shutdown_block) {
                 let wide = HSTRING::from(reason);
                 let _ = unsafe { ShutdownBlockReasonCreate(hwnd, &wide) };
                 if let Some(s) = lookup_window(hwnd) {
@@ -2395,20 +2310,15 @@ fn sid_to_string(sid: PSID) -> Option<String> {
 }
 
 fn encode_paths(paths: &[PathBuf]) -> Vec<u8> {
-    if paths.is_empty() {
-        return Vec::new();
-    }
-    let mut units = Vec::new();
+    let mut bytes = Vec::new();
     for (ix, path) in paths.iter().enumerate() {
         if ix > 0 {
-            units.push(0u16);
+            bytes.extend([0, 0]);
         }
         let abs = std::path::absolute(path).unwrap_or_else(|_| path.clone());
-        units.extend(abs.as_os_str().encode_wide());
-    }
-    let mut bytes = Vec::with_capacity(units.len() * 2);
-    for u in units {
-        bytes.extend_from_slice(&u.to_le_bytes());
+        for u in abs.as_os_str().encode_wide() {
+            bytes.extend(u.to_le_bytes());
+        }
     }
     bytes
 }
@@ -2425,10 +2335,7 @@ fn decode_copydata(cds: &COPYDATASTRUCT) -> Option<Vec<PathBuf>> {
         return None;
     }
     let bytes = unsafe { std::slice::from_raw_parts(cds.lpData.cast::<u8>(), len) };
-    let mut units = Vec::with_capacity(len / 2);
-    for pair in bytes.as_chunks::<2>().0 {
-        units.push(u16::from_le_bytes(*pair));
-    }
+    let units: Vec<u16> = bytes.as_chunks::<2>().0.iter().map(|p| u16::from_le_bytes(*p)).collect();
     let paths: Vec<PathBuf> = units
         .split(|&u| u == 0)
         .filter(|part| !part.is_empty())
@@ -2497,7 +2404,7 @@ fn send_handoff(
     sent.0 != 0 && result == 1
 }
 
-pub(crate) fn arbitrate(paths: &[PathBuf]) -> Arbitration {
+pub(crate) fn arbitrate_instance(paths: &[PathBuf]) -> Arbitration {
     let Some(identity) = ProcessIdentity::current() else {
         return Arbitration::Primary(None);
     };
@@ -2856,14 +2763,16 @@ impl SystemSettings {
             system_parameters_u32(SPI_GETMOUSEHOVERTIME.0).unwrap_or(DEFAULT_HOVER_TIME_MS);
         let menu_ms =
             system_parameters_u32(SPI_GETMENUSHOWDELAY.0).unwrap_or(DEFAULT_MENU_SHOW_DELAY_MS);
+        const SPI_GETCARETTIMEOUT: u32 = 0x2022;
+        let blink = |ms: u32| (ms != 0 && ms != u32::MAX).then(|| Duration::from_millis(ms.into()));
         Self {
             appearance,
             accent_light,
             accent_dark,
             high_contrast: query_high_contrast_colors(),
             reduce_motion,
-            caret_blink_interval: query_caret_blink_interval(),
-            caret_blink_timeout: query_caret_blink_timeout(),
+            caret_blink_interval: blink(unsafe { GetCaretBlinkTime() }),
+            caret_blink_timeout: blink(system_parameters_u32(SPI_GETCARETTIMEOUT).unwrap_or(5_000)),
             caret_width_px: system_parameters_u32(SPI_GETCARETWIDTH.0)
                 .unwrap_or(1)
                 .clamp(1, 20),
@@ -2876,7 +2785,6 @@ impl SystemSettings {
         }
     }
 
-    #[inline]
     pub(crate) fn accent(self, dark: bool) -> Option<u32> {
         if dark {
             self.accent_dark
@@ -2885,7 +2793,6 @@ impl SystemSettings {
         }
     }
 
-    #[inline]
     pub(crate) fn wheel_scroll_amount(self, horizontal: bool) -> u32 {
         if horizontal {
             self.wheel_scroll_chars
@@ -2954,14 +2861,6 @@ fn query_system_accents() -> (Option<u32>, Option<u32>) {
     (read(16), read(4))
 }
 
-#[inline]
-fn colorref_to_rgb24(colorref: u32) -> u32 {
-    let r = colorref & 0xFF;
-    let g = (colorref >> 8) & 0xFF;
-    let b = (colorref >> 16) & 0xFF;
-    (r << 16) | (g << 8) | b
-}
-
 fn query_high_contrast_colors() -> Option<HighContrastColors> {
     let mut hc = HIGHCONTRASTW {
         cbSize: size_of::<HIGHCONTRASTW>() as u32,
@@ -2979,7 +2878,10 @@ fn query_high_contrast_colors() -> Option<HighContrastColors> {
     if !ok || (hc.dwFlags & HCF_HIGHCONTRASTON).0 == 0 {
         return None;
     }
-    let sys = |idx: SYS_COLOR_INDEX| colorref_to_rgb24(unsafe { GetSysColor(idx) });
+    let sys = |idx: SYS_COLOR_INDEX| {
+        let c = unsafe { GetSysColor(idx) }; // COLORREF is 0x00BBGGRR
+        (c & 0xFF) << 16 | (c & 0xFF00) | (c >> 16) & 0xFF
+    };
     Some(HighContrastColors {
         window: sys(COLOR_WINDOW),
         window_text: sys(COLOR_WINDOWTEXT),
@@ -2991,17 +2893,6 @@ fn query_high_contrast_colors() -> Option<HighContrastColors> {
         window_frame: sys(COLOR_WINDOWFRAME),
         hotlight: sys(COLOR_HOTLIGHT),
     })
-}
-
-fn query_caret_blink_interval() -> Option<Duration> {
-    let millis = unsafe { GetCaretBlinkTime() };
-    (millis != 0 && millis != u32::MAX).then(|| Duration::from_millis(millis.into()))
-}
-
-fn query_caret_blink_timeout() -> Option<Duration> {
-    const SPI_GETCARETTIMEOUT_ACTION: u32 = 0x2022;
-    let millis = system_parameters_u32(SPI_GETCARETTIMEOUT_ACTION).unwrap_or(5_000);
-    (millis != 0 && millis != u32::MAX).then(|| Duration::from_millis(millis.into()))
 }
 
 pub(crate) fn format_local_time_date() -> String {
@@ -3060,20 +2951,12 @@ impl WindowHandle {
         Self(hwnd.0 as isize)
     }
 
-    #[inline]
-    fn raw(self) -> HWND {
+    pub(crate) fn raw(self) -> HWND {
         HWND(self.0 as *mut _)
     }
 
-    #[inline]
     pub(crate) fn raw_isize(self) -> isize {
         self.0
-    }
-
-    #[cfg(test)]
-    #[inline]
-    pub(crate) fn raw_hwnd(self) -> HWND {
-        self.raw()
     }
 
     pub(crate) fn is_null(self) -> bool {
@@ -3332,17 +3215,12 @@ pub(crate) struct WindowsDisplay {
 
 impl WindowsDisplay {
     pub(crate) fn primary() -> Option<Self> {
-        let monitor = unsafe { MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY) };
+        let monitor = unsafe { MonitorFromPoint(POINT::default(), MONITOR_DEFAULTTOPRIMARY) };
         (!monitor.is_invalid()).then_some(Self { monitor })
     }
 
     pub(crate) fn from_point(pt: ScreenPoint) -> Option<Self> {
-        let monitor = unsafe {
-            MonitorFromPoint(
-                POINT { x: pt.x, y: pt.y },
-                MONITOR_DEFAULTTONEAREST,
-            )
-        };
+        let monitor = unsafe { MonitorFromPoint(pt.into(), MONITOR_DEFAULTTONEAREST) };
         (!monitor.is_invalid()).then_some(Self { monitor })
     }
 
@@ -3440,21 +3318,9 @@ impl Drop for OleGuard {
 
 unsafe fn shell_item_path(item: &IShellItem) -> Result<PathBuf> {
     let pwstr = unsafe { item.GetDisplayName(SIGDN_FILESYSPATH)? };
-    let path = unsafe {
-        let mut len = 0;
-        while *pwstr.0.add(len) != 0 {
-            len += 1;
-        }
-        let slice = std::slice::from_raw_parts(pwstr.0, len);
-        let os = OsString::from_wide(slice);
-        CoTaskMemFree(Some(pwstr.0.cast()));
-        PathBuf::from(os)
-    };
+    let path = PathBuf::from(OsString::from_wide(unsafe { pwstr.as_wide() }));
+    unsafe { CoTaskMemFree(Some(pwstr.0.cast())) };
     Ok(path)
-}
-
-fn is_cancelled(err: &windows::core::Error) -> bool {
-    err.code() == ERROR_CANCELLED.to_hresult()
 }
 
 unsafe fn configure_dialog(
@@ -3491,7 +3357,7 @@ unsafe fn show_dialog(dialog: &IFileDialog, owner: WindowHandle) -> Result<bool>
     let parent = (!owner.is_null()).then(|| owner.raw());
     match unsafe { dialog.Show(parent) } {
         Ok(()) => Ok(true),
-        Err(err) if is_cancelled(&err) => Ok(false),
+        Err(err) if err.code() == ERROR_CANCELLED.to_hresult() => Ok(false),
         Err(err) => Err(err.into()),
     }
 }

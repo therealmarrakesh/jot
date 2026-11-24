@@ -83,7 +83,7 @@ fn win32_client_clicks_and_capture_loss_via_wnd_proc() {
                 y: (pt.y * scale).round() as i32,
             };
             unsafe {
-                let _ = ClientToScreen(hwnd.raw_hwnd(), &mut p);
+                let _ = ClientToScreen(hwnd.raw(), &mut p);
             }
             LPARAM((((p.y as u16 as u32) << 16) | (p.x as u16 as u32)) as isize)
         };
@@ -94,7 +94,7 @@ fn win32_client_clicks_and_capture_loss_via_wnd_proc() {
             .center();
         let nchittest = unsafe {
             SendMessageW(
-                hwnd.raw_hwnd(),
+                hwnd.raw(),
                 WM_NCHITTEST,
                 Some(WPARAM(0)),
                 Some(pack_screen(new_tab_pt)),
@@ -107,9 +107,9 @@ fn win32_client_clicks_and_capture_loss_via_wnd_proc() {
 
         let lp = pack_client(new_tab_pt);
         unsafe {
-            let _ = SendMessageW(hwnd.raw_hwnd(), WM_MOUSEMOVE, Some(WPARAM(0)), Some(lp));
-            let _ = SendMessageW(hwnd.raw_hwnd(), WM_LBUTTONDOWN, Some(WPARAM(1)), Some(lp));
-            let _ = SendMessageW(hwnd.raw_hwnd(), WM_LBUTTONUP, Some(WPARAM(0)), Some(lp));
+            let _ = SendMessageW(hwnd.raw(), WM_MOUSEMOVE, Some(WPARAM(0)), Some(lp));
+            let _ = SendMessageW(hwnd.raw(), WM_LBUTTONDOWN, Some(WPARAM(1)), Some(lp));
+            let _ = SendMessageW(hwnd.raw(), WM_LBUTTONUP, Some(WPARAM(0)), Some(lp));
         }
         h.read(|w, _| {
             assert_eq!(w.tabs().len(), 2, "Win32 click on NewTab must open a new tab");
@@ -122,9 +122,9 @@ fn win32_client_clicks_and_capture_loss_via_wnd_proc() {
             .center();
         let theme_lp = pack_client(theme_pt);
         unsafe {
-            let _ = SendMessageW(hwnd.raw_hwnd(), WM_MOUSEMOVE, Some(WPARAM(0)), Some(theme_lp));
-            let _ = SendMessageW(hwnd.raw_hwnd(), WM_LBUTTONDOWN, Some(WPARAM(1)), Some(theme_lp));
-            let _ = SendMessageW(hwnd.raw_hwnd(), WM_LBUTTONUP, Some(WPARAM(0)), Some(theme_lp));
+            let _ = SendMessageW(hwnd.raw(), WM_MOUSEMOVE, Some(WPARAM(0)), Some(theme_lp));
+            let _ = SendMessageW(hwnd.raw(), WM_LBUTTONDOWN, Some(WPARAM(1)), Some(theme_lp));
+            let _ = SendMessageW(hwnd.raw(), WM_LBUTTONUP, Some(WPARAM(0)), Some(theme_lp));
         }
         h.read(|_, app| assert_eq!(app.shell.palette.dark, !initial_dark));
 
@@ -135,9 +135,9 @@ fn win32_client_clicks_and_capture_loss_via_wnd_proc() {
             .center();
         let tab_lp = pack_client(tab_pt);
         unsafe {
-            let _ = SendMessageW(hwnd.raw_hwnd(), WM_MOUSEMOVE, Some(WPARAM(0)), Some(tab_lp));
-            let _ = SendMessageW(hwnd.raw_hwnd(), WM_MBUTTONDOWN, Some(WPARAM(0x10)), Some(tab_lp));
-            let _ = SendMessageW(hwnd.raw_hwnd(), WM_MBUTTONUP, Some(WPARAM(0)), Some(tab_lp));
+            let _ = SendMessageW(hwnd.raw(), WM_MOUSEMOVE, Some(WPARAM(0)), Some(tab_lp));
+            let _ = SendMessageW(hwnd.raw(), WM_MBUTTONDOWN, Some(WPARAM(0x10)), Some(tab_lp));
+            let _ = SendMessageW(hwnd.raw(), WM_MBUTTONUP, Some(WPARAM(0)), Some(tab_lp));
         }
         h.read(|w, _| assert_eq!(w.tabs().len(), 1, "Win32 middle-click must close tab"));
 
@@ -147,10 +147,10 @@ fn win32_client_clicks_and_capture_loss_via_wnd_proc() {
             .center();
         let lp = pack_client(new_tab_pt);
         unsafe {
-            let _ = SendMessageW(hwnd.raw_hwnd(), WM_MOUSEMOVE, Some(WPARAM(0)), Some(lp));
-            let _ = SendMessageW(hwnd.raw_hwnd(), WM_LBUTTONDOWN, Some(WPARAM(1)), Some(lp));
-            let _ = SendMessageW(hwnd.raw_hwnd(), WM_CAPTURECHANGED, Some(WPARAM(0)), Some(LPARAM(0)));
-            let _ = SendMessageW(hwnd.raw_hwnd(), WM_LBUTTONUP, Some(WPARAM(0)), Some(lp));
+            let _ = SendMessageW(hwnd.raw(), WM_MOUSEMOVE, Some(WPARAM(0)), Some(lp));
+            let _ = SendMessageW(hwnd.raw(), WM_LBUTTONDOWN, Some(WPARAM(1)), Some(lp));
+            let _ = SendMessageW(hwnd.raw(), WM_CAPTURECHANGED, Some(WPARAM(0)), Some(LPARAM(0)));
+            let _ = SendMessageW(hwnd.raw(), WM_LBUTTONUP, Some(WPARAM(0)), Some(lp));
         }
         h.read(|w, _| {
             assert_eq!(
