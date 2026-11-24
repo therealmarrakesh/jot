@@ -216,7 +216,7 @@ fn word_range_at(text: &Rope, offset: usize) -> Option<Range<usize>> {
 /// Ctrl+Left: the start of the word before `offset`, skipping spaces; a line start steps back
 /// over the line break.
 pub(crate) fn prev_word_start(text: &Rope, offset: usize) -> usize {
-    let offset = text.floor_char_boundary(offset.min(text.len()));
+    let offset = text.clip_offset(offset, Bias::Left);
     if offset == 0 || text.byte(offset - 1) == b'\n' {
         return offset.saturating_sub(1);
     }
@@ -233,7 +233,7 @@ pub(crate) fn prev_word_start(text: &Rope, offset: usize) -> usize {
 /// Ctrl+Right: the end of the word after `offset` plus the spaces that follow it; a line end
 /// steps over the line break.
 pub(crate) fn next_word_end(text: &Rope, offset: usize) -> usize {
-    let offset = text.floor_char_boundary(offset.min(text.len()));
+    let offset = text.clip_offset(offset, Bias::Left);
     if offset >= text.len() || text.byte(offset) == b'\n' {
         return (offset + 1).min(text.len());
     }
@@ -384,8 +384,8 @@ enum EditKind {
     Atomic,
 }
 
-/// Replace a byte range with new text.
-type Splice = (Range<usize>, String);
+/// An edit: replace a byte range with new text.
+type Edit = (Range<usize>, String);
 
 /// A text with its selection, IME composition and undo history. Every edit goes through
 /// `commit`, which keeps the selection on grapheme boundaries and bumps `revision`.
@@ -439,19 +439,11 @@ impl TextModel {
         self.composition.as_ref().map(|c| c.start..c.end)
     }
 
-    pub(crate) fn value(&self) -> String {
-        self.text.to_string()
-    }
-
     pub(crate) fn cursor(&self) -> usize {
         match &self.composition {
             Some(c) => c.start.saturating_add(c.cursor).clamp(c.start, c.end),
             None => self.selection.head,
         }
-    }
-
-    pub(crate) fn selected_range(&self) -> Range<usize> {
-        self.selection.range()
     }
 
     pub(crate) fn selected_text(&self) -> RopeSlice<'_> {
@@ -530,7 +522,7 @@ impl TextModel {
     /// A single-line field rejects an edit its validator refuses. Returns the changed lines.
     fn commit(
         &mut self,
-        edits: Vec<Splice>,
+        edits: Vec<Edit>,
         after: SelectionAfter,
         kind: Option<EditKind>,
         validate: bool,
@@ -539,7 +531,7 @@ impl TextModel {
             return None;
         }
         let (before, sel_before) = (self.text.clone(), self.selection);
-        let mut edits: Vec<Splice> = edits
+        let mut edits: Vec<Edit> = edits
             .into_iter()
             .map(|(range, text)| {
                 let start = self.text.clip_offset(range.start, Bias::Left);
@@ -599,7 +591,7 @@ impl TextModel {
                     .sum::<usize>();
                 Payload::Snapshot {
                     text: [before, self.text.clone()],
-                    bytes: bytes.max(4096),
+                    bytes,
                 }
             } else {
                 let changes = edits.into_iter().map(|(range, new)| Change {
@@ -628,7 +620,7 @@ impl TextModel {
         self.debug_assert_invariants();
     }
 
-    fn replace(&mut self, range: Range<usize>, text: String, kind: EditKind) -> Option<LineChange> {
+    fn edit(&mut self, range: Range<usize>, text: String, kind: EditKind) -> Option<LineChange> {
         let edit = vec![(range, text)];
         self.commit(edit, SelectionAfter::AfterLastEdit, Some(kind), true)
     }
@@ -640,7 +632,7 @@ impl TextModel {
     ) -> Option<LineChange> {
         self.commit_composition();
         let text = self.normalize(replacement).into_owned();
-        let mut edits: Vec<Splice> = ranges.iter().map(|r| (r.clone(), text.clone())).collect();
+        let mut edits: Vec<Edit> = ranges.iter().map(|r| (r.clone(), text.clone())).collect();
         edits.sort_by_key(|(range, _)| range.start);
         let caret = Selection::caret(remap_offset(&edits, self.cursor()));
         self.commit(
@@ -685,9 +677,9 @@ impl TextModel {
                 .push(EditKind::Atomic, Payload::Changes(vec![change]), selection);
             return Some(lines);
         }
-        let range = self.selected_range();
+        let range = self.selection.range();
         let typing = range.is_empty() && !text.is_empty() && !text.contains('\n');
-        self.replace(
+        self.edit(
             range,
             text,
             if typing {
@@ -700,7 +692,7 @@ impl TextModel {
 
     pub(crate) fn replace_selection(&mut self, text: &str) -> Option<LineChange> {
         self.commit_composition();
-        self.replace(self.selected_range(), text.to_owned(), EditKind::Atomic)
+        self.edit(self.selection.range(), text.to_owned(), EditKind::Atomic)
     }
 
     /// Shows uncommitted IME text in place of the selection (or the previous composition).
@@ -718,7 +710,7 @@ impl TextModel {
         let (range, replaced_text, sel_before) = match &self.composition {
             Some(c) => (c.start..c.end, c.replaced_text.clone(), c.sel_before),
             None => {
-                let range = self.selected_range();
+                let range = self.selection.range();
                 (
                     range.clone(),
                     self.text.slice(range).to_string(),
@@ -764,7 +756,6 @@ impl TextModel {
             self.history
                 .push(EditKind::Atomic, Payload::Changes(vec![change]), selection);
         }
-        self.debug_assert_invariants();
         true
     }
 
@@ -783,13 +774,13 @@ impl TextModel {
     ) -> Option<LineChange> {
         self.commit_composition();
         if !self.selection.is_empty() {
-            return self.replace(self.selection.range(), String::new(), EditKind::Atomic);
+            return self.edit(self.selection.range(), String::new(), EditKind::Atomic);
         }
         let span = span(&self.text, self.selection.head);
         if span.start == span.end {
             return None;
         }
-        self.replace(
+        self.edit(
             span.start.min(span.end)..span.start.max(span.end),
             String::new(),
             kind,
@@ -821,7 +812,7 @@ impl TextModel {
         if !self.policy.multi_line {
             return None;
         }
-        self.replace(self.selected_range(), "\n".into(), EditKind::Atomic)
+        self.edit(self.selection.range(), "\n".into(), EditKind::Atomic)
     }
 
     /// Tab: inserts a tab, or with `block` or a multi-line selection indents every selected
@@ -834,7 +825,7 @@ impl TextModel {
         let sel = self.selection;
         let row = |offset| self.text.offset_to_point(offset).row;
         if !block && (sel.is_empty() || row(sel.start()) == row(sel.end())) {
-            return Some(self.replace(sel.range(), "\t".into(), EditKind::Atomic));
+            return Some(self.edit(sel.range(), "\t".into(), EditKind::Atomic));
         }
         let edits = self.selected_rows().map(|r| {
             let start = self.text.line_start_offset(r);
@@ -930,7 +921,6 @@ impl TextModel {
         };
         let start = self.snap_boundary(range.start, Bias::Left);
         self.selection = Selection::from_range(start..self.snap_boundary(range.end, end_bias));
-        self.debug_assert_invariants();
     }
 
     pub(crate) fn go_to_line(&mut self, line: usize) {
@@ -954,7 +944,6 @@ impl TextModel {
         let offset = self.snap_boundary(offset, Bias::Left);
         self.selection
             .extend_to(offset, end_affinity, anchor_word, self.text.len());
-        self.debug_assert_invariants();
     }
 
     pub(crate) fn select_word_at(&mut self, offset: usize) -> Option<Range<usize>> {
@@ -970,7 +959,7 @@ impl TextModel {
 
 /// Where `offset` lands after `edits` (sorted, in pre-edit positions). An offset inside a
 /// replaced range keeps its distance into the new text, up to that text's end.
-fn remap_offset(edits: &[Splice], offset: usize) -> usize {
+fn remap_offset(edits: &[Edit], offset: usize) -> usize {
     let mut out = offset;
     for (range, text) in edits {
         if range.end <= offset {
@@ -986,6 +975,7 @@ fn remap_offset(edits: &[Splice], offset: usize) -> usize {
     out
 }
 
+/// The byte offset of the `target_utf16`th UTF-16 unit (IME carets come in UTF-16).
 fn utf16_offset_to_byte(text: &str, target_utf16: usize) -> usize {
     let mut u16_pos = 0usize;
     for (byte_ix, ch) in text.char_indices() {
@@ -998,7 +988,7 @@ fn utf16_offset_to_byte(text: &str, target_utf16: usize) -> usize {
 }
 
 /// Builds the edited text in one pass, for edits too many to apply one by one.
-fn rebuild_rope(text: &Rope, edits: &[Splice]) -> Rope {
+fn rebuild_rope(text: &Rope, edits: &[Edit]) -> Rope {
     let mut builder = RopeBuilder::new();
     let mut cursor = 0;
     for (range, new) in edits {
@@ -1014,12 +1004,10 @@ fn rebuild_rope(text: &Rope, edits: &[Splice]) -> Rope {
     builder.finish()
 }
 
+/// History limits: undo steps kept, keystrokes merged into one step, and bytes of edits kept.
 const MAX_HISTORY_ENTRIES: usize = 1000;
-const MAX_CHANGES_PER_ENTRY: usize = 1000;
+const MAX_KEYSTROKES_PER_ENTRY: usize = 1000;
 const MAX_HISTORY_BYTES: usize = 32 * 1024 * 1024;
-
-/// History budget charged per change on top of its text: two `(range, text)` records.
-const CHANGE_OVERHEAD: usize = 80;
 
 /// One replacement, kept with the text it replaced so it can be undone and redone.
 #[derive(Debug, PartialEq)]
@@ -1086,18 +1074,19 @@ impl Payload {
         match self {
             Self::Changes(changes) => changes
                 .iter()
-                .map(|c| c.old.len() + c.new.len() + CHANGE_OVERHEAD)
+                .map(|c| c.old.len() + c.new.len() + size_of::<Change>())
                 .sum(),
             Self::Snapshot { bytes, .. } => *bytes,
         }
     }
 }
 
-/// One undo step. `selection` and `version` hold the state before and after it.
+/// One undo step, `keystrokes` long. `selection` and `version` hold the state before and
+/// after it.
 struct Entry {
     kind: EditKind,
     payload: Payload,
-    merged: usize,
+    keystrokes: usize,
     bytes: usize,
     selection: [Selection; 2],
     version: [u64; 2],
@@ -1134,7 +1123,7 @@ impl History {
             && kind != EditKind::Atomic
             && let Some(prev) = self.undo.last_mut()
             && prev.kind == kind
-            && prev.merged < MAX_CHANGES_PER_ENTRY
+            && prev.keystrokes < MAX_KEYSTROKES_PER_ENTRY
             && prev.selection[1] == selection[0]
             && let (Payload::Changes(prev_changes), Payload::Changes(changes)) =
                 (&mut prev.payload, &payload)
@@ -1144,21 +1133,17 @@ impl History {
             let bytes = prev.payload.bytes();
             self.bytes = self.bytes.saturating_sub(prev.bytes) + bytes;
             prev.bytes = bytes;
-            prev.merged += 1;
+            prev.keystrokes += 1;
             prev.selection[1] = selection[1];
             prev.version[1] = version;
         } else {
-            let merged = match &payload {
-                Payload::Changes(changes) => changes.len(),
-                Payload::Snapshot { .. } => 1,
-            };
             let bytes = payload.bytes();
             self.bytes += bytes;
             let version = [self.version, version];
             self.undo.push(Entry {
                 kind,
                 payload,
-                merged,
+                keystrokes: 1,
                 bytes,
                 selection,
                 version,
@@ -1368,29 +1353,29 @@ mod tests {
         m.set_selected_range(6..11);
 
         m.set_composition("に", 1);
-        assert_eq!(m.value(), "hello に");
+        assert_eq!(m.text().to_string(), "hello に");
         assert!(!m.can_undo());
         assert!(!m.is_clean());
 
         m.set_composition("にほん", 3);
-        assert_eq!(m.value(), "hello にほん");
+        assert_eq!(m.text().to_string(), "hello にほん");
         assert!(!m.can_undo());
 
         // Cancelling restores original replaced text without adding an undo entry.
         m.cancel_composition();
-        assert_eq!(m.value(), "hello world");
-        assert_eq!(m.selected_range(), 6..11);
+        assert_eq!(m.text().to_string(), "hello world");
+        assert_eq!(m.selection().range(), 6..11);
         assert!(!m.can_undo());
         assert!(m.is_clean());
 
         // Committing pushes one atomic undo entry restoring the replaced text.
         m.set_composition("に", 1);
         m.insert_text("日本");
-        assert_eq!(m.value(), "hello 日本");
+        assert_eq!(m.text().to_string(), "hello 日本");
         assert!(m.can_undo());
         m.undo();
-        assert_eq!(m.value(), "hello world");
-        assert_eq!(m.selected_range(), 6..11);
+        assert_eq!(m.text().to_string(), "hello world");
+        assert_eq!(m.selection().range(), 6..11);
         assert!(m.is_clean());
     }
 
@@ -1402,7 +1387,7 @@ mod tests {
         });
         assert!(field.insert_text("123").is_some());
         assert!(field.insert_text("abc").is_none());
-        assert_eq!(field.value(), "123");
+        assert_eq!(field.text().to_string(), "123");
         assert!(field.enter().is_none());
 
         let mut doc = TextModel::new(EditPolicy {
@@ -1412,11 +1397,11 @@ mod tests {
         .with_rope(Rope::from("alpha\nbeta\ngamma"));
         doc.set_selected_range(2..9);
         doc.indent(true);
-        assert_eq!(doc.value(), "\talpha\n\tbeta\ngamma");
-        assert_eq!(doc.selected_range(), 3..11);
+        assert_eq!(doc.text().to_string(), "\talpha\n\tbeta\ngamma");
+        assert_eq!(doc.selection().range(), 3..11);
         doc.outdent();
-        assert_eq!(doc.value(), "alpha\nbeta\ngamma");
-        assert_eq!(doc.selected_range(), 2..9);
+        assert_eq!(doc.text().to_string(), "alpha\nbeta\ngamma");
+        assert_eq!(doc.selection().range(), 2..9);
     }
 
     #[test]
@@ -1442,14 +1427,14 @@ mod tests {
         .with_rope(Rope::from("aa bb cc aa dd aa"));
         doc.place_caret(10, false);
         doc.replace_all(&[0..2, 9..11, 15..17], "XYZ");
-        assert_eq!(doc.value(), "XYZ bb cc XYZ dd XYZ");
+        assert_eq!(doc.text().to_string(), "XYZ bb cc XYZ dd XYZ");
         assert_eq!(doc.cursor(), 11);
 
         doc.undo();
-        assert_eq!(doc.value(), "aa bb cc aa dd aa");
+        assert_eq!(doc.text().to_string(), "aa bb cc aa dd aa");
         assert_eq!(doc.cursor(), 10);
         doc.redo();
-        assert_eq!(doc.value(), "XYZ bb cc XYZ dd XYZ");
+        assert_eq!(doc.text().to_string(), "XYZ bb cc XYZ dd XYZ");
         assert_eq!(doc.cursor(), 11);
     }
 
@@ -1489,11 +1474,11 @@ mod tests {
         let run = |len| "a".repeat(len);
         assert_eq!(
             undone(&mut h),
-            [(MAX_CHANGES_PER_ENTRY, String::new(), run(100))]
+            [(MAX_KEYSTROKES_PER_ENTRY, String::new(), run(100))]
         );
         assert_eq!(
             undone(&mut h),
-            [(0, String::new(), run(MAX_CHANGES_PER_ENTRY))]
+            [(0, String::new(), run(MAX_KEYSTROKES_PER_ENTRY))]
         );
         assert!(h.step(true).is_none());
     }

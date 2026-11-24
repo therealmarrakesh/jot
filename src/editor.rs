@@ -729,7 +729,7 @@ impl Editor {
     pub(crate) fn ime_caret_bounds(&self) -> Option<Rect> {
         let frame = self.fresh_frame()?;
         frame
-            .bounds_for_range(self.model.text(), self.model.selected_range())
+            .bounds_for_range(self.model.text(), self.model.selection().range())
             .or(Some(frame.caret_rect))
     }
 
@@ -1157,7 +1157,7 @@ impl Editor {
             && self.model.composition().is_none()
             && !self.model.selection().is_empty()
         {
-            frame.selection_rects = frame.range_rects(&self.model.selected_range());
+            frame.selection_rects = frame.range_rects(&self.model.selection().range());
         }
         self.frame = Some(frame);
     }
@@ -1171,7 +1171,7 @@ impl Editor {
         let (display_str, text_color): (SharedStr, Rgba) = if is_empty {
             (self.placeholder.clone(), params.palette.text_secondary)
         } else {
-            (self.model.value().into(), style.color)
+            (self.model.text().to_string().into(), style.color)
         };
         let shaped = ts.shape_row(display_str, text_style);
         let row_layout = RowLayout::from_shaped(vec![shaped]);

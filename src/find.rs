@@ -192,7 +192,7 @@ impl FindBar {
     }
 
     fn prepare(&mut self) -> Option<String> {
-        let query = self.query.model().value();
+        let query = self.query.model().text().to_string();
         if query.is_empty() {
             return None;
         }
@@ -216,7 +216,7 @@ impl FindBar {
             return FindOutcome::EmptyQuery;
         };
         let text = editor.model().text().clone();
-        let selection = editor.model().selected_range();
+        let selection = editor.model().selection().range();
         let wrap = self.wrap_around;
         let found = self
             .matcher
@@ -253,14 +253,14 @@ impl FindBar {
         if self.prepare().is_none() {
             return FindOutcome::EmptyQuery;
         }
-        let sel_len = editor.model().selected_range().len();
+        let sel_len = editor.model().selection().range().len();
         let is_match = self.matcher.as_ref().is_some_and(|m| {
             sel_len > 0
                 && sel_len <= m.max_match_bytes()
                 && m.is_match(&editor.model().selected_text().to_string())
         });
         if is_match {
-            let replacement = self.replacement.model().value();
+            let replacement = self.replacement.model().text().to_string();
             editor.replace(&replacement, ts);
         }
         let out = self.step(editor, true, timers);
@@ -290,7 +290,7 @@ impl FindBar {
             return FindOutcome::NotFound;
         }
         let count = ranges.len();
-        let replacement = self.replacement.model().value();
+        let replacement = self.replacement.model().text().to_string();
         editor.replace_all(&ranges, &replacement, ts);
         FindOutcome::Replaced(count)
     }
@@ -841,16 +841,16 @@ mod tests {
 
         bar.open(true, "foo", &ts);
         assert!(bar.is_open());
-        assert_eq!(bar.query.model().value(), "foo");
+        assert_eq!(bar.query.model().text().to_string(), "foo");
 
         assert_eq!(bar.step(&mut ed, true, timers), FindOutcome::Found { wrapped: false });
-        assert_eq!(ed.model().selected_range(), 0..3);
+        assert_eq!(ed.model().selection().range(), 0..3);
 
         assert_eq!(bar.step(&mut ed, true, timers), FindOutcome::Found { wrapped: false });
-        assert_eq!(ed.model().selected_range(), 8..11);
+        assert_eq!(ed.model().selection().range(), 8..11);
 
         assert_eq!(bar.step(&mut ed, true, timers), FindOutcome::Found { wrapped: true });
-        assert_eq!(ed.model().selected_range(), 0..3);
+        assert_eq!(ed.model().selection().range(), 0..3);
         assert!(matches!(
             jobs.pop_at(Instant::now() + NOTICE_DURATION + Duration::from_secs(1)),
             Some(AppEvent::Window {
@@ -861,12 +861,12 @@ mod tests {
 
         bar.replacement.set_value("qux", &ts);
         assert_eq!(bar.replace_next(&mut ed, &ts, timers), FindOutcome::Replaced(1));
-        assert_eq!(ed.model().value(), "qux bar foo baz");
-        assert_eq!(ed.model().selected_range(), 8..11);
+        assert_eq!(ed.model().text().to_string(), "qux bar foo baz");
+        assert_eq!(ed.model().selection().range(), 8..11);
 
         bar.query.set_value("o", &ts);
         assert_eq!(bar.replace_all(&mut ed, &ts, timers), FindOutcome::Replaced(2));
-        assert_eq!(ed.model().value(), "qux bar fquxqux baz");
+        assert_eq!(ed.model().text().to_string(), "qux bar fquxqux baz");
 
         bar.query.set_value("missing", &ts);
         assert_eq!(bar.step(&mut ed, true, timers), FindOutcome::NotFound);

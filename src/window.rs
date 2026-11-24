@@ -775,7 +775,7 @@ impl MainWindow {
     }
 
     fn submit_go_to(&mut self, shell: &Shell) {
-        let value = self.dialogs.line.model().value();
+        let value = self.dialogs.line.model().text().to_string();
         let lines = self.active_editor().model().text().lines_len();
         match value.parse::<usize>() {
             Ok(line) if (1..=lines).contains(&line) => {
@@ -920,7 +920,7 @@ fn menu_state(tabs: &TabSet, shell: &Shell) -> MenuState {
     MenuState {
         can_undo: m.can_undo(),
         can_redo: m.can_redo(),
-        has_selection: !m.selected_range().is_empty(),
+        has_selection: !m.selection().range().is_empty(),
         has_text: m.text().len() > 0,
         clipboard_has_text: clipboard_has_text(),
         status_bar: shell.view.status_bar,
@@ -1437,7 +1437,7 @@ impl MainWindow {
         let model = self.active_editor().model();
         let text = model.text();
         let (line, column) = model.caret_line_col();
-        let selection = model.selected_range();
+        let selection = model.selection().range();
         let selected = text
             .byte_to_char_idx(selection.end)
             .saturating_sub(text.byte_to_char_idx(selection.start));
