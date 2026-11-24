@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use ropey::RopeSlice;
 
-use crate::geom::{Edges, Point, Rect};
+use crate::geom::{Axis, Edges, Point, Rect};
 use crate::gfx::{Font, TextSystem};
 use crate::platform::TimerHandle;
 use crate::scrollbar::ScrollbarState;
@@ -340,17 +340,17 @@ impl Editor {
     }
 
     #[inline]
-    pub(crate) fn is_scrollbar_dragging(&self) -> bool {
+    pub(crate) fn scrollbar_drag_axis(&self) -> Option<Axis> {
         match &self.view {
-            ViewKind::Document(doc) => doc.scrollbar.is_dragging(),
-            ViewKind::Field => false,
+            ViewKind::Document(doc) => doc.scrollbar.drag_axis(),
+            ViewKind::Field => None,
         }
     }
 
     #[inline]
-    pub(crate) fn hits_scrollbar_track(&self, pos: Point) -> bool {
+    pub(crate) fn scrollbar_interactive(&self, axis: Axis) -> bool {
         match &self.view {
-            ViewKind::Document(doc) => doc.scrollbar.hits_track(pos),
+            ViewKind::Document(doc) => doc.scrollbar.is_interactive(axis),
             ViewKind::Field => false,
         }
     }
@@ -439,12 +439,16 @@ impl Editor {
         self.reset_pointer_selection_state();
     }
 
-    pub(crate) fn view<H, C>(
+    pub(crate) fn view<H, C>(&self, hit: H, editor_draw: C, line_height: f32) -> Node<H, C> {
+        self.view_with_scrollbars(hit, editor_draw, line_height, Vec::new())
+    }
+
+    pub(crate) fn view_with_scrollbars<H, C>(
         &self,
         hit: H,
         editor_draw: C,
-        scrollbar_draw: Option<C>,
         line_height: f32,
+        scrollbars: Vec<Node<H, C>>,
     ) -> Node<H, C> {
         let cursor = crate::platform::CursorStyle::IBeam;
         match &self.view {
@@ -457,14 +461,12 @@ impl Editor {
                 box_()
                     .hit(hit)
                     .cursor(cursor)
+                    .relative()
                     .flex_1()
                     .overflow_x_hidden()
                     .h_full()
-                    .padding(doc.paddings)
-                    .child(text_leaf)
-                    .when_some(scrollbar_draw, |b, sb| {
-                        b.child(custom(sb).absolute().size_full())
-                    })
+                    .child(box_().size_full().padding(doc.paddings).child(text_leaf))
+                    .children(scrollbars)
             }
             ViewKind::Field => box_()
                 .hit(hit)

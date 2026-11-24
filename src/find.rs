@@ -708,7 +708,6 @@ impl FindBar {
         let query_editor = self.query.view(
             HitId::Editor(query_slot),
             CustomDraw::Editor(query_slot),
-            None,
             BODY_LINE + 2.,
         );
         let query_field = text_field_frame(
@@ -779,7 +778,6 @@ impl FindBar {
         let replace_editor = self.replacement.view(
             HitId::Editor(replace_slot),
             CustomDraw::Editor(replace_slot),
-            None,
             BODY_LINE + 2.,
         );
         let replace_field = text_field_frame(

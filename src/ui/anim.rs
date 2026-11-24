@@ -167,59 +167,6 @@ pub(crate) struct AnimSample<T> {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct TimedTransition<T> {
-    pub(crate) from: T,
-    pub(crate) target: T,
-    pub(crate) started_at: Instant,
-    pub(crate) duration: Duration,
-    pub(crate) easing: Easing,
-}
-
-impl<T: Lerp> TimedTransition<T> {
-    pub(crate) fn settled(value: T, now: Instant) -> Self {
-        Self {
-            from: value,
-            target: value,
-            started_at: now,
-            duration: Duration::ZERO,
-            easing: Easing::Linear,
-        }
-    }
-
-    pub(crate) fn sample(&self, now: Instant) -> (T, bool) {
-        if self.from == self.target || self.duration.is_zero() {
-            return (self.target, false);
-        }
-        let elapsed = now.saturating_duration_since(self.started_at);
-        if elapsed >= self.duration {
-            (self.target, false)
-        } else {
-            let linear = elapsed.as_secs_f32() / self.duration.as_secs_f32();
-            (self.from.lerp(self.target, self.easing.sample(linear)), true)
-        }
-    }
-
-    pub(crate) fn start(
-        &mut self,
-        from: T,
-        target: T,
-        duration: Duration,
-        easing: Easing,
-        now: Instant,
-    ) {
-        self.from = from;
-        self.target = target;
-        self.started_at = now;
-        self.duration = duration;
-        self.easing = easing;
-    }
-
-    pub(crate) fn settle(&mut self, target: T, now: Instant) {
-        self.start(target, target, Duration::ZERO, Easing::Linear, now);
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
 struct AnimTrack<T> {
     from: T,
     target: T,
@@ -511,25 +458,6 @@ mod tests {
             assert!(current >= previous - 1e-4, "not monotonic at {step}");
             previous = current;
         }
-    }
-
-    #[test]
-    fn timed_transition_samples_interpolates_and_settles() {
-        let t0 = Instant::now();
-        let mut tr = TimedTransition::settled(0.0_f32, t0);
-        assert_eq!(tr.sample(t0), (0.0, false));
-
-        tr.start(0.0, 10.0, Duration::from_millis(100), Easing::Linear, t0);
-        let (mid, running) = tr.sample(t0 + Duration::from_millis(50));
-        assert!(running);
-        assert!((mid - 5.0).abs() < 1e-4);
-
-        let (end, running) = tr.sample(t0 + Duration::from_millis(100));
-        assert!(!running);
-        assert_eq!(end, 10.0);
-
-        tr.settle(3.0, t0 + Duration::from_millis(120));
-        assert_eq!(tr.sample(t0 + Duration::from_millis(120)), (3.0, false));
     }
 
     #[test]

@@ -322,12 +322,9 @@ impl Dialogs {
 
     fn render_go_to_body(&self, focus: Focus, p: Palette, ui: &UiState) -> Node {
         let slot = EditorSlot::GoToLine;
-        let line_editor = self.line.view(
-            HitId::Editor(slot),
-            CustomDraw::Editor(slot),
-            None,
-            BODY_LINE + 2.,
-        );
+        let line_editor = self
+            .line
+            .view(HitId::Editor(slot), CustomDraw::Editor(slot), BODY_LINE + 2.);
         let field = text_field_frame(
             p,
             HitId::Editor(slot),

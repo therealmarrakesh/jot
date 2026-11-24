@@ -1,3 +1,4 @@
+use crate::geom::Axis;
 use crate::menu::MenuKind;
 use crate::tabs::TabId;
 
@@ -12,7 +13,6 @@ pub(crate) enum EditorSlot {
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum CustomDraw {
     Editor(EditorSlot),
-    Scrollbar,
     StatusSpacer,
 }
 
@@ -38,6 +38,8 @@ pub(crate) enum HitId {
     ThemeToggle,
     EditorArea,
     Editor(EditorSlot),
+    ScrollTrack(Axis),
+    ScrollThumb(Axis),
     FieldClear(EditorSlot),
     FindCard,
     FindToggleReplace,
@@ -68,6 +70,8 @@ pub(crate) enum AnimKey {
     DialogFadeOut(usize),
     FindShow(usize),
     FindHide(usize),
+    ScrollOpacity,
+    ScrollThickness(Axis),
 }
 
 impl From<HitId> for AnimKey {

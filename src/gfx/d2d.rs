@@ -360,14 +360,6 @@ pub(crate) struct PaintQuad {
     pub(crate) border_color: Rgba,
 }
 
-impl PaintQuad {
-    #[inline]
-    pub(crate) fn corner_radii(mut self, radii: Corners) -> Self {
-        self.corner_radii = radii;
-        self
-    }
-}
-
 #[inline]
 pub(crate) fn fill(bounds: Rect, background: Rgba) -> PaintQuad {
     PaintQuad {

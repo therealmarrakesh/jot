@@ -17,8 +17,8 @@ use crate::ids::{CustomDraw, EditorSlot, Frame, HitId, Node, UiState};
 use crate::keytips::KeyTip;
 use crate::menu::{MenuBar, MenuOutcome};
 use crate::platform::{
-    CursorStyle, Jobs, Key, KeyEvent, Modifiers, MouseButton, NativeWindow, SystemSettings,
-    TimerHandle, WindowControlArea, WindowId, clipboard, format_local_time_date,
+    Jobs, Key, KeyEvent, Modifiers, MouseButton, NativeWindow, SystemSettings, TimerHandle,
+    WindowControlArea, WindowId, clipboard, format_local_time_date,
 };
 
 struct SystemClipboard;
@@ -240,15 +240,7 @@ impl MainWindow {
     }
 
     fn sync_cursor(&self, pos: Point) {
-        let cursor = if !self.menu_bar.is_open()
-            && !self.dialogs.is_open()
-            && self.active_editor().hits_scrollbar_track(pos)
-        {
-            CursorStyle::Arrow
-        } else {
-            self.ui.frame().cursor_at(pos)
-        };
-        self.native.set_cursor(cursor);
+        self.native.set_cursor(self.ui.frame().cursor_at(pos));
     }
 
     #[cfg(test)]
@@ -883,6 +875,16 @@ impl MainWindow {
 
         let dragging_left = pressed_button == Some(MouseButton::Left);
         let active_slot = self.active_slot();
+        if let Some(axis) = self.active_editor().scrollbar_drag_axis() {
+            let track_rect = self.ui.frame().rect_of(HitId::ScrollTrack(axis));
+            if let Some(Some(notify)) = self.with_editor(active_slot, cx.jobs, |ed, timers| {
+                ed.on_scrollbar_mouse_move(pos, dragging_left, track_rect, timers)
+            }) {
+                self.dirty |= notify;
+                self.sync_cursor(pos);
+                return;
+            }
+        }
         if let Some(slot) = self.focused_editor_slot()
             && slot != active_slot
             && self
@@ -896,7 +898,6 @@ impl MainWindow {
         let active_focused = self.focus == Focus::Editor(active_slot);
         if (!self.menu_bar.is_open() && !self.dialogs.is_open())
             || self.active_editor().is_selecting()
-            || self.active_editor().is_scrollbar_dragging()
         {
             self.dirty |= self
                 .with_editor(active_slot, cx.jobs, |ed, timers| {
@@ -914,7 +915,6 @@ impl MainWindow {
         if self.strip.is_frozen() {
             self.dirty |= self.strip.thaw(self.tabs.len());
         }
-        self.dirty |= self.active_editor_mut().on_mouse_leave();
     }
 
     pub(crate) fn on_capture_lost(&mut self) {
@@ -1039,6 +1039,20 @@ impl MainWindow {
                     }
                     return;
                 }
+                Some(HitId::ScrollThumb(axis)) if self.active_editor().scrollbar_interactive(axis) => {
+                    if let Some(track) = self.ui.frame().rect_of(HitId::ScrollTrack(axis)) {
+                        self.active_editor_mut()
+                            .on_scrollbar_mouse_down(axis, true, pos, track);
+                    }
+                    return;
+                }
+                Some(HitId::ScrollTrack(axis)) if self.active_editor().scrollbar_interactive(axis) => {
+                    if let Some(track) = self.ui.frame().rect_of(HitId::ScrollTrack(axis)) {
+                        self.active_editor_mut()
+                            .on_scrollbar_mouse_down(axis, false, pos, track);
+                    }
+                    return;
+                }
                 _ => {}
             }
         } else if in_menu_ui {
@@ -1094,16 +1108,21 @@ impl MainWindow {
         }
 
         let active_slot = self.active_slot();
+        if let Some(axis) = self.active_editor().scrollbar_drag_axis() {
+            let track_rect = self.ui.frame().rect_of(HitId::ScrollTrack(axis));
+            self.active_editor_mut()
+                .on_scrollbar_mouse_up(pos, track_rect);
+        }
         if let Some(slot) = self.focused_editor_slot()
             && slot != active_slot
         {
             self.with_editor(slot, cx.jobs, |ed, timers| {
-                ed.on_mouse_up(button, pos, timers);
+                ed.on_mouse_up(button, timers);
             });
         }
         let open_ctx = self
             .with_editor(active_slot, cx.jobs, |ed, timers| {
-                ed.on_mouse_up(button, pos, timers)
+                ed.on_mouse_up(button, timers)
             })
             .flatten();
         if let Some(anchor) = open_ctx {
@@ -1599,7 +1618,7 @@ impl MainWindow {
         let find_node = self
             .find
             .render(logical.width, self.focused_editor_slot(), p, &mut self.ui);
-        let editor_node = self.editor_area(find_node, p);
+        let editor_node = self.editor_area(find_node, now, p, jobs);
         let status_node = status_metrics.map(|m| self.status_bar(m, p));
         let menu_popup = self.menu_bar.render_popup(p, ts, &mut self.ui);
         let dialog_node = self.dialogs.render(self.focus, p, &mut self.ui);
@@ -1644,7 +1663,6 @@ impl MainWindow {
         let show_selection = editor_focused || self.menu_bar.is_open() || self.find.is_open();
         let caret_hidden = self.menu_bar.access_active();
         let mut editor_needs_redraw = false;
-        let mut editor_needs_vsync = false;
 
         self.active_editor_mut().set_caret_height(caret_height);
         self.active_editor_mut().set_caret_hidden(caret_hidden);
@@ -1665,8 +1683,8 @@ impl MainWindow {
                     (&field_style, f, f)
                 }
             };
-            if let Some(outcome) = self.with_editor(slot, jobs, |ed, timers| {
-                ed.prepare(
+            if let Some(ed) = self.editor_by_slot_mut(slot) {
+                let outcome = ed.prepare(
                     rect,
                     EditorPaintParams {
                         style,
@@ -1675,20 +1693,14 @@ impl MainWindow {
                         focused,
                         show_selection: show_sel,
                         scale,
-                        reduce_motion,
                         caret_width_px,
-                        now,
                     },
                     ts,
-                    timers,
-                )
-            }) {
+                );
                 editor_needs_redraw |= outcome.needs_redraw;
-                editor_needs_vsync |= outcome.needs_vsync;
             }
         }
 
-        let active = self.active;
         let tabs = &self.tabs;
         let find = &self.find;
         let dialogs = &self.dialogs;
@@ -1707,9 +1719,6 @@ impl MainWindow {
                     if let Some(ed) = ed {
                         ed.paint(p, renderer);
                     }
-                }
-                CustomDraw::Scrollbar => {
-                    tabs[active].data.editor.paint_scrollbar(renderer);
                 }
                 CustomDraw::StatusSpacer => {
                     let width = rect.size.width;
@@ -1737,8 +1746,7 @@ impl MainWindow {
         if let Some(ptr) = self.ui.pointer() {
             self.sync_cursor(ptr.pos);
         }
-        let needs_vsync =
-            ui_needs_vsync || editor_needs_vsync || editor_needs_redraw || needs_retry;
+        let needs_vsync = ui_needs_vsync || editor_needs_redraw || needs_retry;
         if needs_vsync {
             self.dirty = true;
         }
@@ -1816,14 +1824,27 @@ impl MainWindow {
             .child(separator(p))
     }
 
-    fn editor_area(&self, find: Option<Node>, p: Palette) -> Node {
+    fn editor_area(
+        &mut self,
+        find: Option<Node>,
+        now: Instant,
+        p: Palette,
+        jobs: &Jobs<AppEvent>,
+    ) -> Node {
         let slot = self.active_slot();
         let lh = self.line_height();
-        let editor_view = self.active_editor().view(
+        let wid = self.id();
+        let blink_timing = self.blink_timing;
+        let mut timers = WindowEditorTimers::new(jobs, wid, slot, blink_timing);
+        let scrollbars = self.tabs[self.active]
+            .data
+            .editor
+            .render_scrollbars(lh, p, now, &mut self.ui, &mut timers);
+        let editor_view = self.tabs[self.active].data.editor.view_with_scrollbars(
             HitId::Editor(slot),
             CustomDraw::Editor(slot),
-            Some(CustomDraw::Scrollbar),
             lh,
+            scrollbars,
         );
         box_()
             .hit(HitId::EditorArea)

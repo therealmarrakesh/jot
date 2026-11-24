@@ -5,8 +5,9 @@ use std::time::{Duration, Instant};
 use ropey::Rope;
 
 use crate::color::Rgba;
-use crate::geom::{Edges, Point, Rect, Size, point, size};
+use crate::geom::{Axis, Edges, Point, Rect, Size, point, size};
 use crate::gfx::{D2DRenderer, Font, TextStyle, TextSystem, fill};
+use crate::ids::{Node, UiState};
 use crate::platform::{Modifiers, MouseButton, TimerHandle};
 use crate::scrollbar::ScrollbarViewport;
 use crate::theme::Palette;
@@ -37,15 +38,12 @@ pub(crate) struct EditorPaintParams<'a> {
     pub(crate) focused: bool,
     pub(crate) show_selection: bool,
     pub(crate) scale: f32,
-    pub(crate) reduce_motion: bool,
     pub(crate) caret_width_px: u32,
-    pub(crate) now: Instant,
 }
 
 #[derive(Copy, Clone, Debug, Default)]
 pub(crate) struct EditorPaintOutcome {
     pub(crate) needs_redraw: bool,
-    pub(crate) needs_vsync: bool,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -371,23 +369,21 @@ impl FrameLayout {
 }
 
 fn scrollbar_viewport(
-    input_bounds: Rect,
+    input_size: Size,
     content_size: Size,
     paddings: Edges<f32>,
     soft_wrap: bool,
 ) -> ScrollbarViewport {
     ScrollbarViewport {
-        bounds: Rect::new(
-            point(input_bounds.origin.x, input_bounds.origin.y - paddings.top),
-            size(
-                input_bounds.size.width + paddings.right,
-                input_bounds.size.height + paddings.top + paddings.bottom,
-            ),
+        size: size(
+            input_size.width + paddings.right,
+            input_size.height + paddings.top + paddings.bottom,
         ),
         content_size: size(
             content_size.width + paddings.right,
             content_size.height + paddings.top + paddings.bottom,
         ),
+        horizontal_left: paddings.left,
         horizontal: !soft_wrap,
     }
 }
@@ -508,6 +504,105 @@ impl Editor {
         frame.hit_test(pos, self.model.text().len(), self.model.is_multi_line())
     }
 
+    pub(crate) fn on_scrollbar_mouse_down(
+        &mut self,
+        axis: Axis,
+        hit_thumb: bool,
+        position: Point,
+        track_rect: Rect,
+    ) -> bool {
+        let offset = self.scroll_offset();
+        let next = match &mut self.view {
+            ViewKind::Document(doc) => {
+                doc.scrollbar
+                    .on_mouse_down(axis, hit_thumb, position, track_rect, offset)
+            }
+            ViewKind::Field => None,
+        };
+        if let Some(next) = next {
+            self.reveal = None;
+            self.clamp_and_set_scroll_f64(next.x, f64::from(next.y));
+            true
+        } else {
+            false
+        }
+    }
+
+    pub(crate) fn on_scrollbar_mouse_move(
+        &mut self,
+        position: Point,
+        dragging_left: bool,
+        track_rect: Option<Rect>,
+        timers: &mut dyn EditorTimers,
+    ) -> Option<bool> {
+        let scroll = self.scroll_offset();
+        let ViewKind::Document(doc) = &mut self.view else {
+            return None;
+        };
+        let (next, notify) = doc.scrollbar.on_mouse_move(
+            position,
+            dragging_left,
+            track_rect,
+            scroll,
+            |delay| timers.after(delay, EditorTimer::ScrollbarDrag),
+        )?;
+        if let Some(next) = next {
+            self.reveal = None;
+            self.clamp_and_set_scroll_f64(next.x, f64::from(next.y));
+        }
+        Some(notify)
+    }
+
+    pub(crate) fn on_scrollbar_mouse_up(
+        &mut self,
+        position: Point,
+        track_rect: Option<Rect>,
+    ) -> bool {
+        let scroll = self.scroll_offset();
+        let next = match &mut self.view {
+            ViewKind::Document(doc) => doc.scrollbar.on_mouse_up(position, track_rect, scroll),
+            ViewKind::Field => None,
+        };
+        if let Some(next) = next {
+            self.reveal = None;
+            self.clamp_and_set_scroll_f64(next.x, f64::from(next.y));
+            true
+        } else {
+            false
+        }
+    }
+
+    pub(crate) fn render_scrollbars(
+        &mut self,
+        line_height: f32,
+        p: Palette,
+        now: Instant,
+        ui: &mut UiState,
+        timers: &mut dyn EditorTimers,
+    ) -> Vec<Node> {
+        let input_size = self.input_bounds.size;
+        if input_size.width <= 0. || input_size.height <= 0. {
+            return Vec::new();
+        }
+        let scroll = self.scroll_offset();
+        let content_width = self.content_width;
+        let ViewKind::Document(doc) = &mut self.view else {
+            return Vec::new();
+        };
+        let total_rows = doc.wrap.visual_row_count().max(1);
+        let content_h = (total_rows as f64 * f64::from(line_height.max(1.0)))
+            .max(f64::from(input_size.height)) as f32;
+        let vp = scrollbar_viewport(
+            input_size,
+            size(content_width, content_h),
+            doc.paddings,
+            doc.soft_wrap,
+        );
+        doc.scrollbar.render(vp, scroll, p, now, ui, |delay| {
+            timers.after(delay, EditorTimer::ScrollbarIdle)
+        })
+    }
+
     pub(crate) fn on_mouse_down(
         &mut self,
         button: MouseButton,
@@ -516,17 +611,6 @@ impl Editor {
         click_count: usize,
         timers: &mut dyn EditorTimers,
     ) {
-        if button == MouseButton::Left {
-            let offset = self.scroll_offset();
-            if let ViewKind::Document(doc) = &mut self.view
-                && let Some(next) = doc.scrollbar.on_mouse_down(position, offset)
-            {
-                self.reveal = None;
-                self.clamp_and_set_scroll_f64(next.x, f64::from(next.y));
-                return;
-            }
-        }
-
         self.model.commit_composition();
         self.model.break_coalescing();
         self.selecting = true;
@@ -564,25 +648,6 @@ impl Editor {
         focused: bool,
         timers: &mut dyn EditorTimers,
     ) -> bool {
-        let mut dirty = false;
-        let scroll = self.scroll_offset();
-        if let ViewKind::Document(doc) = &mut self.view {
-            let outcome = doc.scrollbar.on_mouse_move(
-                position,
-                dragging_left,
-                scroll,
-                |delay| timers.after(delay, EditorTimer::ScrollbarDrag),
-            );
-            if let Some(next) = outcome.new_offset {
-                self.reveal = None;
-                self.clamp_and_set_scroll_f64(next.x, f64::from(next.y));
-            }
-            if outcome.consumed {
-                return outcome.notify_now;
-            }
-            dirty |= outcome.notify_now;
-        }
-
         if dragging_left
             && self.selecting
             && focused
@@ -597,28 +662,17 @@ impl Editor {
                 doc.auto_scroll.update(delta.map(|d| -d), timers);
             }
             self.request_reveal(self.cursor(), aff, None, false);
-            dirty = true;
+            return true;
         }
-        dirty
+        false
     }
 
     pub(crate) fn on_mouse_up(
         &mut self,
         button: MouseButton,
-        position: Point,
         timers: &mut dyn EditorTimers,
     ) -> Option<Point> {
         let mut open_context_menu = None;
-        let scroll = self.scroll_offset();
-        let sb_next = match &mut self.view {
-            ViewKind::Document(doc) => doc.scrollbar.on_mouse_up(position, scroll),
-            ViewKind::Field => None,
-        };
-        if let Some(next) = sb_next {
-            self.reveal = None;
-            self.clamp_and_set_scroll_f64(next.x, f64::from(next.y));
-        }
-
         if button == MouseButton::Right
             && let ViewKind::Document(doc) = &mut self.view
             && let Some((pos, offset)) = doc.pending_context_menu.take()
@@ -630,13 +684,6 @@ impl Editor {
         }
         self.reset_pointer_selection_state();
         open_context_menu
-    }
-
-    pub(crate) fn on_mouse_leave(&mut self) -> bool {
-        match &mut self.view {
-            ViewKind::Document(doc) => doc.scrollbar.on_mouse_leave(),
-            ViewKind::Field => false,
-        }
     }
 
     pub(crate) fn on_scroll_wheel(
@@ -728,25 +775,19 @@ impl Editor {
         input_bounds: Rect,
         params: EditorPaintParams<'_>,
         ts: &TextSystem,
-        timers: &mut dyn EditorTimers,
     ) -> EditorPaintOutcome {
+        let prev_size = self.input_bounds.size;
         self.input_bounds = input_bounds;
         if matches!(self.view, ViewKind::Field) {
             self.prepare_field(input_bounds, params, ts);
             return EditorPaintOutcome::default();
         }
-        self.prepare_document(input_bounds, params, ts, timers)
+        self.prepare_document(input_bounds, prev_size, params, ts)
     }
 
     pub(crate) fn paint(&self, p: Palette, renderer: &mut D2DRenderer) {
         if let Some(frame) = self.frame.as_ref() {
             frame.paint(p, renderer);
-        }
-    }
-
-    pub(crate) fn paint_scrollbar(&self, renderer: &mut D2DRenderer) {
-        if let ViewKind::Document(doc) = &self.view {
-            doc.scrollbar.paint(renderer);
         }
     }
 
@@ -844,9 +885,9 @@ impl Editor {
     fn prepare_document(
         &mut self,
         input_bounds: Rect,
+        prev_size: Size,
         params: EditorPaintParams<'_>,
         ts: &TextSystem,
-        timers: &mut dyn EditorTimers,
     ) -> EditorPaintOutcome {
         let EditorPaintParams {
             style,
@@ -855,9 +896,7 @@ impl Editor {
             focused,
             show_selection,
             scale,
-            reduce_motion,
             caret_width_px,
-            now,
         } = params;
         let font = &style.font;
         let font_size = style.font_size;
@@ -866,10 +905,13 @@ impl Editor {
         let space_width = ts.measure(" ", &text_style);
         let text = self.model.text();
         let reveal_req = self.reveal.take();
+        let prev_content_width = self.content_width;
 
         let ViewKind::Document(doc) = &mut self.view else {
             unreachable!()
         };
+        let prev_content_height = doc.content_height_f64;
+        let prev_scroll_y = doc.scroll_y;
         let soft_wrap = doc.soft_wrap;
         let wrap_width = soft_wrap.then_some((input_bounds.size.width - RIGHT_MARGIN).max(1.0));
 
@@ -1049,16 +1091,14 @@ impl Editor {
             input_bounds.size,
         );
 
-        let vp = scrollbar_viewport(input_bounds, content_size, doc.paddings, soft_wrap);
-        let scroll_pt = point(self.scroll_x, doc.scroll_y as f32);
-        let needs_vsync = doc.scrollbar.prepare(
-            vp,
-            scroll_pt,
-            reduce_motion,
-            p,
-            now,
-            |delay| timers.after(delay, EditorTimer::ScrollbarIdle),
-        );
+        let scrollable = content_height_f64 > f64::from(input_bounds.size.height)
+            || (!soft_wrap && content_width > input_bounds.size.width);
+        let scrollbar_metrics_changed = scrollable
+            && (prev_size != input_bounds.size
+                || (prev_content_width - content_width).abs() > 0.5
+                || (prev_content_height - content_height_f64).abs() > 0.5
+                || (prev_scroll_y - doc.scroll_y).abs() > 0.5
+                || (prev_scroll_x - self.scroll_x).abs() > 0.5);
 
         let caret_rect = self.compute_caret_rect(
             content_bounds.origin,
@@ -1100,11 +1140,9 @@ impl Editor {
         }
         self.frame = Some(frame);
 
-        let needs_redraw = shaped_windowed && (self.scroll_x - prev_scroll_x).abs() > 1.0;
-        EditorPaintOutcome {
-            needs_redraw,
-            needs_vsync,
-        }
+        let needs_redraw = (shaped_windowed && (self.scroll_x - prev_scroll_x).abs() > 1.0)
+            || scrollbar_metrics_changed;
+        EditorPaintOutcome { needs_redraw }
     }
 
     fn compute_caret_rect(
