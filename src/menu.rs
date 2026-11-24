@@ -1462,16 +1462,7 @@ impl MenuBar {
         let offset = if has_commands { 0. } else { -hidden };
 
         let cmd_row = has_commands.then(|| render_command_row(open, p, ts, ui));
-        let main_rows = render_panel_rows(
-            open,
-            &open.panel,
-            open.motion.serial,
-            None,
-            bar,
-            has_commands,
-            p,
-            ui,
-        );
+        let main_rows = render_panel_rows(open, None, bar, p, ui);
         let sub_node = open
             .submenu
             .as_ref()
@@ -1543,10 +1534,9 @@ fn render_command_row(open: &OpenMenu, p: Palette, ts: &TextSystem, ui: &mut UiS
     let count = commands.len() as f32;
     let row_w = open.panel.width + 2. * COMMAND_OUTSET;
     let cell = ((row_w - (count - 1.)) / count).floor();
-    let ring = open.focused_command.filter(|_| open.focus_visible);
 
     let mut children = Vec::with_capacity(commands.len() * 2);
-    for (ix, button) in commands.iter().enumerate() {
+    for ix in 0..commands.len() {
         if ix > 0 {
             children.push(
                 box_()
@@ -1557,16 +1547,7 @@ fn render_command_row(open: &OpenMenu, p: Palette, ts: &TextSystem, ui: &mut UiS
                     .bg(p.menu_separator),
             );
         }
-        children.push(render_command_button(
-            p,
-            open.motion.serial,
-            ix,
-            button,
-            cell,
-            ring == Some(ix),
-            ts,
-            ui,
-        ));
+        children.push(render_command_button(open, ix, cell, p, ts, ui));
     }
 
     row()
@@ -1587,21 +1568,22 @@ fn render_command_row(open: &OpenMenu, p: Palette, ts: &TextSystem, ui: &mut UiS
         )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn render_command_button(
-    p: Palette,
-    serial: usize,
+    open: &OpenMenu,
     ix: usize,
-    button: &CommandButton,
     cell: f32,
-    focused: bool,
+    p: Palette,
     ts: &TextSystem,
     ui: &mut UiState,
 ) -> Node {
     let face_w = cell - 2. * (COMMAND_GAP + COMMAND_INSET);
-    let CommandButton { command, glyph } = button;
+    let CommandButton { command, glyph } = &open.commands[ix];
+    let focused = open.focus_visible && open.focused_command == Some(ix);
     let enabled = command.enabled;
-    let hit = HitId::MenuCommand { serial, ix };
+    let hit = HitId::MenuCommand {
+        serial: open.motion.serial,
+        ix,
+    };
     let bg = ui.brush(hit, subtle_brushes(p), enabled);
     let fg = if !enabled {
         p.text_disabled
@@ -1673,16 +1655,7 @@ fn render_submenu_popup(
     let sub_w = submenu.panel.width;
     let sub_h = submenu.panel.height();
     let hidden = sub_h * SUBMENU_CLOSED_RATIO * (1. - submenu.motion.unroll);
-    let rows = render_panel_rows(
-        open,
-        &submenu.panel,
-        submenu.motion.serial,
-        Some(submenu.ix),
-        0.,
-        false,
-        p,
-        ui,
-    );
+    let rows = render_panel_rows(open, Some(submenu), 0., p, ui);
 
     box_()
         .hit(HitId::SubmenuPanel)
@@ -1702,22 +1675,19 @@ fn render_submenu_popup(
         .when(submenu.motion.closing, Node::inert)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn render_panel_rows(
     open: &OpenMenu,
-    panel: &Panel,
-    serial: usize,
-    parent: Option<usize>,
+    sub: Option<&OpenSubmenu>,
     offset: f32,
-    fade: bool,
     p: Palette,
     ui: &mut UiState,
 ) -> Node {
-    let focus_visible = open.focus_visible && (parent.is_some() || !open.in_submenu());
-    let expanded = open
-        .live_submenu()
-        .filter(|_| parent.is_none())
-        .map(|s| s.ix);
+    let (panel, serial, is_sub, fade) = match sub {
+        Some(sub) => (&sub.panel, sub.motion.serial, true, false),
+        None => (&open.panel, open.motion.serial, false, !open.commands.is_empty()),
+    };
+    let focus_visible = open.focus_visible && (is_sub || !open.in_submenu());
+    let expanded = open.live_submenu().filter(|_| !is_sub).map(|s| s.ix);
 
     let rows: Vec<Node> = panel
         .entries
@@ -1730,9 +1700,10 @@ fn render_panel_rows(
                     .py(1.)
                     .child(box_().h(1.).bg(p.menu_separator));
             }
-            let hit = match parent {
-                Some(_) => HitId::SubmenuItem { serial, ix },
-                None => HitId::MenuItem { serial, ix },
+            let hit = if is_sub {
+                HitId::SubmenuItem { serial, ix }
+            } else {
+                HitId::MenuItem { serial, ix }
             };
             let ring = focus_visible && panel.focused == Some(ix);
             let face = render_row_face(

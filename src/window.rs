@@ -6,7 +6,9 @@ use crate::color::transparent_black;
 use crate::command::{AppCommand, Command, app_shortcut, edit_shortcut};
 use crate::dialog::{DialogKind, Dialogs, Prompt};
 use crate::document::{self, DocPath, Format, PathKey};
-use crate::editor::{Editor, EditorPaintStyle, EditorTimer, EditorTimers, RopeExt as _};
+use crate::editor::{
+    Editor, EditorPaintParams, EditorPaintStyle, EditorTimer, EditorTimers, RopeExt as _,
+};
 use crate::files::FileRequest;
 use crate::find::FindBar;
 use crate::geom::{Edges, Point, Rect, Size, point, size};
@@ -1645,14 +1647,16 @@ impl MainWindow {
                             let mut timers = WindowEditorTimers::new(jobs, wid, slot);
                             let outcome = ed.paint(
                                 rect,
-                                style,
-                                p,
-                                window_active,
-                                focused,
-                                show_sel,
-                                scale,
-                                reduce_motion,
-                                now,
+                                EditorPaintParams {
+                                    style,
+                                    palette: p,
+                                    window_active,
+                                    focused,
+                                    show_selection: show_sel,
+                                    scale,
+                                    reduce_motion,
+                                    now,
+                                },
                                 ts,
                                 renderer,
                                 &mut timers,

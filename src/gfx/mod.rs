@@ -1,3 +1,5 @@
+#![allow(unsafe_code)]
+
 pub(crate) mod d2d;
 pub(crate) mod text;
 pub(crate) mod wrap;

@@ -1,3 +1,5 @@
+#![allow(unsafe_code)]
+
 pub(crate) mod clipboard;
 mod codepage;
 pub(crate) mod dialogs;

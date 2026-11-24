@@ -5,7 +5,7 @@ pub(crate) mod wrap;
 
 pub(crate) use buffer::RopeExt;
 pub(crate) use ropey::Rope;
-pub(crate) use view::EditorPaintStyle;
+pub(crate) use view::{EditorPaintParams, EditorPaintStyle};
 
 use std::ops::Range;
 use std::time::Duration;

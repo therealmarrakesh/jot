@@ -30,6 +30,18 @@ pub(crate) struct EditorPaintStyle {
     pub(crate) color: Rgba,
 }
 
+#[derive(Copy, Clone)]
+pub(crate) struct EditorPaintParams<'a> {
+    pub(crate) style: &'a EditorPaintStyle,
+    pub(crate) palette: Palette,
+    pub(crate) window_active: bool,
+    pub(crate) focused: bool,
+    pub(crate) show_selection: bool,
+    pub(crate) scale: f32,
+    pub(crate) reduce_motion: bool,
+    pub(crate) now: Instant,
+}
+
 #[derive(Copy, Clone, Debug, Default)]
 pub(crate) struct EditorPaintOutcome {
     pub(crate) needs_redraw: bool,
@@ -550,22 +562,24 @@ impl Editor {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn paint(
         &mut self,
         input_bounds: Rect,
-        style: &EditorPaintStyle,
-        p: Palette,
-        window_active: bool,
-        focused: bool,
-        show_selection: bool,
-        scale: f32,
-        reduce_motion: bool,
-        now: Instant,
+        params: EditorPaintParams<'_>,
         ts: &TextSystem,
         renderer: &mut D2DRenderer,
         timers: &mut dyn EditorTimers,
     ) -> EditorPaintOutcome {
+        let EditorPaintParams {
+            style,
+            palette: p,
+            window_active,
+            focused,
+            show_selection,
+            scale,
+            reduce_motion,
+            now,
+        } = params;
         let font = &style.font;
         let font_size = style.font_size;
         let text_style = TextStyle::new(font.clone(), font_size);

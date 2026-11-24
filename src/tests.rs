@@ -1,3 +1,5 @@
+#![allow(unsafe_code)]
+
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::{

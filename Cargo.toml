@@ -58,3 +58,9 @@ windows-numerics = "0.3"
 lto = true
 codegen-units = 1
 debug = "line-tables-only"
+
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+too_many_arguments = "deny"
