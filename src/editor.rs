@@ -3,7 +3,7 @@ use std::ops::Range;
 use std::time::{Duration, Instant};
 
 use crate::geom::{Axis, Edges, Point, Rect, Rgba, Size, point, size};
-use crate::gfx::{Canvas, TextStyle, TextSystem};
+use crate::gfx::{Canvas, TextStyle, TextSystem, fill};
 use crate::platform::{CursorStyle, Modifiers, MouseButton, TimerHandle};
 use crate::text::{
     Bias, EditPolicy, LineChange, Rope, RopeExt as _, TextModel, ValidateFn,
@@ -12,7 +12,7 @@ use crate::text::{
 use crate::theme::Palette;
 use crate::types::SharedStr;
 use crate::ui::{AnimKey, AppNode, AppUi, Easing, EditorSlot, HitId, Node, box_, custom, row};
-use crate::wrap::{FrameLayout, LineRanges, RowLayout, VisibleLine, VisualRow, WrapIndex};
+use crate::wrap::{FrameLayout, Viewport, WrapIndex};
 
 const RIGHT_MARGIN: f32 = 10.0;
 
@@ -136,7 +136,6 @@ struct DocumentView {
     paddings: Edges<f32>,
     scrollbar: ScrollbarState,
     auto_scroll: AutoScroll,
-    longest_line_cache: Option<(LongestLineCache, f32)>,
     pending_context_menu: Option<(Point, usize)>,
 }
 
@@ -149,7 +148,6 @@ impl DocumentView {
             paddings: opts.paddings,
             scrollbar: ScrollbarState::default(),
             auto_scroll: AutoScroll::default(),
-            longest_line_cache: None,
             pending_context_menu: None,
         }
     }
@@ -165,7 +163,7 @@ pub(crate) struct Editor {
     scroll: Scroll,
     reveal: Option<RevealRequest>,
     input_bounds: Rect,
-    frame: Option<FrameLayout>,
+    frame: Option<Frame>,
     pub(crate) caret_height: f32,
     pub(crate) caret_hidden: bool,
     placeholder: SharedStr,
@@ -216,7 +214,7 @@ impl Editor {
         &self.model
     }
 
-    fn fresh_frame(&self) -> Option<&FrameLayout> {
+    fn fresh_frame(&self) -> Option<&Frame> {
         self.frame
             .as_ref()
             .filter(|f| f.revision == self.model.revision())
@@ -511,13 +509,15 @@ impl Editor {
         let Some(frame) = self.fresh_frame() else {
             return (0, false);
         };
-        frame.hit_test(
-            pos,
-            self.scroll.x,
-            self.scroll.y,
-            self.model.text().len(),
-            self.model.is_multi_line(),
-        )
+        let rel = pos
+            - frame.content_bounds.origin
+            - point(
+                self.scroll.x - frame.scroll_x,
+                (self.scroll.y - frame.scroll_y) as f32,
+            );
+        frame
+            .layout
+            .hit_test(rel, self.model.text().len(), self.model.is_multi_line())
     }
 
     pub(crate) fn on_mouse_down(
@@ -730,8 +730,11 @@ impl Editor {
 
     pub(crate) fn ime_caret_bounds(&self) -> Option<Rect> {
         let frame = self.fresh_frame()?;
+        let origin = frame.content_bounds.origin;
+        let selection = self.model.selection().range();
         frame
-            .bounds_for_range(self.model.text(), self.model.selection().range())
+            .layout
+            .bounds_for_range(self.model.text(), selection, frame.last_cursor, origin)
             .or(Some(frame.caret_rect))
     }
 
@@ -812,8 +815,9 @@ impl Editor {
         let frame = self.fresh_frame()?;
         let text = self.model.text();
         let pt = text.offset_to_point(offset);
-        let row_layout = frame.row_layout(pt.row)?;
-        let pos = row_layout.position_for_index(pt.column, frame.line_height, end_affinity)?;
+        let row_layout = frame.layout.row_layout(pt.row)?;
+        let line_height = frame.layout.line_height();
+        let pos = row_layout.position_for_index(pt.column, line_height, end_affinity)?;
         Some((pos.x, pt.column))
     }
 
@@ -837,7 +841,7 @@ impl Editor {
         let lh = self
             .frame
             .as_ref()
-            .map_or(doc.last_line_height, |f| f.line_height)
+            .map_or(doc.last_line_height, |f| f.layout.line_height())
             .max(1.0);
         ((self.input_bounds.size.height / lh).floor() as isize).max(1)
     }
@@ -868,11 +872,12 @@ impl Editor {
             let next_pt = doc.wrap.display_to_point(text, next_disp);
             let line_start = text.line_start_offset(next_pt.row);
             if let Some(frame) = self.fresh_frame()
-                && let Some(row_layout) = frame.row_layout(next_pt.row)
+                && let Some(row_layout) = frame.layout.row_layout(next_pt.row)
             {
+                let line_height = frame.layout.line_height();
                 if let Some((local_ix, affinity)) = row_layout.closest_index_for_position(
-                    point(pref_x, next_disp.sub_row as f32 * frame.line_height),
-                    frame.line_height,
+                    point(pref_x, next_disp.sub_row as f32 * line_height),
+                    line_height,
                 ) {
                     target_offset = line_start + local_ix;
                     target_affinity = affinity;
@@ -1038,24 +1043,6 @@ impl Editor {
     }
 }
 
-const HUGE_UNWRAPPED_LINE_BYTES: usize = 4096;
-const HORIZONTAL_WINDOW_PAD: f32 = 256.0;
-
-#[derive(Clone, Debug, PartialEq)]
-struct LongestLineCache {
-    revision: u64,
-    row: usize,
-    len: usize,
-    style: TextStyle,
-    wrap_width: Option<f32>,
-}
-
-struct VisibleSlice {
-    lines: Range<usize>,
-    top_rel: f32,
-    shape_rows: Range<usize>,
-}
-
 fn snap_point(pt: Point, scale: f32) -> Point {
     point(
         (pt.x * scale).round() / scale,
@@ -1068,36 +1055,6 @@ fn content_width_with_margin(max_line_w: f32, viewport_width: f32) -> f32 {
         max_line_w + RIGHT_MARGIN
     } else {
         max_line_w
-    }
-}
-
-impl DocumentView {
-    fn visible_slice(&self, scroll_y: f64, line_height: f32, viewport_height: f32) -> VisibleSlice {
-        let total_rows = self.wrap.visual_row_count();
-        let total_lines = self.wrap.line_count();
-        if total_rows == 0 || total_lines == 0 {
-            return VisibleSlice {
-                lines: 0..0,
-                top_rel: 0.0,
-                shape_rows: 0..0,
-            };
-        }
-        let lh = f64::from(line_height);
-        let top = (-scroll_y).max(0.0);
-        let bottom = top + f64::from(viewport_height);
-        let first_row = ((top / lh).floor() as usize).min(total_rows - 1);
-        let last_row = ((bottom / lh).ceil() as usize).min(total_rows - 1);
-        let shape_rows = first_row.saturating_sub(2)..(last_row + 3).min(total_rows);
-
-        let start_line = self.wrap.visual_row_to_line(first_row);
-        let end_line = self.wrap.visual_row_to_line(last_row);
-        let first_vis_row = self.wrap.first_visual_row(start_line);
-        let top_rel = (first_vis_row as f64 * lh + scroll_y) as f32;
-        VisibleSlice {
-            lines: start_line..(end_line + 2).min(total_lines),
-            top_rel,
-            shape_rows,
-        }
     }
 }
 
@@ -1117,51 +1074,77 @@ impl Editor {
     }
 
     pub(crate) fn paint(&self, p: Palette, canvas: &mut Canvas) {
-        if let Some(frame) = self.frame.as_ref() {
-            frame.paint(p, canvas);
-        }
+        let Some(frame) = self.frame.as_ref() else {
+            return;
+        };
+        canvas.with_clip(frame.input_bounds, |canvas| {
+            for &rect in &frame.selection_rects {
+                canvas.paint_quad(fill(rect, p.selection));
+            }
+            let origin = frame.content_bounds.origin;
+            let marked = frame.marked_range.as_ref();
+            frame.layout.paint(origin, frame.text_color, marked, canvas);
+            if frame.show_caret {
+                canvas.paint_quad(fill(frame.caret_rect, p.caret));
+            }
+        });
     }
 
     fn finish_frame(
         &mut self,
-        mut frame: FrameLayout,
+        layout: FrameLayout,
+        wrap_width: Option<f32>,
+        text_color: Rgba,
         head_pt: Point,
         is_empty_field: bool,
         params: EditorPaintParams<'_>,
     ) {
-        // Vertical scroll is baked into each VisibleLine::top in f64 so D2D coordinates stay exact on huge files.
-        frame.scroll_x = self.scroll.x;
-        frame.scroll_y = self.scroll.y;
-        frame.content_bounds = Rect::new(
-            point(
-                frame.input_bounds.origin.x + self.scroll.x,
-                frame.input_bounds.origin.y,
-            ),
-            frame.input_bounds.size,
+        // Vertical scroll is baked into each line's top in f64 so D2D coordinates stay exact on
+        // huge files.
+        let input_bounds = self.input_bounds;
+        let content_bounds = Rect::new(
+            point(input_bounds.origin.x + self.scroll.x, input_bounds.origin.y),
+            input_bounds.size,
         );
-        frame.caret_rect = self.compute_caret_rect(
-            frame.content_bounds.origin,
+        let caret_rect = self.compute_caret_rect(
+            content_bounds.origin,
             head_pt,
-            frame.line_height,
+            layout.line_height(),
             params.scale,
             params.caret_width_px,
         );
-        frame.show_caret = params.focused
+        let show_caret = params.focused
             && params.window_active
             && self.blink.visible()
             && !self.caret_hidden
             && (self.model.selection().is_empty() || self.model.composition().is_some());
-        frame.marked_range = (!is_empty_field)
+        let marked_range = (!is_empty_field)
             .then(|| self.model.composition().map(|c| c.start..c.end))
             .flatten();
-        if params.window_active
+        let selection_rects = if params.window_active
             && params.show_selection
             && self.model.composition().is_none()
             && !self.model.selection().is_empty()
         {
-            frame.selection_rects = frame.range_rects(&self.model.selection().range());
-        }
-        self.frame = Some(frame);
+            layout.range_rects(&self.model.selection().range(), content_bounds.origin)
+        } else {
+            Vec::new()
+        };
+        self.frame = Some(Frame {
+            layout,
+            revision: self.model.revision(),
+            scroll_x: self.scroll.x,
+            scroll_y: self.scroll.y,
+            input_bounds,
+            content_bounds,
+            wrap_width,
+            text_color,
+            caret_rect,
+            show_caret,
+            selection_rects,
+            marked_range,
+            last_cursor: self.model.cursor(),
+        });
     }
 
     fn prepare_field(&mut self, input_bounds: Rect, params: EditorPaintParams<'_>, ts: &TextSystem) {
@@ -1176,12 +1159,13 @@ impl Editor {
             (self.model.text().to_string().into(), style.color)
         };
         let shaped = ts.shape_row(display_str, text_style);
-        let row_layout = RowLayout::from_shaped(vec![shaped]);
+        let layout =
+            FrameLayout::single_row(shaped, self.model.text().len(), line_height, space_width);
         let head = self.model.cursor();
-        let head_pt = row_layout
-            .position_for_index(head, line_height, false)
+        let head_pt = layout
+            .position_for_offset(self.model.text(), head, false)
             .unwrap_or(Point::ZERO);
-        let max_line_w = row_layout.size(line_height).width.max(head_pt.x);
+        let max_line_w = layout.width().max(head_pt.x);
         self.scroll.content_w = content_width_with_margin(max_line_w, input_bounds.size.width);
         if self.reveal.take().is_some() {
             self.scroll.x =
@@ -1189,31 +1173,7 @@ impl Editor {
         }
         self.scroll.x =
             clamp_horizontal_scroll(self.scroll.x, self.scroll.content_w, input_bounds.size.width);
-        let text_len = self.model.text().len();
-        let frame = FrameLayout {
-            revision: self.model.revision(),
-            scroll_x: 0.0,
-            scroll_y: 0.0,
-            input_bounds,
-            content_bounds: Rect::ZERO,
-            first_line: 0,
-            lines: vec![VisibleLine {
-                byte_offset: 0,
-                top: 0.0,
-                layout: row_layout,
-            }],
-            visible_byte_range: 0..text_len,
-            line_height,
-            wrap_width: None,
-            space_width,
-            text_color,
-            caret_rect: Rect::ZERO,
-            show_caret: false,
-            selection_rects: Vec::new(),
-            marked_range: None,
-            last_cursor: head,
-        };
-        self.finish_frame(frame, head_pt, is_empty, params);
+        self.finish_frame(layout, None, text_color, head_pt, is_empty, params);
     }
 
     fn prepare_document(
@@ -1226,7 +1186,6 @@ impl Editor {
         let text_style = &style.text;
         let line_height = style.line_height.max(1.0);
         let face = ts.face(text_style);
-        let space_width = face.space_width();
         let text = self.model.text();
         let reveal_req = self.reveal.take();
         let head = self.model.cursor();
@@ -1290,24 +1249,7 @@ impl Editor {
         if soft_wrap {
             self.scroll.x = 0.0;
         } else {
-            let longest_row = doc.wrap.longest_line();
-            let slice = text.slice_line(longest_row);
-            let key = LongestLineCache {
-                revision: self.model.revision(),
-                row: longest_row,
-                len: slice.len(),
-                style: text_style.clone(),
-                wrap_width,
-            };
-            max_line_w = match &doc.longest_line_cache {
-                Some((cached, w)) if *cached == key => *w,
-                _ => {
-                    let s: Cow<str> = slice.into();
-                    let w = face.unwrapped_width(&s);
-                    doc.longest_line_cache = Some((key, w));
-                    w
-                }
-            };
+            max_line_w = doc.wrap.longest_line_width(text, ts);
             if reveal_req.is_some() {
                 let pt = text.offset_to_point(head);
                 let line = text.slice_line(pt.row);
@@ -1321,41 +1263,27 @@ impl Editor {
             self.scroll.x = clamp_horizontal_scroll(self.scroll.x, est_w, input_bounds.size.width);
         }
 
-        let vis = doc.visible_slice(self.scroll.y, line_height, input_bounds.size.height);
-        let first_line = vis.lines.start;
-        let start_off = text.line_start_offset(vis.lines.start);
-        let end_off = text.line_end_offset(vis.lines.end.saturating_sub(1));
-
         let prev_scroll_x = self.scroll.x;
-        let (lines, shaped_windowed) =
-            self.shape_visible_lines(vis, style, line_height, input_bounds.size.width, ts);
-
-        if !soft_wrap {
-            for line in &lines {
-                max_line_w = max_line_w.max(line.layout.size(line_height).width);
-            }
-        }
-
-        let doc = self.doc.as_deref().expect("document view");
-        let text = self.model.text();
-        let head_pt = {
-            let row = text.offset_to_point(head).row;
-            row.checked_sub(first_line)
-                .and_then(|vi| lines.get(vi))
-                .and_then(|line| {
-                    let local = head.saturating_sub(line.byte_offset);
-                    line.layout
-                        .position_for_index(local, line_height, end_affinity)
-                        .map(|pt| point(pt.x, line.top + pt.y))
-                })
-                .unwrap_or_else(|| {
-                    let disp = doc.wrap.offset_to_display(text, head, end_affinity);
-                    point(
-                        0.0,
-                        (disp.row as f64 * f64::from(line_height) + self.scroll.y) as f32,
-                    )
-                })
+        let view = Viewport {
+            size: input_bounds.size,
+            scroll_x: self.scroll.x,
+            scroll_y: self.scroll.y,
         };
+        let (layout, shaped_windowed) =
+            doc.wrap
+                .layout_visible(text, view, head, end_affinity, line_height, ts);
+        if !soft_wrap {
+            max_line_w = max_line_w.max(layout.width());
+        }
+        let head_pt = layout
+            .position_for_offset(text, head, end_affinity)
+            .unwrap_or_else(|| {
+                let disp = doc.wrap.offset_to_display(text, head, end_affinity);
+                point(
+                    0.0,
+                    (disp.row as f64 * f64::from(line_height) + self.scroll.y) as f32,
+                )
+            });
         if !soft_wrap {
             max_line_w = max_line_w.max(head_pt.x);
         }
@@ -1371,171 +1299,9 @@ impl Editor {
             clamp_horizontal_scroll(self.scroll.x, self.scroll.content_w, input_bounds.size.width)
         };
 
-        let frame = FrameLayout {
-            revision: self.model.revision(),
-            scroll_x: 0.0,
-            scroll_y: 0.0,
-            input_bounds,
-            content_bounds: Rect::ZERO,
-            first_line,
-            lines,
-            visible_byte_range: start_off..end_off,
-            line_height,
-            wrap_width,
-            space_width,
-            text_color: style.color,
-            caret_rect: Rect::ZERO,
-            show_caret: false,
-            selection_rects: Vec::new(),
-            marked_range: None,
-            last_cursor: head,
-        };
-        self.finish_frame(frame, head_pt, false, params);
+        self.finish_frame(layout, wrap_width, style.color, head_pt, false, params);
 
         shaped_windowed && (self.scroll.x - prev_scroll_x).abs() > 1.0
-    }
-
-    fn shape_visible_lines(
-        &self,
-        vis: VisibleSlice,
-        style: &EditorPaintStyle,
-        line_height: f32,
-        viewport_width: f32,
-        ts: &TextSystem,
-    ) -> (Vec<VisibleLine>, bool) {
-        let doc = self.doc.as_deref().expect("document view");
-        let text = self.model.text();
-        let text_style = &style.text;
-        let caret = self.model.cursor();
-        let mut result = Vec::with_capacity(vis.lines.len());
-        let mut shaped_windowed = false;
-        let mut y = vis.top_rel;
-
-        for buf_line in vis.lines {
-            let line_slice = text.slice_line(buf_line);
-            let line_len = line_slice.len();
-            let line_byte_start = text.line_start_offset(buf_line);
-            let wrapped = doc.wrap.line(buf_line).expect("wrapped line exists");
-            let total_sub_rows = wrapped.row_count();
-
-            let layout =
-                if !doc.soft_wrap && total_sub_rows == 1 && line_len > HUGE_UNWRAPPED_LINE_BYTES {
-                    let line_str: Cow<str> = line_slice.into();
-                    let min_x = (-self.scroll.x - HORIZONTAL_WINDOW_PAD).max(0.0);
-                    let max_x =
-                        (-self.scroll.x + viewport_width + HORIZONTAL_WINDOW_PAD).max(min_x);
-                    if let Some((mut start_b, mut end_b, start_x, total_w)) =
-                        ts.face(text_style).horizontal_window(&line_str, min_x, max_x)
-                    {
-                        if caret >= line_byte_start && caret <= line_byte_start + line_len {
-                            let local_caret = caret - line_byte_start;
-                            if local_caret < start_b {
-                                start_b = local_caret;
-                            } else if local_caret > end_b {
-                                end_b = local_caret;
-                            }
-                        }
-                        let slice_str: SharedStr = line_str[start_b..end_b].to_string().into();
-                        let shaped = ts.shape_row(slice_str, text_style);
-                        let vrow = VisualRow::Windowed {
-                            start_byte: start_b,
-                            end_byte: end_b,
-                            total_bytes: line_len,
-                            start_x,
-                            total_width: total_w,
-                            line: shaped,
-                        };
-                        shaped_windowed = true;
-                        RowLayout::from_slice(vec![vrow], 0, 0, 1, 0.0)
-                    } else {
-                        self.shape_wrapped_line(buf_line, &vis.shape_rows, text_style, ts)
-                    }
-                } else {
-                    self.shape_wrapped_line(buf_line, &vis.shape_rows, text_style, ts)
-                };
-
-            let h = layout.size(line_height).height;
-            result.push(VisibleLine {
-                byte_offset: line_byte_start,
-                top: y,
-                layout,
-            });
-            y += h;
-        }
-        (result, shaped_windowed)
-    }
-
-    fn shape_wrapped_line(
-        &self,
-        buf_line: usize,
-        shape_rows: &Range<usize>,
-        text_style: &TextStyle,
-        ts: &TextSystem,
-    ) -> RowLayout {
-        let doc = self.doc.as_deref().expect("document view");
-        let text = self.model.text();
-        let line_slice = text.slice_line(buf_line);
-        let line_len = line_slice.len();
-        let line_byte_start = text.line_start_offset(buf_line);
-        let wrapped = doc.wrap.line(buf_line).expect("wrapped line exists");
-        let first_row_of_line = doc.wrap.first_visual_row(buf_line);
-        let total_sub_rows = wrapped.row_count();
-        let caret = self.model.cursor();
-        let end_affinity = self.model.selection().end_affinity;
-
-        let (slice_start, slice_end) = if total_sub_rows > 64 {
-            let vis_lo = shape_rows
-                .start
-                .saturating_sub(first_row_of_line)
-                .min(total_sub_rows);
-            let vis_hi = shape_rows
-                .end
-                .saturating_sub(first_row_of_line)
-                .min(total_sub_rows);
-            let mut lo = vis_lo;
-            let mut hi = vis_hi.max(lo.saturating_add(1)).min(total_sub_rows);
-            if caret >= line_byte_start && caret <= line_byte_start + line_len {
-                let disp = doc.wrap.offset_to_display(text, caret, end_affinity);
-                if disp.sub_row < lo {
-                    lo = disp.sub_row;
-                }
-                if disp.sub_row >= hi {
-                    hi = (disp.sub_row + 1).min(total_sub_rows);
-                }
-            }
-            (lo, hi)
-        } else {
-            (0, total_sub_rows)
-        };
-
-        let leading_bytes = wrapped.ranges.get(slice_start).map_or(0, |r| r.start);
-        let mut rows = Vec::with_capacity(slice_end.saturating_sub(slice_start));
-        for sub_ix in slice_start..slice_end {
-            let range = match &wrapped.ranges {
-                LineRanges::Single(len) => 0..*len,
-                LineRanges::Wrapped(slice) => slice[sub_ix].clone(),
-            };
-            let visual_row = first_row_of_line + sub_ix;
-            let sub_start = line_byte_start + range.start;
-            let sub_end = line_byte_start + range.end;
-            let has_caret = caret >= sub_start && caret <= sub_end;
-            let must_shape = shape_rows.contains(&visual_row) || has_caret;
-            if must_shape {
-                let sub_text: SharedStr = line_slice.slice(range).to_string().into();
-                let shaped = ts.shape_row(sub_text, text_style);
-                rows.push(VisualRow::from(shaped));
-            } else {
-                rows.push(VisualRow::Placeholder(range.len()));
-            }
-        }
-
-        RowLayout::from_slice(
-            rows,
-            slice_start,
-            leading_bytes,
-            total_sub_rows,
-            wrapped.hanging_indent,
-        )
     }
 
     fn compute_caret_rect(
@@ -1771,14 +1537,14 @@ impl Editor {
         let lh = self
             .frame
             .as_ref()
-            .map_or(default_line_height, |f| f.line_height)
+            .map_or(default_line_height, |f| f.layout.line_height())
             .max(1.0);
         let vp = self.input_bounds.size;
         let dx = if delta_lines.x != 0.0 {
             let space_w = self
                 .frame
                 .as_ref()
-                .map_or(lh * 0.5, |f| f.space_width.max(1.0));
+                .map_or(lh * 0.5, |f| f.layout.space_width().max(1.0));
             (delta_lines.x * space_w * 3.0)
                 .round()
                 .clamp(-vp.width.max(lh), vp.width.max(lh))
@@ -1847,6 +1613,23 @@ pub(crate) struct EditorPaintParams<'a> {
     pub(crate) show_selection: bool,
     pub(crate) scale: f32,
     pub(crate) caret_width_px: u32,
+}
+
+/// The editor's last layout, with where it was placed and what was drawn over it.
+struct Frame {
+    layout: FrameLayout,
+    revision: u64,
+    scroll_x: f32,
+    scroll_y: f64,
+    input_bounds: Rect,
+    content_bounds: Rect,
+    wrap_width: Option<f32>,
+    text_color: Rgba,
+    caret_rect: Rect,
+    show_caret: bool,
+    selection_rects: Vec<Rect>,
+    marked_range: Option<Range<usize>>,
+    last_cursor: usize,
 }
 
 const TRACK_THICKNESS: f32 = 16.;
