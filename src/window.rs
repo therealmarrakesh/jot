@@ -5,12 +5,10 @@ use std::time::{Duration, Instant};
 use crate::APP_NAME;
 use crate::app::{AppEvent, Cx, Effect};
 use crate::color::transparent_black;
-use crate::command::{Command, window_shortcut};
+use crate::command::{AppCommand, Command, app_shortcut, edit_shortcut};
 use crate::dialog::{DialogKind, Dialogs};
 use crate::document::{self, Format};
-use crate::editor::{
-    Editor, EditorPaintStyle, EditorTimer, EditorTimers, RopeExt as _, key_to_command,
-};
+use crate::editor::{Editor, EditorPaintStyle, EditorTimer, EditorTimers, RopeExt as _};
 use crate::files::{
     self, FilePrompt, FileWorkflow, WorkflowFinish, WorkflowGen, WorkflowStep,
 };
@@ -1566,7 +1564,7 @@ impl MainWindow {
                 _ => {}
             }
             if self.focus == Focus::Editor(EditorSlot::GoToLine) {
-                return key_to_command(ev)
+                return edit_shortcut(ev)
                     .and_then(|cmd| {
                         self.with_editor(EditorSlot::GoToLine, cx.jobs, |ed, timers| {
                             ed.handle_command(cmd, cx.ts, timers)
@@ -1613,15 +1611,15 @@ impl MainWindow {
         if ev.key == Key::Enter && !ev.modifiers.ctrl && !ev.modifiers.alt && !ev.modifiers.win {
             match (self.focus, ev.modifiers.shift) {
                 (Focus::Editor(EditorSlot::FindQuery), false) => {
-                    self.dispatch_command(Command::FindNext, cx);
+                    self.dispatch_app_command(AppCommand::FindNext, cx);
                     return true;
                 }
                 (Focus::Editor(EditorSlot::FindQuery), true) => {
-                    self.dispatch_command(Command::FindPrevious, cx);
+                    self.dispatch_app_command(AppCommand::FindPrevious, cx);
                     return true;
                 }
                 (Focus::Editor(EditorSlot::FindReplace), false) => {
-                    self.dispatch_command(Command::ReplaceNext, cx);
+                    self.dispatch_app_command(AppCommand::ReplaceNext, cx);
                     return true;
                 }
                 _ => {}
@@ -1629,7 +1627,7 @@ impl MainWindow {
         }
 
         if let Some(slot) = self.focused_editor_slot()
-            && let Some(cmd) = key_to_command(ev)
+            && let Some(cmd) = edit_shortcut(ev)
             && self
                 .with_editor(slot, cx.jobs, |ed, timers| {
                     ed.handle_command(cmd, cx.ts, timers)
@@ -1639,8 +1637,8 @@ impl MainWindow {
             return true;
         }
 
-        if let Some(cmd) = window_shortcut(ev)
-            && self.dispatch_command(cmd, cx)
+        if let Some(cmd) = app_shortcut(ev)
+            && self.dispatch_app_command(cmd, cx)
         {
             return true;
         }
@@ -1697,14 +1695,25 @@ impl MainWindow {
 
     pub(crate) fn dispatch_command(&mut self, cmd: Command, cx: &mut Cx<'_>) -> bool {
         match cmd {
-            Command::Cancel => {
+            Command::App(app_cmd) => self.dispatch_app_command(app_cmd, cx),
+            Command::Edit(edit_cmd) => self
+                .with_editor(self.active_slot(), cx.jobs, |ed, timers| {
+                    ed.handle_command(edit_cmd, cx.ts, timers)
+                })
+                .unwrap_or(false),
+        }
+    }
+
+    fn dispatch_app_command(&mut self, cmd: AppCommand, cx: &mut Cx<'_>) -> bool {
+        match cmd {
+            AppCommand::Cancel => {
                 if self.find.is_open() {
                     self.close_find(cx.jobs);
                     return true;
                 }
                 return false;
             }
-            Command::ShowContextMenu => {
+            AppCommand::ShowContextMenu => {
                 if self.focus != Focus::Editor(self.active_slot()) {
                     return false;
                 }
@@ -1720,21 +1729,21 @@ impl MainWindow {
                 }
                 return true;
             }
-            Command::NewWindow => cx.emit(Effect::NewWindow),
-            Command::Exit => cx.emit(Effect::Exit),
-            Command::ToggleStatusBar => cx.emit(Effect::ToggleStatusBar),
-            Command::ToggleWordWrap => cx.emit(Effect::ToggleWordWrap),
-            Command::ZoomIn => self.set_zoom(self.zoom() + ZOOM_STEP),
-            Command::ZoomOut => self.set_zoom(self.zoom() - ZOOM_STEP),
-            Command::ResetZoom => self.set_zoom(1.),
-            Command::CloseWindow => self.request_close_window(cx.jobs),
-            Command::NewTab => self.add_tab(cx.view.word_wrap, cx.jobs),
-            Command::CloseTab => self.close_tab(self.active, cx.jobs),
-            Command::NextTab => self.next_tab(cx.jobs),
-            Command::PrevTab => self.prev_tab(cx.jobs),
-            Command::SelectTab(ix) => self.select_tab(ix, cx.jobs),
-            Command::SelectLastTab => self.select_last_tab(cx.jobs),
-            Command::Open => {
+            AppCommand::NewWindow => cx.emit(Effect::NewWindow),
+            AppCommand::Exit => cx.emit(Effect::Exit),
+            AppCommand::ToggleStatusBar => cx.emit(Effect::ToggleStatusBar),
+            AppCommand::ToggleWordWrap => cx.emit(Effect::ToggleWordWrap),
+            AppCommand::ZoomIn => self.set_zoom(self.zoom() + ZOOM_STEP),
+            AppCommand::ZoomOut => self.set_zoom(self.zoom() - ZOOM_STEP),
+            AppCommand::ResetZoom => self.set_zoom(1.),
+            AppCommand::CloseWindow => self.request_close_window(cx.jobs),
+            AppCommand::NewTab => self.add_tab(cx.view.word_wrap, cx.jobs),
+            AppCommand::CloseTab => self.close_tab(self.active, cx.jobs),
+            AppCommand::NextTab => self.next_tab(cx.jobs),
+            AppCommand::PrevTab => self.prev_tab(cx.jobs),
+            AppCommand::SelectTab(ix) => self.select_tab(ix, cx.jobs),
+            AppCommand::SelectLastTab => self.select_last_tab(cx.jobs),
+            AppCommand::Open => {
                 if !self.open_dialog_active {
                     self.open_dialog_active = true;
                     files::spawn_open_dialog(
@@ -1745,51 +1754,43 @@ impl MainWindow {
                     );
                 }
             }
-            Command::Save => self.save(cx.jobs),
-            Command::SaveAs => self.save_as(cx.jobs),
-            Command::SaveAll => self.save_all(cx.jobs),
-            Command::TimeDate => {
+            AppCommand::Save => self.save(cx.jobs),
+            AppCommand::SaveAs => self.save_as(cx.jobs),
+            AppCommand::SaveAll => self.save_all(cx.jobs),
+            AppCommand::TimeDate => {
                 let stamp = format_local_time_date();
                 self.active_editor_mut().replace(&stamp, cx.ts);
             }
-            Command::GoTo => self.open_go_to(cx.ts, cx.jobs),
-            Command::Find => {
+            AppCommand::GoTo => self.open_go_to(cx.ts, cx.jobs),
+            AppCommand::Find => {
                 if self.has_text() {
                     self.open_find(false, cx.ts, cx.jobs);
                 }
             }
-            Command::Replace => {
+            AppCommand::Replace => {
                 if self.has_text() {
                     self.open_find(true, cx.ts, cx.jobs);
                 }
             }
-            Command::FindNext => {
+            AppCommand::FindNext => {
                 if self.has_text() {
                     self.find_step(true, cx.ts, cx.jobs);
                 }
             }
-            Command::FindPrevious => {
+            AppCommand::FindPrevious => {
                 if self.has_text() {
                     self.find_step(false, cx.ts, cx.jobs);
                 }
             }
-            Command::ToggleMatchCase => {
+            AppCommand::ToggleMatchCase => {
                 self.find.match_case = !self.find.match_case;
                 self.refocus_find(cx.jobs);
             }
-            Command::ToggleWrapAround => {
+            AppCommand::ToggleWrapAround => {
                 self.find.wrap_around = !self.find.wrap_around;
                 self.refocus_find(cx.jobs);
             }
-            Command::ReplaceNext => self.replace_next(cx.ts, cx.jobs),
-            other => {
-                let slot = self.active_slot();
-                return self
-                    .with_editor(slot, cx.jobs, |ed, timers| {
-                        ed.handle_command(other, cx.ts, timers)
-                    })
-                    .unwrap_or(false);
-            }
+            AppCommand::ReplaceNext => self.replace_next(cx.ts, cx.jobs),
         }
         true
     }

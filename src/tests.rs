@@ -1421,7 +1421,7 @@ fn keyboard_system_chords_altgr_menu_gate_popup_occlusion_and_fractional_borders
         },
     };
     assert!(
-        crate::command::window_shortcut(altgr_s).is_none(),
+        crate::command::app_shortcut(altgr_s).is_none(),
         "AltGr+S must not match Ctrl+Alt+S SaveAll"
     );
 

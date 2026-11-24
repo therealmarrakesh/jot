@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use crate::color::transparent_black;
+use crate::command::{AppCommand, shortcut_tooltip};
 use crate::document::{self, Format};
 use crate::editor::{Editor, Rope};
 use crate::geom::Edges;
@@ -569,7 +570,7 @@ impl TabStrip {
         let new_tab = strip_button(
             p,
             HitId::NewTab,
-            "New tab (Ctrl+N)",
+            shortcut_tooltip("New tab", AppCommand::NewTab.into()),
             ADD_GLYPH,
             BUTTON_GLYPH_SIZE,
             true,
@@ -728,7 +729,7 @@ fn render_tab(
         strip_button(
             p,
             HitId::TabClose(id),
-            "Close tab (Ctrl+W)",
+            shortcut_tooltip("Close tab", AppCommand::CloseTab.into()),
             CLOSE_GLYPH,
             BUTTON_GLYPH_SIZE,
             true,
@@ -806,7 +807,7 @@ fn unsaved_dot(p: Palette, inset: f32) -> Node {
 fn strip_button(
     p: Palette,
     hit: HitId,
-    tip: &'static str,
+    tip: impl Into<SharedStr>,
     glyph: &'static str,
     glyph_size: f32,
     enabled: bool,

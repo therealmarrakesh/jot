@@ -3,7 +3,6 @@ use std::ops::Range;
 
 use ropey::Rope;
 
-use crate::command::Command;
 use crate::geom::{Rect, point};
 use crate::gfx::TextSystem;
 use crate::platform::clipboard;
@@ -13,7 +12,7 @@ use super::buffer::{
     next_word_end, prev_grapheme_boundary, prev_word_start, snap_grapheme_boundary, word_range_at,
 };
 use super::history::{EditKind, EditRecord, ReplayPayload};
-use super::{Composition, Editor, EditorTimers, MoveDirection};
+use super::{Composition, EditCommand, Editor, EditorTimers, MoveDirection};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum IndentOp {
@@ -24,93 +23,134 @@ enum IndentOp {
 impl Editor {
     pub(crate) fn handle_command(
         &mut self,
-        command: Command,
+        command: EditCommand,
         ts: &TextSystem,
         timers: &mut dyn EditorTimers,
     ) -> bool {
         match command {
-            Command::Backspace => return self.backspace(ts, timers),
-            Command::Delete => self.delete_forward(ts, timers),
-            Command::DeletePrevWord => self.delete_prev_word(ts, timers),
-            Command::DeleteNextWord => self.delete_next_word(ts, timers),
-            Command::Enter => return self.enter(ts, timers),
-            Command::Escape => return self.escape(ts),
-            Command::Paste => self.paste(ts, timers),
-            Command::Cut => self.cut(ts, timers),
-            Command::Copy => self.copy(),
-            Command::Undo => self.undo(ts, timers),
-            Command::Redo => self.redo(ts, timers),
-            Command::IndentInline if self.multi_line => {
-                return self.apply_indent(IndentOp::Indent, false, ts, timers);
+            EditCommand::Backspace => return self.backspace(ts, timers),
+            EditCommand::Delete => self.delete_forward(ts, timers),
+            EditCommand::DeletePrevWord => self.delete_prev_word(ts, timers),
+            EditCommand::DeleteNextWord => self.delete_next_word(ts, timers),
+            EditCommand::Enter => return self.enter(ts, timers),
+            EditCommand::Escape => return self.escape(ts),
+            EditCommand::Paste => self.paste(ts, timers),
+            EditCommand::Cut => self.cut(ts, timers),
+            EditCommand::Copy => self.copy(),
+            EditCommand::Undo => self.undo(ts, timers),
+            EditCommand::Redo => self.redo(ts, timers),
+            EditCommand::IndentInline => {
+                return self.multi_line && self.apply_indent(IndentOp::Indent, false, ts, timers);
             }
-            Command::OutdentInline if self.multi_line => {
-                return self.apply_indent(IndentOp::Outdent, false, ts, timers);
+            EditCommand::OutdentInline => {
+                return self.multi_line && self.apply_indent(IndentOp::Outdent, false, ts, timers);
             }
-            Command::Indent if self.multi_line => {
-                return self.apply_indent(IndentOp::Indent, true, ts, timers);
+            EditCommand::Indent => {
+                return self.multi_line && self.apply_indent(IndentOp::Indent, true, ts, timers);
             }
-            Command::Outdent if self.multi_line => {
-                return self.apply_indent(IndentOp::Outdent, true, ts, timers);
+            EditCommand::Outdent => {
+                return self.multi_line && self.apply_indent(IndentOp::Outdent, true, ts, timers);
             }
-            Command::MoveLeft => return self.move_left(timers),
-            Command::MoveRight => return self.move_right(timers),
-            Command::SelectLeft => self.select_left(timers),
-            Command::SelectRight => self.select_right(timers),
-            Command::MoveUp if self.multi_line => self.move_vertical(-1, true, timers),
-            Command::MoveDown if self.multi_line => self.move_vertical(1, true, timers),
-            Command::SelectUp if self.multi_line => self.select_vertical(-1, timers),
-            Command::SelectDown if self.multi_line => self.select_vertical(1, timers),
-            Command::MovePageUp if self.multi_line => self.move_page(-1, timers),
-            Command::MovePageDown if self.multi_line => self.move_page(1, timers),
-            Command::SelectPageUp if self.multi_line => self.select_page(-1, timers),
-            Command::SelectPageDown if self.multi_line => self.select_page(1, timers),
-            Command::SelectAll => self.select_all(),
-            Command::SelectToStartOfLine => {
-                let target = self.visual_line_start_for(self.selection.head(), self.line_end_affinity);
+            EditCommand::MoveLeft => return self.move_left(timers),
+            EditCommand::MoveRight => return self.move_right(timers),
+            EditCommand::SelectLeft => self.select_left(timers),
+            EditCommand::SelectRight => self.select_right(timers),
+            EditCommand::MoveUp => {
+                if !self.multi_line {
+                    return false;
+                }
+                self.move_vertical(-1, true, timers);
+            }
+            EditCommand::MoveDown => {
+                if !self.multi_line {
+                    return false;
+                }
+                self.move_vertical(1, true, timers);
+            }
+            EditCommand::SelectUp => {
+                if !self.multi_line {
+                    return false;
+                }
+                self.select_vertical(-1, timers);
+            }
+            EditCommand::SelectDown => {
+                if !self.multi_line {
+                    return false;
+                }
+                self.select_vertical(1, timers);
+            }
+            EditCommand::MovePageUp => {
+                if !self.multi_line {
+                    return false;
+                }
+                self.move_page(-1, timers);
+            }
+            EditCommand::MovePageDown => {
+                if !self.multi_line {
+                    return false;
+                }
+                self.move_page(1, timers);
+            }
+            EditCommand::SelectPageUp => {
+                if !self.multi_line {
+                    return false;
+                }
+                self.select_page(-1, timers);
+            }
+            EditCommand::SelectPageDown => {
+                if !self.multi_line {
+                    return false;
+                }
+                self.select_page(1, timers);
+            }
+            EditCommand::SelectAll => self.select_all(),
+            EditCommand::SelectToStartOfLine => {
+                let target =
+                    self.visual_line_start_for(self.selection.head(), self.line_end_affinity);
                 self.select_keyboard_to(target, false, false, timers);
             }
-            Command::SelectToEndOfLine => {
+            EditCommand::SelectToEndOfLine => {
                 let (target, aff) =
                     self.visual_line_end_for(self.selection.head(), self.line_end_affinity);
                 self.select_keyboard_to(target, aff, false, timers);
             }
-            Command::SelectPrevWord => {
+            EditCommand::SelectPrevWord => {
                 let target = self.prev_word_at(self.selection.head());
                 self.select_keyboard_to(target, false, false, timers);
             }
-            Command::SelectNextWord => {
+            EditCommand::SelectNextWord => {
                 let target = self.next_word_at(self.selection.head());
                 self.select_keyboard_to(target, false, false, timers);
             }
-            Command::MoveHome => {
-                let target = self.visual_line_start_for(self.selection.head(), self.line_end_affinity);
+            EditCommand::MoveHome => {
+                let target =
+                    self.visual_line_start_for(self.selection.head(), self.line_end_affinity);
                 let anchor = self.preferred_x_for(target, false);
                 self.place_cursor(target, anchor, false, Some(MoveDirection::Up), timers);
             }
-            Command::MoveEnd => {
+            EditCommand::MoveEnd => {
                 let (target, aff) =
                     self.visual_line_end_for(self.selection.head(), self.line_end_affinity);
                 let anchor = self.preferred_x_for(target, aff);
                 self.place_cursor(target, anchor, aff, Some(MoveDirection::Down), timers);
             }
-            Command::MoveToStart => self.move_to(0, None, Some(timers)),
-            Command::MoveToEnd => self.move_to(self.text.len(), None, Some(timers)),
-            Command::MovePrevWord => {
+            EditCommand::MoveToStart => self.move_to(0, None, Some(timers)),
+            EditCommand::MoveToEnd => self.move_to(self.text.len(), None, Some(timers)),
+            EditCommand::MovePrevWord => {
                 let target = self.prev_word_at(self.selection.head());
                 let anchor = self.preferred_x_for(target, false);
                 self.place_cursor(target, anchor, false, None, timers);
             }
-            Command::MoveNextWord => {
+            EditCommand::MoveNextWord => {
                 let target = self.next_word_at(self.selection.head());
                 let anchor = self.preferred_x_for(target, false);
                 self.place_cursor(target, anchor, false, None, timers);
             }
-            Command::SelectToStart => self.select_keyboard_to(0, false, false, timers),
-            Command::SelectToEnd => {
+            EditCommand::SelectToStart => self.select_keyboard_to(0, false, false, timers),
+            EditCommand::SelectToEnd => {
                 let end = self.text.len();
                 self.select_keyboard_to(end, false, false, timers);
             }
-            _ => return false,
         }
         true
     }

@@ -12,10 +12,9 @@ use std::time::Duration;
 
 use ropey::RopeSlice;
 
-use crate::command::Command;
 use crate::geom::{Edges, Point, Rect, Size};
 use crate::gfx::{Font, TextSystem};
-use crate::platform::{Key, KeyEvent, TimerHandle};
+use crate::platform::TimerHandle;
 use crate::scrollbar::ScrollbarState;
 use crate::types::SharedStr;
 use crate::ui::{Node, box_, custom};
@@ -75,57 +74,48 @@ impl EditorTimers for NoopTimers {
     }
 }
 
-pub(crate) fn key_to_command(ev: KeyEvent) -> Option<Command> {
-    let m = ev.modifiers;
-    match (m.ctrl, m.alt, m.shift, m.win, ev.key) {
-        (false, false, false | true, false, Key::Backspace) => Some(Command::Backspace),
-        (false, false, false, false, Key::Delete) => Some(Command::Delete),
-        (false, false, true, false, Key::Delete) => Some(Command::Cut),
-        (true, false, false, false, Key::Insert) => Some(Command::Copy),
-        (false, false, true, false, Key::Insert) => Some(Command::Paste),
-        (true, false, false, false, Key::Backspace) => Some(Command::DeletePrevWord),
-        (true, false, false, false, Key::Delete) => Some(Command::DeleteNextWord),
-        (false | true, false, false, false, Key::Enter)
-        | (false, false, true, false, Key::Enter) => Some(Command::Enter),
-        (false, false, false, false, Key::Escape) => Some(Command::Escape),
-        (false, false, false, false, Key::Up) => Some(Command::MoveUp),
-        (false, false, false, false, Key::Down) => Some(Command::MoveDown),
-        (false, false, false, false, Key::Left) => Some(Command::MoveLeft),
-        (false, false, false, false, Key::Right) => Some(Command::MoveRight),
-        (false, false, false, false, Key::PageUp) => Some(Command::MovePageUp),
-        (false, false, false, false, Key::PageDown) => Some(Command::MovePageDown),
-        (false, false, true, false, Key::PageUp) => Some(Command::SelectPageUp),
-        (false, false, true, false, Key::PageDown) => Some(Command::SelectPageDown),
-        (false, false, false, false, Key::Tab) => Some(Command::IndentInline),
-        (false, false, true, false, Key::Tab) => Some(Command::OutdentInline),
-        (true, false, false, false, Key::Char(']')) => Some(Command::Indent),
-        (true, false, false, false, Key::Char('[')) => Some(Command::Outdent),
-        (false, false | true, true, false, Key::Left) => Some(Command::SelectLeft),
-        (false, false | true, true, false, Key::Right) => Some(Command::SelectRight),
-        (false, false, true, false, Key::Up) => Some(Command::SelectUp),
-        (false, false, true, false, Key::Down) => Some(Command::SelectDown),
-        (false, false, false, false, Key::Home) => Some(Command::MoveHome),
-        (false, false, false, false, Key::End) => Some(Command::MoveEnd),
-        (true, false, false, false, Key::Home) => Some(Command::MoveToStart),
-        (true, false, false, false, Key::End) => Some(Command::MoveToEnd),
-        (true, false, true, false, Key::Home) => Some(Command::SelectToStart),
-        (true, false, true, false, Key::End) => Some(Command::SelectToEnd),
-        (false, false, true, false, Key::Home) => Some(Command::SelectToStartOfLine),
-        (false, false, true, false, Key::End) => Some(Command::SelectToEndOfLine),
-        (true, false, true, false, Key::Left) => Some(Command::SelectPrevWord),
-        (true, false, true, false, Key::Right) => Some(Command::SelectNextWord),
-        (true, false, false, false, Key::Left) => Some(Command::MovePrevWord),
-        (true, false, false, false, Key::Right) => Some(Command::MoveNextWord),
-        (true, false, false, false, Key::Char('a')) => Some(Command::SelectAll),
-        (true, false, false, false, Key::Char('c')) => Some(Command::Copy),
-        (true, false, false, false, Key::Char('x')) => Some(Command::Cut),
-        (true, false, false, false, Key::Char('v')) => Some(Command::Paste),
-        (true, false, false, false, Key::Char('z')) => Some(Command::Undo),
-        (true, false, true, false, Key::Char('z')) | (true, false, false, false, Key::Char('y')) => {
-            Some(Command::Redo)
-        }
-        _ => None,
-    }
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum EditCommand {
+    Enter,
+    Backspace,
+    Delete,
+    DeletePrevWord,
+    DeleteNextWord,
+    Indent,
+    Outdent,
+    IndentInline,
+    OutdentInline,
+    MoveUp,
+    MoveDown,
+    MoveLeft,
+    MoveRight,
+    MoveHome,
+    MoveEnd,
+    MovePageUp,
+    MovePageDown,
+    MoveToStart,
+    MoveToEnd,
+    MovePrevWord,
+    MoveNextWord,
+    SelectAll,
+    SelectUp,
+    SelectDown,
+    SelectLeft,
+    SelectRight,
+    SelectPageUp,
+    SelectPageDown,
+    SelectToStartOfLine,
+    SelectToEndOfLine,
+    SelectToStart,
+    SelectToEnd,
+    SelectPrevWord,
+    SelectNextWord,
+    Copy,
+    Cut,
+    Paste,
+    Undo,
+    Redo,
+    Escape,
 }
 
 type ValidateFn = fn(&str) -> bool;
@@ -463,16 +453,16 @@ mod tests {
         assert_eq!(ed.text().to_string(), "hello world");
         assert!(!ed.is_clean());
 
-        assert!(ed.handle_command(Command::Undo, &ts, &mut timers));
+        assert!(ed.handle_command(EditCommand::Undo, &ts, &mut timers));
         assert_eq!(ed.text().to_string(), "");
         assert!(ed.is_clean());
 
-        assert!(ed.handle_command(Command::Redo, &ts, &mut timers));
+        assert!(ed.handle_command(EditCommand::Redo, &ts, &mut timers));
         assert_eq!(ed.text().to_string(), "hello world");
 
-        assert!(ed.handle_command(Command::MovePrevWord, &ts, &mut timers));
+        assert!(ed.handle_command(EditCommand::MovePrevWord, &ts, &mut timers));
         assert_eq!(ed.cursor(), 6);
-        assert!(ed.handle_command(Command::SelectNextWord, &ts, &mut timers));
+        assert!(ed.handle_command(EditCommand::SelectNextWord, &ts, &mut timers));
         assert_eq!(ed.selected_text().to_string(), "world");
     }
 }

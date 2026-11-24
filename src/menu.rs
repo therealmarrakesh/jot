@@ -2,8 +2,8 @@ use std::time::Duration;
 
 use crate::app::{AppEvent, ViewSettings};
 use crate::color::transparent_black;
-use crate::command::{Command, shortcut_label};
-use crate::editor::Editor;
+use crate::command::{AppCommand, Command, shortcut_label};
+use crate::editor::{EditCommand, Editor};
 use crate::geom::{Edges, Point};
 use crate::gfx::{TextStyle, TextSystem};
 use crate::ids::{AnimKey, Frame, HitId, Node, UiState};
@@ -80,11 +80,11 @@ pub(crate) struct MenuCommand {
 }
 
 impl MenuCommand {
-    const fn new(label: &'static str, enabled: bool, command: Command) -> Self {
+    fn new(label: &'static str, enabled: bool, command: impl Into<Command>) -> Self {
         Self {
             label,
             enabled,
-            command,
+            command: command.into(),
         }
     }
 }
@@ -110,22 +110,22 @@ pub(crate) enum Entry {
 }
 
 impl Entry {
-    fn command(label: &'static str, command: Command) -> Self {
+    fn command(label: &'static str, command: impl Into<Command>) -> Self {
         Self::command_if(label, true, command)
     }
 
-    fn command_if(label: &'static str, enabled: bool, command: Command) -> Self {
+    fn command_if(label: &'static str, enabled: bool, command: impl Into<Command>) -> Self {
         Self::Command {
             command: MenuCommand::new(label, enabled, command),
             icon: None,
         }
     }
 
-    pub(crate) fn toggle(label: &'static str, checked: bool, command: Command) -> Self {
+    pub(crate) fn toggle(label: &'static str, checked: bool, command: impl Into<Command>) -> Self {
         Self::Toggle {
             label,
             checked,
-            command,
+            command: command.into(),
         }
     }
 
@@ -201,51 +201,51 @@ impl MenuKind {
     fn entries(self, editor: &Editor, view: ViewSettings) -> Vec<Entry> {
         match self {
             Self::File => vec![
-                Entry::command("&New tab", Command::NewTab),
-                Entry::command("New &window", Command::NewWindow),
-                Entry::command("&Open", Command::Open),
-                Entry::command("&Save", Command::Save),
-                Entry::command("Save &as", Command::SaveAs),
-                Entry::command("Save a&ll", Command::SaveAll),
+                Entry::command("&New tab", AppCommand::NewTab),
+                Entry::command("New &window", AppCommand::NewWindow),
+                Entry::command("&Open", AppCommand::Open),
+                Entry::command("&Save", AppCommand::Save),
+                Entry::command("Save &as", AppCommand::SaveAs),
+                Entry::command("Save a&ll", AppCommand::SaveAll),
                 Entry::Separator,
-                Entry::command("&Close tab", Command::CloseTab),
-                Entry::command("Clos&e window", Command::CloseWindow),
-                Entry::command("E&xit", Command::Exit),
+                Entry::command("&Close tab", AppCommand::CloseTab),
+                Entry::command("Clos&e window", AppCommand::CloseWindow),
+                Entry::command("E&xit", AppCommand::Exit),
             ],
             Self::Edit => {
                 let selection = !editor.selected_range().is_empty();
                 let clipboard_text = clipboard_has_text();
                 let has_text = editor.text().len() > 0;
                 vec![
-                    Entry::command_if("&Undo", editor.can_undo(), Command::Undo),
-                    Entry::command_if("Re&do", editor.can_redo(), Command::Redo),
+                    Entry::command_if("&Undo", editor.can_undo(), EditCommand::Undo),
+                    Entry::command_if("Re&do", editor.can_redo(), EditCommand::Redo),
                     Entry::Separator,
-                    Entry::command_if("Cu&t", selection, Command::Cut),
-                    Entry::command_if("&Copy", selection, Command::Copy),
-                    Entry::command_if("&Paste", clipboard_text, Command::Paste),
-                    Entry::command_if("De&lete", selection, Command::Delete),
+                    Entry::command_if("Cu&t", selection, EditCommand::Cut),
+                    Entry::command_if("&Copy", selection, EditCommand::Copy),
+                    Entry::command_if("&Paste", clipboard_text, EditCommand::Paste),
+                    Entry::command_if("De&lete", selection, EditCommand::Delete),
                     Entry::Separator,
-                    Entry::command_if("&Find", has_text, Command::Find),
-                    Entry::command_if("Find &next", has_text, Command::FindNext),
-                    Entry::command_if("Find pre&vious", has_text, Command::FindPrevious),
-                    Entry::command_if("&Replace", has_text, Command::Replace),
-                    Entry::command("&Go to", Command::GoTo),
+                    Entry::command_if("&Find", has_text, AppCommand::Find),
+                    Entry::command_if("Find &next", has_text, AppCommand::FindNext),
+                    Entry::command_if("Find pre&vious", has_text, AppCommand::FindPrevious),
+                    Entry::command_if("&Replace", has_text, AppCommand::Replace),
+                    Entry::command("&Go to", AppCommand::GoTo),
                     Entry::Separator,
-                    Entry::command("Select &all", Command::SelectAll),
-                    Entry::command("Time/&Date", Command::TimeDate),
+                    Entry::command("Select &all", EditCommand::SelectAll),
+                    Entry::command("Time/&Date", AppCommand::TimeDate),
                 ]
             }
             Self::View => vec![
                 Entry::Submenu(
                     "&Zoom",
                     vec![
-                        Entry::command("Zoom &in", Command::ZoomIn),
-                        Entry::command("Zoom &out", Command::ZoomOut),
-                        Entry::command("&Restore default zoom", Command::ResetZoom),
+                        Entry::command("Zoom &in", AppCommand::ZoomIn),
+                        Entry::command("Zoom &out", AppCommand::ZoomOut),
+                        Entry::command("&Restore default zoom", AppCommand::ResetZoom),
                     ],
                 ),
-                Entry::toggle("&Status bar", view.status_bar, Command::ToggleStatusBar),
-                Entry::toggle("&Word wrap", view.word_wrap, Command::ToggleWordWrap),
+                Entry::toggle("&Status bar", view.status_bar, AppCommand::ToggleStatusBar),
+                Entry::toggle("&Word wrap", view.word_wrap, AppCommand::ToggleWordWrap),
             ],
         }
     }
@@ -253,19 +253,19 @@ impl MenuKind {
 
 fn context_menu_items(editor: &Editor) -> (Vec<CommandButton>, Vec<Entry>) {
     let selection = !editor.selected_range().is_empty();
-    let button = |label, glyph, enabled, command| CommandButton {
+    let button = |label, glyph, enabled, command: EditCommand| CommandButton {
         command: MenuCommand::new(label, enabled, command),
         glyph,
     };
     let commands = vec![
-        button("Cut", "\u{E8C6}", selection, Command::Cut),
-        button("Copy", "\u{E8C8}", selection, Command::Copy),
-        button("Paste", "\u{E77F}", clipboard_has_text(), Command::Paste),
-        button("Select all", "\u{E8B3}", true, Command::SelectAll),
-        button("Delete", "\u{E74D}", selection, Command::Delete),
+        button("Cut", "\u{E8C6}", selection, EditCommand::Cut),
+        button("Copy", "\u{E8C8}", selection, EditCommand::Copy),
+        button("Paste", "\u{E77F}", clipboard_has_text(), EditCommand::Paste),
+        button("Select all", "\u{E8B3}", true, EditCommand::SelectAll),
+        button("Delete", "\u{E74D}", selection, EditCommand::Delete),
     ];
     let entries = vec![Entry::Command {
-        command: MenuCommand::new("Undo", editor.can_undo(), Command::Undo),
+        command: MenuCommand::new("Undo", editor.can_undo(), EditCommand::Undo),
         icon: Some("\u{E7A7}"),
     }];
     (commands, entries)
@@ -303,7 +303,7 @@ fn cycle(
 struct Panel {
     entries: Vec<Entry>,
     labels: Vec<SharedStr>,
-    shortcuts: Vec<Option<&'static str>>,
+    shortcuts: Vec<Option<SharedStr>>,
     width: f32,
     checks: bool,
     focused: Option<usize>,
@@ -1778,7 +1778,7 @@ fn render_row_face(
     let entry = &panel.entries[ix];
     let label = panel.labels[ix].clone();
     let checks = panel.checks;
-    let shortcut = panel.shortcuts[ix];
+    let shortcut = panel.shortcuts[ix].clone();
     let enabled = entry.selectable();
     let hovered = ui.is_hovered(hit);
     let pressed = ui.is_pressed(hit);

@@ -2,7 +2,7 @@ use std::ops::Range;
 use std::time::Duration;
 
 use crate::app::AppEvent;
-use crate::command::Command;
+use crate::command::AppCommand;
 use crate::editor::{Editor, Rope};
 use crate::geom::{Point, point};
 use crate::gfx::TextSystem;
@@ -441,8 +441,8 @@ impl FindBar {
 
     pub(crate) fn options_entries(&self) -> Vec<Entry> {
         vec![
-            Entry::toggle("Match case", self.match_case, Command::ToggleMatchCase),
-            Entry::toggle("Wrap around", self.wrap_around, Command::ToggleWrapAround),
+            Entry::toggle("Match case", self.match_case, AppCommand::ToggleMatchCase),
+            Entry::toggle("Wrap around", self.wrap_around, AppCommand::ToggleWrapAround),
         ]
     }
 
