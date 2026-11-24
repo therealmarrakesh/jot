@@ -1,4 +1,5 @@
-//! Text model: rope helpers, selections, edits, IME composition and undo history.
+//! The text system: byte positions in a rope, grapheme and word navigation, selections, and the
+//! edit model with its undo history.
 
 use std::borrow::Cow;
 use std::ops::Range;
@@ -8,27 +9,277 @@ use unicode_segmentation::{GraphemeCursor, GraphemeIncomplete, UnicodeSegmentati
 
 pub(crate) use ropey::Rope;
 
-const WORD_SCAN_WINDOW_BYTES: usize = 256;
-const GRAPHEME_SCAN_WINDOW_BYTES: usize = 128;
-
+/// Which way to round a position that falls inside a character or grapheme.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum Bias {
     Left,
     Right,
 }
 
+/// A row (`\n`-separated line) and a byte column within it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct TextPoint {
     pub(crate) row: usize,
     pub(crate) column: usize,
 }
 
-impl TextPoint {
-    pub(crate) fn new(row: usize, column: usize) -> Self {
-        Self { row, column }
+/// Line and position helpers on the rope. Rows are `\n`-separated; a `\r` before the `\n`
+/// stays part of its row.
+pub(crate) trait RopeExt {
+    fn slice_line(&self, row: usize) -> RopeSlice<'_>;
+    fn line_len(&self, row: usize) -> usize;
+    fn line_start_offset(&self, row: usize) -> usize;
+    fn line_end_offset(&self, row: usize) -> usize;
+    fn lines_len(&self) -> usize;
+    fn char_at(&self, offset: usize) -> Option<char>;
+    fn offset_to_point(&self, offset: usize) -> TextPoint;
+    fn clip_offset(&self, offset: usize, bias: Bias) -> usize;
+    fn replace(&mut self, range: Range<usize>, text: &str);
+}
+
+impl RopeExt for Rope {
+    /// Row `row` without its `\n`; empty past the last row.
+    fn slice_line(&self, row: usize) -> RopeSlice<'_> {
+        if row >= self.lines_len() {
+            return self.slice(0..0);
+        }
+        let line = self.line(row, LineType::LF);
+        if line.len() > 0 && line.byte(line.len() - 1) == b'\n' {
+            line.slice(..line.len() - 1)
+        } else {
+            line
+        }
+    }
+
+    fn line_len(&self, row: usize) -> usize {
+        self.slice_line(row).len()
+    }
+
+    fn line_start_offset(&self, row: usize) -> usize {
+        if row >= self.lines_len() {
+            return self.len();
+        }
+        self.line_to_byte_idx(row, LineType::LF)
+    }
+
+    fn line_end_offset(&self, row: usize) -> usize {
+        self.line_start_offset(row) + self.line_len(row)
+    }
+
+    fn lines_len(&self) -> usize {
+        self.len_lines(LineType::LF)
+    }
+
+    fn char_at(&self, offset: usize) -> Option<char> {
+        self.get_char(offset).ok()
+    }
+
+    fn offset_to_point(&self, offset: usize) -> TextPoint {
+        let offset = self.clip_offset(offset, Bias::Left);
+        let row = self.byte_to_line_idx(offset, LineType::LF);
+        TextPoint {
+            row,
+            column: offset - self.line_to_byte_idx(row, LineType::LF),
+        }
+    }
+
+    /// `offset` clamped to the text and rounded onto a char boundary.
+    fn clip_offset(&self, offset: usize, bias: Bias) -> usize {
+        match bias {
+            _ if offset >= self.len() => self.len(),
+            Bias::Left => self.floor_char_boundary(offset),
+            Bias::Right => self.ceil_char_boundary(offset),
+        }
+    }
+
+    fn replace(&mut self, range: Range<usize>, text: &str) {
+        let start = self.clip_offset(range.start, Bias::Left);
+        let end = self.clip_offset(range.end, Bias::Right);
+        self.remove(start..end);
+        self.insert(start, text);
     }
 }
 
+/// The row around `offset`, without its `\n`.
+fn line_range_at(text: &Rope, offset: usize) -> Range<usize> {
+    let row = text.offset_to_point(offset).row;
+    text.line_start_offset(row)..text.line_end_offset(row)
+}
+
+/// Runs a grapheme cursor from `offset`, feeding it the rope's chunks as it asks for them.
+fn grapheme_walk<T>(
+    text: &Rope,
+    offset: usize,
+    step: impl Fn(&mut GraphemeCursor, &str, usize) -> Result<T, GraphemeIncomplete>,
+) -> T {
+    let mut cursor = GraphemeCursor::new(offset, text.len(), true);
+    let (mut chunk, mut start) = text.chunk(offset);
+    loop {
+        match step(&mut cursor, chunk, start) {
+            Ok(found) => return found,
+            Err(GraphemeIncomplete::PreContext(end)) => {
+                let (context, context_start) = text.chunk(end - 1);
+                cursor.provide_context(&context[..end - context_start], context_start);
+            }
+            Err(GraphemeIncomplete::PrevChunk) => (chunk, start) = text.chunk(start - 1),
+            Err(GraphemeIncomplete::NextChunk) => (chunk, start) = text.chunk(start + chunk.len()),
+            Err(GraphemeIncomplete::InvalidOffset) => unreachable!("grapheme cursor left the text"),
+        }
+    }
+}
+
+pub(crate) fn prev_grapheme_boundary(text: &Rope, offset: usize) -> usize {
+    match text.clip_offset(offset, Bias::Left) {
+        0 => 0,
+        at => grapheme_walk(text, at, GraphemeCursor::prev_boundary).unwrap_or(0),
+    }
+}
+
+pub(crate) fn next_grapheme_boundary(text: &Rope, offset: usize) -> usize {
+    match text.clip_offset(offset, Bias::Right) {
+        at if at >= text.len() => text.len(),
+        at => grapheme_walk(text, at, GraphemeCursor::next_boundary).unwrap_or(text.len()),
+    }
+}
+
+/// `offset` if it's a grapheme boundary, otherwise the boundary on the `bias` side.
+fn snap_grapheme_boundary(text: &Rope, offset: usize, bias: Bias) -> usize {
+    let at = text.clip_offset(offset, bias);
+    if at == 0 || at >= text.len() || grapheme_walk(text, at, GraphemeCursor::is_boundary) {
+        return at;
+    }
+    match bias {
+        Bias::Left => prev_grapheme_boundary(text, at),
+        Bias::Right => next_grapheme_boundary(text, at),
+    }
+}
+
+/// Word segmentation needs contiguous text, so words are found in a window of the line that
+/// starts this wide and doubles as needed.
+const WORD_SCAN_WINDOW_BYTES: usize = 256;
+
+#[inline]
+fn is_horizontal_ws(ch: char) -> bool {
+    ch.is_whitespace() && !matches!(ch, '\n' | '\r')
+}
+
+/// The far end of the run of horizontal whitespace at `from`, stopping at `limit` (scanning
+/// backwards when `limit` is before `from`).
+fn skip_spaces(text: &Rope, mut from: usize, limit: usize) -> usize {
+    if limit < from {
+        for ch in text.chars_at(from).reversed() {
+            if from <= limit || !is_horizontal_ws(ch) {
+                break;
+            }
+            from -= ch.len_utf8();
+        }
+    } else {
+        for ch in text.chars_at(from) {
+            if from >= limit || !is_horizontal_ws(ch) {
+                break;
+            }
+            from += ch.len_utf8();
+        }
+    }
+    from
+}
+
+/// Finds a word segment (Unicode word boundaries) of `bounds` near `at`. A window around `at`
+/// is segmented and `pick` chooses a segment, given the window text and `at` within it. The
+/// window grows until the pick sits at least four characters clear of any edge where the window
+/// cut the text short, so its boundaries don't depend on text outside the window.
+fn word_segment(
+    text: &Rope,
+    bounds: Range<usize>,
+    at: usize,
+    pick: impl Fn(&str, usize) -> Option<Range<usize>>,
+) -> Option<Range<usize>> {
+    let mut span = WORD_SCAN_WINDOW_BYTES;
+    loop {
+        let start = text.floor_char_boundary(at.saturating_sub(span).max(bounds.start));
+        let end = text.ceil_char_boundary(at.saturating_add(span).min(bounds.end));
+        let window: Cow<str> = text.slice(start..end).into();
+        if let Some(word) = pick(&window, at - start) {
+            let clear = |cut: bool, rest: &str| !cut || rest.chars().count() >= 4;
+            if clear(start > bounds.start, &window[..word.start])
+                && clear(end < bounds.end, &window[word.end..])
+            {
+                return Some(start + word.start..start + word.end);
+            }
+        }
+        if start == bounds.start && end == bounds.end {
+            return None;
+        }
+        span = span.saturating_mul(2);
+    }
+}
+
+/// The word, or run of spaces, under `offset` (double-click selection).
+fn word_range_at(text: &Rope, offset: usize) -> Option<Range<usize>> {
+    let line = line_range_at(text, offset);
+    let mut pos = text.clip_offset(offset, Bias::Left);
+    if pos >= line.end {
+        pos = prev_grapheme_boundary(text, line.end);
+    }
+    if !line.contains(&pos) {
+        return None;
+    }
+    let ch = text.char_at(pos)?;
+    if is_horizontal_ws(ch) {
+        return Some(
+            skip_spaces(text, pos, line.start)..skip_spaces(text, pos + ch.len_utf8(), line.end),
+        );
+    }
+    let containing = |window: &str, at: usize| {
+        let mut words = window
+            .split_word_bound_indices()
+            .map(|(i, w)| i..i + w.len());
+        words.find(|word| word.contains(&at))
+    };
+    Some(word_segment(text, line, pos, containing).unwrap_or(pos..pos + ch.len_utf8()))
+}
+
+/// Ctrl+Left: the start of the word before `offset`, skipping spaces; a line start steps back
+/// over the line break.
+pub(crate) fn prev_word_start(text: &Rope, offset: usize) -> usize {
+    let offset = text.floor_char_boundary(offset.min(text.len()));
+    if offset == 0 || text.byte(offset - 1) == b'\n' {
+        return offset.saturating_sub(1);
+    }
+    let line_start = text.line_start_offset(text.offset_to_point(offset).row);
+    let end = skip_spaces(text, offset, line_start);
+    let last = |window: &str, _| {
+        let mut words = window.split_word_bound_indices();
+        words
+            .rfind(|(_, w)| !w.chars().all(is_horizontal_ws))
+            .map(|(i, w)| i..i + w.len())
+    };
+    word_segment(text, line_start..end, end, last).map_or(line_start, |word| word.start)
+}
+
+/// Ctrl+Right: the end of the word after `offset` plus the spaces that follow it; a line end
+/// steps over the line break.
+pub(crate) fn next_word_end(text: &Rope, offset: usize) -> usize {
+    let offset = text.floor_char_boundary(offset.min(text.len()));
+    if offset >= text.len() || text.byte(offset) == b'\n' {
+        return (offset + 1).min(text.len());
+    }
+    let line_end = text.line_end_offset(text.offset_to_point(offset).row);
+    if text.char_at(offset).is_some_and(is_horizontal_ws) {
+        return skip_spaces(text, offset, line_end);
+    }
+    let first = |window: &str, _| {
+        let mut words = window.split_word_bound_indices();
+        words
+            .find(|(_, w)| !w.chars().all(is_horizontal_ws))
+            .map(|(i, w)| i..i + w.len())
+    };
+    let word_end = word_segment(text, offset..line_end, offset, first).map_or(line_end, |w| w.end);
+    skip_spaces(text, word_end, line_end)
+}
+
+/// A selection from `anchor` to `head` (the caret). `end_affinity` keeps a caret at a soft-wrap
+/// point on the end of the earlier row.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Default)]
 pub(crate) struct Selection {
     pub(crate) anchor: usize,
@@ -70,15 +321,19 @@ impl Selection {
     }
 
     pub(crate) fn contains(&self, offset: usize) -> bool {
-        offset >= self.start() && offset < self.end()
+        self.range().contains(&offset)
     }
 
     pub(crate) fn place(&mut self, offset: usize, end_affinity: bool) {
-        self.anchor = offset;
-        self.head = offset;
-        self.end_affinity = end_affinity;
+        *self = Self {
+            anchor: offset,
+            head: offset,
+            end_affinity,
+        };
     }
 
+    /// Moves the head to `offset`. While extending a double-click (`anchor_word`), the whole
+    /// word stays selected and the anchor moves to whichever end of it is away from the head.
     pub(crate) fn extend_to(
         &mut self,
         offset: usize,
@@ -91,382 +346,34 @@ impl Selection {
         self.head = offset;
         self.end_affinity = end_affinity;
         if let Some(word) = anchor_word {
-            let ws = word.start.min(max_len);
-            let we = word.end.min(max_len);
-            if offset < ws {
-                self.anchor = we;
-                self.head = offset;
-            } else if offset > we {
-                self.anchor = ws;
-                self.head = offset;
+            let (start, end) = (word.start.min(max_len), word.end.min(max_len));
+            (self.anchor, self.head) = if offset < start {
+                (end, offset)
+            } else if offset > end {
+                (start, offset)
             } else {
-                self.anchor = ws;
-                self.head = we;
-            }
+                (start, end)
+            };
         }
     }
 }
 
-pub(crate) trait RopeExt {
-    fn slice_line(&self, row: usize) -> RopeSlice<'_>;
-    fn line_len(&self, row: usize) -> usize;
-    fn line_start_offset(&self, row: usize) -> usize;
-    fn line_end_offset(&self, row: usize) -> usize;
-    fn lines_len(&self) -> usize;
-    fn char_at(&self, offset: usize) -> Option<char>;
-    fn offset_to_point(&self, offset: usize) -> TextPoint;
-    fn point_to_offset(&self, point: TextPoint) -> usize;
-    fn clip_offset(&self, offset: usize, bias: Bias) -> usize;
-    fn replace(&mut self, range: Range<usize>, text: &str);
-}
-
-impl RopeExt for Rope {
-    fn slice_line(&self, row: usize) -> RopeSlice<'_> {
-        if row >= self.lines_len() {
-            return self.slice(0..0);
-        }
-        let line = self.line(row, LineType::LF);
-        if line.len() > 0 && line.byte(line.len() - 1) == b'\n' {
-            line.slice(..line.len() - 1)
-        } else {
-            line
-        }
-    }
-
-    fn line_len(&self, row: usize) -> usize {
-        self.slice_line(row).len()
-    }
-
-    fn line_start_offset(&self, row: usize) -> usize {
-        self.point_to_offset(TextPoint::new(row, 0))
-    }
-
-    fn line_end_offset(&self, row: usize) -> usize {
-        if row >= self.lines_len() {
-            return self.len();
-        }
-        self.line_start_offset(row) + self.line_len(row)
-    }
-
-    fn lines_len(&self) -> usize {
-        self.len_lines(LineType::LF)
-    }
-
-    fn char_at(&self, offset: usize) -> Option<char> {
-        (offset < self.len())
-            .then(|| self.get_char(offset).ok())
-            .flatten()
-    }
-
-    fn offset_to_point(&self, offset: usize) -> TextPoint {
-        let clamped = self.clip_offset(offset, Bias::Left);
-        let row = self.byte_to_line_idx(clamped, LineType::LF);
-        let start = self.line_to_byte_idx(row, LineType::LF);
-        TextPoint::new(row, clamped.saturating_sub(start))
-    }
-
-    fn point_to_offset(&self, point: TextPoint) -> usize {
-        if point.row >= self.lines_len() {
-            return self.len();
-        }
-        self.line_to_byte_idx(point.row, LineType::LF) + point.column
-    }
-
-    fn clip_offset(&self, offset: usize, bias: Bias) -> usize {
-        if offset >= self.len() {
-            return self.len();
-        }
-        if self.is_char_boundary(offset) {
-            return offset;
-        }
-        match bias {
-            Bias::Left => self.floor_char_boundary(offset),
-            Bias::Right => self.ceil_char_boundary(offset),
-        }
-    }
-
-    fn replace(&mut self, range: Range<usize>, text: &str) {
-        let start = self.clip_offset(range.start, Bias::Left);
-        let end = self.clip_offset(range.end, Bias::Right);
-        self.remove(start..end);
-        self.insert(start, text);
-    }
-}
-
-pub(crate) fn line_range_at(text: &Rope, offset: usize) -> Range<usize> {
-    let clamped = text.clip_offset(offset, Bias::Left);
-    let row = text.offset_to_point(clamped).row;
-    text.line_start_offset(row)..text.line_end_offset(row)
-}
-
-pub(crate) fn prev_grapheme_boundary(text: &Rope, offset: usize) -> usize {
-    let len = text.len();
-    let off = text.clip_offset(offset, Bias::Left);
-    if off == 0 {
-        return 0;
-    }
-    let prev_b = text.byte(off - 1);
-    if (0x20..=0x7E).contains(&prev_b) && (off == 1 || text.byte(off - 2) < 0x80) {
-        return off - 1;
-    }
-    let mut span = GRAPHEME_SCAN_WINDOW_BYTES;
-    loop {
-        let win_start = text.floor_char_boundary(off.saturating_sub(span));
-        let win_end = text.ceil_char_boundary(off.saturating_add(32).min(len));
-        let chunk = text.slice(win_start..win_end).to_string();
-        let mut cursor = GraphemeCursor::new(off, len, true);
-        match cursor.prev_boundary(&chunk, win_start) {
-            Ok(Some(pos)) => return pos,
-            Ok(None) => return 0,
-            Err(GraphemeIncomplete::PrevChunk | GraphemeIncomplete::PreContext(_))
-                if win_start > 0 =>
-            {
-                span = span.saturating_mul(2);
-            }
-            Err(_) => return text.floor_char_boundary(off.saturating_sub(1)),
-        }
-    }
-}
-
-pub(crate) fn next_grapheme_boundary(text: &Rope, offset: usize) -> usize {
-    let len = text.len();
-    let off = text.clip_offset(offset, Bias::Right);
-    if off >= len {
-        return len;
-    }
-    let b = text.byte(off);
-    if (0x20..=0x7E).contains(&b) && (off + 1 == len || text.byte(off + 1) < 0x80) {
-        return off + 1;
-    }
-    let mut span = GRAPHEME_SCAN_WINDOW_BYTES;
-    loop {
-        let win_start = text.floor_char_boundary(off.saturating_sub(span));
-        let win_end = text.ceil_char_boundary(off.saturating_add(span).min(len));
-        let chunk = text.slice(win_start..win_end).to_string();
-        let mut cursor = GraphemeCursor::new(off, len, true);
-        match cursor.next_boundary(&chunk, win_start) {
-            Ok(Some(pos)) => return pos,
-            Ok(None) => return len,
-            Err(GraphemeIncomplete::NextChunk | GraphemeIncomplete::PreContext(_))
-                if win_start > 0 || win_end < len =>
-            {
-                span = span.saturating_mul(2);
-            }
-            Err(_) => return text.ceil_char_boundary((off + 1).min(len)),
-        }
-    }
-}
-
-pub(crate) fn snap_grapheme_boundary(text: &Rope, offset: usize, bias: Bias) -> usize {
-    let len = text.len();
-    let off = text.clip_offset(offset, bias);
-    if off == 0 || off >= len {
-        return off;
-    }
-    let prev_b = text.byte(off - 1);
-    let curr_b = text.byte(off);
-    if prev_b < 0x80 && curr_b < 0x80 && !(prev_b == b'\r' && curr_b == b'\n') {
-        return off;
-    }
-    let mut span = GRAPHEME_SCAN_WINDOW_BYTES;
-    loop {
-        let win_start = text.floor_char_boundary(off.saturating_sub(span));
-        let win_end = text.ceil_char_boundary(off.saturating_add(span).min(len));
-        let chunk = text.slice(win_start..win_end).to_string();
-        let mut cursor = GraphemeCursor::new(off, len, true);
-        match cursor.is_boundary(&chunk, win_start) {
-            Ok(true) => return off,
-            Ok(false) => {
-                return match bias {
-                    Bias::Left => prev_grapheme_boundary(text, off),
-                    Bias::Right => next_grapheme_boundary(text, off),
-                };
-            }
-            Err(GraphemeIncomplete::PreContext(_)) if win_start > 0 => {
-                span = span.saturating_mul(2);
-            }
-            Err(_) => return off,
-        }
-    }
-}
-
-#[inline]
-fn is_horizontal_ws(ch: char) -> bool {
-    ch.is_whitespace() && !matches!(ch, '\n' | '\r')
-}
-
-pub(crate) fn word_range_at(text: &Rope, offset: usize) -> Option<Range<usize>> {
-    let line = line_range_at(text, offset);
-    if line.is_empty() {
-        return None;
-    }
-    let mut pos = text.clip_offset(offset, Bias::Left);
-    if pos >= line.end {
-        pos = prev_grapheme_boundary(text, line.end);
-    }
-    if pos < line.start || pos >= line.end {
-        return None;
-    }
-
-    let ch = text.char_at(pos)?;
-    if is_horizontal_ws(ch) {
-        let mut left = pos;
-        for prev in text.chars_at(pos).reversed() {
-            if left <= line.start || !is_horizontal_ws(prev) {
-                break;
-            }
-            left -= prev.len_utf8();
-        }
-        let mut right = pos + ch.len_utf8();
-        for next in text.chars_at(right) {
-            if right >= line.end || !is_horizontal_ws(next) {
-                break;
-            }
-            right += next.len_utf8();
-        }
-        return Some(left..right);
-    }
-
-    let mut span = WORD_SCAN_WINDOW_BYTES;
-    loop {
-        let win_start = text
-            .floor_char_boundary(pos.saturating_sub(span))
-            .max(line.start);
-        let win_end = text
-            .ceil_char_boundary(pos.saturating_add(span).min(line.end))
-            .min(line.end);
-        let chunk = text.slice(win_start..win_end).to_string();
-        let rel_pos = pos - win_start;
-        for (seg_start, seg) in UnicodeSegmentation::split_word_bound_indices(chunk.as_str()) {
-            let seg_end = seg_start + seg.len();
-            if rel_pos >= seg_start && rel_pos < seg_end {
-                let touches_left = win_start > line.start && chunk[..seg_start].chars().count() < 4;
-                let touches_right = win_end < line.end && chunk[seg_end..].chars().count() < 4;
-                if !touches_left && !touches_right {
-                    return Some((win_start + seg_start)..(win_start + seg_end));
-                }
-                break;
-            }
-        }
-        if win_start == line.start && win_end == line.end {
-            return Some(pos..(pos + ch.len_utf8()));
-        }
-        span = span.saturating_mul(2);
-    }
-}
-
-pub(crate) fn prev_word_start(text: &Rope, offset: usize) -> usize {
-    let offset = text.floor_char_boundary(offset.min(text.len()));
-    if offset == 0 {
-        return 0;
-    }
-    if text.byte(offset - 1) == b'\n' {
-        return offset - 1;
-    }
-    let row = text.offset_to_point(offset).row;
-    let line_start = text.line_start_offset(row);
-
-    let mut end = offset;
-    for ch in text.chars_at(offset).reversed() {
-        if end <= line_start || !is_horizontal_ws(ch) {
-            break;
-        }
-        end -= ch.len_utf8();
-    }
-    if end <= line_start {
-        return line_start;
-    }
-
-    let mut span = WORD_SCAN_WINDOW_BYTES;
-    loop {
-        let win_start = text
-            .floor_char_boundary(end.saturating_sub(span))
-            .max(line_start);
-        let chunk = text.slice(win_start..end).to_string();
-        if let Some((rel, _)) = UnicodeSegmentation::split_word_bound_indices(chunk.as_str())
-            .rfind(|(_, piece)| !piece.chars().all(is_horizontal_ws))
-            && (win_start == line_start || (rel > 0 && chunk[..rel].chars().count() >= 4))
-        {
-            return win_start + rel;
-        }
-        if win_start == line_start {
-            return line_start;
-        }
-        span = span.saturating_mul(2);
-    }
-}
-
-pub(crate) fn next_word_end(text: &Rope, offset: usize) -> usize {
-    let len = text.len();
-    let offset = text.floor_char_boundary(offset.min(len));
-    if offset >= len {
-        return len;
-    }
-    if text.byte(offset) == b'\n' {
-        return offset + 1;
-    }
-    let row = text.offset_to_point(offset).row;
-    let line_end = text.line_end_offset(row);
-    if offset >= line_end {
-        return (line_end + 1).min(len);
-    }
-
-    let mut start = offset;
-    if text.char_at(start).is_some_and(is_horizontal_ws) {
-        for ch in text.chars_at(start) {
-            if start >= line_end || !is_horizontal_ws(ch) {
-                break;
-            }
-            start += ch.len_utf8();
-        }
-        return start.min(line_end);
-    }
-
-    let mut span = WORD_SCAN_WINDOW_BYTES;
-    let word_end = loop {
-        let win_end = text
-            .ceil_char_boundary(start.saturating_add(span).min(line_end))
-            .min(line_end);
-        let chunk = text.slice(start..win_end).to_string();
-        if let Some((rel, piece)) = UnicodeSegmentation::split_word_bound_indices(chunk.as_str())
-            .find(|(_, piece)| !piece.chars().all(is_horizontal_ws))
-        {
-            let end = rel + piece.len();
-            if win_end == line_end || chunk[end..].chars().count() >= 4 {
-                break start + end;
-            }
-        }
-        if win_end == line_end {
-            break line_end;
-        }
-        span = span.saturating_mul(2);
-    };
-
-    let mut pos = word_end.min(line_end);
-    for ch in text.chars_at(pos) {
-        if pos >= line_end || !is_horizontal_ws(ch) {
-            break;
-        }
-        pos += ch.len_utf8();
-    }
-    pos.min(line_end)
-}
-
+/// Edits with more changes than this rebuild the rope in one pass.
 const BULK_REBUILD_THRESHOLD: usize = 64;
+/// Edits with more changes than this are kept in the history as before/after snapshots.
 const SNAPSHOT_HISTORY_THRESHOLD: usize = 1024;
-
-const MAX_HISTORY_ENTRIES: usize = 1000;
-const MAX_CHANGES_PER_ENTRY: usize = 1000;
-const MAX_HISTORY_BYTES: usize = 32 * 1024 * 1024;
 
 pub(crate) type ValidateFn = fn(&str) -> bool;
 
+/// What a model accepts: documents are multi-line; single-line fields drop line breaks and may
+/// refuse text their validator rejects.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct EditPolicy {
     pub(crate) multi_line: bool,
     pub(crate) validate: Option<ValidateFn>,
 }
 
+/// The rows an edit replaced, so views can update only those.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum LineChange {
     Splice {
@@ -476,6 +383,8 @@ pub(crate) enum LineChange {
     Full,
 }
 
+/// Where the selection goes after an edit: a caret after the last change, the old selection
+/// carried through the changes, or a given selection.
 #[derive(Clone, Copy, Debug)]
 enum SelectionAfter {
     AfterLastEdit,
@@ -483,6 +392,7 @@ enum SelectionAfter {
     Explicit(Selection),
 }
 
+/// Uncommitted IME text at `start..end`, with its caret `cursor` bytes in, and what it replaced.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Composition {
     pub(crate) start: usize,
@@ -492,6 +402,8 @@ pub(crate) struct Composition {
     sel_before: Selection,
 }
 
+/// How an edit merges into the history: runs of typing, backspacing or forward deleting
+/// become one undo step; everything else is its own step.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum EditKind {
     Insert,
@@ -500,12 +412,11 @@ enum EditKind {
     Atomic,
 }
 
-/// History budget charged per change on top of its text: two `(range, text)` records.
-const CHANGE_OVERHEAD: usize = 80;
-
 /// Replace a byte range with new text.
 type Splice = (Range<usize>, String);
 
+/// A text with its selection, IME composition and undo history. Every edit goes through
+/// `commit`, which keeps the selection on grapheme boundaries and bumps `revision`.
 pub(crate) struct TextModel {
     text: Rope,
     policy: EditPolicy,
@@ -1131,6 +1042,13 @@ fn rebuild_rope(text: &Rope, edits: &[Splice]) -> Rope {
     builder.finish()
 }
 
+const MAX_HISTORY_ENTRIES: usize = 1000;
+const MAX_CHANGES_PER_ENTRY: usize = 1000;
+const MAX_HISTORY_BYTES: usize = 32 * 1024 * 1024;
+
+/// History budget charged per change on top of its text: two `(range, text)` records.
+const CHANGE_OVERHEAD: usize = 80;
+
 /// One replacement, kept with the text it replaced so it can be undone and redone.
 #[derive(Debug, PartialEq)]
 struct Change {
@@ -1346,7 +1264,10 @@ mod tests {
         let sample = Rope::from("hello 中文🎉 test\nRope");
         assert_eq!(
             sample.offset_to_point("hello 中文🎉\nR".len()),
-            TextPoint::new(0, "hello 中文🎉\nR".len())
+            TextPoint {
+                row: 0,
+                column: "hello 中文🎉\nR".len()
+            }
         );
 
         let mut edit = Rope::from("中文");
