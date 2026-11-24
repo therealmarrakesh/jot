@@ -12,7 +12,7 @@ use crate::platform::{
     MainWindowConfig, NativeWindow, WindowAppearance, WindowHandle, WindowId, WindowsDisplay,
     cursor_screen_pos, debug_log,
 };
-use crate::shell::Shell;
+use crate::app::Shell;
 use crate::tabs::TabData;
 use crate::window::{MainWindow, WINDOW_HEIGHT, WINDOW_MAX_SCREEN_SHARE, WINDOW_WIDTH};
 

@@ -8,9 +8,9 @@ use crate::gfx::TextSystem;
 use crate::ids::{
     AnimKey, AppFrame, AppNode, AppUi, EditorSlot, FindHit, Focus, HitId, MenuHit, MenuKind,
 };
-use crate::keytips::{self, KeyTip};
+use crate::tooltip::{self, KeyTip};
 use crate::platform::{CursorStyle, Key, KeyEvent, TimerHandle};
-use crate::shell::{WindowTimer, WindowTimers};
+use crate::app::{WindowTimer, WindowTimers};
 use crate::theme::{
     CONTROL_RADIUS, ICON_FONT, OVERLAY_RADIUS, Palette, SMALL_FONT, TEXT_FONT, theme_shadow,
 };
@@ -1583,7 +1583,7 @@ impl Menus {
                     .filter_map(|kind| {
                         let key = kind.access_key()?;
                         let anchor = frame.rect_of(HitId::Menu(MenuHit::Trigger(kind)))?;
-                        Some(keytips::layout_tip(ts, key, anchor, keytips::Placement::Below))
+                        Some(tooltip::layout_tip(ts, key, anchor, tooltip::Placement::Below))
                     })
                     .collect();
             }
@@ -1611,7 +1611,7 @@ impl Menus {
                     HitId::Menu(MenuHit::Item { serial, ix })
                 };
                 let face = frame.rect_of(hit)?.inset(Edges::xy(ROW_INSET, ROW_MARGIN_Y));
-                Some(keytips::layout_tip(ts, key, face, keytips::Placement::Left))
+                Some(tooltip::layout_tip(ts, key, face, tooltip::Placement::Left))
             })
             .collect()
     }
@@ -1923,7 +1923,7 @@ mod tests {
     use crate::geom::point;
     use crate::ids::TabId;
     use crate::platform::{Jobs, Modifiers};
-    use crate::shell::AppEvent;
+    use crate::app::AppEvent;
 
     use super::*;
 
