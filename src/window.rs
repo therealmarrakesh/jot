@@ -16,7 +16,7 @@ use crate::ids::{
 use crate::menu::{FocusRequest, MENU_BAR_HEIGHT, MenuOutcome, MenuState, Menus, RowPath};
 use crate::platform::{
     KeyEvent, Modifiers, MouseButton, WindowAppearance, WindowControlArea, WindowHandle, WindowId,
-    clipboard, format_local_time_date,
+    clipboard_has_text, format_local_time_date, read_clipboard_text, write_clipboard_text,
 };
 use crate::shell::{Cx, Effect, Shell, SlotTimers, WindowTimer};
 use crate::tabs::{
@@ -366,7 +366,7 @@ impl MainWindow {
         match cmd {
             EditCommand::Copy => {
                 if let Some(text) = self.editor_by_slot(slot).and_then(Editor::selected_string) {
-                    clipboard::write_clipboard_text(&text);
+                    write_clipboard_text(&text);
                 }
                 true
             }
@@ -375,7 +375,7 @@ impl MainWindow {
                     .editor_by_slot_mut(slot)
                     .and_then(Editor::prepare_cut);
                 if let Some(text) = text
-                    && clipboard::write_clipboard_text(&text)
+                    && write_clipboard_text(&text)
                 {
                     self.with_editor(slot, shell, |ed, timers| {
                         ed.delete_selection(&shell.text_system, timers);
@@ -384,7 +384,7 @@ impl MainWindow {
                 true
             }
             EditCommand::Paste => {
-                if let Some(raw) = clipboard::read_clipboard_text().filter(|s| !s.is_empty()) {
+                if let Some(raw) = read_clipboard_text().filter(|s| !s.is_empty()) {
                     self.with_editor(slot, shell, |ed, timers| {
                         ed.paste(&raw, &shell.text_system, timers);
                     });
@@ -1013,7 +1013,7 @@ fn menu_state(tabs: &TabSet, shell: &Shell) -> MenuState {
         can_redo: m.can_redo(),
         has_selection: !m.selected_range().is_empty(),
         has_text: m.text().len() > 0,
-        clipboard_has_text: clipboard::clipboard_has_text(),
+        clipboard_has_text: clipboard_has_text(),
         status_bar: shell.view.status_bar,
         word_wrap: shell.view.word_wrap,
     }
