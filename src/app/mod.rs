@@ -9,7 +9,7 @@ use crate::files::{FileIo, FileOps, FileRequest, spawn_file_io};
 use crate::geom::Size;
 use crate::gfx::{Gpu, TextSystem};
 use crate::ids::EditorSlot;
-use crate::keytips::KeyTips;
+use crate::tooltip::KeyTips;
 use crate::platform::{
     Key, MouseButton, Platform, PlatformEvent, PlatformHandler, WindowHandle, WindowId,
 };

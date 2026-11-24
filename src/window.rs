@@ -14,7 +14,7 @@ use crate::ids::{
     AppFrame, AppNode, AppUi, CaptionHit, CustomDraw, DialogHit, EditorSlot, FindHit, Focus, HitId,
     MenuHit, TabHit, TabId,
 };
-use crate::keytips::KeyTip;
+use crate::tooltip::KeyTip;
 use crate::menu::{FocusRequest, MENU_BAR_HEIGHT, MenuOutcome, MenuState, Menus, RowPath};
 use crate::platform::{
     KeyEvent, Modifiers, MouseButton, WindowAppearance, WindowControlArea, WindowHandle, WindowId,
