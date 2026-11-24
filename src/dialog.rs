@@ -3,8 +3,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use crate::editor::Editor;
-use crate::ids::{AnimKey, CustomDraw, EditorSlot, HitId, Node, UiState};
-use crate::platform::CursorStyle;
+use crate::ids::{AnimKey, CustomDraw, EditorSlot, Focus, HitId, Node, UiState};
+use crate::platform::{CursorStyle, Key, KeyEvent};
 use crate::tabs::TabId;
 use crate::theme::{Palette, theme_shadow};
 use crate::types::SharedStr;
@@ -13,7 +13,6 @@ use crate::ui::controls::{
     button, text_field_frame,
 };
 use crate::ui::{AnimStatus, Easing, box_, col, row, text};
-use crate::window::Focus;
 
 const TITLE_FONT: &str = "Segoe UI Variable Display";
 const OPEN_SCALE: f32 = 1.05;
@@ -54,6 +53,15 @@ pub(crate) struct Prompt {
     pub(crate) message: SharedStr,
     pub(crate) buttons: &'static [&'static str],
     pub(crate) tab: Option<TabId>,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(crate) enum DialogKey {
+    PassThrough,
+    Focus(Focus),
+    PressButton(usize),
+    EditGoToLine,
+    Consumed,
 }
 
 #[derive(Clone)]
@@ -167,7 +175,7 @@ impl Dialogs {
         self.open.iter().rev().find(|d| !d.closing)
     }
 
-    pub(crate) fn active_button_count(&self) -> usize {
+    fn active_button_count(&self) -> usize {
         self.active().map_or(0, |d| d.kind.buttons().len())
     }
 
@@ -222,7 +230,47 @@ impl Dialogs {
         Some(self.open[ix].kind.clone())
     }
 
-    pub(crate) fn next_focus_step(&self, current: Focus, delta: isize) -> Option<Focus> {
+    pub(crate) fn on_key(&self, ev: KeyEvent, focus: Focus) -> DialogKey {
+        let m = ev.modifiers;
+        if m.alt && !m.ctrl && !m.win && matches!(ev.key, Key::F(4) | Key::Space) {
+            return DialogKey::PassThrough;
+        }
+        match (m.ctrl, m.alt, m.shift, m.win, ev.key) {
+            (false, false, false, false, Key::Enter) => {
+                let btn = match focus {
+                    Focus::DialogButton(ix) => ix,
+                    _ => 0,
+                };
+                return DialogKey::PressButton(btn);
+            }
+            (false, false, false, false, Key::Space) => {
+                if let Focus::DialogButton(ix) = focus {
+                    return DialogKey::PressButton(ix);
+                }
+            }
+            (false, false, false, false, Key::Escape) => {
+                return DialogKey::PressButton(self.active_button_count().saturating_sub(1));
+            }
+            (false, false, false, false, Key::Tab) => {
+                return self
+                    .next_focus_step(focus, 1)
+                    .map_or(DialogKey::Consumed, DialogKey::Focus);
+            }
+            (false, false, true, false, Key::Tab) => {
+                return self
+                    .next_focus_step(focus, -1)
+                    .map_or(DialogKey::Consumed, DialogKey::Focus);
+            }
+            _ => {}
+        }
+        if focus == Focus::Editor(EditorSlot::GoToLine) {
+            DialogKey::EditGoToLine
+        } else {
+            DialogKey::Consumed
+        }
+    }
+
+    fn next_focus_step(&self, current: Focus, delta: isize) -> Option<Focus> {
         let dialog = self.active()?;
         let count = dialog.kind.buttons().len();
         let mut ring = Vec::with_capacity(count + 1);
@@ -409,4 +457,75 @@ fn dialog_content(p: Palette, title: SharedStr, body: Node) -> Node {
                 .child(text(title)),
         )
         .child(body)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::platform::Modifiers;
+
+    fn key(k: Key, m: Modifiers) -> KeyEvent {
+        KeyEvent {
+            key: k,
+            modifiers: m,
+        }
+    }
+
+    #[test]
+    fn dialog_key_routing_handles_focus_ring_buttons_go_to_and_system_chords() {
+        let mut dialogs = Dialogs::new();
+        let initial = dialogs.show_now(DialogKind::GoTo);
+        assert_eq!(initial, Focus::Editor(EditorSlot::GoToLine));
+
+        let plain = Modifiers::default();
+        let shift = Modifiers {
+            shift: true,
+            ..Default::default()
+        };
+        let alt = Modifiers {
+            alt: true,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            dialogs.on_key(key(Key::F(4), alt), initial),
+            DialogKey::PassThrough
+        );
+        assert_eq!(
+            dialogs.on_key(key(Key::Space, alt), initial),
+            DialogKey::PassThrough
+        );
+        assert_eq!(
+            dialogs.on_key(key(Key::Enter, plain), initial),
+            DialogKey::PressButton(0)
+        );
+        assert_eq!(
+            dialogs.on_key(key(Key::Escape, plain), initial),
+            DialogKey::PressButton(1)
+        );
+        assert_eq!(
+            dialogs.on_key(key(Key::Char('a'), plain), initial),
+            DialogKey::EditGoToLine
+        );
+        assert_eq!(
+            dialogs.on_key(key(Key::Tab, plain), initial),
+            DialogKey::Focus(Focus::DialogButton(0))
+        );
+        assert_eq!(
+            dialogs.on_key(key(Key::Tab, plain), Focus::DialogButton(0)),
+            DialogKey::Focus(Focus::DialogButton(1))
+        );
+        assert_eq!(
+            dialogs.on_key(key(Key::Tab, shift), Focus::DialogButton(0)),
+            DialogKey::Focus(Focus::Editor(EditorSlot::GoToLine))
+        );
+        assert_eq!(
+            dialogs.on_key(key(Key::Space, plain), Focus::DialogButton(1)),
+            DialogKey::PressButton(1)
+        );
+        assert_eq!(
+            dialogs.on_key(key(Key::Char('x'), plain), Focus::DialogButton(0)),
+            DialogKey::Consumed
+        );
+    }
 }

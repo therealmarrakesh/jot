@@ -22,7 +22,7 @@ use crate::tab_drag::TabDragState;
 use crate::tabs::{TabData, TabId};
 use crate::theme::Palette;
 use crate::tooltip::{TooltipTarget, Tooltips};
-use crate::window::{MainWindow, WINDOW_HEIGHT, WINDOW_MAX_SCREEN_SHARE, WINDOW_WIDTH};
+use crate::window::{InputMode, MainWindow, WINDOW_HEIGHT, WINDOW_MAX_SCREEN_SHARE, WINDOW_WIDTH};
 
 #[derive(Copy, Clone, Debug)]
 pub(crate) struct ViewSettings {
@@ -185,8 +185,7 @@ impl DocHost for AppDocHost<'_> {
 
     fn active_tab_path(&self, window: WindowId) -> Option<PathBuf> {
         let ix = self.window_ix(window)?;
-        let w = &self.windows[ix];
-        w.tabs[w.active].data.path().map(PathBuf::from)
+        self.windows[ix].tabs.active().path().map(PathBuf::from)
     }
 
     fn fallback_window(&self, preferred: WindowId) -> Option<WindowId> {
@@ -218,8 +217,8 @@ impl DocHost for AppDocHost<'_> {
     }
 
     fn begin_save(&mut self, tab: TabId) -> Option<(u64, Rope)> {
-        let (wix, tix) = self.find_tab(tab)?;
-        let ed = &mut self.windows[wix].tabs[tix].data.editor;
+        let (wix, _) = self.find_tab(tab)?;
+        let ed = self.windows[wix].tabs.editor_mut(tab)?;
         let snapshot = ed.begin_save();
         let text = ed.text().clone();
         Some((snapshot, text))
@@ -801,7 +800,7 @@ impl PlatformHandler for App {
                     && event.modifiers.none()
                     && !self
                         .window(window_id)
-                        .is_some_and(|w| w.dialogs.is_open() || w.menu_bar.is_open())
+                        .is_some_and(|w| matches!(w.mode(), InputMode::Dialog | InputMode::Popup))
                 {
                     self.tab_drag_cancel();
                     handled = true;

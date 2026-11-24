@@ -14,7 +14,7 @@ use crate::editor::RopeExt as _;
 use crate::find;
 use crate::geom::{Point, Rect, ScreenRect, point, size};
 use crate::gfx::{Gpu, Surface, font};
-use crate::ids::{EditorSlot, Frame, HitId};
+use crate::ids::{EditorSlot, Focus, Frame, HitId};
 use crate::menu::MenuKind;
 use crate::platform::window::hit_test_control_areas;
 use crate::platform::{
@@ -24,7 +24,7 @@ use crate::platform::{
 use crate::tabs::TabId;
 use crate::ui::controls::{SMALL_FONT, TEXT_FONT};
 use crate::ui::{AvailSize, box_, col, row, text};
-use crate::window::{EDITOR_PADDINGS, Focus, MainWindow};
+use crate::window::{EDITOR_PADDINGS, MainWindow};
 
 const EDITOR_PADDING_LEFT: f32 = EDITOR_PADDINGS.left;
 const EDITOR_PADDING_TOP: f32 = EDITOR_PADDINGS.top;
@@ -288,12 +288,12 @@ fn tab_close_button_new_tab_hover_and_middle_click() {
     h.click_hit(HitId::NewTab);
     let ids: Vec<TabId> = h.read(|w, _| {
         assert_eq!(w.tabs.len(), 3);
-        assert_eq!(w.active, 2);
+        assert_eq!(w.tabs.active_index(), 2);
         w.tabs.iter().map(|t| t.data.id).collect()
     });
 
     h.click_hit(HitId::Tab(ids[0]));
-    h.read(|w, _| assert_eq!(w.active, 0));
+    h.read(|w, _| assert_eq!(w.tabs.active_index(), 0));
     h.click_hit(HitId::TabClose(ids[0]));
     h.read(|w, app| {
         assert_eq!(w.tabs.len(), 2, "clicking active tab 'x' must close tab");
@@ -991,7 +991,7 @@ fn window_anim_tracks_prune_unused_tracks_and_word_wrap_updates_tabs() {
     h.read(|w, app| {
         assert_eq!(w.tabs.len(), 2);
         assert!(app.shell.view.word_wrap);
-        for tab in &w.tabs {
+        for tab in w.tabs.iter() {
             assert!(tab.data.editor.soft_wrap_enabled());
         }
     });
@@ -999,7 +999,7 @@ fn window_anim_tracks_prune_unused_tracks_and_word_wrap_updates_tabs() {
     h.click_menu_item(2);
     h.read(|w, app| {
         assert!(!app.shell.view.word_wrap);
-        for tab in &w.tabs {
+        for tab in w.tabs.iter() {
             assert!(!tab.data.editor.soft_wrap_enabled());
         }
     });
@@ -1153,12 +1153,8 @@ fn close_save_keeps_window_open_when_edited_mid_write_and_migrated_save_cleans_t
     {
         let mut app_guard = h.app.borrow_mut();
         let app = &mut *app_guard;
-        let tab = crate::tabs::Tab::adopt(crate::tabs::TabData::create(
-            Some(loaded),
-            true,
-            EDITOR_PADDINGS,
-        ));
-        app.windows[0].replace_tab(0, tab, &app.shell.jobs);
+        let data = crate::tabs::TabData::create(Some(loaded), true, EDITOR_PADDINGS);
+        app.windows[0].replace_tab(0, data, &app.shell.jobs);
     }
     h.draw();
     h.type_text(" v2");
@@ -1183,7 +1179,7 @@ fn close_save_keeps_window_open_when_edited_mid_write_and_migrated_save_cleans_t
         "typing during close->Save write must keep window open and re-prompt"
     );
     h.read(|w, _| {
-        assert!(w.tabs[w.active].data.is_dirty());
+        assert!(w.tabs.active().is_dirty());
         assert!(w.dialogs.is_open());
     });
     h.click_hit(HitId::DialogButton(1));
@@ -1194,13 +1190,9 @@ fn close_save_keeps_window_open_when_edited_mid_write_and_migrated_save_cleans_t
     let tab_id = {
         let mut app_guard = h2.app.borrow_mut();
         let app = &mut *app_guard;
-        let tab = crate::tabs::Tab::adopt(crate::tabs::TabData::create(
-            Some(loaded2),
-            true,
-            EDITOR_PADDINGS,
-        ));
-        let id = tab.data.id;
-        app.windows[0].replace_tab(0, tab, &app.shell.jobs);
+        let data = crate::tabs::TabData::create(Some(loaded2), true, EDITOR_PADDINGS);
+        let id = data.id;
+        app.windows[0].replace_tab(0, data, &app.shell.jobs);
         id
     };
     h2.draw();

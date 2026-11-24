@@ -10,6 +10,13 @@ pub(crate) enum EditorSlot {
     GoToLine,
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Focus {
+    Editor(EditorSlot),
+    MenuBar,
+    DialogButton(usize),
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum CustomDraw {
     Editor(EditorSlot),

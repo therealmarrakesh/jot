@@ -71,7 +71,7 @@ const ADD_GLYPH: &str = "\u{E710}";
 pub(crate) const CLOSE_GLYPH: &str = "\u{E711}";
 const BUTTON_GLYPH_SIZE: f32 = 12.;
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct SlotKey(usize);
 
 pub(crate) struct TabData {
@@ -130,11 +130,8 @@ pub(crate) struct Tab {
 }
 
 impl Tab {
-    pub(crate) fn adopt(data: TabData) -> Self {
-        Self {
-            data,
-            slot: SlotKey::default(),
-        }
+    pub(crate) fn new(data: TabData, slot: SlotKey) -> Self {
+        Self { data, slot }
     }
 }
 
