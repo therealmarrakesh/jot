@@ -21,7 +21,7 @@ use crate::platform::TimerHandle;
 use crate::types::SharedStr;
 use crate::ui::{Node, box_, custom, row};
 
-use model::{EditEffects, EditPolicy, LineChange, TextModel, ValidateFn};
+use model::{EditPolicy, LineChange, TextModel, ValidateFn};
 use scrollbar::ScrollbarState;
 use view::{AutoScroll, BlinkState, FrameLayout, LongestLineCache};
 use wrap::WrapIndex;
@@ -318,20 +318,17 @@ impl Editor {
         }
     }
 
-    pub(super) fn apply_effects(&mut self, fx: EditEffects, ts: &TextSystem) {
-        if fx.changed {
-            self.reset_pointer_selection_state();
-            if fx.lines != LineChange::None
-                && let ViewKind::Document(doc) = &mut self.view
-            {
-                doc.wrap.apply_line_change(self.model.text(), &fx.lines, ts);
-            }
+    pub(super) fn apply_change(&mut self, change: Option<LineChange>, ts: &TextSystem) {
+        let Some(lines) = change else {
+            return;
+        };
+        self.reset_pointer_selection_state();
+        if let ViewKind::Document(doc) = &mut self.view {
+            doc.wrap.apply_line_change(self.model.text(), &lines, ts);
         }
-        if fx.caret_moved {
-            let aff = self.model.selection().end_affinity;
-            self.request_reveal(self.cursor(), aff, None, true);
-            self.update_preferred_x();
-        }
+        let aff = self.model.selection().end_affinity;
+        self.request_reveal(self.cursor(), aff, None, true);
+        self.update_preferred_x();
     }
 
     #[inline]

@@ -823,7 +823,6 @@ impl WrapIndex {
             return;
         }
         match change {
-            LineChange::None => {}
             LineChange::Full => self.rebuild_all(updated_text, ts),
             LineChange::Splice {
                 old_lines,

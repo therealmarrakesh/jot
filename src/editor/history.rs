@@ -8,6 +8,81 @@ const MAX_HISTORY_ENTRIES: usize = 1000;
 const MAX_CHANGES_PER_ENTRY: usize = 1000;
 const MAX_HISTORY_BYTES: usize = 32 * 1024 * 1024;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Change {
+    pub(crate) range: Range<usize>,
+    pub(crate) text: String,
+}
+
+impl Change {
+    fn approx_bytes(&self) -> usize {
+        self.text.len() + std::mem::size_of::<Self>()
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ChangeSet {
+    pub(super) changes: Vec<Change>,
+}
+
+impl ChangeSet {
+    pub(crate) fn single(range: Range<usize>, text: impl Into<String>) -> Self {
+        Self {
+            changes: vec![Change {
+                range,
+                text: text.into(),
+            }],
+        }
+    }
+
+    pub(crate) fn new(mut changes: Vec<Change>) -> Self {
+        changes.sort_by_key(|c| c.range.start);
+        debug_assert!(
+            changes.windows(2).all(|w| w[0].range.end <= w[1].range.start),
+            "ChangeSet ranges must be non-overlapping"
+        );
+        Self { changes }
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.changes.is_empty()
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.changes.len()
+    }
+
+    fn approx_bytes(&self) -> usize {
+        self.changes.iter().map(Change::approx_bytes).sum()
+    }
+
+    pub(crate) fn remap_offset(&self, offset: usize) -> usize {
+        remap_offset(
+            self.changes.iter().map(|c| (c.range.clone(), c.text.len())),
+            offset,
+        )
+    }
+}
+
+pub(super) fn remap_offset(
+    changes: impl IntoIterator<Item = (Range<usize>, usize)>,
+    offset: usize,
+) -> usize {
+    let mut out = offset;
+    for (range, new_len) in changes {
+        if range.end <= offset {
+            out = out - (range.end - range.start) + new_len;
+        } else if range.start < offset {
+            let inside = offset - range.start;
+            out = out - inside + inside.min(new_len);
+            break;
+        } else {
+            break;
+        }
+    }
+    out
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum EditKind {
     Insert,
@@ -16,45 +91,24 @@ pub(crate) enum EditKind {
     Atomic,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct EditRecord {
-    pub(crate) old_range: Range<usize>,
-    pub(crate) old_text: String,
-    pub(crate) new_range: Range<usize>,
-    pub(crate) new_text: String,
-}
-
-impl EditRecord {
-    pub(crate) fn new(
-        old_range: Range<usize>,
-        old_text: String,
-        new_range: Range<usize>,
-        new_text: String,
-    ) -> Self {
-        Self {
-            old_range,
-            old_text,
-            new_range,
-            new_text,
-        }
-    }
-
-    fn approx_bytes(&self) -> usize {
-        self.old_text.len() + self.new_text.len() + std::mem::size_of::<Self>()
-    }
-}
-
 #[derive(Debug)]
 pub(crate) enum TxPayload {
-    Edits(Vec<EditRecord>),
-    Snapshot { before: Rope, after: Rope },
+    Changes { undo: ChangeSet, redo: ChangeSet },
+    Snapshot { before: Rope, after: Rope, delta_bytes: usize },
 }
 
 impl TxPayload {
     fn approx_bytes(&self) -> usize {
         match self {
-            Self::Edits(edits) => edits.iter().map(EditRecord::approx_bytes).sum(),
-            Self::Snapshot { .. } => 4096,
+            Self::Changes { undo, redo } => undo.approx_bytes() + redo.approx_bytes(),
+            Self::Snapshot { delta_bytes, .. } => (*delta_bytes).max(4096),
+        }
+    }
+
+    fn is_noop(&self) -> bool {
+        match self {
+            Self::Changes { undo, redo } => undo.is_empty() || undo == redo,
+            Self::Snapshot { .. } => false,
         }
     }
 }
@@ -79,7 +133,7 @@ struct HistoryEntry {
 }
 
 pub(crate) enum ReplayPayload {
-    Edits(Vec<EditRecord>),
+    Changes(ChangeSet),
     Snapshot(Rope),
 }
 
@@ -139,41 +193,31 @@ impl History {
             selection_after,
         } = tx;
 
-        if let TxPayload::Edits(edits) = &payload {
-            if edits.is_empty() {
-                return;
-            }
-            if edits.len() == 1
-                && edits[0].old_range == edits[0].new_range
-                && edits[0].old_text == edits[0].new_text
-            {
-                self.coalesce_broken = true;
-                return;
-            }
+        if payload.is_noop() {
+            self.coalesce_broken = true;
+            return;
         }
 
         self.clear_redo();
 
-        let can_coalesce = !self.coalesce_broken
+        if !self.coalesce_broken
             && kind != EditKind::Atomic
-            && matches!(&payload, TxPayload::Edits(e) if e.len() == 1)
-            && self.undo_stack.last().is_some_and(|prev| {
-                prev.kind == kind
-                    && prev.merged_count < MAX_CHANGES_PER_ENTRY
-                    && match (&prev.payload, &payload) {
-                        (TxPayload::Edits(prev_edits), TxPayload::Edits(curr)) => prev_edits
-                            .last()
-                            .is_some_and(|last| edits_are_adjacent(kind, last, &curr[0])),
-                        _ => false,
-                    }
-            });
-
-        if can_coalesce {
-            let TxPayload::Edits(mut edits) = payload else {
-                unreachable!()
-            };
-            let edit = edits.pop().unwrap();
-            let prev = self.undo_stack.last_mut().expect("previous entry exists");
+            && let Some(prev) = self.undo_stack.last_mut()
+            && prev.kind == kind
+            && prev.merged_count < MAX_CHANGES_PER_ENTRY
+            && prev.selection_after == selection_before
+            && let (
+                TxPayload::Changes {
+                    undo: prev_undo,
+                    redo: prev_redo,
+                },
+                TxPayload::Changes {
+                    undo: curr_undo,
+                    redo: curr_redo,
+                },
+            ) = (&mut prev.payload, &payload)
+            && try_coalesce(kind, prev_undo, prev_redo, curr_undo, curr_redo)
+        {
             let old_bytes = prev.approx_bytes;
             let version = self.next_version;
             self.next_version += 1;
@@ -181,23 +225,6 @@ impl History {
             self.current_version = version;
             prev.merged_count += 1;
             prev.selection_after = selection_after;
-
-            if let TxPayload::Edits(prev_edits) = &mut prev.payload {
-                if kind == EditKind::Insert
-                    && let Some(last) = prev_edits.last_mut()
-                {
-                    let cut = edit.old_range.start.saturating_sub(last.new_range.start);
-                    if cut <= last.new_text.len() && last.new_text.is_char_boundary(cut) {
-                        last.new_text.truncate(cut);
-                        last.new_text.push_str(&edit.new_text);
-                        last.new_range.end = edit.new_range.end;
-                    } else {
-                        prev_edits.push(edit);
-                    }
-                } else {
-                    prev_edits.push(edit);
-                }
-            }
             let new_bytes = prev.payload.approx_bytes();
             prev.approx_bytes = new_bytes;
             self.total_bytes = self.total_bytes.saturating_sub(old_bytes) + new_bytes;
@@ -210,7 +237,7 @@ impl History {
         self.next_version += 1;
         self.current_version = version_after;
         let merged_count = match &payload {
-            TxPayload::Edits(edits) => edits.len(),
+            TxPayload::Changes { redo, .. } => redo.len(),
             TxPayload::Snapshot { .. } => 1,
         };
         let approx_bytes = payload.approx_bytes();
@@ -264,7 +291,7 @@ impl History {
         let entry = self.undo_stack.pop()?;
         self.current_version = entry.version_before;
         let payload = match &entry.payload {
-            TxPayload::Edits(edits) => ReplayPayload::Edits(edits.iter().rev().cloned().collect()),
+            TxPayload::Changes { undo, .. } => ReplayPayload::Changes(undo.clone()),
             TxPayload::Snapshot { before, .. } => ReplayPayload::Snapshot(before.clone()),
         };
         let replay = HistoryReplay {
@@ -280,7 +307,7 @@ impl History {
         let entry = self.redo_stack.pop()?;
         self.current_version = entry.version_after;
         let payload = match &entry.payload {
-            TxPayload::Edits(edits) => ReplayPayload::Edits(edits.clone()),
+            TxPayload::Changes { redo, .. } => ReplayPayload::Changes(redo.clone()),
             TxPayload::Snapshot { after, .. } => ReplayPayload::Snapshot(after.clone()),
         };
         let replay = HistoryReplay {
@@ -293,24 +320,56 @@ impl History {
     }
 }
 
-fn edits_are_adjacent(kind: EditKind, prev: &EditRecord, curr: &EditRecord) -> bool {
+fn try_coalesce(
+    kind: EditKind,
+    prev_undo: &mut ChangeSet,
+    prev_redo: &mut ChangeSet,
+    curr_undo: &ChangeSet,
+    curr_redo: &ChangeSet,
+) -> bool {
+    let ([pu], [pr], [cu], [cr]) = (
+        prev_undo.changes.as_mut_slice(),
+        prev_redo.changes.as_mut_slice(),
+        curr_undo.changes.as_slice(),
+        curr_redo.changes.as_slice(),
+    ) else {
+        return false;
+    };
     match kind {
         EditKind::Insert => {
-            prev.old_range.is_empty()
-                && !prev.new_text.contains(['\n', '\r'])
-                && !curr.new_text.contains(['\n', '\r'])
-                && prev.new_range.start <= curr.old_range.start
-                && prev.new_range.end == curr.old_range.end
+            if !pr.range.is_empty()
+                || pr.text.contains(['\n', '\r'])
+                || cr.text.contains(['\n', '\r'])
+                || cr.range.start < pu.range.start
+                || cr.range.end != pu.range.end
+            {
+                return false;
+            }
+            let cut = cr.range.start - pr.range.start;
+            if cut > pr.text.len() || !pr.text.is_char_boundary(cut) {
+                return false;
+            }
+            pr.text.truncate(cut);
+            pr.text.push_str(&cr.text);
+            pu.range.end = pr.range.start + pr.text.len();
+            true
         }
         EditKind::Backspace => {
-            prev.new_text.is_empty()
-                && curr.new_text.is_empty()
-                && curr.old_range.end == prev.old_range.start
+            if !pr.text.is_empty() || !cr.text.is_empty() || cr.range.end != pr.range.start {
+                return false;
+            }
+            pr.range.start = cr.range.start;
+            pu.range = cr.range.start..cr.range.start;
+            pu.text.insert_str(0, &cu.text);
+            true
         }
         EditKind::DeleteForward => {
-            prev.new_text.is_empty()
-                && curr.new_text.is_empty()
-                && curr.old_range.start == prev.old_range.start
+            if !pr.text.is_empty() || !cr.text.is_empty() || cr.range.start != pr.range.start {
+                return false;
+            }
+            pr.range.end += cr.range.end - cr.range.start;
+            pu.text.push_str(&cu.text);
+            true
         }
         EditKind::Atomic => false,
     }
@@ -323,21 +382,19 @@ mod tests {
     fn insert_tx(offset: usize, text: &str, kind: EditKind) -> Transaction {
         Transaction {
             kind,
-            payload: TxPayload::Edits(vec![EditRecord::new(
-                offset..offset,
-                String::new(),
-                offset..offset + text.len(),
-                text.to_string(),
-            )]),
+            payload: TxPayload::Changes {
+                undo: ChangeSet::single(offset..offset + text.len(), ""),
+                redo: ChangeSet::single(offset..offset, text),
+            },
             selection_before: Selection::caret(offset),
             selection_after: Selection::caret(offset + text.len()),
         }
     }
 
-    fn undo_edits(h: &mut History) -> Vec<EditRecord> {
+    fn undo_changes(h: &mut History) -> ChangeSet {
         match h.undo().unwrap().payload {
-            ReplayPayload::Edits(e) => e,
-            ReplayPayload::Snapshot(_) => panic!("expected edits"),
+            ReplayPayload::Changes(c) => c,
+            ReplayPayload::Snapshot(_) => panic!("expected changes"),
         }
     }
 
@@ -346,10 +403,7 @@ mod tests {
         let mut h = History::new();
         h.push(insert_tx(0, "a", EditKind::Insert));
         h.push(insert_tx(1, "b", EditKind::Insert));
-        assert_eq!(
-            undo_edits(&mut h),
-            [EditRecord::new(0..0, String::new(), 0..2, "ab".into())]
-        );
+        assert_eq!(undo_changes(&mut h), ChangeSet::single(0..2, ""));
         assert!(h.undo().is_none());
 
         let mut h = History::new();
@@ -357,22 +411,12 @@ mod tests {
             h.push(insert_tx(i, "a", EditKind::Insert));
         }
         assert_eq!(
-            undo_edits(&mut h),
-            [EditRecord::new(
-                MAX_CHANGES_PER_ENTRY..MAX_CHANGES_PER_ENTRY,
-                String::new(),
-                MAX_CHANGES_PER_ENTRY..MAX_CHANGES_PER_ENTRY + 100,
-                "a".repeat(100),
-            )]
+            undo_changes(&mut h),
+            ChangeSet::single(MAX_CHANGES_PER_ENTRY..MAX_CHANGES_PER_ENTRY + 100, "")
         );
         assert_eq!(
-            undo_edits(&mut h),
-            [EditRecord::new(
-                0..0,
-                String::new(),
-                0..MAX_CHANGES_PER_ENTRY,
-                "a".repeat(MAX_CHANGES_PER_ENTRY),
-            )]
+            undo_changes(&mut h),
+            ChangeSet::single(0..MAX_CHANGES_PER_ENTRY, "")
         );
         assert!(h.undo().is_none());
     }
@@ -382,23 +426,45 @@ mod tests {
         let mut h = History::new();
         h.push(Transaction {
             kind: EditKind::Atomic,
-            payload: TxPayload::Edits(vec![
-                EditRecord::new(0..0, String::new(), 0..1, "a".into()),
-                EditRecord::new(1..1, String::new(), 1..2, "b".into()),
-                EditRecord::new(2..2, String::new(), 2..3, "c".into()),
-            ]),
+            payload: TxPayload::Changes {
+                undo: ChangeSet::new(vec![
+                    Change {
+                        range: 0..1,
+                        text: String::new(),
+                    },
+                    Change {
+                        range: 2..3,
+                        text: String::new(),
+                    },
+                    Change {
+                        range: 4..5,
+                        text: String::new(),
+                    },
+                ]),
+                redo: ChangeSet::new(vec![
+                    Change {
+                        range: 0..0,
+                        text: "a".into(),
+                    },
+                    Change {
+                        range: 1..1,
+                        text: "b".into(),
+                    },
+                    Change {
+                        range: 2..2,
+                        text: "c".into(),
+                    },
+                ]),
+            },
             selection_before: Selection::caret(0),
-            selection_after: Selection::caret(3),
+            selection_after: Selection::caret(5),
         });
-        let edits = undo_edits(&mut h);
-        assert_eq!(edits.len(), 3);
-        assert_eq!(edits[0].new_text, "c");
-        assert_eq!(edits[2].new_text, "a");
+        assert_eq!(undo_changes(&mut h).len(), 3);
 
         h.push(insert_tx(0, "x", EditKind::Atomic));
         h.push(insert_tx(1, "y", EditKind::Insert));
-        assert_eq!(undo_edits(&mut h).len(), 1);
-        assert_eq!(undo_edits(&mut h).len(), 1);
+        assert_eq!(undo_changes(&mut h).len(), 1);
+        assert_eq!(undo_changes(&mut h).len(), 1);
 
         let mut capped = History::new();
         for i in 0..1_100 {
@@ -428,10 +494,7 @@ mod tests {
         assert!(h.is_clean());
         h.push(insert_tx(1, "b", EditKind::Insert));
         assert!(!h.is_clean());
-        assert_eq!(
-            undo_edits(&mut h),
-            [EditRecord::new(1..1, String::new(), 1..2, "b".into())]
-        );
+        assert_eq!(undo_changes(&mut h), ChangeSet::single(1..2, ""));
         assert!(h.is_clean());
 
         let snapshot = h.begin_save();
