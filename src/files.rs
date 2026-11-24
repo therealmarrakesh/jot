@@ -1,20 +1,131 @@
 use std::collections::{HashSet, VecDeque};
-use std::path::PathBuf;
-use std::time::Duration;
+use std::io;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
 
-use crate::document::{DocPath, Encoding, Format, PathKey};
+use crate::APP_NAME;
+use crate::document::{self, DocPath, Encoding, Format, LoadError, PathKey, SaveError, default_directory, display_name, file_name};
+use crate::editor::Rope;
 use crate::ids::TabId;
-use crate::platform::{SaveDialogResult, WindowId};
+use crate::platform::{Jobs, OpenDialogOptions, SaveChoice, SaveDialogOptions, SaveDialogResult, WindowHandle, WindowId, run_open_dialog, run_save_dialog};
+use crate::types::{Error, SharedStr};
 
-use super::io::WriteTracker;
-use super::prompt::{
-    already_open_save_prompt, dialog_error_prompt, discard_prompt, load_error_prompt,
-    lossy_ansi_prompt, save_error_prompt,
-};
-use super::{
-    DocHost, FileEvent, FileIo, FileRequest, Prompt, PromptAnswer, PromptId, SaveJob, WorkflowId,
-    WriteOutcome,
-};
+crate::types::id_type!(PromptId);
+crate::types::id_type!(WorkflowId);
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(crate) enum PromptAnswer {
+    Save,
+    Discard,
+    Continue,
+    Cancel,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct Prompt {
+    pub(crate) title: SharedStr,
+    pub(crate) message: SharedStr,
+    pub(crate) choices: &'static [(&'static str, PromptAnswer)],
+    pub(crate) cancel: PromptAnswer,
+    pub(crate) reply: Option<(PromptId, TabId)>,
+}
+
+impl Prompt {
+    pub(crate) fn tab(&self) -> Option<TabId> {
+        self.reply.map(|(_, tab)| tab)
+    }
+}
+
+pub(crate) enum FileRequest {
+    OpenDialog { window: WindowId },
+    OpenPaths { window: WindowId, paths: Vec<PathBuf> },
+    Save { window: WindowId, tab: TabId },
+    SaveAs { window: WindowId, tab: TabId },
+    SaveAll { window: WindowId },
+    CloseTab { window: WindowId, tab: TabId },
+    CloseWindow { window: WindowId },
+}
+
+pub(crate) enum WriteOutcome {
+    Saved { doc_path: DocPath, format: Format },
+    NeedsLossyConfirm,
+    Error(SaveError),
+}
+
+pub(crate) enum FileEvent {
+    OpenDialogDone {
+        window: WindowId,
+        result: crate::types::Result<Option<Vec<PathBuf>>>,
+    },
+    FilesLoaded {
+        window: WindowId,
+        results: Vec<(DocPath, Result<document::Loaded, LoadError>)>,
+    },
+    SaveDialogDone {
+        wf: WorkflowId,
+        result: SaveDialogResult,
+    },
+    WriteDone {
+        wf: WorkflowId,
+        outcome: WriteOutcome,
+    },
+}
+
+#[derive(Clone)]
+pub(crate) struct SaveJob {
+    pub(crate) tab: TabId,
+    pub(crate) snapshot: u64,
+    pub(crate) text: Rope,
+    pub(crate) path: PathBuf,
+    pub(crate) format: Format,
+}
+
+pub(crate) enum FileIo {
+    OpenDialog {
+        window: WindowId,
+        current: Option<PathBuf>,
+    },
+    LoadFiles {
+        window: WindowId,
+        paths: Vec<DocPath>,
+    },
+    SaveDialog {
+        wf: WorkflowId,
+        owner: WindowId,
+        current: Option<PathBuf>,
+        format: Format,
+    },
+    WriteFile {
+        wf: WorkflowId,
+        job: SaveJob,
+        force_lossy: bool,
+    },
+}
+
+pub(crate) struct TabSnapshot {
+    pub(crate) window: WindowId,
+    pub(crate) name: String,
+    pub(crate) path: Option<PathBuf>,
+    pub(crate) format: Format,
+    pub(crate) dirty: bool,
+    pub(crate) revision: u64,
+}
+
+pub(crate) trait DocHost {
+    fn tab_info(&self, tab: TabId) -> Option<TabSnapshot>;
+    fn window_dirty_tabs(&self, window: WindowId) -> Vec<TabId>;
+    fn active_tab_path(&self, window: WindowId) -> Option<PathBuf>;
+    fn fallback_window(&self, preferred: WindowId) -> Option<WindowId>;
+    fn find_tab_by_key(&self, key: &PathKey) -> Option<(WindowId, TabId)>;
+    fn activate_tab(&mut self, window: WindowId, tab: TabId, bring_to_front: bool);
+    fn begin_save(&mut self, tab: TabId) -> Option<(u64, Rope)>;
+    fn mark_saved(&mut self, tab: TabId, snapshot: u64, doc_path: DocPath, format: Format);
+    fn adopt_loaded(&mut self, window: WindowId, loaded: document::Loaded);
+    fn remove_tab(&mut self, tab: TabId);
+    fn mark_window_close(&mut self, window: WindowId);
+    fn show_prompt(&mut self, window: WindowId, prompt: Prompt);
+}
 
 enum Goal {
     Save(Option<TabId>),
@@ -673,12 +784,313 @@ fn resolve_save_dialog(
     }
 }
 
+const UNTITLED_FILE_NAME: &str = "Untitled.txt";
+const SAVE_AS_TITLE: &str = "Save as";
+const TEXT_FILE_TYPE: (&str, &str) = ("Text documents (*.txt)", "*.txt");
+const ALL_FILE_TYPE: (&str, &str) = ("All files", "*.*");
+const TEXT_EXTENSION: &str = "txt";
+const ENCODING_LABEL: &str = "Encoding:";
+
+#[derive(Clone, Default)]
+pub(crate) struct WriteTracker(Arc<(Mutex<usize>, Condvar)>);
+
+impl WriteTracker {
+    pub(crate) fn enter(&self) -> WriteFlightGuard {
+        let mut count = self.0.0.lock().unwrap_or_else(|e| e.into_inner());
+        *count += 1;
+        WriteFlightGuard(self.0.clone())
+    }
+
+    pub(crate) fn in_flight(&self) -> usize {
+        *self.0.0.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    pub(crate) fn wait(&self, timeout: Duration) {
+        let deadline = Instant::now() + timeout;
+        let mut count = self.0.0.lock().unwrap_or_else(|e| e.into_inner());
+        while *count > 0 {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            let (guard, _) = self
+                .0
+                .1
+                .wait_timeout(count, remaining)
+                .unwrap_or_else(|e| e.into_inner());
+            count = guard;
+        }
+    }
+}
+
+pub(crate) struct WriteFlightGuard(Arc<(Mutex<usize>, Condvar)>);
+
+impl Drop for WriteFlightGuard {
+    fn drop(&mut self) {
+        let mut count = self.0.0.lock().unwrap_or_else(|e| e.into_inner());
+        *count = count.saturating_sub(1);
+        if *count == 0 {
+            self.0.1.notify_all();
+        }
+    }
+}
+
+pub(crate) fn spawn_file_io<E: Send + 'static>(
+    io: FileIo,
+    owner: Option<WindowHandle>,
+    tracker: &WriteTracker,
+    jobs: &Jobs<E>,
+    wrap: fn(FileEvent) -> E,
+) {
+    match io {
+        FileIo::OpenDialog { window, current } => {
+            let Some(owner) = owner else {
+                jobs.post(wrap(FileEvent::OpenDialogDone {
+                    window,
+                    result: Ok(None),
+                }));
+                return;
+            };
+            let options = OpenDialogOptions {
+                multiple: true,
+                directory: Some(default_directory(current.as_deref())),
+                file_types: [TEXT_FILE_TYPE, ALL_FILE_TYPE]
+                    .map(|(name, spec)| (SharedStr::new_static(name), SharedStr::new_static(spec)))
+                    .into(),
+            };
+            jobs.spawn(
+                "jot-open-dialog",
+                move || run_open_dialog(owner, options),
+                move |res| {
+                    wrap(FileEvent::OpenDialogDone {
+                        window,
+                        result: res.unwrap_or_else(|msg| Err(Error::new(msg))),
+                    })
+                },
+            );
+        }
+        FileIo::LoadFiles { window, paths } => {
+            let fallback = paths.clone();
+            jobs.spawn(
+                "jot-load-files",
+                move || {
+                    paths
+                        .into_iter()
+                        .map(|doc_path| {
+                            let loaded = document::load(doc_path.as_path());
+                            (doc_path, loaded)
+                        })
+                        .collect::<Vec<_>>()
+                },
+                move |res| {
+                    let results = res.unwrap_or_else(|msg| {
+                        fallback
+                            .into_iter()
+                            .map(|doc_path| {
+                                (doc_path, Err(LoadError::Io(io::Error::other(msg.clone()))))
+                            })
+                            .collect()
+                    });
+                    wrap(FileEvent::FilesLoaded { window, results })
+                },
+            );
+        }
+        FileIo::SaveDialog {
+            wf,
+            current,
+            format,
+            ..
+        } => {
+            let Some(owner) = owner else {
+                jobs.post(wrap(FileEvent::SaveDialogDone {
+                    wf,
+                    result: Ok(None),
+                }));
+                return;
+            };
+            let suggested =
+                file_name(current.as_deref()).unwrap_or_else(|| UNTITLED_FILE_NAME.into());
+            let options = SaveDialogOptions {
+                title: Some(SAVE_AS_TITLE.into()),
+                directory: default_directory(current.as_deref()),
+                file_name: Some(suggested),
+                file_types: [TEXT_FILE_TYPE, ALL_FILE_TYPE]
+                    .map(|(name, spec)| (SharedStr::new_static(name), SharedStr::new_static(spec)))
+                    .into(),
+                default_extension: Some(TEXT_EXTENSION.into()),
+                choice: Some(SaveChoice {
+                    label: ENCODING_LABEL.into(),
+                    items: Encoding::SAVE_ORDER
+                        .map(|encoding| SharedStr::new_static(encoding.label()))
+                        .into(),
+                    selected: Encoding::SAVE_ORDER
+                        .iter()
+                        .position(|&encoding| encoding == format.encoding)
+                        .unwrap_or_default(),
+                }),
+            };
+            jobs.spawn(
+                "jot-save-dialog",
+                move || run_save_dialog(owner, options),
+                move |res| {
+                    wrap(FileEvent::SaveDialogDone {
+                        wf,
+                        result: res.unwrap_or_else(|msg| Err(Error::new(msg))),
+                    })
+                },
+            );
+        }
+        FileIo::WriteFile {
+            wf,
+            job,
+            force_lossy,
+        } => {
+            let guard = tracker.enter();
+            jobs.spawn(
+                "jot-write-file",
+                move || {
+                    let _guard = guard;
+                    if !force_lossy {
+                        match document::is_lossy(&job.text, job.format) {
+                            Ok(true) => return WriteOutcome::NeedsLossyConfirm,
+                            Ok(false) => {}
+                            Err(err) => return WriteOutcome::Error(err.into()),
+                        }
+                    }
+                    match document::write_rope(&job.path, &job.text, job.format) {
+                        Ok(()) => WriteOutcome::Saved {
+                            doc_path: DocPath::new(job.path),
+                            format: Format {
+                                mixed_line_endings: false,
+                                lossy_decode: false,
+                                ..job.format
+                            },
+                        },
+                        Err(err) => WriteOutcome::Error(err),
+                    }
+                },
+                move |res| {
+                    let outcome = res.unwrap_or_else(|msg| {
+                        WriteOutcome::Error(SaveError::Io(io::Error::other(msg)))
+                    });
+                    wrap(FileEvent::WriteDone { wf, outcome })
+                },
+            );
+        }
+    }
+}
+
+const OK_CHOICES: &[(&str, PromptAnswer)] = &[("OK", PromptAnswer::Cancel)];
+const DISCARD_CHOICES: &[(&str, PromptAnswer)] = &[
+    ("Save", PromptAnswer::Save),
+    ("Don't save", PromptAnswer::Discard),
+    ("Cancel", PromptAnswer::Cancel),
+];
+const LOSSY_CHOICES: &[(&str, PromptAnswer)] = &[
+    ("OK", PromptAnswer::Continue),
+    ("Cancel", PromptAnswer::Cancel),
+];
+const LOSSY_ANSI_WARNING: &str = "This file contains characters in Unicode format which will be lost if you save this file as an ANSI encoded text file. To keep the Unicode information, click Cancel below and then select one of the Unicode options from the Encoding drop down list. Continue?";
+
+fn friendly_io_error(error: &io::Error) -> String {
+    let raw = error.to_string();
+    if let Some(prefix) = raw.strip_suffix(')')
+        && let Some((clean, suffix)) = prefix.rsplit_once(" (os error ")
+        && suffix.chars().all(|c| c.is_ascii_digit())
+    {
+        return clean.trim_end().to_owned();
+    }
+    raw
+}
+
+fn info_prompt(title: SharedStr, message: SharedStr) -> Prompt {
+    Prompt {
+        title,
+        message,
+        choices: OK_CHOICES,
+        cancel: PromptAnswer::Cancel,
+        reply: None,
+    }
+}
+
+fn load_error_prompt(path: &Path, error: LoadError) -> Prompt {
+    let detail: SharedStr = match error {
+        LoadError::Undecodable => "Jot can't decode the text in this file.".into(),
+        LoadError::TooLarge(bytes) => format!(
+            "This file is too large to open ({} MB).",
+            bytes / (1024 * 1024)
+        )
+        .into(),
+        LoadError::Io(err) => friendly_io_error(&err).into(),
+    };
+    info_prompt(
+        format!("Can't open {}", display_name(Some(path))).into(),
+        detail,
+    )
+}
+
+fn save_error_prompt(path: &Path, error: &SaveError) -> Prompt {
+    let detail: SharedStr = match error {
+        SaveError::ReadOnly => "This file is read-only.".into(),
+        SaveError::Kept {
+            source,
+            backup,
+            temp,
+        } => format!(
+            "{}\nThe original file was kept as {}\nThe new text was saved as {}",
+            friendly_io_error(source),
+            backup.display(),
+            temp.display(),
+        )
+        .into(),
+        SaveError::Io(err) => friendly_io_error(err).into(),
+    };
+    info_prompt(
+        format!("Can't save {}", display_name(Some(path))).into(),
+        detail,
+    )
+}
+
+fn dialog_error_prompt(title: &'static str, message: String) -> Prompt {
+    info_prompt(SharedStr::new_static(title), message.into())
+}
+
+fn already_open_save_prompt(path: &Path) -> Prompt {
+    info_prompt(
+        format!("Can't save {}", display_name(Some(path))).into(),
+        SharedStr::new_static(
+            "This file is already open in another tab. Close that tab before saving over it.",
+        ),
+    )
+}
+
+fn discard_prompt(id: PromptId, tab: TabId, name: &str) -> Prompt {
+    Prompt {
+        title: APP_NAME.into(),
+        message: format!("Do you want to save changes to {name}?").into(),
+        choices: DISCARD_CHOICES,
+        cancel: PromptAnswer::Cancel,
+        reply: Some((id, tab)),
+    }
+}
+
+fn lossy_ansi_prompt(id: PromptId, tab: TabId, path: &Path) -> Prompt {
+    Prompt {
+        title: APP_NAME.into(),
+        message: format!("{}\n{LOSSY_ANSI_WARNING}", path.display()).into(),
+        choices: LOSSY_CHOICES,
+        cancel: PromptAnswer::Cancel,
+        reply: Some((id, tab)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::document::{self, display_name};
     use crate::editor::Rope;
     use crate::files::TabSnapshot;
+
+    use super::*;
 
     struct FakeTab {
         id: TabId,
