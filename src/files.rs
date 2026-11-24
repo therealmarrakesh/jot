@@ -249,22 +249,10 @@ pub(crate) struct FileOps {
     writing: HashSet<TabId>,
     loading: HashSet<PathKey>,
     open_dialogs: HashSet<WindowId>,
-    writes: WriteTracker,
+    pub(crate) writes: WriteTracker,
 }
 
 impl FileOps {
-    pub(crate) fn tracker(&self) -> &WriteTracker {
-        &self.writes
-    }
-
-    pub(crate) fn in_flight_writes(&self) -> usize {
-        self.writes.in_flight()
-    }
-
-    pub(crate) fn wait_for_writes(&self, timeout: Duration) {
-        self.writes.wait(timeout);
-    }
-
     pub(crate) fn has_active_workflow_for(&self, window: WindowId) -> bool {
         self.flows.iter().any(|f| f.origin == window)
     }
@@ -847,6 +835,11 @@ pub(crate) fn spawn_file_io<E: Send + 'static>(
     jobs: &Jobs<E>,
     wrap: fn(FileEvent) -> E,
 ) {
+    let file_types = || {
+        [TEXT_FILE_TYPE, ALL_FILE_TYPE]
+            .map(|(name, spec)| (SharedStr::Static(name), SharedStr::Static(spec)))
+            .into()
+    };
     match io {
         FileIo::OpenDialog { window, current } => {
             let Some(owner) = owner else {
@@ -859,9 +852,7 @@ pub(crate) fn spawn_file_io<E: Send + 'static>(
             let options = OpenDialogOptions {
                 multiple: true,
                 directory: Some(default_directory(current.as_deref())),
-                file_types: [TEXT_FILE_TYPE, ALL_FILE_TYPE]
-                    .map(|(name, spec)| (SharedStr::Static(name), SharedStr::Static(spec)))
-                    .into(),
+                file_types: file_types(),
             };
             jobs.spawn(
                 "jot-open-dialog",
@@ -919,9 +910,7 @@ pub(crate) fn spawn_file_io<E: Send + 'static>(
                 title: Some(SAVE_AS_TITLE.into()),
                 directory: default_directory(current.as_deref()),
                 file_name: Some(suggested),
-                file_types: [TEXT_FILE_TYPE, ALL_FILE_TYPE]
-                    .map(|(name, spec)| (SharedStr::Static(name), SharedStr::Static(spec)))
-                    .into(),
+                file_types: file_types(),
                 default_extension: Some(TEXT_EXTENSION.into()),
                 choice: Some(SaveChoice {
                     label: ENCODING_LABEL.into(),
@@ -1091,10 +1080,6 @@ fn lossy_ansi_prompt(id: PromptId, tab: TabId, path: &Path) -> Prompt {
 
 #[cfg(test)]
 mod tests {
-    use crate::document::{self, display_name};
-    use crate::editor::Rope;
-    use crate::files::TabSnapshot;
-
     use super::*;
 
     struct FakeTab {

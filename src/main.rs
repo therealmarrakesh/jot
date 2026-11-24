@@ -164,7 +164,7 @@ impl App {
             spawn_file_io(
                 cmd,
                 owner_hwnd,
-                self.file_ops.tracker(),
+                &self.file_ops.writes,
                 &self.shell.jobs,
                 AppEvent::File,
             );
@@ -378,7 +378,7 @@ impl App {
                 .any_dirty()
                 .then_some("You have unsaved changes."),
         );
-        if self.windows.is_empty() && !self.quit && self.file_ops.in_flight_writes() == 0 {
+        if self.windows.is_empty() && !self.quit && self.file_ops.writes.in_flight() == 0 {
             self.request_quit();
         }
     }
@@ -605,7 +605,7 @@ impl PlatformHandler for App {
             }
             PlatformEvent::SessionEnding { ending } => {
                 if ending {
-                    self.file_ops.wait_for_writes(Duration::from_secs(5));
+                    self.file_ops.writes.wait(Duration::from_secs(5));
                 }
             }
         }
