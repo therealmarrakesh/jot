@@ -273,7 +273,7 @@ fn snap_point(pt: Point, scale: f32) -> Point {
 
 impl Editor {
     pub(super) fn capture_scroll_anchor(&self, line_height: f32) -> Option<ScrollAnchor> {
-        if !self.multi_line || self.wrap.visual_row_count() == 0 || line_height <= 0.0 {
+        if !self.model.is_multi_line() || self.wrap.visual_row_count() == 0 || line_height <= 0.0 {
             return None;
         }
         let lh = f64::from(line_height);
@@ -298,8 +298,8 @@ impl Editor {
             return;
         }
         let line = anchor.line.min(self.wrap.line_count().saturating_sub(1));
-        let line_start = self.text.line_start_offset(line);
-        let line_len = self.text.line_len(line);
+        let line_start = self.model.text().line_start_offset(line);
+        let line_len = self.model.text().line_len(line);
         let target = line_start + anchor.byte_in_line.min(line_len);
         let disp = self.wrap.offset_to_display(target, false);
         let new_top = disp.row as f64 * f64::from(line_height) + anchor.frac_px;
@@ -325,7 +325,7 @@ impl Editor {
 
     pub(super) fn clamp_and_set_scroll_f64(&mut self, mut x: f32, mut y: f64) -> bool {
         let min_y = (-self.content_height_f64 + f64::from(self.input_bounds.size.height)).min(0.0);
-        y = if self.multi_line {
+        y = if self.model.is_multi_line() {
             y.clamp(min_y, 0.0)
         } else {
             0.0
@@ -338,7 +338,8 @@ impl Editor {
     }
 
     pub(super) fn hit_test_point(&self, pos: Point) -> (usize, bool) {
-        if self.text.len() == 0 {
+        let len = self.model.text().len();
+        if len == 0 {
             return (0, false);
         }
         let (Some(bounds), Some(layout)) = (self.content_bounds.as_ref(), self.layout.as_ref())
@@ -348,28 +349,29 @@ impl Editor {
         let lh = layout.line_height;
         let rel = pos - bounds.origin;
         let mut y = layout.visible_top_rel;
+        let multi = self.model.is_multi_line();
 
         for (vi, row_layout) in layout.rows.iter().enumerate() {
             let base = layout.visible_byte_offsets[vi];
             let local_pos = rel - point(0.0, y);
 
-            if !self.multi_line {
+            if !multi {
                 let col = row_layout.closest_index_for_x(local_pos.x);
-                return ((base + col).min(self.text.len()), false);
+                return ((base + col).min(len), false);
             }
             if let Some((col, aff)) = row_layout.closest_index_for_position(local_pos, lh) {
-                return ((base + col).min(self.text.len()), aff);
+                return ((base + col).min(len), aff);
             } else if local_pos.y < 0.0 {
-                return (base.min(self.text.len()), false);
+                return (base.min(len), false);
             }
             y += row_layout.size(lh).height;
         }
 
         if let Some((row, base)) = layout.rows.last().zip(layout.visible_byte_offsets.last()) {
             let col = row.closest_index_for_x_in_last_row(rel.x);
-            return ((base + col).min(self.text.len()), false);
+            return ((base + col).min(len), false);
         }
-        (self.text.len(), false)
+        (len, false)
     }
 
     pub(crate) fn on_mouse_down(
@@ -381,7 +383,7 @@ impl Editor {
         timers: &mut dyn EditorTimers,
     ) {
         if button == MouseButton::Left
-            && self.multi_line
+            && self.model.is_multi_line()
             && let Some(next) = self
                 .scrollbar
                 .on_mouse_down(position, self.scroll_offset())
@@ -391,8 +393,8 @@ impl Editor {
             return;
         }
 
-        self.commit_composition();
-        self.history.break_coalescing();
+        self.model.commit_composition();
+        self.model.break_coalescing();
         self.selecting = true;
         let (offset, aff) = self.hit_test_point(position);
 
@@ -405,7 +407,7 @@ impl Editor {
             return;
         }
         if button == MouseButton::Right {
-            if !self.selection.contains(offset) {
+            if !self.model.selection().contains(offset) {
                 self.move_to_with_affinity(offset, None, aff, false, Some(timers));
             }
             self.pending_context_menu = Some((position, offset));
@@ -427,7 +429,8 @@ impl Editor {
         timers: &mut dyn EditorTimers,
     ) -> bool {
         let mut dirty = false;
-        if self.multi_line {
+        let multi = self.model.is_multi_line();
+        if multi {
             let outcome = self.scrollbar.on_mouse_move(
                 position,
                 dragging_left,
@@ -444,12 +447,16 @@ impl Editor {
             dirty |= outcome.notify_now;
         }
 
-        if dragging_left && self.selecting && focused && self.text.len() > 0 && self.layout.is_some()
+        if dragging_left
+            && self.selecting
+            && focused
+            && self.model.text().len() > 0
+            && self.layout.is_some()
         {
             self.auto_scroll.last_drag_pos = Some(position);
             let (offset, aff) = self.hit_test_point(position);
             self.select_to_with_affinity(offset, aff);
-            if self.multi_line {
+            if multi {
                 let delta = AutoScroll::compute_delta(position.y, self.input_bounds);
                 self.auto_scroll.update(delta.map(|d| -d), timers);
             }
@@ -466,8 +473,9 @@ impl Editor {
         timers: &mut dyn EditorTimers,
     ) -> Option<Point> {
         let mut open_context_menu = None;
+        let multi = self.model.is_multi_line();
 
-        if self.multi_line
+        if multi
             && let Some(next) = self
                 .scrollbar
                 .on_mouse_up(position, self.scroll_offset())
@@ -478,22 +486,19 @@ impl Editor {
 
         if button == MouseButton::Right
             && let Some((pos, offset)) = self.pending_context_menu.take()
-            && self.multi_line
+            && multi
         {
-            if !self.selection.contains(offset) {
+            if !self.model.selection().contains(offset) {
                 self.move_to_with_affinity(offset, None, false, false, Some(timers));
             }
             open_context_menu = Some(pos);
-        }
-        if self.selection.is_empty() {
-            self.selection.reversed = false;
         }
         self.reset_pointer_selection_state();
         open_context_menu
     }
 
     pub(crate) fn on_mouse_leave(&mut self) -> bool {
-        self.multi_line && self.scrollbar.on_mouse_leave()
+        self.model.is_multi_line() && self.scrollbar.on_mouse_leave()
     }
 
     pub(crate) fn on_scroll_wheel(
@@ -586,7 +591,8 @@ impl Editor {
         let line_height = style.line_height.max(1.0);
         let space_width = ts.measure(" ", &text_style);
 
-        let wrap_width = (self.multi_line && self.soft_wrap)
+        let multi = self.model.is_multi_line();
+        let wrap_width = (multi && self.soft_wrap)
             .then_some((input_bounds.size.width - RIGHT_MARGIN).max(1.0));
 
         let reflowing = self.wrap.font() != font
@@ -600,7 +606,7 @@ impl Editor {
         };
 
         self.wrap
-            .sync_layout(&self.text, font.clone(), font_size, wrap_width, ts);
+            .sync_layout(self.model.text(), font.clone(), font_size, wrap_width, ts);
         self.last_line_height = line_height;
         self.input_bounds = input_bounds;
 
@@ -615,9 +621,9 @@ impl Editor {
 
         let reveal_req = self.reveal;
         if let Some(req) = reveal_req
-            && self.multi_line
+            && multi
         {
-            let target = req.offset.min(self.text.len());
+            let target = req.offset.min(self.model.text().len());
             let disp = self.wrap.offset_to_display(target, req.end_affinity);
             let row_y = disp.row as f64 * f64::from(line_height);
             let vp_h = f64::from(input_bounds.size.height);
@@ -642,27 +648,30 @@ impl Editor {
             self.scroll_y = next_y;
         }
         let min_y_f64 = (-content_height_f64 + f64::from(input_bounds.size.height)).min(0.0);
-        self.scroll_y = if self.multi_line {
+        self.scroll_y = if multi {
             self.scroll_y.clamp(min_y_f64, 0.0)
         } else {
             0.0
         };
 
         let placeholder_rope = Rope::from(self.placeholder.as_str());
-        let is_empty = self.text.len() == 0;
+        let is_empty = self.model.text().len() == 0;
         let (display_text, text_color) = if is_empty {
             (&placeholder_rope, p.text_secondary)
         } else {
-            (&self.text, style.color)
+            (self.model.text(), style.color)
         };
 
         let (vis_range, visible_lines, visible_top_rel, shape_rows) =
             self.visible_slice(line_height, input_bounds.size.height);
-        let start_off = self.text.line_start_offset(vis_range.start);
-        let end_off = self.text.line_end_offset(vis_range.end.saturating_sub(1));
+        let start_off = self.model.text().line_start_offset(vis_range.start);
+        let end_off = self
+            .model
+            .text()
+            .line_end_offset(vis_range.end.saturating_sub(1));
         let visible_byte_offsets: Vec<usize> = visible_lines
             .iter()
-            .map(|&l| self.text.line_start_offset(l))
+            .map(|&l| self.model.text().line_start_offset(l))
             .collect();
 
         let mut layout = ViewLayout {
@@ -676,13 +685,7 @@ impl Editor {
             space_width,
         };
 
-        let marked = (!is_empty)
-            .then_some(self.composition)
-            .flatten()
-            .map(|c| {
-                let len = display_text.len();
-                c.start.min(len)..c.end.min(len)
-            });
+        let marked = (!is_empty).then(|| self.model.composition_range()).flatten();
         let (rows, shaped_windowed) = self.shape_visible_lines(
             display_text,
             &layout,
@@ -694,11 +697,11 @@ impl Editor {
         layout.rows = Rc::new(rows);
 
         let mut max_line_w = wrap_width.unwrap_or(0.0);
-        if !self.multi_line || !self.soft_wrap {
+        if !multi || !self.soft_wrap {
             let longest_row = self.wrap.longest_line();
-            let slice = self.text.slice_line(longest_row);
+            let slice = self.model.text().slice_line(longest_row);
             let key = LongestLineCache {
-                revision: self.revision,
+                revision: self.model.revision(),
                 row: longest_row,
                 len: slice.len(),
                 font: font.clone(),
@@ -726,8 +729,8 @@ impl Editor {
         }
 
         let head = self.cursor();
-        let head_pt = self.viewport_pos_for(&layout, head, self.line_end_affinity);
-        if !self.multi_line || !self.soft_wrap {
+        let head_pt = self.viewport_pos_for(&layout, head, self.model.selection().end_affinity);
+        if !multi || !self.soft_wrap {
             max_line_w = max_line_w.max(head_pt.x);
         }
 
@@ -740,7 +743,7 @@ impl Editor {
         self.content_size = content_size;
 
         let prev_scroll_x = self.scroll_x;
-        if reveal_req.is_some() && (!self.multi_line || !self.soft_wrap) {
+        if reveal_req.is_some() && (!multi || !self.soft_wrap) {
             let w = input_bounds.size.width;
             if self.scroll_x + head_pt.x > w - RIGHT_MARGIN {
                 self.scroll_x = w - RIGHT_MARGIN - head_pt.x;
@@ -748,7 +751,7 @@ impl Editor {
                 self.scroll_x = -head_pt.x;
             }
         }
-        self.scroll_x = if self.multi_line && self.soft_wrap {
+        self.scroll_x = if multi && self.soft_wrap {
             0.0
         } else {
             clamp_horizontal_scroll(self.scroll_x, content_size.width, input_bounds.size.width)
@@ -809,7 +812,7 @@ impl Editor {
         }
 
         let show_caret = focused && window_active && self.blink.visible() && !self.caret_hidden;
-        if show_caret && (self.selection.is_empty() || self.composition.is_some()) {
+        if show_caret && (self.model.selection().is_empty() || self.model.composition().is_some()) {
             renderer.paint_quad(fill(caret_rect, p.caret));
         }
         renderer.pop_clip();
@@ -822,7 +825,7 @@ impl Editor {
         let needs_redraw = shaped_windowed && (self.scroll_x - prev_scroll_x).abs() > 1.0;
 
         let mut needs_vsync = false;
-        if self.multi_line {
+        if multi {
             let vp = scrollbar_viewport(input_bounds, content_size, self.paddings, self.soft_wrap);
             needs_vsync = self.scrollbar.prepare(
                 vp,
@@ -841,14 +844,14 @@ impl Editor {
     }
 
     pub(crate) fn paint_scrollbar(&self, renderer: &mut D2DRenderer) {
-        if self.multi_line {
+        if self.model.is_multi_line() {
             self.scrollbar.paint(renderer);
         }
     }
 
     fn viewport_pos_for(&self, layout: &ViewLayout, offset: usize, aff: bool) -> Point {
         let lh = layout.line_height;
-        let row = self.text.offset_to_point(offset).row;
+        let row = self.model.text().offset_to_point(offset).row;
         let line_top_rel =
             (self.wrap.first_visual_row(row) as f64 * f64::from(lh) + self.scroll_y) as f32;
         if let Ok(vi) = layout.visible_lines.binary_search(&row) {
@@ -867,7 +870,7 @@ impl Editor {
         line_height: f32,
         viewport_height: f32,
     ) -> (Range<usize>, Vec<usize>, f32, Range<usize>) {
-        if !self.multi_line {
+        if !self.model.is_multi_line() {
             return (0..1, vec![0], 0.0, 0..1);
         }
         let total_rows = self.wrap.visual_row_count();
@@ -900,13 +903,13 @@ impl Editor {
         viewport_width: f32,
         ts: &TextSystem,
     ) -> (Vec<RowLayout>, bool) {
-        if !self.multi_line {
+        if !self.model.is_multi_line() {
             let text: SharedStr = display_text.to_string().into();
             let shaped = ts.shape_row(text, text_style);
             return (vec![RowLayout::from_shaped(vec![shaped])], false);
         }
 
-        if self.text.len() == 0 {
+        if self.model.text().len() == 0 {
             let text = display_text.to_string();
             let shaped = text
                 .split('\n')
@@ -918,6 +921,7 @@ impl Editor {
         let mut result = Vec::with_capacity(layout.visible_lines.len());
         let mut shaped_windowed = false;
         let caret = self.cursor();
+        let end_affinity = self.model.selection().end_affinity;
 
         for (vi, &buf_line) in layout.visible_lines.iter().enumerate() {
             let line_slice = display_text.slice_line(buf_line);
@@ -975,7 +979,7 @@ impl Editor {
                 let mut lo = vis_lo;
                 let mut hi = vis_hi.max(lo.saturating_add(1)).min(total_sub_rows);
                 if caret >= line_byte_start && caret <= line_byte_start + line_len {
-                    let disp = self.wrap.offset_to_display(caret, self.line_end_affinity);
+                    let disp = self.wrap.offset_to_display(caret, end_affinity);
                     if disp.sub_row < lo {
                         lo = disp.sub_row;
                     }
@@ -1025,17 +1029,16 @@ impl Editor {
     }
 
     fn selection_rects(&self, layout: &ViewLayout, bounds: &Rect) -> Vec<Rect> {
-        let mut sel = self.selection;
-        if self.composition.is_some() {
+        if self.model.composition().is_some() {
             return Vec::new();
         }
+        let sel = self.model.selection();
         if sel.is_empty() {
             return Vec::new();
         }
-        sel.start = sel.start.min(self.text.len());
-        sel.end = sel.end.min(self.text.len());
-        let (lo, hi) = (sel.start.min(sel.end), sel.start.max(sel.end));
-        let vis = lo.max(layout.visible_byte_range.start)..hi.min(layout.visible_byte_range.end);
+        let range = sel.range();
+        let vis = range.start.max(layout.visible_byte_range.start)
+            ..range.end.min(layout.visible_byte_range.end);
         if vis.is_empty() {
             return Vec::new();
         }

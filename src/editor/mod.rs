@@ -1,5 +1,7 @@
 mod actions;
 mod buffer;
+mod history;
+mod model;
 mod view;
 pub(crate) mod wrap;
 
@@ -19,24 +21,14 @@ use crate::scrollbar::ScrollbarState;
 use crate::types::SharedStr;
 use crate::ui::{Node, box_, custom};
 
-use buffer::CaretSelection;
-use history::History;
+use model::{EditEffects, EditPolicy, LineChange, TextModel, ValidateFn};
 use view::{AutoScroll, BlinkState, LongestLineCache, ViewLayout};
 use wrap::WrapIndex;
-
-mod history;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum MoveDirection {
     Up,
     Down,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct Composition {
-    pub(super) start: usize,
-    pub(super) end: usize,
-    pub(super) cursor: usize,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -60,6 +52,11 @@ pub(crate) trait EditorTimers {
     fn every(&mut self, delay: Duration, interval: Duration, kind: EditorTimer) -> TimerHandle;
 }
 
+pub(crate) trait Clipboard {
+    fn read(&mut self) -> Option<String>;
+    fn write(&mut self, text: &str) -> bool;
+}
+
 #[cfg(test)]
 pub(crate) struct NoopTimers;
 
@@ -74,6 +71,38 @@ impl EditorTimers for NoopTimers {
     }
 }
 
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct MemoryClipboard(pub(crate) Option<String>);
+
+#[cfg(test)]
+impl Clipboard for MemoryClipboard {
+    fn read(&mut self) -> Option<String> {
+        self.0.clone()
+    }
+
+    fn write(&mut self, text: &str) -> bool {
+        self.0 = Some(text.to_string());
+        true
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum Motion {
+    Left,
+    Right,
+    Up,
+    Down,
+    LineStart,
+    LineEnd,
+    PageUp,
+    PageDown,
+    DocStart,
+    DocEnd,
+    PrevWord,
+    NextWord,
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum EditCommand {
     Enter,
@@ -85,31 +114,8 @@ pub(crate) enum EditCommand {
     Outdent,
     IndentInline,
     OutdentInline,
-    MoveUp,
-    MoveDown,
-    MoveLeft,
-    MoveRight,
-    MoveHome,
-    MoveEnd,
-    MovePageUp,
-    MovePageDown,
-    MoveToStart,
-    MoveToEnd,
-    MovePrevWord,
-    MoveNextWord,
+    Move { motion: Motion, extend: bool },
     SelectAll,
-    SelectUp,
-    SelectDown,
-    SelectLeft,
-    SelectRight,
-    SelectPageUp,
-    SelectPageDown,
-    SelectToStartOfLine,
-    SelectToEndOfLine,
-    SelectToStart,
-    SelectToEnd,
-    SelectPrevWord,
-    SelectNextWord,
     Copy,
     Cut,
     Paste,
@@ -118,21 +124,14 @@ pub(crate) enum EditCommand {
     Escape,
 }
 
-type ValidateFn = fn(&str) -> bool;
-
 pub(crate) struct Editor {
-    multi_line: bool,
-    text: Rope,
+    model: TextModel,
     wrap: WrapIndex,
-    history: History,
-    revision: u64,
     soft_wrap: bool,
     blink: BlinkState,
     auto_scroll: AutoScroll,
     scrollbar: ScrollbarState,
-    selection: CaretSelection,
-    word_anchor: Option<CaretSelection>,
-    composition: Option<Composition>,
+    word_anchor: Option<Range<usize>>,
     layout: Option<ViewLayout>,
     caret_bounds: Option<Rect>,
     caret_height: f32,
@@ -142,8 +141,6 @@ pub(crate) struct Editor {
     input_bounds: Rect,
     content_bounds: Option<Rect>,
     selecting: bool,
-    line_end_affinity: bool,
-    validate: Option<ValidateFn>,
     scroll_x: f32,
     scroll_y: f64,
     reveal: Option<RevealRequest>,
@@ -166,18 +163,16 @@ impl Editor {
 
     fn new_inner(multi_line: bool) -> Self {
         Self {
-            multi_line,
-            text: Rope::new(),
+            model: TextModel::new(EditPolicy {
+                multi_line,
+                validate: None,
+            }),
             wrap: WrapIndex::new(Font::default(), 14.0, None),
-            history: History::new(),
-            revision: 0,
             soft_wrap: true,
             blink: BlinkState::new(),
             auto_scroll: AutoScroll::default(),
             scrollbar: ScrollbarState::new(),
-            selection: CaretSelection::default(),
             word_anchor: None,
-            composition: None,
             layout: None,
             caret_bounds: None,
             caret_height: 0.0,
@@ -187,8 +182,6 @@ impl Editor {
             input_bounds: Rect::ZERO,
             content_bounds: None,
             selecting: false,
-            line_end_affinity: false,
-            validate: None,
             scroll_x: 0.0,
             scroll_y: 0.0,
             reveal: None,
@@ -212,7 +205,7 @@ impl Editor {
     }
 
     pub(crate) fn with_validate(mut self, f: ValidateFn) -> Self {
-        self.validate = Some(f);
+        self.model = self.model.with_validate(f);
         self
     }
 
@@ -222,7 +215,7 @@ impl Editor {
     }
 
     pub(crate) fn with_rope(mut self, rope: Rope) -> Self {
-        self.text = rope;
+        self.model = self.model.with_rope(rope);
         self
     }
 
@@ -233,16 +226,16 @@ impl Editor {
 
     #[inline]
     pub(crate) fn text(&self) -> &Rope {
-        &self.text
+        self.model.text()
     }
 
     #[inline]
     pub(crate) fn revision(&self) -> u64 {
-        self.revision
+        self.model.revision()
     }
 
     pub(crate) fn value(&self) -> SharedStr {
-        self.text.to_string().into()
+        self.model.value().into()
     }
 
     #[inline]
@@ -292,14 +285,17 @@ impl Editor {
         self.auto_scroll.stop();
     }
 
-    #[inline]
-    pub(super) fn debug_assert_invariants(&self) {
-        debug_assert!(self.selection.start <= self.selection.end);
-        debug_assert!(self.selection.end <= self.text.len());
-        debug_assert!(self.text.is_char_boundary(self.selection.start));
-        debug_assert!(self.text.is_char_boundary(self.selection.end));
-        if let Some(comp) = self.composition {
-            debug_assert!(comp.start <= comp.end && comp.end <= self.text.len());
+    pub(super) fn apply_effects(&mut self, fx: EditEffects, ts: &TextSystem) {
+        if fx.changed {
+            self.reset_pointer_selection_state();
+            if fx.lines != LineChange::None {
+                self.wrap.apply_line_change(self.model.text(), &fx.lines, ts);
+            }
+        }
+        if fx.caret_moved {
+            let aff = self.model.selection().end_affinity;
+            self.request_reveal(self.cursor(), aff, None, true);
+            self.update_preferred_x();
         }
     }
 
@@ -315,7 +311,7 @@ impl Editor {
 
     #[inline]
     pub(crate) fn hits_scrollbar_track(&self, pos: Point) -> bool {
-        self.multi_line && self.scrollbar.hits_track(pos)
+        self.model.is_multi_line() && self.scrollbar.hits_track(pos)
     }
 
     pub(crate) fn set_soft_wrap(&mut self, wrap: bool, ts: &TextSystem) {
@@ -344,47 +340,39 @@ impl Editor {
     }
 
     pub(crate) fn cursor(&self) -> usize {
-        if let Some(comp) = self.composition {
-            let start = comp.start.min(self.text.len());
-            let end = comp.end.min(self.text.len());
-            if start <= end {
-                return start.saturating_add(comp.cursor).clamp(start, end);
-            }
-        }
-        self.selection.head().min(self.text.len())
+        self.model.cursor()
+    }
+
+    pub(crate) fn caret_line_col(&self) -> (usize, usize) {
+        self.model.caret_line_col()
     }
 
     pub(crate) fn selected_range(&self) -> Range<usize> {
-        let len = self.text.len();
-        self.selection.start.min(len)..self.selection.end.min(len)
+        self.model.selected_range()
     }
 
     pub(crate) fn selected_text(&self) -> RopeSlice<'_> {
-        let range = self.selected_range();
-        let start = self.text.clip_offset(range.start, buffer::Bias::Left);
-        let end = self.text.clip_offset(range.end, buffer::Bias::Right);
-        self.text.slice(start..end)
+        self.model.selected_text()
     }
 
     pub(crate) fn can_undo(&self) -> bool {
-        self.history.can_undo()
+        self.model.can_undo()
     }
 
     pub(crate) fn can_redo(&self) -> bool {
-        self.history.can_redo()
+        self.model.can_redo()
     }
 
     pub(crate) fn begin_save(&mut self) -> u64 {
-        self.commit_composition();
-        self.history.begin_save()
+        self.model.begin_save()
     }
 
     pub(crate) fn mark_saved_version(&mut self, version: u64) {
-        self.history.mark_saved(version);
+        self.model.mark_saved_version(version);
     }
 
     pub(crate) fn is_clean(&self) -> bool {
-        self.history.is_clean()
+        self.model.is_clean()
     }
 
     pub(crate) fn start_blink(&mut self, timers: &mut dyn EditorTimers) {
@@ -400,8 +388,8 @@ impl Editor {
     }
 
     pub(crate) fn on_blur(&mut self) {
-        self.commit_composition();
-        self.history.break_coalescing();
+        self.model.commit_composition();
+        self.model.break_coalescing();
         self.blink.stop();
         self.reset_pointer_selection_state();
     }
@@ -413,8 +401,9 @@ impl Editor {
         scrollbar_draw: Option<C>,
         line_height: f32,
     ) -> Node<H, C> {
+        let multi = self.model.is_multi_line();
         let cursor = crate::platform::CursorStyle::IBeam;
-        let text_leaf = if self.multi_line {
+        let text_leaf = if multi {
             custom(editor_draw)
                 .w_full()
                 .h_full()
@@ -429,10 +418,10 @@ impl Editor {
             .cursor(cursor)
             .flex_1()
             .overflow_x_hidden()
-            .when(self.multi_line, |b| b.h_full().padding(self.paddings))
-            .when(!self.multi_line, |b| b.row().min_h_full().items_center())
+            .when(multi, |b| b.h_full().padding(self.paddings))
+            .when(!multi, |b| b.row().min_h_full().items_center())
             .child(text_leaf)
-            .when_some(scrollbar_draw.filter(|_| self.multi_line), |b, sb| {
+            .when_some(scrollbar_draw.filter(|_| multi), |b, sb| {
                 b.child(custom(sb).absolute().size_full())
             })
     }
@@ -446,6 +435,7 @@ mod tests {
     fn editor_direct_typing_undo_redo_and_word_navigation() {
         let ts = TextSystem::new();
         let mut timers = NoopTimers;
+        let mut clip = MemoryClipboard::default();
         let mut ed = Editor::multi_line();
 
         ed.handle_text_input("hello", &ts, &mut timers);
@@ -453,16 +443,39 @@ mod tests {
         assert_eq!(ed.text().to_string(), "hello world");
         assert!(!ed.is_clean());
 
-        assert!(ed.handle_command(EditCommand::Undo, &ts, &mut timers));
+        assert!(ed.handle_command(EditCommand::Undo, &mut clip, &ts, &mut timers));
         assert_eq!(ed.text().to_string(), "");
         assert!(ed.is_clean());
 
-        assert!(ed.handle_command(EditCommand::Redo, &ts, &mut timers));
+        assert!(ed.handle_command(EditCommand::Redo, &mut clip, &ts, &mut timers));
         assert_eq!(ed.text().to_string(), "hello world");
 
-        assert!(ed.handle_command(EditCommand::MovePrevWord, &ts, &mut timers));
+        assert!(ed.handle_command(
+            EditCommand::Move {
+                motion: Motion::PrevWord,
+                extend: false,
+            },
+            &mut clip,
+            &ts,
+            &mut timers,
+        ));
         assert_eq!(ed.cursor(), 6);
-        assert!(ed.handle_command(EditCommand::SelectNextWord, &ts, &mut timers));
+        assert!(ed.handle_command(
+            EditCommand::Move {
+                motion: Motion::NextWord,
+                extend: true,
+            },
+            &mut clip,
+            &ts,
+            &mut timers,
+        ));
         assert_eq!(ed.selected_text().to_string(), "world");
+
+        assert!(ed.handle_command(EditCommand::Copy, &mut clip, &ts, &mut timers));
+        assert_eq!(clip.0.as_deref(), Some("world"));
+        assert!(ed.handle_command(EditCommand::Cut, &mut clip, &ts, &mut timers));
+        assert_eq!(ed.text().to_string(), "hello ");
+        assert!(ed.handle_command(EditCommand::Paste, &mut clip, &ts, &mut timers));
+        assert_eq!(ed.text().to_string(), "hello world");
     }
 }

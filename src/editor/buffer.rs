@@ -25,134 +25,125 @@ impl TextPoint {
     }
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Copy, Clone, PartialEq, Default)]
 pub(crate) struct Selection {
-    pub(crate) start: usize,
-    pub(crate) end: usize,
+    pub(crate) anchor: usize,
+    pub(crate) head: usize,
+    pub(crate) end_affinity: bool,
+    pub(crate) goal: Option<(f32, usize)>,
 }
 
 impl Selection {
     #[inline]
-    pub(crate) fn new(start: usize, end: usize) -> Self {
-        Self { start, end }
+    pub(crate) fn caret(offset: usize) -> Self {
+        Self {
+            anchor: offset,
+            head: offset,
+            end_affinity: false,
+            goal: None,
+        }
+    }
+
+    #[inline]
+    pub(crate) fn from_range(range: Range<usize>) -> Self {
+        Self {
+            anchor: range.start,
+            head: range.end,
+            end_affinity: false,
+            goal: None,
+        }
+    }
+
+    #[inline]
+    pub(crate) fn start(&self) -> usize {
+        self.anchor.min(self.head)
+    }
+
+    #[inline]
+    pub(crate) fn end(&self) -> usize {
+        self.anchor.max(self.head)
+    }
+
+    #[inline]
+    pub(crate) fn range(&self) -> Range<usize> {
+        self.start()..self.end()
     }
 
     #[inline]
     pub(crate) fn is_empty(&self) -> bool {
-        self.start == self.end
+        self.anchor == self.head
+    }
+
+    #[inline]
+    pub(crate) fn contains(&self, offset: usize) -> bool {
+        offset >= self.start() && offset < self.end()
+    }
+
+    #[inline]
+    pub(crate) fn place(&mut self, offset: usize, end_affinity: bool, goal: Option<(f32, usize)>) {
+        self.anchor = offset;
+        self.head = offset;
+        self.end_affinity = end_affinity;
+        self.goal = goal;
+    }
+
+    pub(crate) fn extend_to(
+        &mut self,
+        offset: usize,
+        end_affinity: bool,
+        anchor_word: Option<Range<usize>>,
+        max_len: usize,
+    ) {
+        let offset = offset.min(max_len);
+        self.anchor = self.anchor.min(max_len);
+        self.head = offset;
+        self.end_affinity = end_affinity;
+        if let Some(word) = anchor_word {
+            let ws = word.start.min(max_len);
+            let we = word.end.min(max_len);
+            if offset < ws {
+                self.anchor = we;
+                self.head = offset;
+            } else if offset > we {
+                self.anchor = ws;
+                self.head = offset;
+            } else {
+                self.anchor = ws;
+                self.head = we;
+            }
+        }
     }
 }
 
 impl From<Range<usize>> for Selection {
     #[inline]
     fn from(range: Range<usize>) -> Self {
-        Self::new(range.start, range.end)
+        Self::from_range(range)
     }
 }
 
 impl From<Selection> for Range<usize> {
     #[inline]
     fn from(sel: Selection) -> Self {
-        sel.start..sel.end
+        sel.range()
     }
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Default)]
-pub(crate) struct CaretSelection {
-    pub(crate) start: usize,
-    pub(crate) end: usize,
-    pub(crate) reversed: bool,
-    pub(crate) preferred_x: Option<(f32, usize)>,
-}
-
-impl CaretSelection {
-    #[inline]
-    pub(crate) fn new(start: usize, end: usize) -> Self {
-        Self {
-            start,
-            end,
-            reversed: false,
-            preferred_x: None,
-        }
-    }
-
-    #[inline]
-    pub(crate) fn is_empty(&self) -> bool {
-        self.start == self.end
-    }
-
-    #[inline]
-    pub(crate) fn clear(&mut self) {
-        self.start = 0;
-        self.end = 0;
-        self.reversed = false;
-        self.preferred_x = None;
-    }
-
-    #[inline]
-    pub(crate) fn contains(&self, offset: usize) -> bool {
-        offset >= self.start && offset < self.end
-    }
-
-    #[inline]
-    pub(crate) fn head(&self) -> usize {
-        if self.reversed { self.start } else { self.end }
-    }
-
-    #[inline]
-    pub(crate) fn place_at(&mut self, offset: usize, preferred_x: Option<(f32, usize)>) {
-        self.start = offset;
-        self.end = offset;
-        self.reversed = false;
-        self.preferred_x = preferred_x;
-    }
-
-    pub(crate) fn extend_to(
-        &mut self,
-        offset: usize,
-        anchor_word: Option<CaretSelection>,
-        max_len: usize,
-    ) {
-        let offset = offset.min(max_len);
-        self.start = self.start.min(max_len);
-        self.end = self.end.min(max_len);
-        if self.reversed {
-            self.start = offset;
-        } else {
-            self.end = offset;
-        }
-        if self.end < self.start {
-            self.reversed = !self.reversed;
-            std::mem::swap(&mut self.start, &mut self.end);
-        }
-        if let Some(word) = anchor_word {
-            self.start = self.start.min(word.start.min(max_len));
-            self.end = self.end.max(word.end.min(max_len));
-        }
-    }
-}
-
-impl From<Range<usize>> for CaretSelection {
-    #[inline]
-    fn from(range: Range<usize>) -> Self {
-        Self::new(range.start, range.end)
-    }
-}
-
-impl From<CaretSelection> for Range<usize> {
-    #[inline]
-    fn from(sel: CaretSelection) -> Self {
-        sel.start..sel.end
-    }
-}
-
-impl RangeBounds<usize> for CaretSelection {
+impl RangeBounds<usize> for Selection {
     fn start_bound(&self) -> Bound<&usize> {
-        Bound::Included(&self.start)
+        Bound::Included(if self.anchor <= self.head {
+            &self.anchor
+        } else {
+            &self.head
+        })
     }
 
     fn end_bound(&self) -> Bound<&usize> {
-        Bound::Excluded(&self.end)
+        Bound::Excluded(if self.anchor >= self.head {
+            &self.anchor
+        } else {
+            &self.head
+        })
     }
 }
 
@@ -507,18 +498,26 @@ mod tests {
 
     #[test]
     fn selection_and_caret_basics() {
-        let sel = Selection::new(2, 5);
-        assert_eq!(Range::<usize>::from(sel), 2..5);
+        let mut sel = Selection::from_range(5..10);
+        assert_eq!(sel.range(), 5..10);
         assert!(!sel.is_empty());
+        assert_eq!(sel.head, 10);
 
-        let mut caret = CaretSelection::new(5, 10);
-        assert_eq!(caret.head(), 10);
-        caret.reversed = true;
-        assert_eq!(caret.head(), 5);
-        caret.place_at(7, Some((12., 3)));
-        assert!(caret.is_empty());
-        assert!(!caret.reversed);
-        assert_eq!(caret.preferred_x, Some((12., 3)));
+        sel.extend_to(2, false, None, 20);
+        assert_eq!(sel.range(), 2..5);
+        assert_eq!(sel.head, 2);
+
+        sel.place(7, true, Some((12., 3)));
+        assert!(sel.is_empty());
+        assert!(sel.end_affinity);
+        assert_eq!(sel.goal, Some((12., 3)));
+
+        sel.extend_to(3, false, Some(5..8), 20);
+        assert_eq!(sel.range(), 3..8);
+        assert_eq!(sel.head, 3);
+        sel.extend_to(12, false, Some(5..8), 20);
+        assert_eq!(sel.range(), 5..12);
+        assert_eq!(sel.head, 12);
     }
 
     #[test]

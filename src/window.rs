@@ -7,7 +7,7 @@ use crate::command::{AppCommand, Command, app_shortcut, edit_shortcut};
 use crate::dialog::{DialogKind, Dialogs, Prompt};
 use crate::document::{self, DocPath, Format, PathKey};
 use crate::editor::{
-    Editor, EditorPaintParams, EditorPaintStyle, EditorTimer, EditorTimers, RopeExt as _,
+    Clipboard, Editor, EditorPaintParams, EditorPaintStyle, EditorTimer, EditorTimers, RopeExt as _,
 };
 use crate::files::FileRequest;
 use crate::find::FindBar;
@@ -18,8 +18,20 @@ use crate::keytips::KeyTip;
 use crate::menu::{MenuBar, MenuOutcome};
 use crate::platform::{
     CursorStyle, Jobs, Key, KeyEvent, Modifiers, MouseButton, NativeWindow, TimerHandle,
-    WindowControlArea, WindowId, format_local_time_date,
+    WindowControlArea, WindowId, clipboard, format_local_time_date,
 };
+
+struct SystemClipboard;
+
+impl Clipboard for SystemClipboard {
+    fn read(&mut self) -> Option<String> {
+        clipboard::read_clipboard_text()
+    }
+
+    fn write(&mut self, text: &str) -> bool {
+        clipboard::write_clipboard_text(text)
+    }
+}
 use crate::tabs::{
     self, CAPTION_BUTTON_WIDTH, SCROLL_REPEAT_DELAY, SCROLL_REPEAT_INTERVAL, SCROLL_STEP,
     STRIP_TOP, TAB_HEIGHT, Tab, TabData, TabId, TabStrip, WHEEL_SHARE,
@@ -1224,7 +1236,7 @@ impl MainWindow {
                 return edit_shortcut(ev)
                     .and_then(|cmd| {
                         self.with_editor(EditorSlot::GoToLine, cx.jobs, |ed, timers| {
-                            ed.handle_command(cmd, cx.ts, timers)
+                            ed.handle_command(cmd, &mut SystemClipboard, cx.ts, timers)
                         })
                     })
                     .unwrap_or(false);
@@ -1287,7 +1299,7 @@ impl MainWindow {
             && let Some(cmd) = edit_shortcut(ev)
             && self
                 .with_editor(slot, cx.jobs, |ed, timers| {
-                    ed.handle_command(cmd, cx.ts, timers)
+                    ed.handle_command(cmd, &mut SystemClipboard, cx.ts, timers)
                 })
                 .unwrap_or(false)
         {
@@ -1355,7 +1367,7 @@ impl MainWindow {
             Command::App(app_cmd) => self.dispatch_app_command(app_cmd, cx),
             Command::Edit(edit_cmd) => self
                 .with_editor(self.active_slot(), cx.jobs, |ed, timers| {
-                    ed.handle_command(edit_cmd, cx.ts, timers)
+                    ed.handle_command(edit_cmd, &mut SystemClipboard, cx.ts, timers)
                 })
                 .unwrap_or(false),
         }
@@ -1466,22 +1478,14 @@ impl MainWindow {
     fn status_metrics(&self) -> StatusMetrics {
         let editor = self.active_editor();
         let text = editor.text();
-        let len = text.len();
-        let cursor = text.floor_char_boundary(editor.cursor().min(len));
-        let pt = text.offset_to_point(cursor);
-        let line_start = cursor.saturating_sub(pt.column);
-        let column = text
-            .byte_to_char_idx(cursor)
-            .saturating_sub(text.byte_to_char_idx(line_start));
+        let (line, column) = editor.caret_line_col();
         let selection = editor.selected_range();
-        let sel_start = text.floor_char_boundary(selection.start.min(len));
-        let sel_end = text.floor_char_boundary(selection.end.min(len));
         let selected = text
-            .byte_to_char_idx(sel_end)
-            .saturating_sub(text.byte_to_char_idx(sel_start));
+            .byte_to_char_idx(selection.end)
+            .saturating_sub(text.byte_to_char_idx(selection.start));
         StatusMetrics {
-            line: pt.row + 1,
-            column: column + 1,
+            line,
+            column,
             selected,
             total: text.len_chars(),
             zoom_pct: (self.zoom() * 100.).round() as u32,

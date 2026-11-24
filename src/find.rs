@@ -531,7 +531,6 @@ impl FindBar {
             return false;
         };
         let text = editor.text().clone();
-        let cursor = editor.cursor();
         let ranges = match self.matcher.as_ref() {
             Some(m) => m.all(&text, &mut self.buffer),
             None => return false,
@@ -540,10 +539,8 @@ impl FindBar {
             self.show_notice(not_found(&query), window, jobs);
             return false;
         }
-        let replacement = self.replacement.value().to_string();
-        let next_cursor = cursor_after_replace_all(cursor, &ranges, replacement.len());
-        let rebuilt = rebuild_replaced_rope(&text, &ranges, &replacement);
-        editor.replace_all_bulk(rebuilt, next_cursor, ts);
+        let replacement = self.replacement.value();
+        editor.replace_all(&ranges, replacement.as_str(), ts);
         true
     }
 
@@ -887,48 +884,6 @@ fn find_icon_button(
     )
 }
 
-fn cursor_after_replace_all(
-    cursor: usize,
-    ranges: &[Range<usize>],
-    replacement_len: usize,
-) -> usize {
-    let mut offset = cursor;
-    for range in ranges {
-        if range.end <= cursor {
-            offset = offset - range.len() + replacement_len;
-        } else if range.start < cursor {
-            let inside = cursor - range.start;
-            offset = offset - inside + inside.min(replacement_len);
-            break;
-        } else {
-            break;
-        }
-    }
-    offset
-}
-
-fn rebuild_replaced_rope(text: &Rope, ranges: &[Range<usize>], replacement: &str) -> Rope {
-    let mut builder = ropey::RopeBuilder::new();
-    let mut cursor = 0usize;
-    for range in ranges {
-        if range.start > cursor {
-            for chunk in text.slice(cursor..range.start).chunks() {
-                builder.append(chunk);
-            }
-        }
-        if !replacement.is_empty() {
-            builder.append(replacement);
-        }
-        cursor = range.end;
-    }
-    if cursor < text.len() {
-        for chunk in text.slice(cursor..text.len()).chunks() {
-            builder.append(chunk);
-        }
-    }
-    builder.finish()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -988,26 +943,5 @@ mod tests {
         assert_eq!(matcher.previous(&text, 2, 0, &mut buffer), Some(1..3));
         assert_eq!(matcher.previous(&text, 1, 0, &mut buffer), Some(0..2));
         assert_eq!(matcher.previous(&text, 0, 0, &mut buffer), None);
-    }
-
-    #[test]
-    fn cursor_after_replace_all_handles_inside_and_around_matches() {
-        let ranges = vec![0..3, 8..11];
-        assert_eq!(cursor_after_replace_all(0, &ranges, 1), 0);
-        assert_eq!(cursor_after_replace_all(2, &ranges, 1), 1);
-        assert_eq!(cursor_after_replace_all(2, &ranges, 0), 0);
-        assert_eq!(cursor_after_replace_all(2, &ranges, 5), 2);
-        assert_eq!(cursor_after_replace_all(3, &ranges, 1), 1);
-        assert_eq!(cursor_after_replace_all(5, &ranges, 1), 3);
-        assert_eq!(cursor_after_replace_all(10, &ranges, 1), 7);
-        assert_eq!(cursor_after_replace_all(10, &ranges, 0), 5);
-        assert_eq!(cursor_after_replace_all(11, &ranges, 1), 7);
-    }
-
-    #[test]
-    fn rebuild_replaced_rope_streams_non_overlapping_ranges() {
-        let text = Rope::from("aa bb cc aa dd aa");
-        let rebuilt = rebuild_replaced_rope(&text, &[0..2, 9..11, 15..17], "XYZ");
-        assert_eq!(rebuilt.to_string(), "XYZ bb cc XYZ dd XYZ");
     }
 }

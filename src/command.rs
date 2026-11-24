@@ -1,4 +1,4 @@
-use crate::editor::EditCommand;
+use crate::editor::{EditCommand, Motion};
 use crate::platform::{Key, KeyEvent, Modifiers};
 use crate::types::SharedStr;
 
@@ -90,6 +90,21 @@ use AppCommand as A;
 use Command::{App, Edit};
 use EditCommand as E;
 use Key as K;
+use Motion as M;
+
+const fn mv(motion: Motion) -> Command {
+    Edit(E::Move {
+        motion,
+        extend: false,
+    })
+}
+
+const fn sel(motion: Motion) -> Command {
+    Edit(E::Move {
+        motion,
+        extend: true,
+    })
+}
 
 const KEYMAP: &[Binding] = &[
     // App shortcuts
@@ -138,34 +153,34 @@ const KEYMAP: &[Binding] = &[
     bind(ANY_CTRL, K::Enter, Edit(E::Enter)),
     bind(SHIFT, K::Enter, Edit(E::Enter)),
     bind(NONE, K::Escape, Edit(E::Escape)),
-    bind(NONE, K::Up, Edit(E::MoveUp)),
-    bind(NONE, K::Down, Edit(E::MoveDown)),
-    bind(NONE, K::Left, Edit(E::MoveLeft)),
-    bind(NONE, K::Right, Edit(E::MoveRight)),
-    bind(NONE, K::PageUp, Edit(E::MovePageUp)),
-    bind(NONE, K::PageDown, Edit(E::MovePageDown)),
-    bind(SHIFT, K::PageUp, Edit(E::SelectPageUp)),
-    bind(SHIFT, K::PageDown, Edit(E::SelectPageDown)),
+    bind(NONE, K::Up, mv(M::Up)),
+    bind(NONE, K::Down, mv(M::Down)),
+    bind(NONE, K::Left, mv(M::Left)),
+    bind(NONE, K::Right, mv(M::Right)),
+    bind(NONE, K::PageUp, mv(M::PageUp)),
+    bind(NONE, K::PageDown, mv(M::PageDown)),
+    bind(SHIFT, K::PageUp, sel(M::PageUp)),
+    bind(SHIFT, K::PageDown, sel(M::PageDown)),
     bind(NONE, K::Tab, Edit(E::IndentInline)),
     bind(SHIFT, K::Tab, Edit(E::OutdentInline)),
     bind(CTRL, K::Char(']'), Edit(E::Indent)),
     bind(CTRL, K::Char('['), Edit(E::Outdent)),
-    bind(SHIFT | ANY_ALT, K::Left, Edit(E::SelectLeft)),
-    bind(SHIFT | ANY_ALT, K::Right, Edit(E::SelectRight)),
-    bind(SHIFT, K::Up, Edit(E::SelectUp)),
-    bind(SHIFT, K::Down, Edit(E::SelectDown)),
-    bind(NONE, K::Home, Edit(E::MoveHome)),
-    bind(NONE, K::End, Edit(E::MoveEnd)),
-    bind(CTRL, K::Home, Edit(E::MoveToStart)),
-    bind(CTRL, K::End, Edit(E::MoveToEnd)),
-    bind(CTRL | SHIFT, K::Home, Edit(E::SelectToStart)),
-    bind(CTRL | SHIFT, K::End, Edit(E::SelectToEnd)),
-    bind(SHIFT, K::Home, Edit(E::SelectToStartOfLine)),
-    bind(SHIFT, K::End, Edit(E::SelectToEndOfLine)),
-    bind(CTRL | SHIFT, K::Left, Edit(E::SelectPrevWord)),
-    bind(CTRL | SHIFT, K::Right, Edit(E::SelectNextWord)),
-    bind(CTRL, K::Left, Edit(E::MovePrevWord)),
-    bind(CTRL, K::Right, Edit(E::MoveNextWord)),
+    bind(SHIFT | ANY_ALT, K::Left, sel(M::Left)),
+    bind(SHIFT | ANY_ALT, K::Right, sel(M::Right)),
+    bind(SHIFT, K::Up, sel(M::Up)),
+    bind(SHIFT, K::Down, sel(M::Down)),
+    bind(NONE, K::Home, mv(M::LineStart)),
+    bind(NONE, K::End, mv(M::LineEnd)),
+    bind(CTRL, K::Home, mv(M::DocStart)),
+    bind(CTRL, K::End, mv(M::DocEnd)),
+    bind(CTRL | SHIFT, K::Home, sel(M::DocStart)),
+    bind(CTRL | SHIFT, K::End, sel(M::DocEnd)),
+    bind(SHIFT, K::Home, sel(M::LineStart)),
+    bind(SHIFT, K::End, sel(M::LineEnd)),
+    bind(CTRL | SHIFT, K::Left, sel(M::PrevWord)),
+    bind(CTRL | SHIFT, K::Right, sel(M::NextWord)),
+    bind(CTRL, K::Left, mv(M::PrevWord)),
+    bind(CTRL, K::Right, mv(M::NextWord)),
     shown(CTRL, K::Char('a'), Edit(E::SelectAll)),
     shown(CTRL, K::Char('c'), Edit(E::Copy)),
     shown(CTRL, K::Char('x'), Edit(E::Cut)),

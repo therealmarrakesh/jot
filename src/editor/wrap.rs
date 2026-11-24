@@ -10,6 +10,7 @@ use crate::gfx::{
 };
 
 use super::buffer::{RopeExt, TextPoint};
+use super::model::LineChange;
 
 const CHUNK_SIZE: usize = 256;
 const MAX_WRAP_INDENT: u32 = 32;
@@ -812,18 +813,37 @@ impl WrapIndex {
         }
     }
 
-    pub(crate) fn apply_edit(
+    pub(crate) fn apply_line_change(
         &mut self,
         updated_text: &Rope,
-        old_range: &Range<usize>,
-        inserted_bytes: usize,
+        change: &LineChange,
+        ts: &TextSystem,
+    ) {
+        if !self.initialized {
+            return;
+        }
+        match change {
+            LineChange::None => {}
+            LineChange::Full => self.rebuild_all(updated_text, ts),
+            LineChange::Splice {
+                old_lines,
+                new_lines,
+            } => self.apply_line_splice(updated_text, old_lines.clone(), new_lines.clone(), ts),
+        }
+    }
+
+    fn apply_line_splice(
+        &mut self,
+        updated_text: &Rope,
+        old_lines: Range<usize>,
+        new_lines: Range<usize>,
         ts: &TextSystem,
     ) {
         let Some(wrap_width) = self.wrap_width else {
-            self.splice_lines(
+            self.splice_line_range(
                 updated_text,
-                old_range,
-                inserted_bytes,
+                old_lines,
+                new_lines,
                 0,
                 &mut |_, _, _| 0.0,
             );
@@ -838,50 +858,40 @@ impl WrapIndex {
             } else {
                 0
             };
-            self.splice_lines(
+            self.splice_line_range(
                 updated_text,
-                old_range,
-                inserted_bytes,
+                old_lines,
+                new_lines,
                 ascii_fit_len,
                 &mut |line_str, width, out| wrap_line(line_str, width, advances, out),
             );
         });
     }
 
-    fn splice_lines<F>(
+    fn splice_line_range<F>(
         &mut self,
         updated_text: &Rope,
-        old_range: &Range<usize>,
-        inserted_bytes: usize,
+        old_lines: Range<usize>,
+        new_lines: Range<usize>,
         ascii_fit_len: usize,
         wrap_fn: &mut F,
     ) where
         F: FnMut(&str, f32, &mut Vec<usize>) -> f32,
     {
         let existing_count = self.line_count();
-        let old_start = self
-            .text
-            .offset_to_point(old_range.start)
-            .row
-            .min(existing_count.saturating_sub(1));
-        let old_end = self
-            .text
-            .offset_to_point(old_range.end)
-            .row
-            .min(existing_count.saturating_sub(1));
+        let old_start = old_lines.start.min(existing_count);
+        let old_end = old_lines.end.clamp(old_start, existing_count);
 
-        let new_start = updated_text.offset_to_point(old_range.start).row;
-        let new_end = updated_text
-            .offset_to_point(old_range.start + inserted_bytes)
-            .row;
+        let total_rows = updated_text.lines_len();
+        let new_start = new_lines.start.min(total_rows);
+        let new_end = new_lines.end.clamp(new_start, total_rows);
 
-        let mut replacement = Vec::with_capacity(new_end.saturating_sub(new_start) + 1);
+        let mut replacement = Vec::with_capacity(new_end - new_start);
         let mut breaks = Vec::new();
         let wrap_width = self.wrap_width;
-        let total_rows = updated_text.lines_len();
-        let mut iter = updated_text.lines_at(new_start.min(total_rows), ropey::LineType::LF);
+        let mut iter = updated_text.lines_at(new_start, ropey::LineType::LF);
 
-        for _ in new_start..=new_end {
+        for _ in new_start..new_end {
             let slice = match iter.next() {
                 Some(raw) if raw.len() > 0 && raw.byte(raw.len() - 1) == b'\n' => {
                     raw.slice(..raw.len() - 1)
@@ -929,12 +939,49 @@ impl WrapIndex {
             });
         }
 
-        self.chunks.splice(old_start..old_end + 1, replacement);
+        self.chunks.splice(old_start..old_end, replacement);
         self.text = updated_text.clone();
     }
 
+    #[cfg(test)]
+    fn splice_lines<F>(
+        &mut self,
+        updated_text: &Rope,
+        old_range: &Range<usize>,
+        inserted_bytes: usize,
+        ascii_fit_len: usize,
+        wrap_fn: &mut F,
+    ) where
+        F: FnMut(&str, f32, &mut Vec<usize>) -> f32,
+    {
+        let existing_count = self.line_count();
+        let old_start = self
+            .text
+            .offset_to_point(old_range.start)
+            .row
+            .min(existing_count.saturating_sub(1));
+        let old_end = self
+            .text
+            .offset_to_point(old_range.end)
+            .row
+            .min(existing_count.saturating_sub(1));
+        let new_start = updated_text.offset_to_point(old_range.start).row;
+        let new_end = updated_text
+            .offset_to_point(old_range.start + inserted_bytes)
+            .row;
+        self.splice_line_range(
+            updated_text,
+            old_start..old_end + 1,
+            new_start..new_end + 1,
+            ascii_fit_len,
+            wrap_fn,
+        );
+    }
+
     pub(crate) fn rebuild_all(&mut self, text: &Rope, ts: &TextSystem) {
-        self.apply_edit(text, &(0..self.text.len()), text.len(), ts);
+        let old_count = self.line_count();
+        let new_count = text.lines_len();
+        self.apply_line_splice(text, 0..old_count, 0..new_count, ts);
     }
 
     pub(crate) fn offset_to_display(&self, offset: usize, end_affinity: bool) -> DisplayPos {
