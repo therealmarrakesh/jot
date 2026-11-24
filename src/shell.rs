@@ -155,19 +155,18 @@ impl Shell {
         let jobs = Jobs::new();
         jobs.attach_platform(platform);
         let settings = platform.settings();
-        let appearance = settings.appearance;
-        let dark = matches!(appearance, WindowAppearance::Dark);
-        let palette = Palette::resolve(dark, settings.accent(dark), settings.high_contrast);
-        Self {
+        let mut shell = Self {
             text_system,
             jobs,
             appearance_override: None,
-            appearance,
-            palette,
+            appearance: settings.appearance,
+            palette: crate::theme::LIGHT,
             settings,
             view: ViewSettings::default(),
             gpu,
-        }
+        };
+        shell.rebuild_palette();
+        shell
     }
 
     #[inline]
