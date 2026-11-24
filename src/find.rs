@@ -611,8 +611,8 @@ fn match_rest_folded(haystack: &str, start: usize, rest: &[char]) -> Option<usiz
 }
 
 pub(crate) struct Matcher {
-    pub(super) query: String,
-    pub(super) match_case: bool,
+    query: String,
+    match_case: bool,
     folded: Vec<char>,
     overlap: usize,
     block: usize,
