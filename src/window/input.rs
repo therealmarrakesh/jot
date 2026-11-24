@@ -1,11 +1,12 @@
-use crate::shell::{AppEvent, Cx, Effect};
 use crate::command::{AppCommand, app_shortcut, edit_shortcut};
 use crate::dialog::DialogKey;
 use crate::files::FileRequest;
+use crate::find::FindKey;
 use crate::geom::{Point, point};
 use crate::ids::{EditorSlot, Focus, HitId};
 use crate::menu::Entry;
-use crate::platform::{Key, KeyEvent, Modifiers, MouseButton};
+use crate::platform::{KeyEvent, Modifiers, MouseButton};
+use crate::shell::{AppEvent, Cx, Effect};
 use crate::tabs::{
     SCROLL_REPEAT_DELAY, SCROLL_REPEAT_INTERVAL, SCROLL_STEP, STRIP_TOP, WHEEL_SHARE,
 };
@@ -27,8 +28,10 @@ impl MainWindow {
         }
         let mode = self.mode();
         if mode != InputMode::Dialog {
-            let state = self.menu_state(cx.view);
-            let menu_out = self.menu_bar.on_hover_change(top, state, cx.ts);
+            let state = self.menu_state(cx.shell);
+            let menu_out = self
+                .menu_bar
+                .on_hover_change(top, state, cx.ts(), &mut self.ui);
             let _ = self.apply_menu_outcome(menu_out, cx);
         }
 
@@ -46,7 +49,7 @@ impl MainWindow {
         let active_slot = self.active_slot();
         if let Some(axis) = self.active_editor().scrollbar_drag_axis() {
             let track_rect = self.ui.frame().rect_of(HitId::ScrollTrack(active_slot, axis));
-            if let Some(Some(notify)) = self.with_editor(active_slot, cx.jobs, |ed, timers| {
+            if let Some(Some(notify)) = self.with_editor(active_slot, cx.shell, |ed, timers| {
                 ed.on_scrollbar_mouse_move(pos, dragging_left, track_rect, timers)
             }) {
                 self.dirty |= notify;
@@ -57,7 +60,7 @@ impl MainWindow {
         if let Some(slot) = self.focused_editor_slot()
             && slot != active_slot
             && self
-                .with_editor(slot, cx.jobs, |ed, timers| {
+                .with_editor(slot, cx.shell, |ed, timers| {
                     ed.on_mouse_move(pos, dragging_left, true, timers)
                 })
                 .unwrap_or(false)
@@ -69,7 +72,7 @@ impl MainWindow {
             || self.active_editor().is_selecting()
         {
             self.dirty |= self
-                .with_editor(active_slot, cx.jobs, |ed, timers| {
+                .with_editor(active_slot, cx.shell, |ed, timers| {
                     ed.on_mouse_move(pos, dragging_left, active_focused, timers)
                 })
                 .unwrap_or(false);
@@ -100,7 +103,7 @@ impl MainWindow {
         click_count: usize,
         cx: &mut Cx<'_>,
     ) {
-        let menu_out = self.menu_bar.pointer_down();
+        let menu_out = self.menu_bar.pointer_down(self.focus);
         let _ = self.apply_menu_outcome(menu_out, cx);
         let chain = self.ui.on_mouse_down(pos, button);
         let top = chain.first().copied();
@@ -153,14 +156,14 @@ impl MainWindow {
                     | HitId::TabClose(_),
                 ) => return,
                 Some(HitId::MenuTrigger(kind)) => {
-                    let state = self.menu_state(cx.view);
-                    let out = self.menu_bar.toggle_trigger(kind, state, cx.ts);
+                    let state = self.menu_state(cx.shell);
+                    let out = self.menu_bar.toggle_trigger(kind, state, cx.ts());
                     let _ = self.apply_menu_outcome(out, cx);
                     return;
                 }
                 Some(HitId::Tab(id)) => {
                     if let Some(ix) = self.tab_index(id) {
-                        self.activate_tab(ix, cx.jobs);
+                        self.activate_tab(ix, cx.shell);
                         let left = self
                             .ui
                             .frame()
@@ -180,7 +183,7 @@ impl MainWindow {
                 Some(HitId::TabScrollLeft) => {
                     if self.scroll_tabs(-SCROLL_STEP) {
                         let wid = self.id();
-                        self.tabs.set_scroll_repeat(cx.jobs.every(
+                        self.tabs.set_scroll_repeat(cx.jobs().every(
                             SCROLL_REPEAT_DELAY,
                             SCROLL_REPEAT_INTERVAL,
                             move || AppEvent::TabScrollRepeat {
@@ -194,7 +197,7 @@ impl MainWindow {
                 Some(HitId::TabScrollRight) => {
                     if self.scroll_tabs(SCROLL_STEP) {
                         let wid = self.id();
-                        self.tabs.set_scroll_repeat(cx.jobs.every(
+                        self.tabs.set_scroll_repeat(cx.jobs().every(
                             SCROLL_REPEAT_DELAY,
                             SCROLL_REPEAT_INTERVAL,
                             move || AppEvent::TabScrollRepeat {
@@ -206,7 +209,8 @@ impl MainWindow {
                     return;
                 }
                 Some(HitId::ScrollThumb(slot, axis))
-                    if slot == self.active_slot() && self.active_editor().scrollbar_interactive(axis) =>
+                    if slot == self.active_slot()
+                        && self.active_editor().scrollbar_interactive(axis) =>
                 {
                     if let Some(track) = self.ui.frame().rect_of(HitId::ScrollTrack(slot, axis)) {
                         self.active_editor_mut()
@@ -215,7 +219,8 @@ impl MainWindow {
                     return;
                 }
                 Some(HitId::ScrollTrack(slot, axis))
-                    if slot == self.active_slot() && self.active_editor().scrollbar_interactive(axis) =>
+                    if slot == self.active_slot()
+                        && self.active_editor().scrollbar_interactive(axis) =>
                 {
                     if let Some(track) = self.ui.frame().rect_of(HitId::ScrollTrack(slot, axis)) {
                         self.active_editor_mut()
@@ -231,8 +236,8 @@ impl MainWindow {
 
         if let Some(slot) = editor_hit {
             self.native.hwnd().complete_ime_composition();
-            self.set_focus(Focus::Editor(slot), cx.jobs);
-            self.with_editor(slot, cx.jobs, |ed, timers| {
+            self.set_focus(Focus::Editor(slot), cx.shell);
+            self.with_editor(slot, cx.shell, |ed, timers| {
                 ed.on_mouse_down(button, pos, modifiers, click_count, timers);
             });
         }
@@ -286,18 +291,18 @@ impl MainWindow {
         if let Some(slot) = self.focused_editor_slot()
             && slot != active_slot
         {
-            self.with_editor(slot, cx.jobs, |ed, timers| {
+            self.with_editor(slot, cx.shell, |ed, timers| {
                 ed.on_mouse_up(button, timers);
             });
         }
         let open_ctx = self
-            .with_editor(active_slot, cx.jobs, |ed, timers| {
+            .with_editor(active_slot, cx.shell, |ed, timers| {
                 ed.on_mouse_up(button, timers)
             })
             .flatten();
         if let Some(anchor) = open_ctx {
-            let state = self.menu_state(cx.view);
-            let out = self.menu_bar.open_context_menu(anchor, state, cx.ts);
+            let state = self.menu_state(cx.shell);
+            let out = self.menu_bar.open_context_menu(anchor, state, cx.ts());
             let _ = self.apply_menu_outcome(out, cx);
             return;
         }
@@ -306,26 +311,26 @@ impl MainWindow {
             Some(HitId::DialogButton(ix)) => self.press_dialog_button(ix, cx),
             Some(HitId::FieldClear(slot)) => {
                 if let Some(ed) = self.editor_by_slot_mut(slot) {
-                    ed.set_value("", cx.ts);
+                    ed.set_value("", cx.ts());
                 }
-                self.set_focus(Focus::Editor(slot), cx.jobs);
+                self.set_focus(Focus::Editor(slot), cx.shell);
             }
             Some(HitId::FindToggleReplace) => {
-                self.find.replace = !self.find.replace;
-                self.refocus_find(cx.jobs);
+                self.find.toggle_replace();
+                self.refocus_find(cx.shell);
             }
-            Some(HitId::FindNext) => self.find_step(true, cx.ts, cx.jobs),
-            Some(HitId::FindPrev) => self.find_step(false, cx.ts, cx.jobs),
+            Some(HitId::FindNext) => self.find_step(true, cx.shell),
+            Some(HitId::FindPrev) => self.find_step(false, cx.shell),
             Some(HitId::FindOptions) => {
                 let entries = vec![
                     Entry::toggle(
                         "Match case",
-                        self.find.match_case,
+                        self.find.match_case(),
                         AppCommand::ToggleMatchCase,
                     ),
                     Entry::toggle(
                         "Wrap around",
-                        self.find.wrap_around,
+                        self.find.wrap_around(),
                         AppCommand::ToggleWrapAround,
                     ),
                 ];
@@ -333,19 +338,19 @@ impl MainWindow {
                     entries,
                     HitId::FindOptions,
                     EditorSlot::FindQuery,
-                    cx.ts,
+                    cx.ts(),
                 );
                 let _ = self.apply_menu_outcome(out, cx);
             }
-            Some(HitId::FindClose) => self.close_find(cx.jobs),
-            Some(HitId::FindReplace) => self.replace_next(cx.ts, cx.jobs),
-            Some(HitId::FindReplaceAll) => self.replace_all(cx.ts, cx.jobs),
+            Some(HitId::FindClose) => self.close_find(cx.shell),
+            Some(HitId::FindReplace) => self.replace_next(cx.shell),
+            Some(HitId::FindReplaceAll) => self.replace_all(cx.shell),
             Some(HitId::MenuItem { ix, .. }) => {
-                let out = self.menu_bar.activate((ix, None), false, cx.ts);
+                let out = self.menu_bar.activate((ix, None), false, cx.ts());
                 let _ = self.apply_menu_outcome(out, cx);
             }
             Some(HitId::SubmenuItem { ix: sub_ix, .. }) => {
-                let out = self.menu_bar.activate((0, Some(sub_ix)), false, cx.ts);
+                let out = self.menu_bar.activate((0, Some(sub_ix)), false, cx.ts());
                 let _ = self.apply_menu_outcome(out, cx);
             }
             Some(HitId::MenuCommand { ix, .. }) => {
@@ -360,7 +365,7 @@ impl MainWindow {
                     }));
                 }
             }
-            Some(HitId::NewTab) => self.add_tab(cx.view.word_wrap, cx.jobs),
+            Some(HitId::NewTab) => self.add_tab(cx.shell),
             Some(HitId::ThemeToggle) => cx.emit(Effect::ToggleTheme),
             _ => {}
         }
@@ -409,97 +414,60 @@ impl MainWindow {
     pub(crate) fn on_key_down(&mut self, ev: KeyEvent, cx: &mut Cx<'_>) -> bool {
         self.ui.mark_keyboard_input();
 
-        match self.mode() {
-            InputMode::Dialog => {
-                if let Some(slot) = self.focused_editor_slot() {
-                    self.with_editor(slot, cx.jobs, |ed, timers| ed.pause_blink(timers));
+        if self.mode() == InputMode::Dialog {
+            if let Some(slot) = self.focused_editor_slot() {
+                self.with_editor(slot, cx.shell, |ed, timers| ed.pause_blink(timers));
+            }
+            return match self.dialogs.on_key(ev, self.focus) {
+                DialogKey::PassThrough => false,
+                DialogKey::Focus(next) => {
+                    self.set_focus(next, cx.shell);
+                    true
                 }
-                return match self.dialogs.on_key(ev, self.focus) {
-                    DialogKey::PassThrough => false,
-                    DialogKey::Focus(next) => {
-                        self.set_focus(next, cx.jobs);
-                        true
-                    }
-                    DialogKey::PressButton(ix) => {
-                        self.press_dialog_button(ix, cx);
-                        true
-                    }
-                    DialogKey::EditGoToLine => edit_shortcut(ev)
-                        .and_then(|cmd| {
-                            self.with_editor(EditorSlot::GoToLine, cx.jobs, |ed, timers| {
-                                ed.handle_command(cmd, &mut SystemClipboard, cx.ts, timers)
-                            })
+                DialogKey::PressButton(ix) => {
+                    self.press_dialog_button(ix, cx);
+                    true
+                }
+                DialogKey::EditGoToLine => edit_shortcut(ev)
+                    .and_then(|cmd| {
+                        self.with_editor(EditorSlot::GoToLine, cx.shell, |ed, timers| {
+                            ed.handle_command(cmd, &mut SystemClipboard, cx.ts(), timers)
                         })
-                        .unwrap_or(false),
-                    DialogKey::Consumed => true,
-                };
-            }
-            InputMode::Popup => {
-                let state = self.menu_state(cx.view);
-                let out = self.menu_bar.on_key_down(ev, false, state, cx.ts);
-                return self.apply_menu_outcome(out, cx);
-            }
-            InputMode::MenuBar => {
-                let state = self.menu_state(cx.view);
-                let out = self.menu_bar.on_key_down(ev, true, state, cx.ts);
-                if self.apply_menu_outcome(out, cx) {
-                    return true;
-                }
-            }
-            InputMode::Normal => {
-                let state = self.menu_state(cx.view);
-                let out = self.menu_bar.on_key_down(ev, false, state, cx.ts);
-                if self.apply_menu_outcome(out, cx) {
-                    return true;
-                }
-            }
+                    })
+                    .unwrap_or(false),
+                DialogKey::Consumed => true,
+            };
+        }
+
+        let was_popup = self.menu_bar.is_open();
+        let state = self.menu_state(cx.shell);
+        let out = self.menu_bar.on_key_down(ev, self.focus, state, cx.ts());
+        let handled = self.apply_menu_outcome(out, cx);
+        if handled || was_popup {
+            return handled;
         }
 
         if let Some(slot) = self.focused_editor_slot() {
-            self.with_editor(slot, cx.jobs, |ed, timers| ed.pause_blink(timers));
+            self.with_editor(slot, cx.shell, |ed, timers| ed.pause_blink(timers));
         }
 
-        if ev.key == Key::Tab
-            && !ev.modifiers.ctrl
-            && !ev.modifiers.alt
-            && !ev.modifiers.win
-            && self.find.replace
-        {
-            match self.focus {
-                Focus::Editor(EditorSlot::FindQuery) => {
-                    self.set_focus(Focus::Editor(EditorSlot::FindReplace), cx.jobs);
-                    return true;
-                }
-                Focus::Editor(EditorSlot::FindReplace) => {
-                    self.set_focus(Focus::Editor(EditorSlot::FindQuery), cx.jobs);
-                    return true;
-                }
-                _ => {}
+        match self.find.on_key(ev, self.focus) {
+            FindKey::Focus(next) => {
+                self.set_focus(next, cx.shell);
+                return true;
             }
-        }
-        if ev.key == Key::Enter && !ev.modifiers.ctrl && !ev.modifiers.alt && !ev.modifiers.win {
-            match (self.focus, ev.modifiers.shift) {
-                (Focus::Editor(EditorSlot::FindQuery), false) => {
-                    self.dispatch_app_command(AppCommand::FindNext, cx);
-                    return true;
-                }
-                (Focus::Editor(EditorSlot::FindQuery), true) => {
-                    self.dispatch_app_command(AppCommand::FindPrevious, cx);
-                    return true;
-                }
-                (Focus::Editor(EditorSlot::FindReplace), false) => {
-                    self.dispatch_app_command(AppCommand::ReplaceNext, cx);
-                    return true;
-                }
-                _ => {}
+            FindKey::Command(cmd) => {
+                self.dispatch_app_command(cmd, cx);
+                return true;
             }
+            FindKey::PassThrough => {}
         }
 
         if let Some(slot) = self.focused_editor_slot()
             && let Some(cmd) = edit_shortcut(ev)
             && self
-                .with_editor(slot, cx.jobs, |ed, timers| {
-                    ed.handle_command(cmd, &mut SystemClipboard, cx.ts, timers)
+                .with_editor(slot, cx.shell, |ed, timers| {
+                    ed.handle_command(cmd, &mut SystemClipboard, cx.ts(), timers)
                 })
                 .unwrap_or(false)
         {
@@ -519,7 +487,7 @@ impl MainWindow {
         if self.mode() == InputMode::Dialog {
             return false;
         }
-        let menu_out = self.menu_bar.on_key_up(ev);
+        let menu_out = self.menu_bar.on_key_up(ev, self.focus);
         if menu_out.handled {
             return self.apply_menu_outcome(menu_out, cx);
         }
@@ -540,8 +508,8 @@ impl MainWindow {
         let Some(slot) = self.text_input_slot() else {
             return;
         };
-        self.with_editor(slot, cx.jobs, |ed, timers| {
-            ed.handle_text_input(text, cx.ts, timers);
+        self.with_editor(slot, cx.shell, |ed, timers| {
+            ed.handle_text_input(text, cx.ts(), timers);
         });
     }
 
@@ -550,7 +518,7 @@ impl MainWindow {
             return;
         };
         if let Some(ed) = self.editor_by_slot_mut(slot) {
-            ed.handle_ime_composition(text, cursor, cx.ts);
+            ed.handle_ime_composition(text, cursor, cx.ts());
         }
     }
 }

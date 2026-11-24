@@ -76,15 +76,21 @@ pub(crate) enum Effect {
 }
 
 pub(crate) struct Cx<'a> {
-    pub(crate) ts: &'a TextSystem,
-    pub(crate) jobs: &'a Jobs<AppEvent>,
-    pub(crate) view: ViewSettings,
-    pub(crate) palette: Palette,
-    pub(crate) settings: SystemSettings,
+    pub(crate) shell: &'a Shell,
     fx: &'a mut Vec<Effect>,
 }
 
-impl Cx<'_> {
+impl<'a> Cx<'a> {
+    #[inline]
+    pub(crate) fn ts(&self) -> &'a TextSystem {
+        &self.shell.text_system
+    }
+
+    #[inline]
+    pub(crate) fn jobs(&self) -> &'a Jobs<AppEvent> {
+        &self.shell.jobs
+    }
+
     #[inline]
     pub(crate) fn emit(&mut self, effect: Effect) {
         self.fx.push(effect);
@@ -146,13 +152,6 @@ impl Shell {
     }
 
     pub(crate) fn cx<'a>(&'a self, fx: &'a mut Vec<Effect>) -> Cx<'a> {
-        Cx {
-            ts: &self.text_system,
-            jobs: &self.jobs,
-            view: self.view,
-            palette: self.palette,
-            settings: self.settings,
-            fx,
-        }
+        Cx { shell: self, fx }
     }
 }

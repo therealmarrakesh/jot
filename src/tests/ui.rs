@@ -62,7 +62,7 @@ fn menus_shortcuts_toggles_submenus_and_context_menu() {
     });
 
     h.press_key("alt");
-    h.read(|w, _| assert!(w.menu_bar.access_active()));
+    h.read(|w, _| assert!(w.key_tips_active()));
     h.press_key("f");
     h.read(|w, _| assert!(w.menu_bar.is_open(), "Alt then F must open File menu"));
     h.press_key("down");
@@ -70,7 +70,7 @@ fn menus_shortcuts_toggles_submenus_and_context_menu() {
     h.press_key("escape");
     h.read(|w, _| {
         assert!(!w.menu_bar.is_open());
-        assert!(!w.menu_bar.access_active());
+        assert!(!w.key_tips_active());
     });
 
     h.type_text("delete me");
@@ -129,10 +129,10 @@ fn find_replace_bar_clear_button_and_key_contexts() {
     h.click_hit(HitId::FindOptions);
     h.read(|w, _| assert!(w.menu_bar.is_open(), "find-options must open flyout"));
     h.click_menu_item(0);
-    h.read(|w, _| assert!(w.find.match_case));
+    h.read(|w, _| assert!(w.find.match_case()));
     h.click_hit(HitId::FindOptions);
     h.click_menu_item(0);
-    h.read(|w, _| assert!(!w.find.match_case));
+    h.read(|w, _| assert!(!w.find.match_case()));
 
     h.click_hit(HitId::FindToggleReplace);
     h.click_hit(HitId::Editor(EditorSlot::FindReplace));
@@ -547,7 +547,7 @@ fn keyboard_system_chords_altgr_menu_gate_popup_occlusion_and_fractional_borders
     }));
 
     h.press_key("alt");
-    h.read(|w, _| assert!(w.menu_bar.access_active()));
+    h.read(|w, _| assert!(w.key_tips_active()));
     assert!(!h.app.borrow_mut().on_event(PlatformEvent::KeyDown {
         window_id: h.window_id,
         event: alt_f4,

@@ -1,9 +1,9 @@
-use crate::shell::{Cx, Effect};
 use crate::command::{AppCommand, Command};
 use crate::files::FileRequest;
 use crate::geom::point;
 use crate::ids::Focus;
 use crate::platform::format_local_time_date;
+use crate::shell::{Cx, Effect};
 
 use super::{MainWindow, SystemClipboard, ZOOM_STEP};
 
@@ -12,18 +12,21 @@ impl MainWindow {
         match cmd {
             Command::App(app_cmd) => self.dispatch_app_command(app_cmd, cx),
             Command::Edit(edit_cmd) => self
-                .with_editor(self.active_slot(), cx.jobs, |ed, timers| {
-                    ed.handle_command(edit_cmd, &mut SystemClipboard, cx.ts, timers)
+                .with_editor(self.active_slot(), cx.shell, |ed, timers| {
+                    ed.handle_command(edit_cmd, &mut SystemClipboard, cx.ts(), timers)
                 })
                 .unwrap_or(false),
         }
     }
 
     pub(super) fn dispatch_app_command(&mut self, cmd: AppCommand, cx: &mut Cx<'_>) -> bool {
+        if self.dialogs.is_open() {
+            return false;
+        }
         match cmd {
             AppCommand::Cancel => {
                 if self.find.is_open() {
-                    self.close_find(cx.jobs);
+                    self.close_find(cx.shell);
                     return true;
                 }
                 return false;
@@ -34,8 +37,8 @@ impl MainWindow {
                 }
                 if let Some(caret) = self.active_editor().caret_bounds() {
                     let anchor = point(caret.right(), caret.bottom());
-                    let state = self.menu_state(cx.view);
-                    let out = self.menu_bar.open_context_menu(anchor, state, cx.ts);
+                    let state = self.menu_state(cx.shell);
+                    let out = self.menu_bar.open_context_menu(anchor, state, cx.ts());
                     let _ = self.apply_menu_outcome(out, cx);
                 }
                 return true;
@@ -50,17 +53,17 @@ impl MainWindow {
             AppCommand::CloseWindow => {
                 cx.emit(Effect::File(FileRequest::CloseWindow { window: self.id() }));
             }
-            AppCommand::NewTab => self.add_tab(cx.view.word_wrap, cx.jobs),
+            AppCommand::NewTab => self.add_tab(cx.shell),
             AppCommand::CloseTab => {
                 cx.emit(Effect::File(FileRequest::CloseTab {
                     window: self.id(),
                     tab: self.active_tab_id(),
                 }));
             }
-            AppCommand::NextTab => self.next_tab(cx.jobs),
-            AppCommand::PrevTab => self.prev_tab(cx.jobs),
-            AppCommand::SelectTab(ix) => self.select_tab(ix, cx.jobs),
-            AppCommand::SelectLastTab => self.select_last_tab(cx.jobs),
+            AppCommand::NextTab => self.next_tab(cx.shell),
+            AppCommand::PrevTab => self.prev_tab(cx.shell),
+            AppCommand::SelectTab(ix) => self.select_tab(ix, cx.shell),
+            AppCommand::SelectLastTab => self.select_last_tab(cx.shell),
             AppCommand::Open => {
                 cx.emit(Effect::File(FileRequest::OpenDialog { window: self.id() }));
             }
@@ -81,38 +84,38 @@ impl MainWindow {
             }
             AppCommand::TimeDate => {
                 let stamp = format_local_time_date();
-                self.active_editor_mut().replace(&stamp, cx.ts);
+                self.active_editor_mut().replace(&stamp, cx.ts());
             }
-            AppCommand::GoTo => self.open_go_to(cx.ts, cx.jobs),
+            AppCommand::GoTo => self.open_go_to(cx.shell),
             AppCommand::Find => {
                 if self.has_text() {
-                    self.open_find(false, cx.ts, cx.jobs);
+                    self.open_find(false, cx.shell);
                 }
             }
             AppCommand::Replace => {
                 if self.has_text() {
-                    self.open_find(true, cx.ts, cx.jobs);
+                    self.open_find(true, cx.shell);
                 }
             }
             AppCommand::FindNext => {
                 if self.has_text() {
-                    self.find_step(true, cx.ts, cx.jobs);
+                    self.find_step(true, cx.shell);
                 }
             }
             AppCommand::FindPrevious => {
                 if self.has_text() {
-                    self.find_step(false, cx.ts, cx.jobs);
+                    self.find_step(false, cx.shell);
                 }
             }
             AppCommand::ToggleMatchCase => {
-                self.find.match_case = !self.find.match_case;
-                self.refocus_find(cx.jobs);
+                self.find.toggle_match_case();
+                self.refocus_find(cx.shell);
             }
             AppCommand::ToggleWrapAround => {
-                self.find.wrap_around = !self.find.wrap_around;
-                self.refocus_find(cx.jobs);
+                self.find.toggle_wrap_around();
+                self.refocus_find(cx.shell);
             }
-            AppCommand::ReplaceNext => self.replace_next(cx.ts, cx.jobs),
+            AppCommand::ReplaceNext => self.replace_next(cx.shell),
         }
         true
     }

@@ -147,7 +147,7 @@ fn device_loss_recreates_devices_and_renders_new_windows_cleanly() {
     {
         let mut app = h.app.borrow_mut();
         app.windows[0].surface.mark_device_lost_for_test();
-        app.windows[0].dirty = true;
+        app.windows[0].mark_dirty();
     }
     h.draw();
     let gen1 = h.read(|_, app| app.shell.gpu.generation());

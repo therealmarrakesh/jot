@@ -1,10 +1,11 @@
 use std::time::Duration;
 
+use crate::command::AppCommand;
 use crate::editor::Editor;
 use crate::geom::{Point, point};
 use crate::gfx::TextSystem;
-use crate::ids::{AnimKey, CustomDraw, EditorSlot, HitId, Node, UiState};
-use crate::platform::{CursorStyle, TimerHandle};
+use crate::ids::{AnimKey, CustomDraw, EditorSlot, Focus, HitId, Node, UiState};
+use crate::platform::{CursorStyle, Key, KeyEvent, TimerHandle};
 use crate::theme::{Palette, theme_shadow};
 use crate::types::SharedStr;
 use crate::ui::controls::{
@@ -50,6 +51,13 @@ const ARROW_UP_GLYPH: &str = "\u{E74A}";
 const OPTIONS_GLYPH: &str = "\u{E9E9}";
 const CLOSE_GLYPH: &str = "\u{E8BB}";
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(crate) enum FindKey {
+    PassThrough,
+    Focus(Focus),
+    Command(AppCommand),
+}
+
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct FindOutcome {
     pub(crate) searched: bool,
@@ -59,10 +67,10 @@ pub(crate) struct FindOutcome {
 
 pub(crate) struct FindBar {
     presence: Presence,
-    pub(crate) replace: bool,
+    replace: bool,
     serial: usize,
-    pub(crate) match_case: bool,
-    pub(crate) wrap_around: bool,
+    match_case: bool,
+    wrap_around: bool,
     pub(crate) query: Editor,
     pub(crate) replacement: Editor,
     notice: Option<SharedStr>,
@@ -102,6 +110,62 @@ impl FindBar {
 
     pub(crate) fn is_open(&self) -> bool {
         self.presence.is_open()
+    }
+
+    pub(crate) fn is_replace(&self) -> bool {
+        self.replace
+    }
+
+    pub(crate) fn match_case(&self) -> bool {
+        self.match_case
+    }
+
+    pub(crate) fn wrap_around(&self) -> bool {
+        self.wrap_around
+    }
+
+    pub(crate) fn toggle_replace(&mut self) {
+        self.replace = !self.replace;
+    }
+
+    pub(crate) fn toggle_match_case(&mut self) {
+        self.match_case = !self.match_case;
+    }
+
+    pub(crate) fn toggle_wrap_around(&mut self) {
+        self.wrap_around = !self.wrap_around;
+    }
+
+    pub(crate) fn on_key(&self, ev: KeyEvent, focus: Focus) -> FindKey {
+        if ev.modifiers.ctrl || ev.modifiers.alt || ev.modifiers.win {
+            return FindKey::PassThrough;
+        }
+        if ev.key == Key::Tab && self.replace {
+            return match focus {
+                Focus::Editor(EditorSlot::FindQuery) => {
+                    FindKey::Focus(Focus::Editor(EditorSlot::FindReplace))
+                }
+                Focus::Editor(EditorSlot::FindReplace) => {
+                    FindKey::Focus(Focus::Editor(EditorSlot::FindQuery))
+                }
+                _ => FindKey::PassThrough,
+            };
+        }
+        if ev.key == Key::Enter {
+            return match (focus, ev.modifiers.shift) {
+                (Focus::Editor(EditorSlot::FindQuery), false) => {
+                    FindKey::Command(AppCommand::FindNext)
+                }
+                (Focus::Editor(EditorSlot::FindQuery), true) => {
+                    FindKey::Command(AppCommand::FindPrevious)
+                }
+                (Focus::Editor(EditorSlot::FindReplace), false) => {
+                    FindKey::Command(AppCommand::ReplaceNext)
+                }
+                _ => FindKey::PassThrough,
+            };
+        }
+        FindKey::PassThrough
     }
 
     pub(crate) fn clear_notice(&mut self) {

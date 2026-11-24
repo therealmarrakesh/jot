@@ -1,10 +1,10 @@
 use std::time::Instant;
 
-use crate::shell::Cx;
 use crate::editor::{EditorPaintParams, EditorPaintStyle};
 use crate::geom::{Rect, point, size};
 use crate::gfx::{fill, font};
 use crate::ids::{CustomDraw, EditorSlot, Focus, Frame};
+use crate::shell::Shell;
 use crate::ui::controls::{BODY_LINE, BODY_SIZE, TEXT_FONT};
 use crate::ui::{AvailSize, box_};
 
@@ -12,13 +12,12 @@ use super::chrome::STATUS_DIVIDER_WIDTH;
 use super::{EDITOR_FONT_SIZE, MainWindow};
 
 impl MainWindow {
-    pub(crate) fn render_frame(&mut self, now: Instant, cx: &Cx<'_>) -> bool {
-        let p = cx.palette;
-        let view = cx.view;
-        let reduce_motion = cx.settings.reduce_motion;
-        let caret_width_px = cx.settings.caret_width_px;
-        let ts = cx.ts;
-        let jobs = cx.jobs;
+    pub(crate) fn render_frame(&mut self, now: Instant, shell: &Shell) -> bool {
+        let p = shell.palette;
+        let view = shell.view;
+        let reduce_motion = shell.settings.reduce_motion;
+        let caret_width_px = shell.settings.caret_width_px;
+        let ts = &shell.text_system;
         self.dirty = false;
         let logical = self.native.logical_size();
         let scale = self.native.scale_factor();
@@ -35,7 +34,7 @@ impl MainWindow {
         let find_node = self
             .find
             .render(logical.width, self.focused_editor_slot(), p, &mut self.ui);
-        let editor_node = self.editor_area(find_node, now, p, jobs);
+        let editor_node = self.editor_area(find_node, now, shell);
         let status_node = status_metrics.map(|m| self.status_bar(m, p));
         let menu_popup = self.menu_bar.render_popup(p, ts, &mut self.ui);
         let dialog_node = self.dialogs.render(self.focus, p, &mut self.ui);
@@ -77,7 +76,7 @@ impl MainWindow {
         let active_slot = self.active_slot();
         let editor_focused = self.focus == Focus::Editor(active_slot);
         let show_selection = editor_focused || self.menu_bar.is_open() || self.find.is_open();
-        let caret_hidden = self.menu_bar.access_active();
+        let caret_hidden = self.key_tips_active();
         let mut editor_needs_redraw = false;
 
         self.active_editor_mut().set_caret_height(caret_height);

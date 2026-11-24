@@ -1,13 +1,13 @@
 use std::time::Instant;
 
-use crate::shell::AppEvent;
 use crate::color::transparent_black;
 use crate::document::Format;
 use crate::geom::{Size, size};
 use crate::gfx::TextSystem;
-use crate::ids::{CustomDraw, Focus, Frame, HitId, Node, UiState};
+use crate::ids::{CustomDraw, Frame, HitId, Node, UiState};
 use crate::menu::MENU_BAR_HEIGHT;
-use crate::platform::{Jobs, WindowControlArea};
+use crate::platform::WindowControlArea;
+use crate::shell::Shell;
 use crate::tabs::{self, CAPTION_BUTTON_WIDTH, STRIP_TOP, StripFrame, TAB_HEIGHT};
 use crate::theme::Palette;
 use crate::ui::controls::{CONTROL_RADIUS, ICON_FONT, IconButtonStyle, SMALL_FONT, icon_button};
@@ -151,9 +151,7 @@ impl MainWindow {
     }
 
     pub(super) fn menu_bar_row(&mut self, p: Palette) -> Node {
-        let menu = self
-            .menu_bar
-            .render_bar(self.focus == Focus::MenuBar, p, &mut self.ui);
+        let menu = self.menu_bar.render_bar(self.focus, p, &mut self.ui);
         let theme_btn = icon_button(
             p,
             HitId::ThemeToggle,
@@ -187,14 +185,13 @@ impl MainWindow {
         &mut self,
         find: Option<Node>,
         now: Instant,
-        p: Palette,
-        jobs: &Jobs<AppEvent>,
+        shell: &Shell,
     ) -> Node {
+        let p = shell.palette;
         let slot = self.active_slot();
         let lh = self.line_height();
         let wid = self.id();
-        let blink_timing = self.blink_timing;
-        let mut timers = WindowEditorTimers::new(jobs, wid, slot, blink_timing);
+        let mut timers = WindowEditorTimers::new(shell, wid, slot);
         let scrollbars = self
             .tabs
             .active_mut()

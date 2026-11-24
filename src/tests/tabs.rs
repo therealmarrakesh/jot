@@ -108,7 +108,7 @@ fn dirty_window_close_file_drop_and_multi_window() {
     {
         let mut app = h.app.borrow_mut();
         assert_eq!(app.windows.len(), 2, "Ctrl+Shift+N must open a 2nd window");
-        app.windows[1].pending_close = true;
+        app.windows[1].request_close();
         app.sweep_closed_windows();
         assert_eq!(app.windows.len(), 1);
     }

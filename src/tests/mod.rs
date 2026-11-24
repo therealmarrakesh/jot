@@ -90,7 +90,7 @@ impl TestHarness {
             let mut app = self.app.borrow_mut();
             app.on_wake();
             if let Some(ix) = app.window_ix(self.window_id) {
-                app.windows[ix].dirty = true;
+                app.windows[ix].mark_dirty();
             }
             app.drive_frames();
         }
@@ -260,7 +260,7 @@ impl TestHarness {
     fn close_all(&mut self) {
         let mut app = self.app.borrow_mut();
         for w in &mut app.windows {
-            w.pending_close = true;
+            w.request_close();
         }
         app.sweep_closed_windows();
     }

@@ -13,12 +13,12 @@ use crate::editor::{Clipboard, Editor, EditorTimer, EditorTimers, RopeExt as _};
 use crate::files::Prompt;
 use crate::find::{self, FindBar, FindOutcome};
 use crate::geom::{Edges, Point};
-use crate::gfx::{Surface, TextSystem};
+use crate::gfx::Surface;
 use crate::ids::{EditorSlot, Focus, HitId, TabId, UiState};
 use crate::keytips::KeyTip;
 use crate::menu::{FocusRequest, MenuBar, MenuOutcome, MenuState, SubmenuTimer};
-use crate::platform::{Jobs, NativeWindow, SystemSettings, TimerHandle, WindowId, clipboard};
-use crate::shell::{AppEvent, Cx, Effect, ViewSettings};
+use crate::platform::{NativeWindow, TimerHandle, WindowId, clipboard};
+use crate::shell::{AppEvent, Cx, Effect, Shell};
 use crate::tabs::TabData;
 use crate::tooltip::TooltipProbe;
 
@@ -69,31 +69,24 @@ impl Clipboard for SystemClipboard {
 }
 
 pub(crate) struct WindowEditorTimers<'a> {
-    jobs: &'a Jobs<AppEvent>,
+    shell: &'a Shell,
     window: WindowId,
     slot: EditorSlot,
-    blink_timing: (Option<Duration>, Option<Duration>),
 }
 
 impl<'a> WindowEditorTimers<'a> {
-    pub(crate) fn new(
-        jobs: &'a Jobs<AppEvent>,
-        window: WindowId,
-        slot: EditorSlot,
-        blink_timing: (Option<Duration>, Option<Duration>),
-    ) -> Self {
+    pub(crate) fn new(shell: &'a Shell, window: WindowId, slot: EditorSlot) -> Self {
         Self {
-            jobs,
+            shell,
             window,
             slot,
-            blink_timing,
         }
     }
 }
 
 impl EditorTimers for WindowEditorTimers<'_> {
     fn after(&mut self, delay: Duration, kind: EditorTimer) -> TimerHandle {
-        self.jobs.after(
+        self.shell.jobs.after(
             delay,
             AppEvent::EditorTimer {
                 window: self.window,
@@ -106,15 +99,20 @@ impl EditorTimers for WindowEditorTimers<'_> {
     fn every(&mut self, delay: Duration, interval: Duration, kind: EditorTimer) -> TimerHandle {
         let window = self.window;
         let slot = self.slot;
-        self.jobs.every(delay, interval, move || AppEvent::EditorTimer {
-            window,
-            slot,
-            kind,
-        })
+        self.shell
+            .jobs
+            .every(delay, interval, move || AppEvent::EditorTimer {
+                window,
+                slot,
+                kind,
+            })
     }
 
     fn blink_timing(&self) -> (Option<Duration>, Option<Duration>) {
-        self.blink_timing
+        (
+            self.shell.settings.caret_blink_interval,
+            self.shell.settings.caret_blink_timeout,
+        )
     }
 }
 
@@ -128,10 +126,9 @@ pub(crate) struct MainWindow {
     pub(crate) find: FindBar,
     pub(crate) dialogs: Dialogs,
     pub(crate) focus: Focus,
-    pub(crate) dirty: bool,
-    pub(crate) has_painted: bool,
-    pub(crate) pending_close: bool,
-    blink_timing: (Option<Duration>, Option<Duration>),
+    dirty: bool,
+    has_painted: bool,
+    pending_close: bool,
     menu_submenu_timer: TimerHandle,
     middle_pressed_tab: Option<TabId>,
     min_size_cache: Option<MinSizeCache>,
@@ -142,11 +139,10 @@ impl MainWindow {
         native: NativeWindow,
         surface: Surface,
         initial: Option<TabData>,
-        word_wrap: bool,
-        settings: SystemSettings,
-        jobs: &Jobs<AppEvent>,
+        shell: &Shell,
     ) -> Self {
-        let data = initial.unwrap_or_else(|| TabData::create(None, word_wrap, EDITOR_PADDINGS));
+        let data =
+            initial.unwrap_or_else(|| TabData::create(None, shell.view.word_wrap, EDITOR_PADDINGS));
         let tabs = TabSet::new(data);
         let active_id = tabs.active_id();
 
@@ -162,13 +158,38 @@ impl MainWindow {
             dirty: true,
             has_painted: false,
             pending_close: false,
-            blink_timing: (settings.caret_blink_interval, settings.caret_blink_timeout),
             menu_submenu_timer: TimerHandle::default(),
             middle_pressed_tab: None,
             min_size_cache: None,
         };
-        win.activate_tab(0, jobs);
+        win.activate_tab(0, shell);
         win
+    }
+
+    #[inline]
+    pub(crate) fn is_dirty(&self) -> bool {
+        self.dirty
+    }
+
+    #[inline]
+    pub(crate) fn mark_dirty(&mut self) {
+        self.dirty = true;
+    }
+
+    pub(crate) fn on_paint_requested(&mut self) {
+        if !self.has_painted {
+            self.dirty = true;
+        }
+    }
+
+    #[inline]
+    pub(crate) fn is_pending_close(&self) -> bool {
+        self.pending_close
+    }
+
+    #[inline]
+    pub(crate) fn request_close(&mut self) {
+        self.pending_close = true;
     }
 
     pub(crate) fn mode(&self) -> InputMode {
@@ -181,14 +202,6 @@ impl MainWindow {
         } else {
             InputMode::Normal
         }
-    }
-
-    pub(crate) fn set_blink_timing(
-        &mut self,
-        interval: Option<Duration>,
-        timeout: Option<Duration>,
-    ) {
-        self.blink_timing = (interval, timeout);
     }
 
     #[inline]
@@ -272,10 +285,10 @@ impl MainWindow {
         }
     }
 
-    pub(crate) fn set_focus(&mut self, next: Focus, jobs: &Jobs<AppEvent>) {
+    pub(crate) fn set_focus(&mut self, next: Focus, shell: &Shell) {
         if self.focus == next {
             if let Focus::Editor(slot) = next {
-                self.start_editor_blink(slot, jobs);
+                self.start_editor_blink(slot, shell);
             }
             return;
         }
@@ -287,7 +300,7 @@ impl MainWindow {
         }
         self.focus = next;
         if let Focus::Editor(new_slot) = next {
-            self.start_editor_blink(new_slot, jobs);
+            self.start_editor_blink(new_slot, shell);
         }
         self.dirty = true;
     }
@@ -295,18 +308,17 @@ impl MainWindow {
     pub(super) fn with_editor<R>(
         &mut self,
         slot: EditorSlot,
-        jobs: &Jobs<AppEvent>,
+        shell: &Shell,
         f: impl FnOnce(&mut Editor, &mut WindowEditorTimers<'_>) -> R,
     ) -> Option<R> {
         let wid = self.id();
-        let blink_timing = self.blink_timing;
         let ed = self.editor_by_slot_mut(slot)?;
-        let mut timers = WindowEditorTimers::new(jobs, wid, slot, blink_timing);
+        let mut timers = WindowEditorTimers::new(shell, wid, slot);
         Some(f(ed, &mut timers))
     }
 
-    fn start_editor_blink(&mut self, slot: EditorSlot, jobs: &Jobs<AppEvent>) {
-        self.with_editor(slot, jobs, |ed, timers| ed.start_blink(timers));
+    fn start_editor_blink(&mut self, slot: EditorSlot, shell: &Shell) {
+        self.with_editor(slot, shell, |ed, timers| ed.start_blink(timers));
     }
 
     fn stop_all_editor_blinks(&mut self) {
@@ -316,8 +328,8 @@ impl MainWindow {
         self.dialogs.line.stop_blink();
     }
 
-    pub(crate) fn focus_active_editor(&mut self, jobs: &Jobs<AppEvent>) {
-        self.set_focus(Focus::Editor(self.active_slot()), jobs);
+    pub(crate) fn focus_active_editor(&mut self, shell: &Shell) {
+        self.set_focus(Focus::Editor(self.active_slot()), shell);
     }
 
     pub(crate) fn refresh_title(&self) {
@@ -349,9 +361,10 @@ impl MainWindow {
         self.dirty = true;
     }
 
-    pub(crate) fn set_word_wrap(&mut self, word_wrap: bool, ts: &TextSystem) {
+    pub(crate) fn set_word_wrap(&mut self, shell: &Shell) {
+        let word_wrap = shell.view.word_wrap;
         self.tabs
-            .for_each_editor_mut(|ed| ed.set_soft_wrap(word_wrap, ts));
+            .for_each_editor_mut(|ed| ed.set_soft_wrap(word_wrap, &shell.text_system));
         self.dirty = true;
     }
 
@@ -369,29 +382,29 @@ impl MainWindow {
         self.dirty = true;
     }
 
-    pub(crate) fn activate_tab(&mut self, ix: usize, jobs: &Jobs<AppEvent>) {
+    pub(crate) fn activate_tab(&mut self, ix: usize, shell: &Shell) {
         self.select_tab_only(ix);
         if !matches!(self.mode(), InputMode::Dialog | InputMode::Popup) {
-            self.focus_active_editor(jobs);
+            self.focus_active_editor(shell);
         }
     }
 
-    pub(crate) fn add_tab(&mut self, word_wrap: bool, jobs: &Jobs<AppEvent>) {
-        let data = TabData::create(None, word_wrap, EDITOR_PADDINGS);
-        self.push_tab(data, jobs);
+    pub(crate) fn add_tab(&mut self, shell: &Shell) {
+        let data = TabData::create(None, shell.view.word_wrap, EDITOR_PADDINGS);
+        self.push_tab(data, shell);
     }
 
-    pub(crate) fn push_tab(&mut self, data: TabData, jobs: &Jobs<AppEvent>) {
+    pub(crate) fn push_tab(&mut self, data: TabData, shell: &Shell) {
         let ix = self.tabs.push(data);
-        self.activate_tab(ix, jobs);
+        self.activate_tab(ix, shell);
     }
 
-    pub(crate) fn replace_tab(&mut self, ix: usize, data: TabData, jobs: &Jobs<AppEvent>) {
+    pub(crate) fn replace_tab(&mut self, ix: usize, data: TabData, shell: &Shell) {
         self.tabs.replace(ix, data);
-        self.activate_tab(ix, jobs);
+        self.activate_tab(ix, shell);
     }
 
-    pub(crate) fn remove_tab(&mut self, ix: usize, jobs: &Jobs<AppEvent>) {
+    pub(crate) fn remove_tab(&mut self, ix: usize, shell: &Shell) {
         let pointer_in_strip = self.ui.pointer().is_some_and(|p| {
             self.ui
                 .frame()
@@ -406,18 +419,18 @@ impl MainWindow {
                 next_active,
             } => {
                 self.dialogs.close_for_tab(id);
-                self.finish_removal(closed_active, next_active, jobs);
+                self.finish_removal(closed_active, next_active, shell);
             }
         }
     }
 
-    fn finish_removal(&mut self, closed_active: bool, next_active: usize, jobs: &Jobs<AppEvent>) {
+    fn finish_removal(&mut self, closed_active: bool, next_active: usize, shell: &Shell) {
         let focus_in_find = matches!(
             self.focus,
             Focus::Editor(EditorSlot::FindQuery | EditorSlot::FindReplace)
         );
         if closed_active || !focus_in_find {
-            self.activate_tab(next_active, jobs);
+            self.activate_tab(next_active, shell);
         } else {
             self.select_tab_only(next_active);
         }
@@ -434,37 +447,31 @@ impl MainWindow {
         }
     }
 
-    pub(crate) fn take_tab(&mut self, id: TabId, jobs: &Jobs<AppEvent>) -> Option<TabData> {
+    pub(crate) fn take_tab(&mut self, id: TabId, shell: &Shell) -> Option<TabData> {
         let (data, outcome) = self.tabs.take(id)?;
         match outcome {
             TakeOutcome::NowEmpty => self.pending_close = true,
             TakeOutcome::Settled {
                 closed_active,
                 next_active,
-            } => self.finish_removal(closed_active, next_active, jobs),
+            } => self.finish_removal(closed_active, next_active, shell),
         }
         Some(data)
     }
 
-    pub(crate) fn insert_dragged_tab(
-        &mut self,
-        data: TabData,
-        x: f32,
-        grab: f32,
-        jobs: &Jobs<AppEvent>,
-    ) {
+    pub(crate) fn insert_dragged_tab(&mut self, data: TabData, x: f32, grab: f32, shell: &Shell) {
         let ix = self.tabs.insert_dragged(data, x, grab);
-        self.activate_tab(ix, jobs);
+        self.activate_tab(ix, shell);
     }
 
-    pub(crate) fn restore_tab(&mut self, data: TabData, ix: usize, jobs: &Jobs<AppEvent>) {
+    pub(crate) fn restore_tab(&mut self, data: TabData, ix: usize, shell: &Shell) {
         let ix = self.tabs.restore(data, ix);
-        self.activate_tab(ix, jobs);
+        self.activate_tab(ix, shell);
     }
 
-    pub(crate) fn return_tab(&mut self, id: TabId, ix: usize, jobs: &Jobs<AppEvent>) {
+    pub(crate) fn return_tab(&mut self, id: TabId, ix: usize, shell: &Shell) {
         if let Some(ix) = self.tabs.return_tab(id, ix) {
-            self.activate_tab(ix, jobs);
+            self.activate_tab(ix, shell);
         }
         self.dirty = true;
     }
@@ -481,35 +488,35 @@ impl MainWindow {
         }
     }
 
-    pub(super) fn next_tab(&mut self, jobs: &Jobs<AppEvent>) {
-        if self.dialogs.is_open() || self.tabs.len() <= 1 {
+    pub(super) fn next_tab(&mut self, shell: &Shell) {
+        if self.tabs.len() <= 1 {
             return;
         }
         let next = (self.tabs.active_index() + 1) % self.tabs.len();
-        self.activate_tab(next, jobs);
+        self.activate_tab(next, shell);
     }
 
-    pub(super) fn prev_tab(&mut self, jobs: &Jobs<AppEvent>) {
-        if self.dialogs.is_open() || self.tabs.len() <= 1 {
+    pub(super) fn prev_tab(&mut self, shell: &Shell) {
+        if self.tabs.len() <= 1 {
             return;
         }
         let prev = (self.tabs.active_index() + self.tabs.len() - 1) % self.tabs.len();
-        self.activate_tab(prev, jobs);
+        self.activate_tab(prev, shell);
     }
 
-    pub(super) fn select_tab(&mut self, ix: usize, jobs: &Jobs<AppEvent>) {
-        if self.dialogs.is_open() || ix >= self.tabs.len() || ix == self.tabs.active_index() {
+    pub(super) fn select_tab(&mut self, ix: usize, shell: &Shell) {
+        if ix >= self.tabs.len() || ix == self.tabs.active_index() {
             return;
         }
-        self.activate_tab(ix, jobs);
+        self.activate_tab(ix, shell);
     }
 
-    pub(super) fn select_last_tab(&mut self, jobs: &Jobs<AppEvent>) {
+    pub(super) fn select_last_tab(&mut self, shell: &Shell) {
         let last = self.tabs.len().saturating_sub(1);
-        if self.dialogs.is_open() || last == self.tabs.active_index() {
+        if last == self.tabs.active_index() {
             return;
         }
-        self.activate_tab(last, jobs);
+        self.activate_tab(last, shell);
     }
 
     pub(crate) fn find_open_tab_by_key(&self, key: &PathKey) -> Option<usize> {
@@ -524,18 +531,13 @@ impl MainWindow {
         self.tabs.dirty_tabs()
     }
 
-    pub(crate) fn adopt_loaded_file(
-        &mut self,
-        loaded: document::Loaded,
-        word_wrap: bool,
-        jobs: &Jobs<AppEvent>,
-    ) {
-        let data = TabData::create(Some(loaded), word_wrap, EDITOR_PADDINGS);
+    pub(crate) fn adopt_loaded_file(&mut self, loaded: document::Loaded, shell: &Shell) {
+        let data = TabData::create(Some(loaded), shell.view.word_wrap, EDITOR_PADDINGS);
         let active = self.tabs.active_index();
         if self.tabs.is_blank(active) {
-            self.replace_tab(active, data, jobs);
+            self.replace_tab(active, data, shell);
         } else {
-            self.push_tab(data, jobs);
+            self.push_tab(data, shell);
         }
     }
 
@@ -552,61 +554,60 @@ impl MainWindow {
         }
     }
 
-    pub(crate) fn show_prompt(&mut self, prompt: Prompt, jobs: &Jobs<AppEvent>) {
+    pub(crate) fn show_prompt(&mut self, prompt: Prompt, shell: &Shell) {
         if let Some(next_focus) = self.dialogs.enqueue(DialogKind::Prompt(prompt)) {
-            self.cancel_menu(jobs);
-            self.set_focus(next_focus, jobs);
+            self.cancel_menu(shell);
+            self.set_focus(next_focus, shell);
             self.dirty = true;
         }
     }
 
-    fn show_dialog_now(&mut self, kind: DialogKind, jobs: &Jobs<AppEvent>) {
-        self.cancel_menu(jobs);
+    fn show_dialog_now(&mut self, kind: DialogKind, shell: &Shell) {
+        self.cancel_menu(shell);
         let next_focus = self.dialogs.show_now(kind);
-        self.set_focus(next_focus, jobs);
+        self.set_focus(next_focus, shell);
         self.dirty = true;
     }
 
-    fn close_dialogs(&mut self, jobs: &Jobs<AppEvent>) {
+    fn close_dialogs(&mut self, shell: &Shell) {
         if let Some(next_focus) = self.dialogs.dismiss() {
-            self.cancel_menu(jobs);
-            self.set_focus(next_focus, jobs);
+            self.cancel_menu(shell);
+            self.set_focus(next_focus, shell);
         } else {
-            self.focus_active_editor(jobs);
+            self.focus_active_editor(shell);
         }
         self.dirty = true;
     }
 
-    pub(crate) fn open_go_to(&mut self, ts: &TextSystem, jobs: &Jobs<AppEvent>) {
-        if self.dialogs.is_open() {
-            return;
-        }
+    pub(crate) fn open_go_to(&mut self, shell: &Shell) {
         let ed = self.active_editor();
         let row = ed.text().offset_to_point(ed.cursor()).row;
-        self.show_go_to(Some(row + 1), ts, jobs);
+        self.show_go_to(Some(row + 1), shell);
     }
 
-    fn show_go_to(&mut self, line: Option<usize>, ts: &TextSystem, jobs: &Jobs<AppEvent>) {
-        self.show_dialog_now(DialogKind::GoTo, jobs);
+    fn show_go_to(&mut self, line: Option<usize>, shell: &Shell) {
+        self.show_dialog_now(DialogKind::GoTo, shell);
         if let Some(line) = line {
-            self.dialogs.line.set_value(&line.to_string(), ts);
+            self.dialogs
+                .line
+                .set_value(&line.to_string(), &shell.text_system);
         }
         self.dialogs.line.select_all();
-        self.set_focus(Focus::Editor(EditorSlot::GoToLine), jobs);
+        self.set_focus(Focus::Editor(EditorSlot::GoToLine), shell);
         self.dirty = true;
     }
 
-    fn submit_go_to(&mut self, jobs: &Jobs<AppEvent>) {
+    fn submit_go_to(&mut self, shell: &Shell) {
         let value = self.dialogs.line.value();
         let lines = self.active_editor().text().lines_len();
         match value.parse::<usize>() {
             Ok(line) if (1..=lines).contains(&line) => {
-                self.close_dialogs(jobs);
+                self.close_dialogs(shell);
                 self.active_editor_mut().go_to_line(line - 1);
                 self.dirty = true;
             }
             _ => {
-                self.show_dialog_now(DialogKind::LineOutOfRange, jobs);
+                self.show_dialog_now(DialogKind::LineOutOfRange, shell);
             }
         }
     }
@@ -616,11 +617,11 @@ impl MainWindow {
             return;
         };
         match kind {
-            DialogKind::GoTo if ix == 0 => self.submit_go_to(cx.jobs),
-            DialogKind::GoTo => self.close_dialogs(cx.jobs),
-            DialogKind::LineOutOfRange => self.show_go_to(None, cx.ts, cx.jobs),
+            DialogKind::GoTo if ix == 0 => self.submit_go_to(cx.shell),
+            DialogKind::GoTo => self.close_dialogs(cx.shell),
+            DialogKind::LineOutOfRange => self.show_go_to(None, cx.shell),
             DialogKind::Prompt(prompt) => {
-                self.close_dialogs(cx.jobs);
+                self.close_dialogs(cx.shell);
                 if let Some(id) = prompt.id {
                     cx.emit(Effect::PromptResponse { id, button: ix });
                 }
@@ -628,70 +629,72 @@ impl MainWindow {
         }
     }
 
-    pub(super) fn open_find(&mut self, replace: bool, ts: &TextSystem, jobs: &Jobs<AppEvent>) {
+    pub(super) fn open_find(&mut self, replace: bool, shell: &Shell) {
         let selected = self.active_editor().selected_text().to_string();
-        self.find.open(replace, &selected, ts);
-        self.set_focus(Focus::Editor(EditorSlot::FindQuery), jobs);
+        self.find.open(replace, &selected, &shell.text_system);
+        self.set_focus(Focus::Editor(EditorSlot::FindQuery), shell);
         self.dirty = true;
     }
 
-    pub(super) fn close_find(&mut self, jobs: &Jobs<AppEvent>) {
+    pub(super) fn close_find(&mut self, shell: &Shell) {
         if self.find.close() {
-            self.focus_active_editor(jobs);
+            self.focus_active_editor(shell);
             self.dirty = true;
         }
     }
 
-    pub(super) fn refocus_find(&mut self, jobs: &Jobs<AppEvent>) {
+    pub(super) fn refocus_find(&mut self, shell: &Shell) {
         if self.find.is_open() {
-            let slot = if self.find.replace && self.focus == Focus::Editor(EditorSlot::FindReplace)
-            {
-                EditorSlot::FindReplace
-            } else {
-                EditorSlot::FindQuery
-            };
-            self.set_focus(Focus::Editor(slot), jobs);
+            let slot =
+                if self.find.is_replace() && self.focus == Focus::Editor(EditorSlot::FindReplace) {
+                    EditorSlot::FindReplace
+                } else {
+                    EditorSlot::FindQuery
+                };
+            self.set_focus(Focus::Editor(slot), shell);
         }
         self.dirty = true;
     }
 
-    fn apply_find_outcome(&mut self, out: FindOutcome, jobs: &Jobs<AppEvent>) {
+    fn apply_find_outcome(&mut self, out: FindOutcome, shell: &Shell) {
         if out.arm_notice {
             let window = self.id();
             self.find.set_notice_timer(
-                jobs.after(find::NOTICE_DURATION, AppEvent::FindNoticeDismiss { window }),
+                shell
+                    .jobs
+                    .after(find::NOTICE_DURATION, AppEvent::FindNoticeDismiss { window }),
             );
         }
     }
 
-    pub(super) fn find_step(&mut self, forward: bool, ts: &TextSystem, jobs: &Jobs<AppEvent>) {
+    pub(super) fn find_step(&mut self, forward: bool, shell: &Shell) {
         let out = self.find.step(&mut self.tabs.active_mut().editor, forward);
-        self.apply_find_outcome(out, jobs);
+        self.apply_find_outcome(out, shell);
         if !out.searched {
-            self.open_find(false, ts, jobs);
+            self.open_find(false, shell);
             return;
         }
         if !self.find.is_open() {
-            self.focus_active_editor(jobs);
+            self.focus_active_editor(shell);
         }
         self.dirty = true;
     }
 
-    pub(super) fn replace_next(&mut self, ts: &TextSystem, jobs: &Jobs<AppEvent>) {
+    pub(super) fn replace_next(&mut self, shell: &Shell) {
         let out = self
             .find
-            .replace_next(&mut self.tabs.active_mut().editor, ts);
-        self.apply_find_outcome(out, jobs);
+            .replace_next(&mut self.tabs.active_mut().editor, &shell.text_system);
+        self.apply_find_outcome(out, shell);
         self.dirty = true;
     }
 
-    pub(super) fn replace_all(&mut self, ts: &TextSystem, jobs: &Jobs<AppEvent>) {
+    pub(super) fn replace_all(&mut self, shell: &Shell) {
         let out = self
             .find
-            .replace_all(&mut self.tabs.active_mut().editor, ts);
-        self.apply_find_outcome(out, jobs);
+            .replace_all(&mut self.tabs.active_mut().editor, &shell.text_system);
+        self.apply_find_outcome(out, shell);
         if out.replaced {
-            self.refocus_find(jobs);
+            self.refocus_find(shell);
         } else {
             self.dirty = true;
         }
@@ -703,11 +706,16 @@ impl MainWindow {
         }
     }
 
-    pub(crate) fn key_tips(&self, ts: &TextSystem) -> Vec<KeyTip> {
-        self.menu_bar.key_tips(self.ui.frame(), ts)
+    pub(crate) fn key_tips_active(&self) -> bool {
+        self.menu_bar.access_active(self.focus)
     }
 
-    pub(super) fn menu_state(&self, view: ViewSettings) -> MenuState {
+    pub(crate) fn key_tips(&self, shell: &Shell) -> Vec<KeyTip> {
+        self.menu_bar
+            .key_tips(self.focus, self.ui.frame(), &shell.text_system)
+    }
+
+    pub(super) fn menu_state(&self, shell: &Shell) -> MenuState {
         let ed = self.active_editor();
         MenuState {
             can_undo: ed.can_undo(),
@@ -715,52 +723,51 @@ impl MainWindow {
             has_selection: !ed.selected_range().is_empty(),
             has_text: ed.text().len() > 0,
             clipboard_has_text: clipboard::clipboard_has_text(),
-            status_bar: view.status_bar,
-            word_wrap: view.word_wrap,
+            status_bar: shell.view.status_bar,
+            word_wrap: shell.view.word_wrap,
         }
     }
 
-    pub(crate) fn cancel_menu(&mut self, jobs: &Jobs<AppEvent>) {
-        let out = self.menu_bar.cancel();
+    pub(crate) fn cancel_menu(&mut self, shell: &Shell) {
+        let out = self.menu_bar.cancel(self.focus);
         self.dirty |= out.dirty;
         if matches!(out.submenu_timer, SubmenuTimer::Cancel) {
             self.menu_submenu_timer.cancel();
         }
-        self.apply_focus_request(out.focus, jobs);
+        self.apply_focus_request(out.focus, shell);
     }
 
-    pub(crate) fn on_menu_submenu_timer(&mut self, target: Option<usize>, ts: &TextSystem) {
-        if self.menu_bar.on_submenu_timer(target, ts) {
+    pub(crate) fn on_menu_submenu_timer(&mut self, target: Option<usize>, shell: &Shell) {
+        if self.menu_bar.on_submenu_timer(target, &shell.text_system) {
             self.dirty = true;
         }
     }
 
-    fn apply_focus_request(&mut self, req: FocusRequest, jobs: &Jobs<AppEvent>) {
+    fn apply_focus_request(&mut self, req: FocusRequest, shell: &Shell) {
         match req {
             FocusRequest::Keep => {}
-            FocusRequest::MenuBar => self.set_focus(Focus::MenuBar, jobs),
-            FocusRequest::RestoreEditor => self.set_focus(Focus::Editor(self.active_slot()), jobs),
-            FocusRequest::Editor(slot) => self.set_focus(Focus::Editor(slot), jobs),
+            FocusRequest::MenuBar => self.set_focus(Focus::MenuBar, shell),
+            FocusRequest::RestoreEditor => {
+                self.set_focus(Focus::Editor(self.active_slot()), shell)
+            }
+            FocusRequest::Editor(slot) => self.set_focus(Focus::Editor(slot), shell),
         }
     }
 
     pub(super) fn apply_menu_outcome(&mut self, out: MenuOutcome, cx: &mut Cx<'_>) -> bool {
         self.dirty |= out.dirty;
-        if out.clear_keyboard_focus {
-            self.ui.mark_pointer_input();
-        }
         match out.submenu_timer {
             SubmenuTimer::Keep => {}
             SubmenuTimer::Cancel => self.menu_submenu_timer.cancel(),
             SubmenuTimer::Arm(target) => {
-                let delay = Duration::from_millis(u64::from(cx.settings.menu_show_delay_ms));
+                let delay = Duration::from_millis(u64::from(cx.shell.settings.menu_show_delay_ms));
                 let window = self.id();
                 self.menu_submenu_timer = cx
-                    .jobs
+                    .jobs()
                     .after(delay, AppEvent::MenuSubmenuTimer { window, target });
             }
         }
-        self.apply_focus_request(out.focus, cx.jobs);
+        self.apply_focus_request(out.focus, cx.shell);
         if let Some(cmd) = out.command {
             self.dispatch_command(cmd, cx);
             return true;
@@ -768,7 +775,7 @@ impl MainWindow {
         out.handled
     }
 
-    pub(crate) fn on_activated(&mut self, active: bool, jobs: &Jobs<AppEvent>) {
+    pub(crate) fn on_activated(&mut self, active: bool, shell: &Shell) {
         if !active {
             self.native.hwnd().complete_ime_composition();
             if let Some(slot) = self.focused_editor_slot()
@@ -776,22 +783,17 @@ impl MainWindow {
             {
                 ed.on_blur();
             }
-            self.cancel_menu(jobs);
+            self.cancel_menu(shell);
             self.stop_all_editor_blinks();
             self.native.set_text_caret(None, false);
         } else if let Some(slot) = self.focused_editor_slot() {
-            self.start_editor_blink(slot, jobs);
+            self.start_editor_blink(slot, shell);
         }
     }
 
-    pub(crate) fn on_editor_timer(
-        &mut self,
-        slot: EditorSlot,
-        kind: EditorTimer,
-        jobs: &Jobs<AppEvent>,
-    ) {
+    pub(crate) fn on_editor_timer(&mut self, slot: EditorSlot, kind: EditorTimer, shell: &Shell) {
         self.dirty |= self
-            .with_editor(slot, jobs, |ed, timers| ed.on_timer(kind, timers))
+            .with_editor(slot, shell, |ed, timers| ed.on_timer(kind, timers))
             .unwrap_or(false);
     }
 }

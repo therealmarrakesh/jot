@@ -1,7 +1,7 @@
 use crate::color::transparent_black;
 use crate::geom::Edges;
 use crate::gfx::{TextStyle, TextSystem};
-use crate::ids::{Frame, HitId, MenuKind, Node, UiState};
+use crate::ids::{Focus, Frame, HitId, MenuKind, Node, UiState};
 use crate::keytips::{self, KeyTip, round_half_up};
 use crate::platform::CursorStyle;
 use crate::theme::{Palette, theme_shadow};
@@ -48,8 +48,8 @@ const BAR_FOCUS_OUTSET: Edges<f32> = Edges {
 };
 
 impl MenuBar {
-    pub(crate) fn render_bar(&self, bar_has_focus: bool, p: Palette, ui: &mut UiState) -> Node {
-        let bar_focused = self.bar_focused(bar_has_focus);
+    pub(crate) fn render_bar(&self, focus: Focus, p: Palette, ui: &mut UiState) -> Node {
+        let bar_focused = self.bar_focused(focus);
         let triggers: Vec<Node> = MenuKind::ALL
             .into_iter()
             .map(|kind| {
@@ -130,8 +130,8 @@ impl MenuBar {
         )
     }
 
-    pub(crate) fn key_tips(&self, frame: &Frame, ts: &TextSystem) -> Vec<KeyTip> {
-        if !self.access_active() {
+    pub(crate) fn key_tips(&self, focus: Focus, frame: &Frame, ts: &TextSystem) -> Vec<KeyTip> {
+        if !self.access_active(focus) {
             return Vec::new();
         }
         let Some(open) = self.live_open() else {

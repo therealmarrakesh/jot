@@ -20,7 +20,7 @@ fn real_disk_save_routes_completion_to_migrated_tab() {
         let app = &mut *app_guard;
         let data = crate::tabs::TabData::create(Some(loaded), true, EDITOR_PADDINGS);
         let id = data.id;
-        app.windows[0].replace_tab(0, data, &app.shell.jobs);
+        app.windows[0].replace_tab(0, data, &app.shell);
         id
     };
     h.draw();
@@ -31,7 +31,7 @@ fn real_disk_save_routes_completion_to_migrated_tab() {
     {
         let mut app_guard = h.app.borrow_mut();
         let app = &mut *app_guard;
-        let data = app.windows[0].take_tab(tab_id, &app.shell.jobs).unwrap();
+        let data = app.windows[0].take_tab(tab_id, &app.shell).unwrap();
         let _ = app
             .open_window(Some(data), Some(size(600.0, 400.0)))
             .unwrap();

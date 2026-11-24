@@ -106,7 +106,7 @@ impl DocHost for AppDocHost<'_> {
             return;
         };
         let hwnd = self.windows[wix].native.hwnd();
-        self.windows[wix].activate_tab(tix, &self.shell.jobs);
+        self.windows[wix].activate_tab(tix, self.shell);
         if bring_to_front {
             hwnd.bring_to_front();
         }
@@ -128,29 +128,25 @@ impl DocHost for AppDocHost<'_> {
 
     fn adopt_loaded(&mut self, window: WindowId, loaded: document::Loaded) {
         if let Some(wix) = self.window_ix(window) {
-            self.windows[wix].adopt_loaded_file(
-                loaded,
-                self.shell.view.word_wrap,
-                &self.shell.jobs,
-            );
+            self.windows[wix].adopt_loaded_file(loaded, self.shell);
         }
     }
 
     fn remove_tab(&mut self, tab: TabId) {
         if let Some((wix, tix)) = self.find_tab(tab) {
-            self.windows[wix].remove_tab(tix, &self.shell.jobs);
+            self.windows[wix].remove_tab(tix, self.shell);
         }
     }
 
     fn mark_window_close(&mut self, window: WindowId) {
         if let Some(wix) = self.window_ix(window) {
-            self.windows[wix].pending_close = true;
+            self.windows[wix].request_close();
         }
     }
 
     fn show_prompt(&mut self, window: WindowId, prompt: Prompt) {
         if let Some(wix) = self.window_ix(window) {
-            self.windows[wix].show_prompt(prompt, &self.shell.jobs);
+            self.windows[wix].show_prompt(prompt, self.shell);
         }
     }
 }
@@ -216,7 +212,23 @@ impl App {
         }
     }
 
-    fn deliver<R>(
+    fn with_window<R>(
+        &mut self,
+        window_id: WindowId,
+        f: impl FnOnce(&mut MainWindow, &mut Cx<'_>) -> R,
+    ) -> Option<R> {
+        self.with_window_inner(window_id, true, f)
+    }
+
+    fn with_window_quiet<R>(
+        &mut self,
+        window_id: WindowId,
+        f: impl FnOnce(&mut MainWindow, &mut Cx<'_>) -> R,
+    ) -> Option<R> {
+        self.with_window_inner(window_id, false, f)
+    }
+
+    fn with_window_inner<R>(
         &mut self,
         window_id: WindowId,
         mark_dirty: bool,
@@ -229,7 +241,7 @@ impl App {
             let win = &mut self.windows[ix];
             let r = f(win, &mut cx);
             if mark_dirty {
-                win.dirty = true;
+                win.mark_dirty();
             }
             r
         };
@@ -262,9 +274,8 @@ impl App {
                 }
                 Effect::ToggleWordWrap => {
                     self.shell.view.word_wrap = !self.shell.view.word_wrap;
-                    let wrap = self.shell.view.word_wrap;
                     for w in &mut self.windows {
-                        w.set_word_wrap(wrap, &self.shell.text_system);
+                        w.set_word_wrap(&self.shell);
                     }
                 }
                 Effect::StartTabDrag {
@@ -318,7 +329,7 @@ impl App {
 
     pub(crate) fn mark_all_dirty(&mut self) {
         for w in &mut self.windows {
-            w.dirty = true;
+            w.mark_dirty();
         }
     }
 
@@ -425,14 +436,7 @@ impl App {
             };
         let id = native.id;
         let hwnd = native.hwnd();
-        let win = MainWindow::new(
-            native,
-            surface,
-            initial,
-            self.shell.view.word_wrap,
-            self.shell.settings,
-            &self.shell.jobs,
-        );
+        let win = MainWindow::new(native, surface, initial, &self.shell);
         self.windows.push(win);
         self.active_window = Some(id);
         Ok((id, hwnd))
@@ -459,7 +463,7 @@ impl App {
             let key = PathKey::quick(&paths[0]);
             if let Some((wix, tix)) = self.find_open_tab_by_key(&key) {
                 let hwnd = self.windows[wix].native.hwnd();
-                self.windows[wix].activate_tab(tix, &self.shell.jobs);
+                self.windows[wix].activate_tab(tix, &self.shell);
                 hwnd.bring_to_front();
                 return;
             }
@@ -488,20 +492,18 @@ impl App {
 
     fn apply_theme_to_windows(&mut self) {
         let appearance = self.shell.appearance();
-        let settings = self.shell.settings;
         for w in &mut self.windows {
             w.native.set_appearance(appearance);
-            w.set_blink_timing(settings.caret_blink_interval, settings.caret_blink_timeout);
-            w.dirty = true;
+            w.mark_dirty();
         }
     }
 
     pub(crate) fn sweep_closed_windows(&mut self) {
-        if self.windows.iter().any(|w| w.pending_close) {
+        if self.windows.iter().any(MainWindow::is_pending_close) {
             let closed: Vec<WindowId> = self
                 .windows
                 .iter()
-                .filter(|w| w.pending_close)
+                .filter(|w| w.is_pending_close())
                 .map(MainWindow::id)
                 .collect();
             for wid in closed {
@@ -509,7 +511,7 @@ impl App {
                 self.tooltips.window_closed(wid, &self.shell.jobs);
                 self.file_ops.on_window_closed(wid);
             }
-            self.windows.retain(|w| !w.pending_close);
+            self.windows.retain(|w| !w.is_pending_close());
             if let Some(active) = self.active_window
                 && self.window(active).is_none()
             {
@@ -538,14 +540,10 @@ impl App {
     }
 
     fn paint_window_ix(&mut self, ix: usize, now: Instant) -> bool {
-        let mut fx = Vec::new();
-        let needs_vsync = {
-            let cx = self.shell.cx(&mut fx);
-            self.windows[ix].render_frame(now, &cx)
-        };
+        let needs_vsync = self.windows[ix].render_frame(now, &self.shell);
         let wid = self.windows[ix].id();
-        if self.windows[ix].menu_bar.access_active() || self.keytips.is_owner(wid) {
-            let tips = self.windows[ix].key_tips(&self.shell.text_system);
+        if self.windows[ix].key_tips_active() || self.keytips.is_owner(wid) {
+            let tips = self.windows[ix].key_tips(&self.shell);
             let origin = self.windows[ix].native.hwnd().client_origin();
             let scale = self.windows[ix].native.scale_factor();
             self.keytips
@@ -568,15 +566,15 @@ impl PlatformHandler for App {
                 physical_height,
                 scale,
             } => {
-                self.deliver(window_id, true, |w, cx| {
+                self.with_window(window_id, |w, cx| {
                     w.surface.resize(physical_width, physical_height, scale);
-                    w.cancel_menu(cx.jobs);
+                    w.cancel_menu(cx.shell);
                 });
                 self.keytips.hide_owner(window_id);
             }
             PlatformEvent::Moved { window_id } => {
-                self.deliver(window_id, false, |w, cx| {
-                    w.cancel_menu(cx.jobs);
+                self.with_window_quiet(window_id, |w, cx| {
+                    w.cancel_menu(cx.shell);
                 });
                 self.keytips.hide_owner(window_id);
             }
@@ -588,13 +586,11 @@ impl PlatformHandler for App {
                     self.tooltips
                         .window_deactivated(window_id, &self.shell.jobs);
                 }
-                self.deliver(window_id, true, |w, cx| w.on_activated(active, cx.jobs));
+                self.with_window(window_id, |w, cx| w.on_activated(active, cx.shell));
             }
             PlatformEvent::PaintRequested { window_id } => {
-                if let Some(ix) = self.window_ix(window_id)
-                    && !self.windows[ix].has_painted
-                {
-                    self.windows[ix].dirty = true;
+                if let Some(w) = self.window_mut(window_id) {
+                    w.on_paint_requested();
                 }
             }
             PlatformEvent::ThemeChanged => {
@@ -608,7 +604,7 @@ impl PlatformHandler for App {
                 if self.tab_drag.is_some() {
                     self.tab_drag_moved(pressed_button == Some(MouseButton::Left));
                 }
-                self.deliver(window_id, false, |w, cx| {
+                self.with_window_quiet(window_id, |w, cx| {
                     w.on_mouse_move(position, pressed_button, cx);
                 });
                 if let Some(ix) = self.window_ix(window_id) {
@@ -616,7 +612,7 @@ impl PlatformHandler for App {
                 }
             }
             PlatformEvent::MouseLeave { window_id } => {
-                self.deliver(window_id, false, |w, _| w.on_mouse_leave());
+                self.with_window_quiet(window_id, |w, _| w.on_mouse_leave());
                 self.tooltips.on_mouse_leave(window_id, &self.shell.jobs);
             }
             PlatformEvent::MouseDown {
@@ -627,7 +623,7 @@ impl PlatformHandler for App {
                 click_count,
             } => {
                 self.tooltips.on_mouse_down(window_id, &self.shell.jobs);
-                self.deliver(window_id, true, |w, cx| {
+                self.with_window(window_id, |w, cx| {
                     w.on_mouse_down(button, position, modifiers, click_count, cx);
                 });
             }
@@ -640,7 +636,7 @@ impl PlatformHandler for App {
                 if button == MouseButton::Left && self.tab_drag.is_some() {
                     self.tab_drag_released();
                 }
-                self.deliver(window_id, true, |w, cx| {
+                self.with_window(window_id, |w, cx| {
                     w.on_mouse_up(button, position, cx);
                 });
             }
@@ -651,7 +647,7 @@ impl PlatformHandler for App {
                 page_scroll,
                 modifiers,
             } => {
-                self.deliver(window_id, false, |w, _| {
+                self.with_window_quiet(window_id, |w, _| {
                     w.on_scroll_wheel(position, delta_lines, page_scroll, modifiers);
                 });
             }
@@ -667,20 +663,20 @@ impl PlatformHandler for App {
                     self.tab_drag_cancel();
                     handled = true;
                 } else if let Some(was_handled) =
-                    self.deliver(window_id, true, |w, cx| w.on_key_down(event, cx))
+                    self.with_window(window_id, |w, cx| w.on_key_down(event, cx))
                 {
                     handled = was_handled;
                 }
             }
             PlatformEvent::KeyUp { window_id, event } => {
                 if let Some(was_handled) =
-                    self.deliver(window_id, false, |w, cx| w.on_key_up(event, cx))
+                    self.with_window_quiet(window_id, |w, cx| w.on_key_up(event, cx))
                 {
                     handled = was_handled;
                 }
             }
             PlatformEvent::CaptureLost { window_id } => {
-                self.deliver(window_id, false, |w, _| w.on_capture_lost());
+                self.with_window_quiet(window_id, |w, _| w.on_capture_lost());
                 if self
                     .tab_drag
                     .as_ref()
@@ -694,14 +690,14 @@ impl PlatformHandler for App {
                     .on_modifiers_changed(modifiers, &self.shell.jobs);
             }
             PlatformEvent::TextInput { window_id, text } => {
-                self.deliver(window_id, true, |w, cx| w.on_text_input(&text, cx));
+                self.with_window(window_id, |w, cx| w.on_text_input(&text, cx));
             }
             PlatformEvent::ImeComposition {
                 window_id,
                 text,
                 cursor,
             } => {
-                self.deliver(window_id, true, |w, cx| {
+                self.with_window(window_id, |w, cx| {
                     w.on_ime_composition(&text, cursor, cx);
                 });
             }
@@ -751,7 +747,7 @@ impl PlatformHandler for App {
                         _ => self.window_ix(window),
                     };
                     if let Some(ix) = target_ix {
-                        self.windows[ix].on_editor_timer(slot, kind, &self.shell.jobs);
+                        self.windows[ix].on_editor_timer(slot, kind, &self.shell);
                     }
                 }
                 AppEvent::TabScrollRepeat { window, step } => {
@@ -761,7 +757,7 @@ impl PlatformHandler for App {
                 }
                 AppEvent::MenuSubmenuTimer { window, target } => {
                     if let Some(ix) = self.window_ix(window) {
-                        self.windows[ix].on_menu_submenu_timer(target, &self.shell.text_system);
+                        self.windows[ix].on_menu_submenu_timer(target, &self.shell);
                     }
                 }
                 AppEvent::FindNoticeDismiss { window } => {
@@ -791,7 +787,7 @@ impl PlatformHandler for App {
                 #[cfg(test)]
                 AppEvent::TestCloseWindow(id) => {
                     if let Some(ix) = self.window_ix(id) {
-                        self.windows[ix].pending_close = true;
+                        self.windows[ix].request_close();
                     }
                 }
                 #[cfg(test)]
@@ -813,7 +809,7 @@ impl PlatformHandler for App {
         let mut any_vsync = false;
         let mut painted_any = false;
         for ix in 0..self.windows.len() {
-            if self.windows[ix].dirty {
+            if self.windows[ix].is_dirty() {
                 painted_any = true;
                 any_vsync |= self.paint_window_ix(ix, now);
             }

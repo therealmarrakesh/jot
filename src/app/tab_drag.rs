@@ -74,7 +74,7 @@ impl App {
 
     fn mark_window_dirty(&mut self, id: WindowId) {
         if let Some(w) = self.window_mut(id) {
-            w.dirty = true;
+            w.mark_dirty();
         }
     }
 
@@ -218,7 +218,7 @@ impl App {
         if drag.owner == drag.source {
             if drag.is_dragging() {
                 if let Some(ix) = self.window_ix(drag.source) {
-                    self.windows[ix].return_tab(tab, index, &self.shell.jobs);
+                    self.windows[ix].return_tab(tab, index, &self.shell);
                 }
             } else if let Some(placement) = drag.source_placement
                 && let Some(hwnd) = self.window_hwnd(drag.source)
@@ -230,7 +230,7 @@ impl App {
 
         let Some(data) = self
             .window_ix(drag.owner)
-            .and_then(|ix| self.windows[ix].take_tab(tab, &self.shell.jobs))
+            .and_then(|ix| self.windows[ix].take_tab(tab, &self.shell))
         else {
             return;
         };
@@ -238,7 +238,7 @@ impl App {
 
         if let Some(ix) = self.window_ix(drag.source) {
             let src_hwnd = self.windows[ix].native.hwnd();
-            self.windows[ix].restore_tab(data, index, &self.shell.jobs);
+            self.windows[ix].restore_tab(data, index, &self.shell);
             src_hwnd.set_foreground();
         } else {
             match self.open_window(Some(data), None) {
@@ -252,7 +252,7 @@ impl App {
                         && let Some(win) = self.windows.last_mut()
                     {
                         let ix = win.tabs.len();
-                        win.restore_tab(tab_data, ix, &self.shell.jobs);
+                        win.restore_tab(tab_data, ix, &self.shell);
                     }
                 }
             }
@@ -267,7 +267,7 @@ impl App {
         let prev_owner = drag.owner;
         let Some(data) = self
             .window_ix(prev_owner)
-            .and_then(|ix| self.windows[ix].take_tab(tab, &self.shell.jobs))
+            .and_then(|ix| self.windows[ix].take_tab(tab, &self.shell))
         else {
             return;
         };
@@ -276,7 +276,7 @@ impl App {
         let x = to_local(target_hwnd, pt).x;
         let grab = drag.grab.x;
         if let Some(ix) = self.window_ix(target_id) {
-            self.windows[ix].insert_dragged_tab(data, x, grab, &self.shell.jobs);
+            self.windows[ix].insert_dragged_tab(data, x, grab, &self.shell);
         }
         drag.owner = target_id;
         drag.phase = Phase::Dragging;
@@ -301,7 +301,7 @@ impl App {
                     native.logical_size()
                 };
                 self.windows[ix]
-                    .take_tab(tab, &self.shell.jobs)
+                    .take_tab(tab, &self.shell)
                     .map(|data| (data, sz))
             });
             let Some((data, sz)) = taken else {
@@ -313,14 +313,10 @@ impl App {
                 Err(err) => {
                     if let Some(tab_data) = err.tab {
                         if let Some(ix) = self.window_ix(source_win) {
-                            self.windows[ix].restore_tab(
-                                tab_data,
-                                drag.source_index,
-                                &self.shell.jobs,
-                            );
+                            self.windows[ix].restore_tab(tab_data, drag.source_index, &self.shell);
                         } else if let Some(win) = self.windows.last_mut() {
                             let ix = win.tabs.len();
-                            win.restore_tab(tab_data, ix, &self.shell.jobs);
+                            win.restore_tab(tab_data, ix, &self.shell);
                         }
                     }
                     return;
@@ -448,7 +444,7 @@ impl App {
             let w_hwnd = w.native.hwnd();
             let accepts_attach = !w.dialogs.is_open()
                 && !self.file_ops.has_active_workflow_for(w.id())
-                && !w.pending_close
+                && !w.is_pending_close()
                 && w_hwnd.is_enabled();
             (w_hwnd == hwnd && accepts_attach).then_some(w.native.id)
         })
