@@ -40,8 +40,6 @@ pub(crate) struct TooltipTarget {
     pub(crate) hit: HitId,
 }
 
-type Key = TooltipTarget;
-
 pub(crate) struct TooltipProbe<'a> {
     pub(crate) window: WindowId,
     pub(crate) pointer: Option<PointerState>,
@@ -52,7 +50,7 @@ pub(crate) struct TooltipProbe<'a> {
 
 #[derive(Clone)]
 struct Snap {
-    key: Key,
+    key: TooltipTarget,
     text: SharedStr,
     owner: ScreenRect,
     entered: ScreenPoint,
@@ -69,12 +67,12 @@ enum State {
         snap: Snap,
     },
     Suppressed {
-        key: Key,
+        key: TooltipTarget,
     },
 }
 
 impl State {
-    fn key(&self) -> Option<Key> {
+    fn key(&self) -> Option<TooltipTarget> {
         match self {
             Self::Idle => None,
             Self::Waiting { snap } | Self::Showing { snap } => Some(snap.key),
@@ -86,10 +84,10 @@ impl State {
 enum Report {
     Owner(Snap),
     NoneIn(WindowId),
-    Gone(Key),
+    Gone(TooltipTarget),
     Suppress(WindowId),
     Dismiss,
-    Timer(Key),
+    Timer(TooltipTarget),
 }
 
 fn transition_state(state: State, report: Report) -> State {
@@ -123,7 +121,7 @@ fn transition_state(state: State, report: Report) -> State {
 }
 
 struct Shown {
-    key: Key,
+    key: TooltipTarget,
     owner: ScreenRect,
 }
 
@@ -138,7 +136,7 @@ pub(crate) struct Tooltips {
     shown: Option<Shown>,
     closed_at: Option<Instant>,
     control_only: bool,
-    opening: Option<(Key, TimerHandle)>,
+    opening: Option<(TooltipTarget, TimerHandle)>,
     hiding: Option<TimerHandle>,
 }
 
@@ -212,7 +210,7 @@ impl Tooltips {
             Some(_) if self.pressed => None,
             Some(ptr) => Some(match frame.tooltip_at(ptr.pos) {
                 Some((hit, tip, rect)) => Report::Owner(Snap {
-                    key: Key { window, hit },
+                    key: TooltipTarget { window, hit },
                     text: tip,
                     owner: rect.to_screen(scale, origin),
                     entered: cursor_screen_pos(),
@@ -330,8 +328,9 @@ impl Tooltips {
     fn show(&mut self, snap: Snap, gpu: &Rc<Gpu>, ts: &TextSystem) {
         let entered = snap.entered;
         let (work, scale) = monitor_work_area_and_scale(entered);
-        let measured = GenericFrame::measure_fit(
+        let measured = GenericFrame::measure(
             tooltip_card(Palette::resolve(false, None, None), snap.text.clone()),
+            AvailSize::MAX,
             scale,
             ts,
         );
@@ -425,14 +424,12 @@ fn tooltip_card(p: Palette, content: SharedStr) -> GenericNode<(), ()> {
         .shadows(theme_shadow(p.dark, ELEVATION * 2.))
         .child(
             box_()
-                .relative()
                 .rounded(CONTROL_RADIUS - BORDER)
                 .overflow_hidden()
                 .bg(p.acrylic_fallback)
                 .child(box_().absolute().inset_0().bg(p.acrylic_luminosity))
                 .child(
                     box_()
-                        .relative()
                         .px(PADDING_X)
                         .pt(PADDING_TOP)
                         .pb(PADDING_BOTTOM)
@@ -451,7 +448,7 @@ mod tests {
 
     fn snap(window: WindowId, hit: HitId, label: &'static str) -> Snap {
         Snap {
-            key: Key { window, hit },
+            key: TooltipTarget { window, hit },
             text: label.into(),
             owner: ScreenRect {
                 left: 0,
@@ -467,11 +464,11 @@ mod tests {
     fn tooltip_state_machine_transitions() {
         let w1 = WindowId(1);
         let w2 = WindowId(2);
-        let k1 = Key {
+        let k1 = TooltipTarget {
             window: w1,
             hit: HitId::NewTab,
         };
-        let k2 = Key {
+        let k2 = TooltipTarget {
             window: w1,
             hit: HitId::ThemeToggle,
         };

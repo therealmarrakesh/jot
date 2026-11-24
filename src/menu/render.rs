@@ -8,7 +8,7 @@ use crate::theme::{Palette, theme_shadow};
 use crate::ui::controls::{
     CONTROL_RADIUS, ICON_FONT, OVERLAY_RADIUS, SMALL_FONT, TEXT_FONT, focus_ring, subtle_brushes,
 };
-use crate::ui::{Anchor, box_, col, row, text};
+use crate::ui::{Anchor, box_, row, text};
 
 use super::bar::MenuBar;
 use super::model::{
@@ -64,13 +64,12 @@ impl MenuBar {
                 row()
                     .hit(hit)
                     .cursor(CursorStyle::Arrow)
-                    .relative()
                     .items_center()
                     .h_full()
                     .px(BAR_ITEM_PADDING)
                     .rounded(CONTROL_RADIUS)
                     .bg(bg)
-                    .child(box_().relative().top(1.).child(text(kind.title())))
+                    .child(box_().top(1.).child(text(kind.title())))
                     .when(ring, |this| {
                         this.child(focus_ring(
                             p,
@@ -83,7 +82,6 @@ impl MenuBar {
 
         row()
             .hit(HitId::MenuBar)
-            .relative()
             .flex_none()
             .h_full()
             .gap(BAR_GAP)
@@ -256,8 +254,7 @@ fn render_command_button(
         .px(COMMAND_GAP + COMMAND_INSET)
         .pb(COMMAND_INSET)
         .child(
-            col()
-                .relative()
+            box_()
                 .size_full()
                 .items_center()
                 .pt(COMMAND_ICON_TOP)
@@ -368,7 +365,6 @@ fn render_panel_rows(
             box_()
                 .hit(hit)
                 .cursor(CursorStyle::Arrow)
-                .relative()
                 .h(entry.height())
                 .px(ROW_INSET)
                 .py(ROW_MARGIN_Y)
@@ -379,7 +375,7 @@ fn render_panel_rows(
         })
         .collect();
 
-    col()
+    box_()
         .absolute()
         .top(BORDER + PADDING_Y + offset)
         .left(BORDER)

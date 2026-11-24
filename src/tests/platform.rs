@@ -7,10 +7,8 @@ use std::sync::{
 use std::time::Duration;
 
 use crate::app::{App, AppEvent};
-use crate::document;
-use crate::find;
 use crate::geom::ScreenRect;
-use crate::gfx::{Gpu, Surface, font};
+use crate::gfx::{Gpu, Surface};
 use crate::platform::{NativeWindow, Platform, PlatformHandler};
 
 use super::TestHarness;
@@ -284,109 +282,4 @@ fn win32_client_clicks_and_capture_loss_via_wnd_proc() {
 
     h.close_all();
     Platform::set_active_handler_for_test(None);
-}
-
-mod large_file_smoke {
-    use super::*;
-    use crate::editor::wrap::{DisplayPos, WrapIndex};
-    use crate::gfx::TextSystem;
-    use std::io::Write as _;
-    use std::time::Instant;
-
-    fn run_profile(target_mb: usize) {
-        let dir = std::env::temp_dir()
-            .join(format!("jot-bench-{target_mb}mb-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let file = dir.join("big.txt");
-
-        let target_bytes = target_mb * 1024 * 1024;
-        {
-            let mut w = std::io::BufWriter::with_capacity(
-                256 * 1024,
-                std::fs::File::create(&file).unwrap(),
-            );
-            let mut written = 0usize;
-            let mut line_ix = 0usize;
-            while written < target_bytes {
-                let line = if line_ix.is_multiple_of(50) {
-                    format!("Line {line_ix:07}: long wrapped paragraph with repeated words alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi omicron pi rho sigma tau upsilon phi chi psi omega end.\r\n")
-                } else {
-                    format!("Line {line_ix:07}: standard 80-col plain text log entry for Jot benchmark.\r\n")
-                };
-                w.write_all(line.as_bytes()).unwrap();
-                written += line.len();
-                line_ix += 1;
-            }
-            w.write_all(b"FINAL_SENTINEL_NEEDLE_42\r\n").unwrap();
-            w.flush().unwrap();
-        }
-
-        let disk_len = std::fs::metadata(&file).unwrap().len();
-        println!("\n=== Large-File Smoke Profile ({target_mb} MB, {disk_len} bytes on disk) ===");
-
-        let t0 = Instant::now();
-        let loaded = document::load(&file).unwrap();
-        println!(
-            "load:                 {:8.2} ms",
-            t0.elapsed().as_secs_f64() * 1000.0
-        );
-
-        let ts = TextSystem::new();
-        let mut wrap_none = WrapIndex::new(font("Consolas"), 14.0, None);
-        let t0 = Instant::now();
-        wrap_none.sync_layout(&loaded.text, font("Consolas"), 14.0, None, &ts);
-        println!(
-            "wrap (no-wrap):       {:8.2} ms  ({} rows)",
-            t0.elapsed().as_secs_f64() * 1000.0,
-            wrap_none.visual_row_count()
-        );
-
-        let mut wrap_900 = WrapIndex::new(font("Consolas"), 14.0, Some(900.0));
-        let t0 = Instant::now();
-        wrap_900.sync_layout(&loaded.text, font("Consolas"), 14.0, Some(900.0), &ts);
-        println!(
-            "wrap (word-wrap):     {:8.2} ms  ({} rows)",
-            t0.elapsed().as_secs_f64() * 1000.0,
-            wrap_900.visual_row_count()
-        );
-
-        let total_rows = wrap_900.visual_row_count();
-        let t0 = Instant::now();
-        for i in 0..1000 {
-            let r = (i * (total_rows / 1000)).min(total_rows.saturating_sub(1));
-            let off = wrap_900.display_to_offset(&loaded.text, DisplayPos::new(r, 0, 0));
-            let _ = wrap_900.offset_to_display(&loaded.text, off, false);
-        }
-        println!(
-            "1000 scroll queries:  {:8.2} ms",
-            t0.elapsed().as_secs_f64() * 1000.0
-        );
-
-        let mut buf = String::new();
-        let m_cs = find::Matcher::new("FINAL_SENTINEL_NEEDLE_42", true).unwrap();
-        let hit = m_cs.next(&loaded.text, 0, usize::MAX, &mut buf);
-        assert!(hit.is_some());
-
-        let m_ci = find::Matcher::new("final_sentinel_needle_42", false).unwrap();
-        assert_eq!(m_ci.next(&loaded.text, 0, usize::MAX, &mut buf), hit);
-
-        let m_all = find::Matcher::new("omicron", false).unwrap();
-        let _ = m_all.all(&loaded.text, &mut buf);
-
-        let before_bytes = std::fs::read(&file).unwrap();
-        document::write_rope(&file, &loaded.text, loaded.format).unwrap();
-        let after_bytes = std::fs::read(&file).unwrap();
-        assert_eq!(
-            before_bytes, after_bytes,
-            "large-file round-trip must be byte-exact"
-        );
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    #[ignore]
-    fn large_file_smoke_profile() {
-        run_profile(50);
-        run_profile(100);
-    }
 }

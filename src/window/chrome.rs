@@ -11,7 +11,7 @@ use crate::platform::{Jobs, WindowControlArea};
 use crate::tabs::{self, CAPTION_BUTTON_WIDTH, STRIP_TOP, StripFrame, TAB_HEIGHT};
 use crate::theme::Palette;
 use crate::ui::controls::{CONTROL_RADIUS, ICON_FONT, IconButtonStyle, SMALL_FONT, icon_button};
-use crate::ui::{Brushes, box_, col, custom, row, text};
+use crate::ui::{AvailSize, Brushes, box_, custom, row, text};
 
 use super::{EDITOR_FONT_SIZE, MainWindow, WindowEditorTimers};
 
@@ -93,7 +93,8 @@ impl MainWindow {
         {
             return;
         }
-        let status_sz = metrics.map(|m| Frame::measure_min_size(self.status_bar(m, p), scale, ts));
+        let status_sz =
+            metrics.map(|m| Frame::measure(self.status_bar(m, p), AvailSize::MIN, scale, ts));
         let menu_row = MENU_BAR_LEFT + menu_width + THEME_BUTTON_WIDTH + THEME_BUTTON_RIGHT;
         let width = status_sz
             .map_or(0., |s| s.width)
@@ -131,7 +132,7 @@ impl MainWindow {
                     .window_area(WindowControlArea::Drag),
             )
             .child(
-                col()
+                box_()
                     .flex_none()
                     .child(
                         box_()
@@ -167,7 +168,7 @@ impl MainWindow {
             true,
             &mut self.ui,
         );
-        col()
+        box_()
             .flex_none()
             .child(
                 row()
@@ -207,13 +208,11 @@ impl MainWindow {
         );
         box_()
             .hit(HitId::EditorArea)
-            .relative()
             .flex_1()
             .min_h(self.editor_min_height())
             .bg(p.editor)
             .child(
                 box_()
-                    .relative()
                     .size_full()
                     .overflow_hidden()
                     .child(
@@ -235,7 +234,7 @@ impl MainWindow {
     }
 
     pub(super) fn status_bar(&self, metrics: StatusMetrics, p: Palette) -> Node {
-        col().flex_none().child(separator(p)).child(
+        box_().flex_none().child(separator(p)).child(
             row()
                 .items_center()
                 .gap(24.)
@@ -394,7 +393,6 @@ impl Caption {
             .window_area(self.area())
             .child(
                 box_()
-                    .relative()
                     .when(matches!(self, Self::Minimize), |this| {
                         this.left(1.).top(1.)
                     })
@@ -409,7 +407,7 @@ fn caption_buttons(active: bool, maximized: bool, p: Palette, ui: &mut UiState) 
     } else {
         Caption::Maximize
     };
-    col()
+    box_()
         .flex_none()
         .h_full()
         .child(

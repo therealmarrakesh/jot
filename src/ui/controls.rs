@@ -94,7 +94,6 @@ pub(crate) fn button<H: Copy + Eq + Hash, C: Copy, K: Copy + Eq + Hash + From<H>
 
     box_()
         .hit(hit)
-        .relative()
         .h(CONTROL_HEIGHT)
         .rounded(CONTROL_RADIUS)
         .bg(if pressed { pressed_bottom } else { bottom })
@@ -247,7 +246,6 @@ pub(crate) fn text_field_frame<H: Copy + Eq + Hash, C: Copy, K: Copy + Eq + Hash
     box_()
         .hit(field_hit)
         .cursor(CursorStyle::IBeam)
-        .relative()
         .h(CONTROL_HEIGHT)
         .rounded(CONTROL_RADIUS)
         .overflow_hidden()

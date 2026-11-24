@@ -231,13 +231,11 @@ impl<H, C> Node<H, C> {
     }
 
     setters! {
-        row() => |s| { s.flex.direction = FlexDirection::Row; }
         absolute() => |s| { s.flex.position = Position::Absolute; }
-        relative() => |s| { s.flex.position = Position::Relative; }
         w(v: f32) => |s| { s.flex.width = Dim::Px(v); }
         h(v: f32) => |s| { s.flex.height = Dim::Px(v); }
-        w_pct(f: f32) => |s| { s.flex.width = Dim::Pct(f); }
-        h_pct(f: f32) => |s| { s.flex.height = Dim::Pct(f); }
+        w_full() => |s| { s.flex.width = Dim::Pct(1.0); }
+        h_full() => |s| { s.flex.height = Dim::Pct(1.0); }
         min_w(v: f32) => |s| { s.flex.min_width = Dim::Px(v); }
         min_h(v: f32) => |s| { s.flex.min_height = Dim::Px(v); }
         min_h_full() => |s| { s.flex.min_height = Dim::Pct(1.0); }
@@ -324,12 +322,6 @@ impl<H, C> Node<H, C> {
         window_area(area: WindowControlArea) => |s| { s.window_area = Some(area); }
     }
 
-    pub(crate) fn w_full(self) -> Self {
-        self.w_pct(1.0)
-    }
-    pub(crate) fn h_full(self) -> Self {
-        self.h_pct(1.0)
-    }
     pub(crate) fn size(self, v: f32) -> Self {
         self.w(v).h(v)
     }
@@ -375,10 +367,6 @@ impl<H, C> Node<H, C> {
 
 pub(crate) fn row<H, C>() -> Node<H, C> {
     Node::new_box(FlexDirection::Row)
-}
-
-pub(crate) fn col<H, C>() -> Node<H, C> {
-    Node::new_box(FlexDirection::Column)
 }
 
 pub(crate) fn box_<H, C>() -> Node<H, C> {
@@ -550,23 +538,13 @@ impl<H: Copy + Eq, C: Copy> Frame<H, C> {
         frame
     }
 
-    pub(crate) fn measure_min_size(
+    pub(crate) fn measure(
         root_node: Node<H, C>,
+        available: AvailSize,
         scale: f32,
         text_system: &TextSystem,
     ) -> Size {
-        let frame = Self::layout(root_node, AvailSize::MIN, scale, text_system);
-        frame
-            .root
-            .map_or(Size::ZERO, |idx| frame.nodes[idx].rect.size)
-    }
-
-    pub(crate) fn measure_fit(
-        root_node: Node<H, C>,
-        scale: f32,
-        text_system: &TextSystem,
-    ) -> Size {
-        let frame = Self::layout(root_node, AvailSize::MAX, scale, text_system);
+        let frame = Self::layout(root_node, available, scale, text_system);
         frame
             .root
             .map_or(Size::ZERO, |idx| frame.nodes[idx].rect.size)
@@ -1110,7 +1088,7 @@ mod tests {
 
         assert_eq!(frame.hit_chain(point(130., 16.)), vec![TestHit::NewTab]);
 
-        let modal: Node<TestHit, ()> = col()
+        let modal: Node<TestHit, ()> = box_()
             .size_full()
             .child(box_().w(100.).h(40.).hit(TestHit::NewTab))
             .child(
@@ -1137,7 +1115,6 @@ mod tests {
         );
 
         let passthrough: Node<TestHit, ()> = box_()
-            .relative()
             .size_full()
             .child(box_().w(100.).h(40.).hit(TestHit::NewTab))
             .child(box_().absolute().inset_0());
@@ -1162,7 +1139,6 @@ mod tests {
 
         let ts = TextSystem::new();
         let tree: Node<AnchorHit, ()> = box_()
-            .relative()
             .size_full()
             .child(
                 row()
@@ -1237,7 +1213,7 @@ mod tests {
                 .text_size(12.)
                 .line_height(16.)
                 .child(text("New tab"));
-            let short_sz = Frame::measure_fit(short, scale, &ts);
+            let short_sz = Frame::measure(short, AvailSize::MAX, scale, &ts);
             assert!(short_sz.width > 30. && short_sz.width < 150.);
             assert!((short_sz.height - 32.).abs() <= 1.0);
 
@@ -1252,7 +1228,7 @@ mod tests {
                 .child(text(
                     "This is a significantly longer tooltip message that must wrap cleanly across multiple lines inside the 320px cap",
                 ));
-            let long_sz = Frame::measure_fit(long, scale, &ts);
+            let long_sz = Frame::measure(long, AvailSize::MAX, scale, &ts);
             assert!(long_sz.width <= 320.5);
             assert!(long_sz.height >= 48. - 1.0);
         }

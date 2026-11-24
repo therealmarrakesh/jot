@@ -1,4 +1,4 @@
-use std::ops::{Bound, Range, RangeBounds};
+use std::ops::Range;
 
 use ropey::{LineType, Rope, RopeSlice};
 use unicode_segmentation::{GraphemeCursor, GraphemeIncomplete, UnicodeSegmentation};
@@ -112,38 +112,6 @@ impl Selection {
                 self.head = we;
             }
         }
-    }
-}
-
-impl From<Range<usize>> for Selection {
-    #[inline]
-    fn from(range: Range<usize>) -> Self {
-        Self::from_range(range)
-    }
-}
-
-impl From<Selection> for Range<usize> {
-    #[inline]
-    fn from(sel: Selection) -> Self {
-        sel.range()
-    }
-}
-
-impl RangeBounds<usize> for Selection {
-    fn start_bound(&self) -> Bound<&usize> {
-        Bound::Included(if self.anchor <= self.head {
-            &self.anchor
-        } else {
-            &self.head
-        })
-    }
-
-    fn end_bound(&self) -> Bound<&usize> {
-        Bound::Excluded(if self.anchor >= self.head {
-            &self.anchor
-        } else {
-            &self.head
-        })
     }
 }
 

@@ -12,7 +12,7 @@ use crate::ui::controls::{
     BODY_LINE, BODY_SIZE, ButtonStyle, FIELD_CARET, OVERLAY_RADIUS, TEXT_FONT, TextFieldStyle,
     button, text_field_frame,
 };
-use crate::ui::{AnimStatus, Easing, box_, col, row, text};
+use crate::ui::{AnimStatus, Easing, box_, row, text};
 
 const TITLE_FONT: &str = "Segoe UI Variable Display";
 const OPEN_SCALE: f32 = 1.05;
@@ -146,12 +146,6 @@ pub(crate) struct Dialogs {
     pending: VecDeque<DialogKind>,
     serial: usize,
     pub(crate) line: Editor,
-}
-
-impl Default for Dialogs {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 impl Dialogs {
@@ -386,7 +380,7 @@ impl Dialogs {
             line_editor,
             ui,
         );
-        col()
+        box_()
             .child(message_body("Line number".into()).h(BODY_LINE).mb(HEADER_GAP))
             .child(field)
     }
@@ -394,7 +388,6 @@ impl Dialogs {
 
 fn message_body(message: SharedStr) -> Node {
     box_()
-        .relative()
         .top(BODY_BASELINE_SNAP)
         .line_height(BODY_LINE)
         .child(text(message))
@@ -418,7 +411,7 @@ fn dialog_frame(
         .rounded(OVERLAY_RADIUS)
         .shadows(theme_shadow(p.dark, DIALOG_Z))
         .child(
-            col()
+            box_()
                 .rounded(OVERLAY_RADIUS - BORDER)
                 .bg(p.command_surface.panel)
                 .font_family(TEXT_FONT)
@@ -440,7 +433,7 @@ fn dialog_frame(
 }
 
 fn dialog_content(p: Palette, title: SharedStr, body: Node) -> Node {
-    col()
+    box_()
         .p(PADDING)
         .rounded_t(OVERLAY_RADIUS - BORDER)
         .bg(p.content_surface.panel)

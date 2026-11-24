@@ -62,12 +62,6 @@ pub(crate) struct Palette {
     pub(crate) selection: Rgba,
 }
 
-impl Default for Palette {
-    fn default() -> Self {
-        LIGHT
-    }
-}
-
 impl Palette {
     pub(crate) fn resolve(
         dark: bool,

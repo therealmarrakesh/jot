@@ -102,7 +102,7 @@ impl Editor {
                 };
                 self.commit_edit(fx, ts, timers);
             }
-            EditCommand::OutdentInline | EditCommand::Outdent => {
+            EditCommand::Outdent => {
                 let Some(fx) = self.model.outdent() else {
                     return false;
                 };

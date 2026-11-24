@@ -19,7 +19,7 @@ use crate::gfx::{Font, TextSystem};
 use crate::platform::TimerHandle;
 use crate::scrollbar::ScrollbarState;
 use crate::types::SharedStr;
-use crate::ui::{Node, box_, custom};
+use crate::ui::{Node, box_, custom, row};
 
 use model::{EditEffects, EditPolicy, LineChange, TextModel, ValidateFn};
 use view::{AutoScroll, BlinkState, FrameLayout, LongestLineCache};
@@ -118,7 +118,6 @@ pub(crate) enum EditCommand {
     Indent,
     Outdent,
     IndentInline,
-    OutdentInline,
     Move { motion: Motion, extend: bool },
     SelectAll,
     Copy,
@@ -461,19 +460,17 @@ impl Editor {
                 box_()
                     .hit(hit)
                     .cursor(cursor)
-                    .relative()
                     .flex_1()
                     .overflow_x_hidden()
                     .h_full()
                     .child(box_().size_full().padding(doc.paddings).child(text_leaf))
                     .children(scrollbars)
             }
-            ViewKind::Field => box_()
+            ViewKind::Field => row()
                 .hit(hit)
                 .cursor(cursor)
                 .flex_1()
                 .overflow_x_hidden()
-                .row()
                 .min_h_full()
                 .items_center()
                 .child(custom(editor_draw).w_full().h(line_height)),

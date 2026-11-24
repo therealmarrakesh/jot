@@ -631,7 +631,7 @@ impl App {
                 .map(MainWindow::id)
                 .collect();
             for wid in closed {
-                self.keytips.window_closed(wid);
+                self.keytips.hide_owner(wid);
                 self.tooltips.window_closed(wid, &self.shell.jobs);
                 self.file_ops.on_window_closed(wid);
             }

@@ -96,7 +96,7 @@ pub(crate) struct History {
     coalesce_broken: bool,
     next_version: u64,
     current_version: u64,
-    saved_version: Option<u64>,
+    saved_version: u64,
 }
 
 impl History {
@@ -108,7 +108,7 @@ impl History {
             coalesce_broken: false,
             next_version: 1,
             current_version: 0,
-            saved_version: Some(0),
+            saved_version: 0,
         }
     }
 
@@ -236,7 +236,7 @@ impl History {
         self.coalesce_broken = false;
         self.next_version = 1;
         self.current_version = 0;
-        self.saved_version = Some(0);
+        self.saved_version = 0;
     }
 
     pub(crate) fn begin_save(&mut self) -> u64 {
@@ -245,11 +245,11 @@ impl History {
     }
 
     pub(crate) fn mark_saved(&mut self, version: u64) {
-        self.saved_version = Some(version);
+        self.saved_version = version;
     }
 
     pub(crate) fn is_clean(&self) -> bool {
-        self.saved_version == Some(self.current_version)
+        self.saved_version == self.current_version
     }
 
     pub(crate) fn can_undo(&self) -> bool {

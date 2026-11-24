@@ -373,18 +373,6 @@ enum RenderScope {
     Transform(Matrix3x2),
 }
 
-#[inline]
-fn mul_matrix(a: Matrix3x2, b: Matrix3x2) -> Matrix3x2 {
-    Matrix3x2 {
-        M11: a.M11 * b.M11 + a.M12 * b.M21,
-        M12: a.M11 * b.M12 + a.M12 * b.M22,
-        M21: a.M21 * b.M11 + a.M22 * b.M21,
-        M22: a.M21 * b.M12 + a.M22 * b.M22,
-        M31: a.M31 * b.M11 + a.M32 * b.M21 + b.M31,
-        M32: a.M31 * b.M12 + a.M32 * b.M22 + b.M32,
-    }
-}
-
 pub(crate) struct D2DRenderer {
     devices: Direct2DDevices,
     swap_chain: IDXGISwapChain1,
@@ -691,7 +679,7 @@ impl D2DRenderer {
             M32: origin.y * (1.0 - sy),
         };
         let prev = self.transform;
-        self.transform = mul_matrix(local, prev);
+        self.transform = local * prev;
         unsafe {
             self.context.SetTransform(&self.transform);
         }

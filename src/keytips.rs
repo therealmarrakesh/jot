@@ -84,12 +84,6 @@ impl KeyTips {
         }
     }
 
-    pub(crate) fn window_closed(&mut self, window: WindowId) {
-        if self.owner == Some(window) {
-            self.hide();
-        }
-    }
-
     pub(crate) fn sync(
         &mut self,
         owner: WindowId,

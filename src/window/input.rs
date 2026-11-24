@@ -337,11 +337,11 @@ impl MainWindow {
             Some(HitId::FindReplace) => self.replace_next(cx.ts, cx.jobs),
             Some(HitId::FindReplaceAll) => self.replace_all(cx.ts, cx.jobs),
             Some(HitId::MenuItem { ix, .. }) => {
-                let out = self.menu_bar.click_item((ix, None), cx.ts);
+                let out = self.menu_bar.activate((ix, None), false, cx.ts);
                 let _ = self.apply_menu_outcome(out, cx);
             }
             Some(HitId::SubmenuItem { ix: sub_ix, .. }) => {
-                let out = self.menu_bar.click_item((0, Some(sub_ix)), cx.ts);
+                let out = self.menu_bar.activate((0, Some(sub_ix)), false, cx.ts);
                 let _ = self.apply_menu_outcome(out, cx);
             }
             Some(HitId::MenuCommand { ix, .. }) => {

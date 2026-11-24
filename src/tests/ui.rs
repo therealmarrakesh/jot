@@ -7,7 +7,7 @@ use crate::platform::{
     Key, KeyEvent, Modifiers, MouseButton, PlatformEvent, PlatformHandler, WindowControlArea,
 };
 use crate::ui::controls::{SMALL_FONT, TEXT_FONT};
-use crate::ui::{AvailSize, box_, col, row, text};
+use crate::ui::{AvailSize, box_, row, text};
 
 use super::{EDITOR_PADDING_LEFT, EDITOR_PADDING_TOP, TestHarness};
 
@@ -453,7 +453,7 @@ fn status_bar_min_width_and_no_vertical_char_wrapping() {
         }
     }
 
-    let dialog_body = col()
+    let dialog_body = box_()
         .w(180.0)
         .font_family(TEXT_FONT)
         .text_size(14.0)

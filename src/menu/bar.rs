@@ -432,10 +432,6 @@ impl MenuBar {
         }
     }
 
-    pub(crate) fn click_item(&mut self, path: (usize, Option<usize>), ts: &TextSystem) -> MenuOutcome {
-        self.activate(path, false, ts)
-    }
-
     pub(crate) fn click_command(&mut self, ix: usize) -> MenuOutcome {
         let Some(cmd) = self
             .live_open()
@@ -450,7 +446,7 @@ impl MenuBar {
         out
     }
 
-    fn activate(
+    pub(crate) fn activate(
         &mut self,
         path: (usize, Option<usize>),
         focus_first: bool,
@@ -978,7 +974,7 @@ mod tests {
 
         // Mouse-clicking a submenu item opens the submenu without pre-selecting its first child.
         bar.open_kind_menu(MenuKind::View, state, &ts);
-        let click = bar.click_item((0, None), &ts);
+        let click = bar.activate((0, None), false, &ts);
         assert_eq!(click.submenu_timer, SubmenuTimer::Cancel);
         assert!(bar.open_popup().is_some_and(|o| o.live_submenu().is_some() && !o.in_submenu()));
 

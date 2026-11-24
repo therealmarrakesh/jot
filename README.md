@@ -6,7 +6,7 @@ Jot keeps the familiar look, tabs, and keyboard shortcuts of Windows 11 Notepad 
 
 ## Download
 
-Get `Jot.exe` from the [latest release](https://github.com/therealmarrakesh/jot/releases/latest). Requires 64-bit Windows 11 (22H2+ for the Mica Alt backdrop).
+Get `Jot.exe` from the [latest release](https://github.com/therealmarrakesh/jot/releases/latest). Runs on Windows 10 and Windows 11 (Windows 11 22H2+ for the Mica Alt backdrop).
 
 `Jot.exe` is not code-signed, so Windows SmartScreen may prompt on first run (**More info -> Run anyway**).
 
@@ -26,8 +26,9 @@ Jot is written in Rust directly against Win32, Direct2D 1.1, DirectWrite, and Di
 - `src/gfx/`: Direct3D 11 / DirectComposition / Direct2D 1.1 `Gpu` & `Surface` renderer and DirectWrite `TextStyle`/`Label`/`ShapedRow` shaping and line-break analysis.
 - `src/ui/`: Flex layout solver with same-frame anchors and fit-content measurement, generic flat scene graph, key-based animation tracks, unified `OverlaySurface`, and Fluent controls.
 - `src/editor/`: Headless `TextModel`, transaction `History`, rope buffer & selection, prefix-sum soft-wrap index, and prepare/paint editor view.
-- `src/window/`, `src/app.rs`: Multi-window `Shell`/`Cx`/`Effect` lifecycle, `TabSet` invariants, explicit `InputMode` routing, window chrome, and shared primitives (`ids`, `diag`, `theme`, `color`, `geom`, `types`, `command`).
-- Feature modules: `src/menu/` (`model`, `popup`, `bar`, `render`), `src/find/` (`matcher`, `bar`), `tabs`, `tab_drag`, `keytips`, `dialog`, `tooltip`, `scrollbar`, `files` (pure `FileOps` workflow), and `document` (streaming codec & atomic save).
+- `src/window/`, `src/app.rs`: Multi-window `Shell`/`Cx`/`Effect` lifecycle, `TabSet` invariants, explicit `InputMode` routing, and window chrome.
+- Shared primitives: `ids`, `diag`, `theme`, `color`, `geom`, `types`, and `command`.
+- Feature modules: `src/menu/` (`model`, `popup`, `bar`, `render`), `src/find/` (`matcher`, `bar`), `tabs`, `tab_drag`, `keytips`, `dialog`, `tooltip`, `scrollbar`, `files` (`FileOps` workflow & background I/O executor), and `document` (streaming codec & atomic save).
 - `build.rs`: Embeds `assets/jot.ico`, the Windows 11 manifest (`PerMonitorV2`, `SegmentHeap`, Common Controls v6), and version info via `rc.exe`, and generates third-party notices in `OUT_DIR` (embedded via `include_str!`).
 
 ## Building

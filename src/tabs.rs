@@ -561,13 +561,11 @@ impl TabStrip {
 
         row()
             .hit(HitId::TabStrip)
-            .relative()
             .h(TAB_HEIGHT)
             .when_some(scroll_back, |this, btn| this.child(btn))
             .child(
                 box_()
                     .hit(HitId::TabList)
-                    .relative()
                     .flex_none()
                     .h_full()
                     .w(viewport)
@@ -723,7 +721,6 @@ fn render_tab(
         .hit(hit)
         .tooltip(tip)
         .cursor(CursorStyle::Arrow)
-        .relative()
         .size_full()
         .overflow_hidden()
         .when(active, |this| {

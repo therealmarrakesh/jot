@@ -162,7 +162,7 @@ const KEYMAP: &[Binding] = &[
     bind(SHIFT, K::PageUp, sel(M::PageUp)),
     bind(SHIFT, K::PageDown, sel(M::PageDown)),
     bind(NONE, K::Tab, Edit(E::IndentInline)),
-    bind(SHIFT, K::Tab, Edit(E::OutdentInline)),
+    bind(SHIFT, K::Tab, Edit(E::Outdent)),
     bind(CTRL, K::Char(']'), Edit(E::Indent)),
     bind(CTRL, K::Char('['), Edit(E::Outdent)),
     bind(SHIFT | ANY_ALT, K::Left, sel(M::Left)),

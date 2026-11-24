@@ -12,7 +12,7 @@ use crate::ui::controls::{
     IconButtonStyle, OVERLAY_RADIUS, TEXT_FONT, TextFieldStyle, button, icon_button,
     text_field_frame,
 };
-use crate::ui::{AnimStatus, Easing, Presence, box_, col, row, text};
+use crate::ui::{AnimStatus, Easing, Presence, box_, row, text};
 
 use super::matcher::Matcher;
 
@@ -368,7 +368,7 @@ impl FindBar {
             .rounded(OVERLAY_RADIUS)
             .shadows(theme_shadow(p.dark, CARD_Z))
             .child(
-                col()
+                box_()
                     .hit(HitId::FindCard)
                     .cursor(CursorStyle::Arrow)
                     .size_full()

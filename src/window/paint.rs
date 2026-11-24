@@ -6,7 +6,7 @@ use crate::geom::{Rect, point, size};
 use crate::gfx::{fill, font};
 use crate::ids::{CustomDraw, EditorSlot, Focus, Frame};
 use crate::ui::controls::{BODY_LINE, BODY_SIZE, TEXT_FONT};
-use crate::ui::{AvailSize, box_, col};
+use crate::ui::{AvailSize, box_};
 
 use super::chrome::STATUS_DIVIDER_WIDTH;
 use super::{EDITOR_FONT_SIZE, MainWindow};
@@ -40,14 +40,13 @@ impl MainWindow {
         let menu_popup = self.menu_bar.render_popup(p, ts, &mut self.ui);
         let dialog_node = self.dialogs.render(self.focus, p, &mut self.ui);
 
-        let chrome = col()
+        let chrome = box_()
             .size_full()
             .child(title_bar)
             .child(menu_bar)
             .child(editor_node)
             .when_some(status_node, |this, s| this.child(s));
         let root = box_()
-            .relative()
             .size_full()
             .child(chrome)
             .when_some(menu_popup, |this, m| this.child(m))
