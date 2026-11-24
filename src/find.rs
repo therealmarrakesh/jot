@@ -9,7 +9,7 @@ use crate::geom::{Point, Rect, Size, point, size};
 use crate::gfx::TextSystem;
 use crate::ids::{AnimKey, AppNode, AppUi, EditorSlot, FindHit, Focus, HitId};
 use crate::platform::{CursorStyle, Key, KeyEvent, TimerHandle};
-use crate::app::{WindowTimer, WindowTimers};
+use crate::shell::{WindowTimer, WindowTimers};
 use crate::theme::{BODY_SIZE, FIELD_CARET, OVERLAY_RADIUS, Palette, TEXT_FONT, theme_shadow};
 use crate::types::SharedStr;
 use crate::ui::{Anchor, AnimStatus, Curve, Easing, Transform, Transition, box_, row, text};
@@ -864,7 +864,7 @@ mod tests {
     use crate::editor::{DocOptions, Rope};
     use crate::geom::Edges;
     use crate::platform::Jobs;
-    use crate::app::AppEvent;
+    use crate::shell::AppEvent;
 
     use super::*;
 

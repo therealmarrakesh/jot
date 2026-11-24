@@ -14,13 +14,13 @@ use crate::ids::{
     AppFrame, AppNode, AppUi, CaptionHit, CustomDraw, DialogHit, EditorSlot, FindHit, Focus, HitId,
     MenuHit, TabHit, TabId,
 };
-use crate::tooltip::KeyTip;
+use crate::keytips::KeyTip;
 use crate::menu::{FocusRequest, MENU_BAR_HEIGHT, MenuOutcome, MenuState, Menus, RowPath};
 use crate::platform::{
     KeyEvent, Modifiers, MouseButton, WindowAppearance, WindowControlArea, WindowHandle, WindowId,
     clipboard, format_local_time_date,
 };
-use crate::app::{Cx, Effect, Shell, SlotTimers, WindowTimer};
+use crate::shell::{Cx, Effect, Shell, SlotTimers, WindowTimer};
 use crate::tabs::{
     self, self as tab_strip, Removal, SCROLL_REPEAT_DELAY, SCROLL_REPEAT_INTERVAL, SCROLL_STEP,
     StripFrame, TAB_HEIGHT, TabData, TabSet, WHEEL_SHARE,

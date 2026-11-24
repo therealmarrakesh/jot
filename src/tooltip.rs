@@ -1,9 +1,9 @@
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use crate::app::AppEvent;
-use crate::geom::{Rect, ScreenPoint, ScreenRect, point, round_half_up, size};
-use crate::gfx::{Gpu, TextStyle, TextSystem};
+use crate::shell::AppEvent;
+use crate::geom::{ScreenPoint, ScreenRect};
+use crate::gfx::{Gpu, TextSystem};
 use crate::ids::{AppFrame, HitId};
 use crate::platform::{
     Jobs, Modifiers, TimerHandle, WindowId, cursor_screen_pos, monitor_work_area_and_scale,
@@ -11,8 +11,8 @@ use crate::platform::{
 use crate::theme::{CONTROL_RADIUS, Palette, SMALL_FONT, theme_shadow};
 use crate::types::SharedStr;
 use crate::ui::{
-    AnimTracks, AvailSize, Curve, Easing, Frame, Node, OverlayAnchor, OverlaySurface, PointerState,
-    box_, text,
+    AnimTracks, AvailSize, Curve, Easing, Frame, Node, OverlayAnchor, OverlaySurface,
+    PointerState, box_, text,
 };
 
 const PADDING_X: f32 = 9.;
@@ -437,133 +437,6 @@ fn tooltip_card(p: Palette, content: SharedStr) -> Node<(), ()> {
                         .child(text(content)),
                 ),
         )
-}
-
-const PADDING: f32 = 4.;
-const MARGIN: f32 = 1.;
-const FONT: &str = "Segoe UI";
-
-#[derive(Clone, Copy)]
-pub(crate) enum Placement {
-    Below,
-    Left,
-}
-
-#[derive(Clone, PartialEq)]
-pub(crate) struct KeyTip {
-    pub(crate) key: char,
-    pub(crate) bounds: Rect,
-}
-
-pub(crate) fn layout_tip(
-    ts: &TextSystem,
-    key: char,
-    anchor: Rect,
-    placement: Placement,
-) -> KeyTip {
-    let mut buf = [0u8; 4];
-    let style = TextStyle::regular(FONT, FONT_SIZE);
-    let width = ts.measure(key.encode_utf8(&mut buf), &style).ceil();
-    let fill = size(width + 2. * PADDING, LINE_HEIGHT + 2. * PADDING);
-    let (outer_w, outer_h) = (fill.width + 2. * MARGIN, fill.height + 2. * MARGIN);
-    let (x, y) = match placement {
-        Placement::Below => (
-            round_half_up(anchor.center().x - outer_w / 2.),
-            anchor.bottom(),
-        ),
-        Placement::Left => (
-            anchor.left() - outer_w,
-            round_half_up(anchor.top() + (anchor.size.height - outer_h) / 2.),
-        ),
-    };
-    KeyTip {
-        key,
-        bounds: Rect::new(point(x + MARGIN, y + MARGIN), fill),
-    }
-}
-
-#[derive(Default)]
-pub(crate) struct KeyTips {
-    overlay: OverlaySurface,
-    owner: Option<WindowId>,
-    rect: ScreenRect,
-    tips: Vec<KeyTip>,
-    dirty: bool,
-}
-
-impl KeyTips {
-    pub(crate) fn is_owner(&self, owner: WindowId) -> bool {
-        self.owner == Some(owner)
-    }
-
-    pub(crate) fn hide(&mut self) {
-        self.owner = None;
-        self.rect = ScreenRect::default();
-        self.tips.clear();
-        self.dirty = false;
-        self.overlay.hide();
-    }
-
-    pub(crate) fn hide_owner(&mut self, owner: WindowId) {
-        if self.owner == Some(owner) {
-            self.hide();
-        }
-    }
-
-    pub(crate) fn sync(&mut self, anchor: OverlayAnchor, mut tips: Vec<KeyTip>, gpu: &Rc<Gpu>) {
-        let Some(union) = tips.iter().map(|t| t.bounds).reduce(Rect::union) else {
-            self.hide_owner(anchor.window);
-            return;
-        };
-        for tip in &mut tips {
-            tip.bounds.origin -= union.origin;
-        }
-        let rect = union.to_screen(anchor.scale, anchor.origin);
-        if self.owner == Some(anchor.window) && self.rect == rect && self.tips == tips {
-            return;
-        }
-        self.tips = tips;
-        self.owner = Some(anchor.window);
-        self.rect = rect;
-        self.dirty = true;
-        self.overlay.show(gpu, rect);
-    }
-
-    pub(crate) fn paint(&mut self, p: Palette, ts: &TextSystem) -> bool {
-        if !self.dirty {
-            return false;
-        }
-        self.dirty = false;
-        if self.owner.is_none() || self.tips.is_empty() {
-            return false;
-        }
-        let tips = &self.tips;
-        let needs_retry = self.overlay.paint_scene(ts, |_| render_tips(tips, p));
-        if needs_retry {
-            self.dirty = true;
-        }
-        needs_retry
-    }
-}
-
-fn render_tips(tips: &[KeyTip], p: Palette) -> Node<(), ()> {
-    box_().size_full().children(tips.iter().map(|tip| {
-        box_()
-            .absolute()
-            .left(tip.bounds.origin.x)
-            .top(tip.bounds.origin.y)
-            .w(tip.bounds.size.width)
-            .h(tip.bounds.size.height)
-            .bg(p.keytip_fill)
-            .pl(PADDING)
-            .pt(PADDING)
-            .font_family(FONT)
-            .text_size(FONT_SIZE)
-            .line_height(LINE_HEIGHT)
-            .text_color(p.keytip_text)
-            .nowrap()
-            .child(text(tip.key.to_string()))
-    }))
 }
 
 #[cfg(test)]

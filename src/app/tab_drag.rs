@@ -7,7 +7,7 @@ use crate::platform::{
     TimerHandle, WindowHandle, WindowId, WindowPlacement, cursor_screen_pos,
     primary_mouse_button_down, release_mouse_capture, top_visible_window_at,
 };
-use crate::app::{AppEvent, Shell};
+use crate::shell::{AppEvent, Shell};
 
 use super::windows::Windows;
 
