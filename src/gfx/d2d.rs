@@ -50,6 +50,7 @@ use windows_numerics::{Matrix3x2, Vector2};
 
 use crate::color::Rgba;
 use crate::geom::{Corners, Edges, Point, Rect, Shadows, Size, point, size};
+use crate::platform::NativeWindow;
 use crate::types::{Error, Result};
 
 use super::FrameCache;
@@ -385,15 +386,12 @@ pub(crate) struct Surface {
 }
 
 impl Surface {
-    pub(crate) fn new(
-        gpu: Rc<Gpu>,
-        hwnd: HWND,
-        physical_width: u32,
-        physical_height: u32,
-        scale_factor: f32,
-    ) -> Result<Self> {
-        let width = physical_width.max(1);
-        let height = physical_height.max(1);
+    pub(crate) fn for_window(gpu: Rc<Gpu>, window: &NativeWindow) -> Result<Self> {
+        let (pw, ph) = window.physical_size();
+        let width = pw.max(1);
+        let height = ph.max(1);
+        let scale_factor = window.scale_factor();
+        let hwnd = HWND(window.hwnd().raw_isize() as *mut _);
         let (generation, devices) = gpu.snapshot();
         let target = Target::new(devices, generation, hwnd, width, height, scale_factor)?;
         Ok(Self {
@@ -491,6 +489,19 @@ impl Surface {
     #[cfg(test)]
     pub(crate) fn mark_device_lost_for_test(&mut self) {
         self.force_device_lost = true;
+    }
+}
+
+pub(crate) struct WindowSurface {
+    // Surface drops before NativeWindow so swapchain/DComp target release before DestroyWindow.
+    pub(crate) surface: Surface,
+    pub(crate) window: NativeWindow,
+}
+
+impl WindowSurface {
+    pub(crate) fn new(gpu: Rc<Gpu>, window: NativeWindow) -> Result<Self> {
+        let surface = Surface::for_window(gpu, &window)?;
+        Ok(Self { surface, window })
     }
 }
 

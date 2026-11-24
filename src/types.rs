@@ -150,37 +150,58 @@ impl PartialEq<String> for SharedStr {
     }
 }
 
-pub(crate) struct Error {
-    message: String,
-    hresult: Option<i32>,
+macro_rules! id_type {
+    ($name:ident) => {
+        #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+        pub(crate) struct $name(pub(crate) u64);
+
+        impl $name {
+            pub(crate) fn next() -> Self {
+                static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+                Self(NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+            }
+        }
+    };
+}
+pub(crate) use id_type;
+
+pub(crate) enum Error {
+    Win(windows::core::Error),
+    Io(std::io::Error),
+    Msg(String),
 }
 
 pub(crate) type Result<T> = std::result::Result<T, Error>;
 
 impl Error {
     pub(crate) fn new(msg: impl fmt::Display) -> Self {
-        Self {
-            message: msg.to_string(),
-            hresult: None,
-        }
+        Self::Msg(msg.to_string())
     }
 
     pub(crate) fn hresult(&self) -> Option<i32> {
-        self.hresult
+        match self {
+            Self::Win(e) => Some(e.code().0),
+            Self::Io(_) | Self::Msg(_) => None,
+        }
     }
 }
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.message)
+        match self {
+            Self::Win(e) => fmt::Display::fmt(e, f),
+            Self::Io(e) => fmt::Display::fmt(e, f),
+            Self::Msg(m) => f.write_str(m),
+        }
     }
 }
 
 impl fmt::Debug for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.hresult {
-            Some(hr) => write!(f, "{} (0x{:08x})", self.message, hr as u32),
-            None => f.write_str(&self.message),
+        match self {
+            Self::Win(e) => write!(f, "{e} (0x{:08x})", e.code().0 as u32),
+            Self::Io(e) => fmt::Display::fmt(e, f),
+            Self::Msg(m) => f.write_str(m),
         }
     }
 }
@@ -189,19 +210,13 @@ impl std::error::Error for Error {}
 
 impl From<windows::core::Error> for Error {
     fn from(err: windows::core::Error) -> Self {
-        Self {
-            hresult: Some(err.code().0),
-            message: err.to_string(),
-        }
+        Self::Win(err)
     }
 }
 
 impl From<std::io::Error> for Error {
     fn from(err: std::io::Error) -> Self {
-        Self {
-            hresult: err.raw_os_error(),
-            message: err.to_string(),
-        }
+        Self::Io(err)
     }
 }
 

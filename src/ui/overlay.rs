@@ -2,7 +2,7 @@ use std::rc::Rc;
 
 use crate::color::transparent_black;
 use crate::geom::{ScreenPoint, ScreenRect, Size};
-use crate::gfx::{Gpu, Surface, TextSystem};
+use crate::gfx::{Gpu, TextSystem, WindowSurface};
 use crate::platform::{NativeWindow, WindowId};
 
 use super::{AvailSize, Frame, Node};
@@ -14,15 +14,9 @@ pub(crate) struct OverlayAnchor {
     pub(crate) scale: f32,
 }
 
-struct LiveOverlay {
-    // Surface drops before NativeWindow so DComp/swapchain release before DestroyWindow.
-    surface: Surface,
-    window: NativeWindow,
-}
-
 #[derive(Default)]
 pub(crate) struct OverlaySurface {
-    live: Option<LiveOverlay>,
+    live: Option<WindowSurface>,
     create_failed: bool,
 }
 
@@ -32,12 +26,9 @@ impl OverlaySurface {
             if self.create_failed {
                 return;
             }
-            match NativeWindow::create_overlay().and_then(|window| {
-                let (w, h) = window.physical_size();
-                let surface =
-                    Surface::new(gpu.clone(), window.hwnd().raw(), w, h, window.scale_factor())?;
-                Ok(LiveOverlay { surface, window })
-            }) {
+            match NativeWindow::create_overlay()
+                .and_then(|window| WindowSurface::new(gpu.clone(), window))
+            {
                 Ok(live) => self.live = Some(live),
                 Err(err) => {
                     self.create_failed = true;

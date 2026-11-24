@@ -5,7 +5,7 @@ use crate::ids::Focus;
 use crate::platform::format_local_time_date;
 use crate::shell::{Cx, Effect};
 
-use super::{MainWindow, ZOOM_STEP};
+use super::{MainWindow, ZOOM_STEP, menu_state};
 
 impl MainWindow {
     pub(crate) fn dispatch_command(&mut self, cmd: Command, cx: &mut Cx<'_>) -> bool {
@@ -35,8 +35,8 @@ impl MainWindow {
                 }
                 if let Some(caret) = self.active_editor().caret_bounds() {
                     let anchor = point(caret.right(), caret.bottom());
-                    let state = self.menu_state(cx.shell);
-                    let out = self.menu_bar.open_context_menu(anchor, state);
+                    let state = menu_state(&self.tabs, cx.shell);
+                    let out = self.menus.open_context_menu(anchor, state);
                     let _ = self.apply_menu_outcome(out, cx);
                 }
                 return true;

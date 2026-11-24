@@ -9,9 +9,10 @@ mod ui;
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use crate::app::App;
+use crate::app::{App, WindowLaunch};
+use crate::command::Command;
 use crate::geom::{Point, Rect, size};
-use crate::gfx::Gpu;
+use crate::gfx::{Gpu, TextSystem};
 use crate::ids::HitId;
 use crate::platform::{
     Key, KeyEvent, Modifiers, MouseButton, Platform, PlatformEvent, PlatformHandler, WindowId,
@@ -73,9 +74,9 @@ impl TestHarness {
     fn new() -> Self {
         let platform = Rc::new(Platform::new(None).expect("Platform::new failed"));
         let gpu = Gpu::new().expect("Gpu::new failed");
-        let mut app = App::new(platform, gpu);
+        let text_system = TextSystem::new().expect("TextSystem::new failed");
+        let mut app = App::with_launch(platform, gpu, text_system, WindowLaunch::HIDDEN);
         app.shell.settings.reduce_motion = true;
-        app.windows.set_headless(true);
         let (window_id, _) = app
             .open_window(None, Some(size(1024., 700.)))
             .expect("open_window failed");
@@ -112,37 +113,19 @@ impl TestHarness {
         app.windows.get(self.window_id)?.frame().rect_of(hit)
     }
 
-    fn click_matching(&mut self, pred: impl Fn(HitId) -> bool, desc: &str) {
-        let bounds = {
-            let app = self.app.borrow();
-            app.windows
-                .get(self.window_id)
-                .and_then(|w| w.frame().find_rect(&pred))
-                .unwrap_or_else(|| panic!("{desc} was not laid out"))
-        };
-        assert!(!bounds.is_empty(), "{desc} laid out with empty bounds {bounds:?}");
-        self.click_point(bounds.center(), MouseButton::Left);
+    fn click_menu_command(&mut self, cmd: impl Into<Command>) {
+        let cmd = cmd.into();
+        let hit = self
+            .read(|w, _| w.menus().hit_for_command(cmd))
+            .unwrap_or_else(|| panic!("menu command {cmd:?} is not visible"));
+        self.click_hit(hit);
     }
 
-    fn click_menu_item(&mut self, ix: usize) {
-        self.click_matching(
-            |h| matches!(h, HitId::MenuItem { ix: i, .. } if i == ix),
-            &format!("MenuItem({ix})"),
-        );
-    }
-
-    fn click_submenu_item(&mut self, ix: usize) {
-        self.click_matching(
-            |h| matches!(h, HitId::SubmenuItem { ix: i, .. } if i == ix),
-            &format!("SubmenuItem({ix})"),
-        );
-    }
-
-    fn click_menu_command(&mut self, ix: usize) {
-        self.click_matching(
-            |h| matches!(h, HitId::MenuCommand { ix: i, .. } if i == ix),
-            &format!("MenuCommand({ix})"),
-        );
+    fn click_menu_submenu(&mut self, title: &str) {
+        let hit = self
+            .read(|w, _| w.menus().hit_for_submenu(title))
+            .unwrap_or_else(|| panic!("menu submenu {title:?} is not visible"));
+        self.click_hit(hit);
     }
 
     fn move_mouse(&mut self, pos: Point) {

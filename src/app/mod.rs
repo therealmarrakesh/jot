@@ -7,11 +7,11 @@ use std::time::{Duration, Instant};
 
 use crate::files::{FileIo, FileOps, FileRequest, spawn_file_io};
 use crate::geom::Size;
-use crate::gfx::Gpu;
+use crate::gfx::{Gpu, TextSystem};
 use crate::ids::EditorSlot;
 use crate::keytips::KeyTips;
 use crate::platform::{
-    Key, MouseButton, Platform, PlatformEvent, PlatformHandler, WindowHwnd, WindowId,
+    Key, MouseButton, Platform, PlatformEvent, PlatformHandler, WindowHandle, WindowId,
 };
 use crate::shell::{AppEvent, Cx, Effect, Shell, WindowTimer};
 use crate::tabs::TabData;
@@ -20,6 +20,8 @@ use crate::window::{InputMode, MainWindow};
 
 use tab_drag::TabDrag;
 use windows::{OpenWindowError, Windows};
+#[cfg(test)]
+pub(crate) use windows::WindowLaunch;
 
 pub(crate) struct App {
     pub(crate) windows: Windows,
@@ -34,11 +36,20 @@ pub(crate) struct App {
 }
 
 impl App {
-    pub(crate) fn new(platform: Rc<Platform>, gpu: Rc<Gpu>) -> Self {
-        let shell = Shell::new(&platform, gpu);
+    pub(crate) fn new(platform: Rc<Platform>, gpu: Rc<Gpu>, text_system: TextSystem) -> Self {
+        Self::with_launch(platform, gpu, text_system, windows::WindowLaunch::default())
+    }
+
+    pub(crate) fn with_launch(
+        platform: Rc<Platform>,
+        gpu: Rc<Gpu>,
+        text_system: TextSystem,
+        launch: windows::WindowLaunch,
+    ) -> Self {
+        let shell = Shell::new(&platform, gpu, text_system);
         let tooltips = Tooltips::new(shell.settings.mouse_hover_time);
         Self {
-            windows: Windows::new(),
+            windows: Windows::new(launch),
             tab_drag: None,
             file_ops: FileOps::default(),
             keytips: KeyTips::default(),
@@ -217,7 +228,7 @@ impl App {
         &mut self,
         initial: Option<TabData>,
         window_size: Option<Size>,
-    ) -> std::result::Result<(WindowId, WindowHwnd), Box<OpenWindowError>> {
+    ) -> std::result::Result<(WindowId, WindowHandle), Box<OpenWindowError>> {
         self.windows.open(initial, window_size, &self.shell)
     }
 
@@ -550,16 +561,6 @@ impl PlatformHandler for App {
                 }
                 AppEvent::File(fe) => {
                     self.run_file_ops(|ops, host, io| ops.on_event(fe, host, io));
-                }
-                #[cfg(test)]
-                AppEvent::TestCloseWindow(id) => {
-                    if let Some(w) = self.windows.get_mut(id) {
-                        w.request_close();
-                    }
-                }
-                #[cfg(test)]
-                AppEvent::TestFlag(flag) => {
-                    flag.store(true, std::sync::atomic::Ordering::SeqCst);
                 }
             }
             self.sweep_closed_windows();

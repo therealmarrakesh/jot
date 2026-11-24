@@ -15,11 +15,11 @@ use windows::core::{BOOL, HSTRING};
 
 use crate::color::Rgba;
 use crate::geom::{Point, Rect, Size, point, size};
-use crate::types::SharedStr;
+use crate::types::{Result, SharedStr};
 
 use super::FrameCache;
 use super::d2d::{Canvas, fill};
-use super::wrap::{AdvanceTable, can_wrap_with_advances};
+use super::line_breaks::{AdvanceTable, can_wrap_with_advances};
 
 const MAX_LAYOUT_CACHE: usize = 512;
 const MAX_SHAPED_CACHE_BYTES: usize = 4 * 1024 * 1024;
@@ -442,12 +442,11 @@ struct TextSystemState {
 }
 
 impl TextSystem {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new() -> Result<Self> {
         let factory: IDWriteFactory5 =
-            unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED) }
-                .expect("failed to create DirectWrite factory");
+            unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)? };
         let analyzer = unsafe { factory.CreateTextAnalyzer() }.ok();
-        Self {
+        Ok(Self {
             factory,
             analyzer,
             state: RefCell::new(TextSystemState {
@@ -459,7 +458,7 @@ impl TextSystem {
                 ),
                 labels: FrameCache::new(MAX_LAYOUT_CACHE, 0, 1),
             }),
-        }
+        })
     }
 
     pub(crate) fn face(&self, style: &TextStyle) -> Rc<FontFace> {
@@ -793,7 +792,7 @@ mod tests {
 
     #[test]
     fn directwrite_line_breaks_and_shaping_work() {
-        let ts = TextSystem::new();
+        let ts = TextSystem::new().unwrap();
         let style = TextStyle::regular("Segoe UI Variable Text", 14.0);
         let shaped = ts.shape_row(SharedStr::new_static("Hello 🎉 world"), &style);
         assert!(shaped.width > 0.0);
@@ -803,13 +802,14 @@ mod tests {
         assert!(hit <= shaped.len);
 
         let analyzer = ts.analyzer.as_ref().expect("text analyzer");
-        let breaks = super::super::wrap::analyze_break_opportunities(analyzer, "hello world");
+        let breaks = super::super::line_breaks::analyze_break_opportunities(analyzer, "hello world");
         assert!(breaks.contains(&6));
         assert!(
-            super::super::wrap::analyze_break_opportunities(analyzer, "foo\u{00A0}bar").is_empty()
+            super::super::line_breaks::analyze_break_opportunities(analyzer, "foo\u{00A0}bar")
+                .is_empty()
         );
         assert_eq!(
-            super::super::wrap::analyze_break_opportunities(analyzer, "foo-bar"),
+            super::super::line_breaks::analyze_break_opportunities(analyzer, "foo-bar"),
             vec![4]
         );
     }
@@ -818,7 +818,7 @@ mod tests {
     fn wrapped_text_two_frame_cache_promotes_and_evicts() {
         use windows::core::Interface;
 
-        let ts = TextSystem::new();
+        let ts = TextSystem::new().unwrap();
         let style = TextStyle::regular("Segoe UI Variable Small", 12.0);
         let single = LabelLayout {
             line_height: 16.0,

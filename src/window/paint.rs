@@ -3,7 +3,7 @@ use std::time::Instant;
 use crate::editor::{EditorPaintParams, EditorPaintStyle};
 use crate::geom::{Rect, point, size};
 use crate::gfx::{TextStyle, fill};
-use crate::ids::{CustomDraw, EditorSlot, Focus, Frame};
+use crate::ids::{AppFrame, CustomDraw, EditorSlot, Focus};
 use crate::shell::Shell;
 use crate::theme::{BODY_LINE, BODY_SIZE, TEXT_FONT};
 use crate::ui::{AvailSize, box_};
@@ -19,17 +19,17 @@ impl MainWindow {
         let caret_width_px = shell.settings.caret_width_px;
         let ts = &shell.text_system;
         self.dirty = false;
-        let logical = self.native.logical_size();
-        let scale = self.native.scale_factor();
-        let window_active = self.native.is_active();
-        let maximized = self.native.is_maximized();
+        let logical = self.win.window.logical_size();
+        let scale = self.win.window.scale_factor();
+        let window_active = self.win.window.is_active();
+        let maximized = self.win.window.is_maximized();
         let status_metrics = view.status_bar.then(|| self.status_metrics());
 
         self.ui.begin_frame(now, reduce_motion);
         let strip = self
             .tabs
             .sample(tab_strip_column(logical.width), &mut self.ui);
-        self.menu_bar.sample(&mut self.ui);
+        self.menus.sample(&mut self.ui);
 
         let editor_style = EditorPaintStyle {
             text: TextStyle::regular("Consolas", EDITOR_FONT_SIZE * self.zoom()),
@@ -44,7 +44,7 @@ impl MainWindow {
         let caret_height = self.caret_height();
         let active_slot = self.active_slot();
         let editor_focused = self.focus == Focus::Editor(active_slot);
-        let show_selection = editor_focused || self.menu_bar.is_open() || self.find.is_open();
+        let show_selection = editor_focused || self.menus.is_open() || self.find.is_open();
         let caret_hidden = self.key_tips_active();
 
         // Prepare the active document before building scrollbars so thumb metrics never lag a frame.
@@ -69,7 +69,7 @@ impl MainWindow {
         let find_node = self.find.render(self.focused_editor_slot(), p, &mut self.ui);
         let editor_node = self.editor_area(find_node, now, shell);
         let status_node = status_metrics.map(|m| self.status_bar(m, p));
-        let menu_popup = self.menu_bar.render_popup(p, &mut self.ui);
+        let menu_popup = self.menus.render_popup(p, &mut self.ui);
         let dialog_node = self.dialogs.render(self.focus, p, &mut self.ui);
 
         let chrome = box_()
@@ -84,13 +84,13 @@ impl MainWindow {
             .when_some(menu_popup, |this, m| this.child(m))
             .when_some(dialog_node, |this, d| this.child(d));
 
-        let frame = Frame::layout(
+        let frame = AppFrame::layout(
             root,
             AvailSize::definite(logical.width, logical.height),
             scale,
             ts,
         );
-        self.native.set_control_areas(frame.control_areas());
+        self.win.window.set_control_areas(frame.control_areas());
         self.update_min_size(logical, status_metrics, &frame, p, ts);
 
         let editor_rects: Vec<(EditorSlot, Rect)> = frame
@@ -133,7 +133,7 @@ impl MainWindow {
         let tabs = &self.tabs;
         let find = &self.find;
         let dialogs = &self.dialogs;
-        let needs_retry = self.surface.draw(p.window_clear, |renderer| {
+        let needs_retry = self.win.surface.draw(p.window_clear, |renderer| {
             frame.paint(renderer, &mut |token, rect, renderer| match token {
                 CustomDraw::Editor(slot) => {
                     let ed = match slot {
@@ -164,7 +164,8 @@ impl MainWindow {
             .focused_editor_slot()
             .and_then(|slot| self.editor_by_slot(slot))
             .and_then(|ed| ed.ime_caret_bounds());
-        self.native
+        self.win
+            .window
             .set_text_caret(ime_caret, window_active && !caret_hidden);
 
         self.has_painted = true;

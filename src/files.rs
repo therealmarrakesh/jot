@@ -1,31 +1,23 @@
 use std::collections::{HashSet, VecDeque};
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::APP_NAME;
 use crate::document::{
-    self, DocPath, Encoding, Format, LoadError, PathKey, default_directory, display_name, file_name,
+    self, DocPath, Encoding, Format, LoadError, PathKey, SaveError, default_directory,
+    display_name, file_name,
 };
 use crate::editor::Rope;
 use crate::ids::TabId;
 use crate::platform::{
-    Jobs, OpenDialogOptions, SaveChoice, SaveDialogOptions, SaveDialogResult, WindowHwnd, WindowId,
-    run_open_dialog, run_save_dialog,
+    Jobs, OpenDialogOptions, SaveChoice, SaveDialogOptions, SaveDialogResult, WindowHandle,
+    WindowId, run_open_dialog, run_save_dialog,
 };
 use crate::types::{Error, SharedStr};
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct PromptId(u64);
-
-impl PromptId {
-    pub(crate) fn next() -> Self {
-        static NEXT: AtomicU64 = AtomicU64::new(1);
-        Self(NEXT.fetch_add(1, Ordering::Relaxed))
-    }
-}
+crate::types::id_type!(PromptId);
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub(crate) enum PromptAnswer {
@@ -68,15 +60,7 @@ const LOSSY_CHOICES: &[(&str, PromptAnswer)] = &[
 ];
 const LOSSY_ANSI_WARNING: &str = "This file contains characters in Unicode format which will be lost if you save this file as an ANSI encoded text file. To keep the Unicode information, click Cancel below and then select one of the Unicode options from the Encoding drop down list. Continue?";
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct WorkflowId(u64);
-
-impl WorkflowId {
-    pub(crate) fn next() -> Self {
-        static NEXT: AtomicU64 = AtomicU64::new(1);
-        Self(NEXT.fetch_add(1, Ordering::Relaxed))
-    }
-}
+crate::types::id_type!(WorkflowId);
 
 #[derive(Clone, Default)]
 pub(crate) struct WriteTracker(Arc<(Mutex<usize>, Condvar)>);
@@ -135,7 +119,7 @@ pub(crate) enum FileRequest {
 pub(crate) enum WriteOutcome {
     Saved { doc_path: DocPath, format: Format },
     NeedsLossyConfirm,
-    Error(io::Error),
+    Error(SaveError),
 }
 
 pub(crate) enum FileEvent {
@@ -849,21 +833,20 @@ impl FileOps {
 
 pub(crate) fn spawn_file_io<E: Send + 'static>(
     io: FileIo,
-    owner_hwnd: Option<WindowHwnd>,
+    owner: Option<WindowHandle>,
     tracker: &WriteTracker,
     jobs: &Jobs<E>,
     wrap: fn(FileEvent) -> E,
 ) {
     match io {
         FileIo::OpenDialog { window, current } => {
-            let Some(hwnd) = owner_hwnd else {
+            let Some(owner) = owner else {
                 jobs.post(wrap(FileEvent::OpenDialogDone {
                     window,
                     result: Ok(None),
                 }));
                 return;
             };
-            let owner_raw = hwnd.raw().0 as isize;
             let options = OpenDialogOptions {
                 multiple: true,
                 directory: Some(default_directory(current.as_deref())),
@@ -873,7 +856,7 @@ pub(crate) fn spawn_file_io<E: Send + 'static>(
             };
             jobs.spawn(
                 "jot-open-dialog",
-                move || run_open_dialog(owner_raw, options),
+                move || run_open_dialog(owner, options),
                 move |res| {
                     wrap(FileEvent::OpenDialogDone {
                         window,
@@ -914,7 +897,7 @@ pub(crate) fn spawn_file_io<E: Send + 'static>(
             format,
             ..
         } => {
-            let Some(hwnd) = owner_hwnd else {
+            let Some(owner) = owner else {
                 jobs.post(wrap(FileEvent::SaveDialogDone {
                     wf,
                     result: Ok(None),
@@ -942,10 +925,9 @@ pub(crate) fn spawn_file_io<E: Send + 'static>(
                         .unwrap_or_default(),
                 }),
             };
-            let owner_raw = hwnd.raw().0 as isize;
             jobs.spawn(
                 "jot-save-dialog",
-                move || run_save_dialog(owner_raw, options),
+                move || run_save_dialog(owner, options),
                 move |res| {
                     wrap(FileEvent::SaveDialogDone {
                         wf,
@@ -968,7 +950,7 @@ pub(crate) fn spawn_file_io<E: Send + 'static>(
                         match document::is_lossy(&job.text, job.format) {
                             Ok(true) => return WriteOutcome::NeedsLossyConfirm,
                             Ok(false) => {}
-                            Err(err) => return WriteOutcome::Error(err),
+                            Err(err) => return WriteOutcome::Error(err.into()),
                         }
                     }
                     match document::write_rope(&job.path, &job.text, job.format) {
@@ -984,8 +966,9 @@ pub(crate) fn spawn_file_io<E: Send + 'static>(
                     }
                 },
                 move |res| {
-                    let outcome =
-                        res.unwrap_or_else(|msg| WriteOutcome::Error(io::Error::other(msg)));
+                    let outcome = res.unwrap_or_else(|msg| {
+                        WriteOutcome::Error(SaveError::Io(io::Error::other(msg)))
+                    });
                     wrap(FileEvent::WriteDone { wf, outcome })
                 },
             );
@@ -1050,11 +1033,23 @@ fn load_error_prompt(path: &Path, error: LoadError) -> Prompt {
     )
 }
 
-fn save_error_prompt(path: &Path, error: &io::Error) -> Prompt {
-    info_prompt(
-        format!("Can't save {}", display_name(Some(path))).into(),
-        friendly_io_error(error).into(),
-    )
+fn save_error_prompt(path: &Path, error: &SaveError) -> Prompt {
+    let detail: SharedStr = match error {
+        SaveError::ReadOnly => "This file is read-only.".into(),
+        SaveError::Kept {
+            source,
+            backup,
+            temp,
+        } => format!(
+            "{}\nThe original file was kept as {}\nThe new text was saved as {}",
+            friendly_io_error(source),
+            backup.display(),
+            temp.display(),
+        )
+        .into(),
+        SaveError::Io(err) => friendly_io_error(err).into(),
+    };
+    info_prompt(format!("Can't save {}", display_name(Some(path))).into(), detail)
 }
 
 fn dialog_error_prompt(title: &'static str, message: String) -> Prompt {

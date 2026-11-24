@@ -4,7 +4,7 @@ use crate::command::AppCommand;
 use crate::editor::{Editor, FieldOptions};
 use crate::geom::{Point, Rect, Size, point, size};
 use crate::gfx::TextSystem;
-use crate::ids::{AnimKey, EditorSlot, Focus, HitId, Node, UiState};
+use crate::ids::{AnimKey, AppNode, AppUi, EditorSlot, FindHit, Focus, HitId};
 use crate::platform::{CursorStyle, Key, KeyEvent, TimerHandle};
 use crate::shell::{WindowTimer, WindowTimers};
 use crate::theme::{
@@ -327,7 +327,7 @@ impl FindBar {
         FindOutcome::Replaced(count)
     }
 
-    fn sample(&mut self, ui: &mut UiState) -> Option<Transform> {
+    fn sample(&mut self, ui: &mut AppUi) -> Option<Transform> {
         if !self.transition.is_visible() {
             return None;
         }
@@ -356,8 +356,8 @@ impl FindBar {
         &mut self,
         focused_slot: Option<EditorSlot>,
         p: Palette,
-        ui: &mut UiState,
-    ) -> Option<Node> {
+        ui: &mut AppUi,
+    ) -> Option<AppNode> {
         let transform = self.sample(ui)?;
         let notice_node = self
             .notice
@@ -367,7 +367,7 @@ impl FindBar {
         let card = self
             .render_card(p, focused_slot, ui)
             .transform(transform)
-            .when(self.transition.is_closing(), Node::inert);
+            .when(self.transition.is_closing(), AppNode::inert);
 
         Some(
             box_()
@@ -386,11 +386,11 @@ impl FindBar {
                         .justify_center()
                         .child(card),
                 )
-                .when_some(notice_node, Node::child),
+                .when_some(notice_node, AppNode::child),
         )
     }
 
-    fn render_card(&self, p: Palette, focused_slot: Option<EditorSlot>, ui: &mut UiState) -> Node {
+    fn render_card(&self, p: Palette, focused_slot: Option<EditorSlot>, ui: &mut AppUi) -> AppNode {
         let query_row = self.render_query_row(p, focused_slot, ui);
         let replace_row = self
             .replace
@@ -404,14 +404,14 @@ impl FindBar {
             .shadows(theme_shadow(p.dark, CARD_Z))
             .child(
                 box_()
-                    .hit(HitId::FindCard)
+                    .hit(HitId::Find(FindHit::Card))
                     .cursor(CursorStyle::Arrow)
                     .w_full()
                     .p(CARD_PADDING)
                     .rounded(OVERLAY_RADIUS - BORDER)
                     .bg(p.card_surface.panel)
                     .child(query_row)
-                    .when_some(replace_row, Node::child),
+                    .when_some(replace_row, AppNode::child),
             )
     }
 
@@ -419,15 +419,15 @@ impl FindBar {
         &self,
         p: Palette,
         focused_slot: Option<EditorSlot>,
-        ui: &mut UiState,
-    ) -> Node {
+        ui: &mut AppUi,
+    ) -> AppNode {
         let dims = size(ICON_BUTTON_SIZE, ICON_BUTTON_SIZE);
-        let btn = |hit, tip, glyph, sz, ui: &mut UiState| {
-            icon_button(p, hit, tip, (glyph, sz), dims, true, ui)
+        let btn = |hit, tip, glyph, sz, ui: &mut AppUi| {
+            icon_button(p, HitId::Find(hit), tip, (glyph, sz), dims, true, ui)
         };
         let replace = self.replace;
         let expand_btn = btn(
-            HitId::FindToggleReplace,
+            FindHit::ToggleReplace,
             if replace {
                 "Close replace options"
             } else {
@@ -450,11 +450,11 @@ impl FindBar {
             true,
             ui,
         );
-        let next_btn = btn(HitId::FindNext, "Search down", ARROW_DOWN_GLYPH, ICON_SIZE, ui);
-        let prev_btn = btn(HitId::FindPrev, "Search up", ARROW_UP_GLYPH, ICON_SIZE, ui);
-        let opts_btn = btn(HitId::FindOptions, "More options", OPTIONS_GLYPH, ICON_SIZE, ui);
+        let next_btn = btn(FindHit::Next, "Search down", ARROW_DOWN_GLYPH, ICON_SIZE, ui);
+        let prev_btn = btn(FindHit::Prev, "Search up", ARROW_UP_GLYPH, ICON_SIZE, ui);
+        let opts_btn = btn(FindHit::Options, "More options", OPTIONS_GLYPH, ICON_SIZE, ui);
         let close_btn = btn(
-            HitId::FindClose,
+            FindHit::Close,
             "Exit Find and Replace",
             CLOSE_GLYPH,
             ICON_SIZE,
@@ -476,8 +476,8 @@ impl FindBar {
         &self,
         p: Palette,
         focused_slot: Option<EditorSlot>,
-        ui: &mut UiState,
-    ) -> Node {
+        ui: &mut AppUi,
+    ) -> AppNode {
         let replace_field = text_field(
             p,
             p.card_surface,
@@ -490,7 +490,7 @@ impl FindBar {
         let replace_btn = button(
             p,
             p.card_surface,
-            HitId::FindReplace,
+            HitId::Find(FindHit::Replace),
             "Replace",
             false,
             false,
@@ -499,7 +499,7 @@ impl FindBar {
         let replace_all_btn = button(
             p,
             p.card_surface,
-            HitId::FindReplaceAll,
+            HitId::Find(FindHit::ReplaceAll),
             "Replace all",
             false,
             false,
@@ -539,10 +539,10 @@ fn place_notice(card: Rect, popup: Size, _viewport: Size) -> Point {
     )
 }
 
-fn render_notice(p: Palette, msg: SharedStr) -> Node {
+fn render_notice(p: Palette, msg: SharedStr) -> AppNode {
     box_()
         .anchored(Anchor::Target {
-            target: HitId::FindCard,
+            target: HitId::Find(FindHit::Card),
             place: place_notice,
         })
         .border(BORDER, p.flyout_stroke)
@@ -575,7 +575,7 @@ mod tests {
 
     #[test]
     fn find_bar_step_wrap_replace_next_and_replace_all_return_outcomes() {
-        let ts = TextSystem::new();
+        let ts = TextSystem::new().unwrap();
         let jobs = Jobs::new();
         let timers = WindowTimers::for_test(&jobs);
         let mut bar = FindBar::new();

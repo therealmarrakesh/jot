@@ -24,7 +24,7 @@ pub(crate) use input::{Key, KeyEvent, Modifiers, MouseButton};
 pub(crate) use instance::{Arbitration, InstanceLock, arbitrate as arbitrate_instance};
 pub(crate) use jobs::{Jobs, TimerHandle};
 pub(crate) use os::{
-    WindowHwnd, WindowPlacement, cursor_screen_pos, monitor_work_area_and_scale,
+    WindowHandle, WindowPlacement, cursor_screen_pos, monitor_work_area_and_scale,
     primary_mouse_button_down, release_mouse_capture, top_visible_window_at,
 };
 pub(crate) use settings::{HighContrastColors, SystemSettings, format_local_time_date};
@@ -208,7 +208,7 @@ struct VsyncPacer {
 }
 
 impl VsyncPacer {
-    fn spawn(wake_hwnd_raw: isize) -> Arc<Self> {
+    fn spawn(wake_hwnd_raw: isize) -> Result<Arc<Self>> {
         let pacer = Arc::new(Self {
             armed: Mutex::new(false),
             condvar: Condvar::new(),
@@ -238,9 +238,8 @@ impl VsyncPacer {
                         LPARAM(0),
                     );
                 }
-            })
-            .expect("failed to spawn vsync thread");
-        pacer
+            })?;
+        Ok(pacer)
     }
 
     fn arm(&self) {
@@ -295,7 +294,7 @@ impl Platform {
         };
 
         set_cached_settings(SystemSettings::query());
-        let vsync = VsyncPacer::spawn(wake_hwnd.0 as isize);
+        let vsync = VsyncPacer::spawn(wake_hwnd.0 as isize)?;
 
         let platform = Self {
             wake_hwnd,

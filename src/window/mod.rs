@@ -10,11 +10,11 @@ use crate::editor::{EditCommand, Editor, Rope, RopeExt as _};
 use crate::files::Prompt;
 use crate::find::{FindBar, FindOutcome};
 use crate::geom::{Edges, Point, ScreenPoint, Size, point};
-use crate::gfx::Surface;
-use crate::ids::{EditorSlot, Focus, HitId, TabId, UiState};
+use crate::gfx::WindowSurface;
+use crate::ids::{AppUi, CaptionHit, EditorSlot, Focus, HitId, TabHit, TabId};
 use crate::keytips::KeyTip;
-use crate::menu::{FocusRequest, MenuBar, MenuOutcome, MenuState};
-use crate::platform::{NativeWindow, WindowAppearance, WindowHwnd, WindowId, clipboard};
+use crate::menu::{FocusRequest, MenuOutcome, MenuState, Menus};
+use crate::platform::{WindowAppearance, WindowHandle, WindowId, clipboard};
 use crate::shell::{Cx, Effect, Shell, SlotTimers, WindowTimer};
 use crate::tabs::{self, Removal, TabData, TabSet};
 use crate::tooltip::TooltipProbe;
@@ -52,12 +52,10 @@ pub(crate) enum InputMode {
 }
 
 pub(crate) struct MainWindow {
-    // Declared before native so swapchain/DComp target drop before DestroyWindow.
-    pub(super) surface: Surface,
-    pub(super) native: NativeWindow,
-    pub(super) ui: UiState,
+    pub(super) win: WindowSurface,
+    pub(super) ui: AppUi,
     pub(super) tabs: TabSet,
-    pub(super) menu_bar: MenuBar,
+    pub(super) menus: Menus,
     pub(super) find: FindBar,
     pub(super) dialogs: Dialogs,
     pub(super) focus: Focus,
@@ -69,23 +67,17 @@ pub(crate) struct MainWindow {
 }
 
 impl MainWindow {
-    pub(crate) fn new(
-        native: NativeWindow,
-        surface: Surface,
-        initial: Option<TabData>,
-        shell: &Shell,
-    ) -> Self {
+    pub(crate) fn new(win: WindowSurface, initial: Option<TabData>, shell: &Shell) -> Self {
         let data =
             initial.unwrap_or_else(|| TabData::create(None, shell.view.word_wrap, EDITOR_PADDINGS));
         let tabs = TabSet::new(data);
         let active_id = tabs.active_id();
 
-        let mut win = Self {
-            surface,
-            native,
-            ui: UiState::default(),
+        let mut window = Self {
+            win,
+            ui: AppUi::default(),
             tabs,
-            menu_bar: MenuBar::default(),
+            menus: Menus::default(),
             find: FindBar::new(),
             dialogs: Dialogs::new(),
             focus: Focus::Editor(EditorSlot::Tab(active_id)),
@@ -95,8 +87,8 @@ impl MainWindow {
             middle_pressed_tab: None,
             min_size: None,
         };
-        win.activate_tab(0, shell);
-        win
+        window.activate_tab(0, shell);
+        window
     }
 
     #[inline]
@@ -128,7 +120,7 @@ impl MainWindow {
     pub(crate) fn mode(&self) -> InputMode {
         if self.dialogs.is_open() {
             InputMode::Dialog
-        } else if self.menu_bar.is_open() {
+        } else if self.menus.is_open() {
             InputMode::Popup
         } else if self.focus == Focus::MenuBar {
             InputMode::MenuBar
@@ -139,27 +131,28 @@ impl MainWindow {
 
     #[inline]
     pub(crate) fn id(&self) -> WindowId {
-        self.native.id
+        self.win.window.id
     }
 
     #[inline]
-    pub(crate) fn hwnd(&self) -> WindowHwnd {
-        self.native.hwnd()
+    pub(crate) fn hwnd(&self) -> WindowHandle {
+        self.win.window.hwnd()
     }
 
     #[inline]
     pub(crate) fn scale_factor(&self) -> f32 {
-        self.native.scale_factor()
+        self.win.window.scale_factor()
     }
 
     pub(crate) fn restored_logical_size(&self) -> Size {
-        if self.native.is_maximized() {
-            self.native
+        if self.win.window.is_maximized() {
+            self.win
+                .window
                 .hwnd()
                 .restored_logical_size()
-                .unwrap_or_else(|| self.native.logical_size())
+                .unwrap_or_else(|| self.win.window.logical_size())
         } else {
-            self.native.logical_size()
+            self.win.window.logical_size()
         }
     }
 
@@ -180,21 +173,21 @@ impl MainWindow {
         scale: f32,
         shell: &Shell,
     ) {
-        self.surface.resize(physical_width, physical_height, scale);
+        self.win.surface.resize(physical_width, physical_height, scale);
         self.cancel_menu(shell);
     }
 
     pub(crate) fn apply_theme(&mut self, appearance: WindowAppearance) {
-        self.native.set_appearance(appearance);
+        self.win.window.set_appearance(appearance);
         self.dirty = true;
     }
 
     pub(crate) fn accepts_tab_drop(&self) -> bool {
-        !self.dialogs.is_open() && !self.pending_close && self.native.hwnd().is_enabled()
+        !self.dialogs.is_open() && !self.pending_close && self.win.window.hwnd().is_enabled()
     }
 
     pub(crate) fn screen_to_local(&self, pt: ScreenPoint) -> Point {
-        let hwnd = self.native.hwnd();
+        let hwnd = self.win.window.hwnd();
         let origin = hwnd.client_origin();
         let scale = hwnd.dpi_scale();
         point(
@@ -204,7 +197,7 @@ impl MainWindow {
     }
 
     pub(crate) fn local_to_screen(&self, pos: Point) -> ScreenPoint {
-        let hwnd = self.native.hwnd();
+        let hwnd = self.win.window.hwnd();
         let origin = hwnd.client_origin();
         let scale = hwnd.dpi_scale();
         ScreenPoint {
@@ -218,9 +211,12 @@ impl MainWindow {
         let right = self
             .ui
             .frame()
-            .rect_of(HitId::CaptionMin)
-            .map_or_else(|| self.native.logical_size().width - CAPTION_WIDTH, |r| r.left());
-        let (left, top, bottom) = self.ui.frame().rect_of(HitId::TabList).map_or(
+            .rect_of(HitId::Caption(CaptionHit::Min))
+            .map_or_else(
+                || self.win.window.logical_size().width - CAPTION_WIDTH,
+                |r| r.left(),
+            );
+        let (left, top, bottom) = self.ui.frame().rect_of(HitId::Tab(TabHit::List)).map_or(
             (
                 HEADER_WIDTH + tabs::LIST_PAD,
                 STRIP_TOP,
@@ -238,15 +234,15 @@ impl MainWindow {
     fn overlay_anchor(&self) -> OverlayAnchor {
         OverlayAnchor {
             window: self.id(),
-            origin: self.native.hwnd().client_origin(),
-            scale: self.native.scale_factor(),
+            origin: self.win.window.hwnd().client_origin(),
+            scale: self.win.window.scale_factor(),
         }
     }
 
     pub(crate) fn key_tip_request(&self, shell: &Shell) -> (OverlayAnchor, Vec<KeyTip>) {
         (
             self.overlay_anchor(),
-            self.menu_bar
+            self.menus
                 .key_tips(self.focus, self.ui.frame(), &shell.text_system),
         )
     }
@@ -267,7 +263,7 @@ impl MainWindow {
     }
 
     pub(super) fn sync_cursor(&self, pos: Point) {
-        self.native.set_cursor(self.ui.frame().cursor_at(pos));
+        self.win.window.set_cursor(self.ui.frame().cursor_at(pos));
     }
 
     #[cfg(test)]
@@ -276,12 +272,12 @@ impl MainWindow {
     }
 
     #[cfg(test)]
-    pub(crate) fn frame(&self) -> &crate::ids::Frame {
+    pub(crate) fn frame(&self) -> &crate::ids::AppFrame {
         self.ui.frame()
     }
 
     #[cfg(test)]
-    pub(crate) fn ui_state(&self) -> &UiState {
+    pub(crate) fn ui_state(&self) -> &AppUi {
         &self.ui
     }
 
@@ -291,13 +287,8 @@ impl MainWindow {
     }
 
     #[cfg(test)]
-    pub(crate) fn is_menu_open(&self) -> bool {
-        self.menu_bar.is_open()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn open_menu_kind(&self) -> Option<crate::ids::MenuKind> {
-        self.menu_bar.open_kind()
+    pub(crate) fn menus(&self) -> &Menus {
+        &self.menus
     }
 
     #[cfg(test)]
@@ -317,22 +308,22 @@ impl MainWindow {
 
     #[cfg(test)]
     pub(crate) fn is_active(&self) -> bool {
-        self.native.is_active()
+        self.win.window.is_active()
     }
 
     #[cfg(test)]
     pub(crate) fn in_size_move(&self) -> bool {
-        self.native.in_size_move()
+        self.win.window.in_size_move()
     }
 
     #[cfg(test)]
     pub(crate) fn surface_is_ready(&self) -> bool {
-        self.surface.is_ready()
+        self.win.surface.is_ready()
     }
 
     #[cfg(test)]
     pub(crate) fn mark_device_lost_for_test(&mut self) {
-        self.surface.mark_device_lost_for_test();
+        self.win.surface.mark_device_lost_for_test();
     }
 
     #[inline]
@@ -434,7 +425,7 @@ impl MainWindow {
             return;
         }
         if let Focus::Editor(old_slot) = self.focus {
-            self.native.hwnd().complete_ime_composition();
+            self.win.window.hwnd().complete_ime_composition();
             if let Some(ed) = self.editor_by_slot_mut(old_slot) {
                 ed.on_blur();
             }
@@ -474,7 +465,7 @@ impl MainWindow {
     }
 
     pub(crate) fn refresh_title(&self) {
-        self.native.set_title(&format!(
+        self.win.window.set_title(&format!(
             "{} - {APP_NAME}",
             self.tabs.tab_name(self.tabs.active_index())
         ));
@@ -511,7 +502,7 @@ impl MainWindow {
 
     pub(crate) fn select_tab_only(&mut self, ix: usize) {
         if self.tabs.active_index() != ix {
-            self.native.hwnd().complete_ime_composition();
+            self.win.window.hwnd().complete_ime_composition();
             self.active_editor_mut().on_blur();
         }
         self.tabs.select(ix);
@@ -549,7 +540,7 @@ impl MainWindow {
         let pointer_in_strip = self.ui.pointer().is_some_and(|p| {
             self.ui
                 .frame()
-                .rect_of(HitId::TabStrip)
+                .rect_of(HitId::Tab(TabHit::Strip))
                 .is_some_and(|r| r.contains(p.pos))
         });
         match self.tabs.remove(ix, pointer_in_strip) {
@@ -827,24 +818,11 @@ impl MainWindow {
     }
 
     pub(crate) fn key_tips_active(&self) -> bool {
-        self.menu_bar.access_active(self.focus)
-    }
-
-    pub(super) fn menu_state(&self, shell: &Shell) -> MenuState {
-        let m = self.active_editor().model();
-        MenuState {
-            can_undo: m.can_undo(),
-            can_redo: m.can_redo(),
-            has_selection: !m.selected_range().is_empty(),
-            has_text: m.text().len() > 0,
-            clipboard_has_text: clipboard::clipboard_has_text(),
-            status_bar: shell.view.status_bar,
-            word_wrap: shell.view.word_wrap,
-        }
+        self.menus.access_active(self.focus)
     }
 
     pub(crate) fn cancel_menu(&mut self, shell: &Shell) {
-        let out = self.menu_bar.cancel(self.focus);
+        let out = self.menus.cancel(self.focus);
         self.dirty |= out.dirty;
         self.apply_focus_request(out.focus, shell);
     }
@@ -872,7 +850,7 @@ impl MainWindow {
 
     pub(crate) fn on_activated(&mut self, active: bool, shell: &Shell) {
         if !active {
-            self.native.hwnd().complete_ime_composition();
+            self.win.window.hwnd().complete_ime_composition();
             if let Some(slot) = self.focused_editor_slot()
                 && let Some(ed) = self.editor_by_slot_mut(slot)
             {
@@ -880,7 +858,7 @@ impl MainWindow {
             }
             self.cancel_menu(shell);
             self.stop_all_editor_blinks();
-            self.native.set_text_caret(None, false);
+            self.win.window.set_text_caret(None, false);
         } else if let Some(slot) = self.focused_editor_slot() {
             self.start_editor_blink(slot, shell);
         }
@@ -899,7 +877,7 @@ impl MainWindow {
                 }
             }
             WindowTimer::Submenu(target) => {
-                if self.menu_bar.on_submenu_timer(target) {
+                if self.menus.on_submenu_timer(target) {
                     self.dirty = true;
                 }
             }
@@ -909,5 +887,18 @@ impl MainWindow {
                 }
             }
         }
+    }
+}
+
+pub(super) fn menu_state(tabs: &TabSet, shell: &Shell) -> MenuState {
+    let m = tabs.active().editor.model();
+    MenuState {
+        can_undo: m.can_undo(),
+        can_redo: m.can_redo(),
+        has_selection: !m.selected_range().is_empty(),
+        has_text: m.text().len() > 0,
+        clipboard_has_text: clipboard::clipboard_has_text(),
+        status_bar: shell.view.status_bar,
+        word_wrap: shell.view.word_wrap,
     }
 }

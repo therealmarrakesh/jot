@@ -31,7 +31,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use app::App;
-use gfx::Gpu;
+use gfx::{Gpu, TextSystem};
 use platform::{Arbitration, Platform, arbitrate_instance, diag};
 
 pub(crate) const APP_NAME: &str = "Jot";
@@ -80,7 +80,14 @@ fn main() {
             return;
         }
     };
-    let app = Rc::new(RefCell::new(App::new(platform, gpu)));
+    let text_system = match TextSystem::new() {
+        Ok(ts) => ts,
+        Err(err) => {
+            diag::show_error_dialog(APP_NAME, &format!("Jot couldn't start.\n\n{err}"));
+            return;
+        }
+    };
+    let app = Rc::new(RefCell::new(App::new(platform, gpu, text_system)));
 
     Platform::run(app, move |app| {
         if let Err(message) = app.launch(paths, false) {

@@ -416,7 +416,7 @@ mod tests {
 
     #[test]
     fn editor_direct_typing_undo_redo_and_word_navigation() {
-        let ts = TextSystem::new();
+        let ts = TextSystem::new().unwrap();
         let mut timers = NoopTimers;
         let mut ed = Editor::document(
             Rope::new(),

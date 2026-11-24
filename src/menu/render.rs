@@ -1,7 +1,7 @@
 use crate::color::transparent_black;
 use crate::geom::Edges;
 use crate::gfx::TextSystem;
-use crate::ids::{Focus, Frame, HitId, MenuKind, Node, UiState};
+use crate::ids::{AppFrame, AppNode, AppUi, Focus, HitId, MenuHit, MenuKind};
 use crate::keytips::{self, KeyTip};
 use crate::platform::CursorStyle;
 use crate::theme::{
@@ -10,7 +10,7 @@ use crate::theme::{
 use crate::ui::{Anchor, Transform, box_, row, text};
 use crate::widgets::{focus_ring, subtle_brushes};
 
-use super::bar::{MenuBar, MenuMode};
+use super::bar::{MenuMode, Menus};
 use super::model::{
     BORDER, CHECK_COLUMN, CHEVRON_WIDTH, CommandButton, Entry, LABEL_SIZE, PADDING_Y, Panel,
     ROW_INSET, ROW_PADDING, ROW_SEPARATOR, SHORTCUT_GAP, SHORTCUT_SIZE,
@@ -44,13 +44,13 @@ const BAR_FOCUS_OUTSET: Edges<f32> = Edges {
     left: 1.,
 };
 
-impl MenuBar {
-    pub(crate) fn render_bar(&self, focus: Focus, p: Palette, ui: &mut UiState) -> Node {
+impl Menus {
+    pub(crate) fn render_bar(&self, focus: Focus, p: Palette, ui: &mut AppUi) -> AppNode {
         let bar_focused = self.bar_focused(focus);
-        let triggers: Vec<Node> = MenuKind::ALL
+        let triggers: Vec<AppNode> = MenuKind::ALL
             .into_iter()
             .map(|kind| {
-                let hit = HitId::MenuTrigger(kind);
+                let hit = HitId::Menu(MenuHit::Trigger(kind));
                 let active = self.open_kind() == Some(kind);
                 let ring = bar_focused == Some(kind);
                 let bg = if active {
@@ -78,7 +78,7 @@ impl MenuBar {
             .collect();
 
         row()
-            .hit(HitId::MenuBar)
+            .hit(HitId::Menu(MenuHit::Bar))
             .flex_none()
             .h_full()
             .gap(BAR_GAP)
@@ -88,7 +88,7 @@ impl MenuBar {
             .children(triggers)
     }
 
-    pub(crate) fn render_popup(&self, p: Palette, ui: &mut UiState) -> Option<Node> {
+    pub(crate) fn render_popup(&self, p: Palette, ui: &mut AppUi) -> Option<AppNode> {
         let open = self.open_popup()?;
         let has_commands = !open.kind.commands().is_empty();
         let shown_ratio = 1. - CLOSED_RATIO * (1. - open.motion.unroll);
@@ -100,7 +100,7 @@ impl MenuBar {
             .map(|sub| render_submenu_popup(open, sub, p, ui));
 
         let card = box_()
-            .hit(HitId::MenuPanel)
+            .hit(HitId::Menu(MenuHit::Panel))
             .cursor(CursorStyle::Arrow)
             .min_w(open.panel.min_width)
             .border(BORDER, p.flyout_stroke)
@@ -115,7 +115,7 @@ impl MenuBar {
                     .w_full()
                     .rounded(OVERLAY_RADIUS - BORDER)
                     .bg(p.menu_fill)
-                    .when_some(cmd_row, Node::child)
+                    .when_some(cmd_row, AppNode::child)
                     .child(main_rows),
             );
 
@@ -124,12 +124,12 @@ impl MenuBar {
                 .anchored(open.kind.anchor())
                 .opacity(open.motion.opacity)
                 .child(card)
-                .when_some(sub_node, Node::child)
-                .when(open.is_closing(), Node::inert),
+                .when_some(sub_node, AppNode::child)
+                .when(open.is_closing(), AppNode::inert),
         )
     }
 
-    pub(crate) fn key_tips(&self, focus: Focus, frame: &Frame, ts: &TextSystem) -> Vec<KeyTip> {
+    pub(crate) fn key_tips(&self, focus: Focus, frame: &AppFrame, ts: &TextSystem) -> Vec<KeyTip> {
         if !self.access_active(focus) {
             return Vec::new();
         }
@@ -140,7 +140,7 @@ impl MenuBar {
                     .into_iter()
                     .filter_map(|kind| {
                         let key = kind.access_key()?;
-                        let anchor = frame.rect_of(HitId::MenuTrigger(kind))?;
+                        let anchor = frame.rect_of(HitId::Menu(MenuHit::Trigger(kind)))?;
                         Some(keytips::layout_tip(ts, key, anchor, keytips::Placement::Below))
                     })
                     .collect();
@@ -164,9 +164,9 @@ impl MenuBar {
             .filter_map(|(ix, entry)| {
                 let key = entry.access_key()?;
                 let hit = if is_sub {
-                    HitId::SubmenuItem { serial, ix }
+                    HitId::Menu(MenuHit::SubmenuItem { serial, ix })
                 } else {
-                    HitId::MenuItem { serial, ix }
+                    HitId::Menu(MenuHit::Item { serial, ix })
                 };
                 let face = frame.rect_of(hit)?.inset(Edges::xy(ROW_INSET, ROW_MARGIN_Y));
                 Some(keytips::layout_tip(ts, key, face, keytips::Placement::Left))
@@ -175,7 +175,7 @@ impl MenuBar {
     }
 }
 
-fn render_command_row(open: &OpenMenu, p: Palette, ui: &mut UiState) -> Node {
+fn render_command_row(open: &OpenMenu, p: Palette, ui: &mut AppUi) -> AppNode {
     let commands = open.kind.commands();
     let mut children = Vec::with_capacity(commands.len() * 2);
     for ix in 0..commands.len() {
@@ -198,14 +198,14 @@ fn render_command_row(open: &OpenMenu, p: Palette, ui: &mut UiState) -> Node {
         .child(box_().w_full().h(1.).bg(p.menu_separator))
 }
 
-fn render_command_button(open: &OpenMenu, ix: usize, p: Palette, ui: &mut UiState) -> Node {
+fn render_command_button(open: &OpenMenu, ix: usize, p: Palette, ui: &mut AppUi) -> AppNode {
     let CommandButton { command, glyph } = &open.kind.commands()[ix];
     let focused = ui.last_input_was_keyboard() && open.focus == PopupFocus::Command(ix);
     let enabled = command.enabled;
-    let hit = HitId::MenuCommand {
+    let hit = HitId::Menu(MenuHit::Command {
         serial: open.motion.serial(),
         ix,
-    };
+    });
     let bg = ui.brush(hit, subtle_brushes(p), enabled);
     let fg = if !enabled {
         p.text_disabled
@@ -259,19 +259,19 @@ fn render_submenu_popup(
     open: &OpenMenu,
     submenu: &OpenSubmenu,
     p: Palette,
-    ui: &mut UiState,
-) -> Node {
+    ui: &mut AppUi,
+) -> AppNode {
     let shown_ratio = 1. - SUBMENU_CLOSED_RATIO * (1. - submenu.motion.unroll);
     let rows = render_panel_rows(open, Some(submenu), p, ui);
 
     box_()
-        .hit(HitId::SubmenuPanel)
+        .hit(HitId::Menu(MenuHit::SubmenuPanel))
         .cursor(CursorStyle::Arrow)
         .anchored(Anchor::Target {
-            target: HitId::MenuItem {
+            target: HitId::Menu(MenuHit::Item {
                 serial: open.motion.serial(),
                 ix: submenu.ix,
-            },
+            }),
             place: place_submenu,
         })
         .min_w(submenu.panel.min_width)
@@ -290,15 +290,15 @@ fn render_submenu_popup(
                 .bg(p.menu_fill)
                 .child(rows),
         )
-        .when(submenu.motion.is_closing(), Node::inert)
+        .when(submenu.motion.is_closing(), AppNode::inert)
 }
 
 fn render_panel_rows(
     open: &OpenMenu,
     sub: Option<&OpenSubmenu>,
     p: Palette,
-    ui: &mut UiState,
-) -> Node {
+    ui: &mut AppUi,
+) -> AppNode {
     let (panel, serial, is_sub, fade) = match sub {
         Some(sub) => (&sub.panel, sub.motion.serial(), true, false),
         None => (
@@ -311,7 +311,7 @@ fn render_panel_rows(
     let focus_visible = ui.last_input_was_keyboard();
     let expanded = open.submenu.as_ref().filter(|_| !is_sub).map(|s| s.ix);
 
-    let rows: Vec<Node> = panel
+    let rows: Vec<AppNode> = panel
         .entries
         .iter()
         .enumerate()
@@ -323,9 +323,9 @@ fn render_panel_rows(
                     .child(box_().h(1.).bg(p.menu_separator));
             }
             let hit = if is_sub {
-                HitId::SubmenuItem { serial, ix }
+                HitId::Menu(MenuHit::SubmenuItem { serial, ix })
             } else {
-                HitId::MenuItem { serial, ix }
+                HitId::Menu(MenuHit::Item { serial, ix })
             };
             let focused_here = if is_sub {
                 open.focus == PopupFocus::SubRow(ix)
@@ -365,8 +365,8 @@ fn render_row_face(
     hit: HitId,
     fade: bool,
     expanded: bool,
-    ui: &mut UiState,
-) -> Node {
+    ui: &mut AppUi,
+) -> AppNode {
     let entry = &panel.entries[ix];
     let label = panel.labels[ix].clone();
     let checks = panel.checks;

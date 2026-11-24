@@ -1,10 +1,10 @@
 #![allow(unsafe_code)]
 
 pub(crate) mod d2d;
+mod line_breaks;
 pub(crate) mod text;
-pub(crate) mod wrap;
 
-pub(crate) use d2d::{Canvas, Gpu, PaintQuad, Scope, Surface, fill};
+pub(crate) use d2d::{Canvas, Gpu, PaintQuad, Scope, WindowSurface, fill};
 pub(crate) use text::{
     FontFace, FontWeight, Label, LabelLayout, ShapedRow, TextStyle, TextSystem,
 };

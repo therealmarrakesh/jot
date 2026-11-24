@@ -662,15 +662,6 @@ impl<H: Copy + Eq, C: Copy> Frame<H, C> {
             .map(|node| node.rect)
     }
 
-    #[cfg(test)]
-    pub(crate) fn find_rect(&self, pred: impl Fn(H) -> bool) -> Option<Rect> {
-        self.nodes
-            .iter()
-            .rev()
-            .find(|node| node.interact.hit.is_some_and(&pred))
-            .map(|node| node.rect)
-    }
-
     pub(crate) fn cursor_at(&self, pos: Point) -> CursorStyle {
         let Some(top) = self.top_hit(pos) else {
             return CursorStyle::Arrow;
@@ -990,7 +981,7 @@ mod tests {
 
     #[test]
     fn scene_hit_chain_bubbles_nested_hits_and_clips_overflow() {
-        let ts = TextSystem::new();
+        let ts = TextSystem::new().unwrap();
         let tree: Node<TestHit, ()> = row()
             .size_full()
             .child(
@@ -1073,7 +1064,7 @@ mod tests {
             Flyout,
         }
 
-        let ts = TextSystem::new();
+        let ts = TextSystem::new().unwrap();
         let tree: Node<AnchorHit, ()> = box_()
             .size_full()
             .child(

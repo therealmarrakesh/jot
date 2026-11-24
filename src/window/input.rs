@@ -1,16 +1,16 @@
-use crate::command::{AppCommand, app_shortcut, edit_shortcut};
+use crate::command::{app_shortcut, edit_shortcut};
 use crate::dialog::DialogKey;
 use crate::files::FileRequest;
 use crate::find::FindKey;
 use crate::geom::{Point, point};
-use crate::ids::{EditorSlot, Focus, HitId};
-use crate::menu::{Entry, RowPath};
+use crate::ids::{DialogHit, EditorSlot, FindHit, Focus, HitId, MenuHit, TabHit};
+use crate::menu::RowPath;
 use crate::platform::{KeyEvent, Modifiers, MouseButton};
 use crate::shell::{Cx, Effect, WindowTimer};
 use crate::tabs::{SCROLL_REPEAT_DELAY, SCROLL_REPEAT_INTERVAL, SCROLL_STEP, WHEEL_SHARE};
 
 use super::chrome::STRIP_TOP;
-use super::{InputMode, MainWindow, ZOOM_STEP};
+use super::{InputMode, MainWindow, ZOOM_STEP, menu_state};
 
 impl MainWindow {
     pub(crate) fn on_mouse_move(
@@ -22,14 +22,17 @@ impl MainWindow {
         self.dirty |= self.ui.on_mouse_move(pos, pressed_button.is_some());
 
         let top = self.ui.top_hit();
-        if !matches!(top, Some(HitId::TabScrollLeft | HitId::TabScrollRight)) {
+        if !matches!(top, Some(HitId::Tab(TabHit::ScrollLeft | TabHit::ScrollRight))) {
             self.tabs.stop_scroll_repeat();
         }
         let mode = self.mode();
         if mode != InputMode::Dialog {
-            let state = self.menu_state(cx.shell);
             let timers = cx.timers(self.id());
-            let menu_out = self.menu_bar.on_hover_change(top, state, &mut self.ui, timers);
+            let tabs = &self.tabs;
+            let shell = cx.shell;
+            let menu_out =
+                self.menus
+                    .on_hover_change(top, || menu_state(tabs, shell), &mut self.ui, timers);
             let _ = self.apply_menu_outcome(menu_out, cx);
         }
 
@@ -37,7 +40,7 @@ impl MainWindow {
             && !self
                 .ui
                 .frame()
-                .rect_of(HitId::TabStrip)
+                .rect_of(HitId::Tab(TabHit::Strip))
                 .is_some_and(|r| r.contains(pos))
         {
             self.dirty |= self.tabs.thaw_if_frozen();
@@ -101,18 +104,18 @@ impl MainWindow {
         click_count: usize,
         cx: &mut Cx<'_>,
     ) {
-        let menu_out = self.menu_bar.pointer_down(self.focus);
+        let menu_out = self.menus.pointer_down(self.focus);
         let _ = self.apply_menu_outcome(menu_out, cx);
         let chain = self.ui.on_mouse_down(pos, button);
         let top = chain.first().copied();
         let in_menu_ui = chain.iter().any(|h| {
             matches!(
                 h,
-                HitId::MenuPanel | HitId::SubmenuPanel | HitId::MenuTrigger(_)
+                HitId::Menu(MenuHit::Panel | MenuHit::SubmenuPanel | MenuHit::Trigger(_))
             )
         });
         let tab_hit = chain.iter().find_map(|hit| match hit {
-            HitId::Tab(id) => Some(*id),
+            HitId::Tab(TabHit::Item(id)) => Some(*id),
             _ => None,
         });
         let editor_hit = chain.iter().find_map(|hit| match hit {
@@ -122,7 +125,7 @@ impl MainWindow {
 
         let mode = self.mode();
         if mode == InputMode::Popup && !in_menu_ui {
-            let out = self.menu_bar.close();
+            let out = self.menus.close();
             let _ = self.apply_menu_outcome(out, cx);
         }
 
@@ -135,37 +138,24 @@ impl MainWindow {
             match top {
                 Some(
                     HitId::FieldClear(_)
-                    | HitId::DialogButton(_)
-                    | HitId::DialogBackdrop
-                    | HitId::DialogCard
-                    | HitId::FindCard
-                    | HitId::FindToggleReplace
-                    | HitId::FindNext
-                    | HitId::FindPrev
-                    | HitId::FindOptions
-                    | HitId::FindClose
-                    | HitId::FindReplace
-                    | HitId::FindReplaceAll
-                    | HitId::MenuPanel
-                    | HitId::MenuItem { .. }
-                    | HitId::MenuCommand { .. }
-                    | HitId::SubmenuPanel
-                    | HitId::SubmenuItem { .. }
-                    | HitId::TabClose(_),
+                    | HitId::Dialog(_)
+                    | HitId::Find(_)
+                    | HitId::Tab(TabHit::Close(_)),
                 ) => return,
-                Some(HitId::MenuTrigger(kind)) => {
-                    let state = self.menu_state(cx.shell);
-                    let out = self.menu_bar.toggle_trigger(kind, state);
+                Some(HitId::Menu(m)) if m.is_popup() => return,
+                Some(HitId::Menu(MenuHit::Trigger(kind))) => {
+                    let state = menu_state(&self.tabs, cx.shell);
+                    let out = self.menus.toggle_trigger(kind, state);
                     let _ = self.apply_menu_outcome(out, cx);
                     return;
                 }
-                Some(HitId::Tab(id)) => {
+                Some(HitId::Tab(TabHit::Item(id))) => {
                     if let Some(ix) = self.tabs.index_of(id) {
                         self.activate_tab(ix, cx.shell);
                         let left = self
                             .ui
                             .frame()
-                            .rect_of(HitId::Tab(id))
+                            .rect_of(HitId::Tab(TabHit::Item(id)))
                             .map_or(pos.x, |r| r.origin.x);
                         let grab = point(pos.x - left, pos.y - STRIP_TOP);
                         cx.emit(Effect::StartTabDrag {
@@ -178,7 +168,7 @@ impl MainWindow {
                     }
                     return;
                 }
-                Some(HitId::TabScrollLeft) => {
+                Some(HitId::Tab(TabHit::ScrollLeft)) => {
                     if self.scroll_tabs(-SCROLL_STEP) {
                         self.tabs.set_scroll_repeat(cx.timers(self.id()).every(
                             SCROLL_REPEAT_DELAY,
@@ -188,7 +178,7 @@ impl MainWindow {
                     }
                     return;
                 }
-                Some(HitId::TabScrollRight) => {
+                Some(HitId::Tab(TabHit::ScrollRight)) => {
                     if self.scroll_tabs(SCROLL_STEP) {
                         self.tabs.set_scroll_repeat(cx.timers(self.id()).every(
                             SCROLL_REPEAT_DELAY,
@@ -225,7 +215,7 @@ impl MainWindow {
         }
 
         if let Some(slot) = editor_hit {
-            self.native.hwnd().complete_ime_composition();
+            self.win.window.hwnd().complete_ime_composition();
             self.set_focus(Focus::Editor(slot), cx.shell);
             self.with_editor(slot, cx.shell, |ed, timers| {
                 ed.on_mouse_down(button, pos, modifiers, click_count, timers);
@@ -237,7 +227,7 @@ impl MainWindow {
         let (clicked, chain) = self.ui.on_mouse_up(pos, button);
         let top = chain.first().copied();
         let tab_over = chain.iter().find_map(|hit| match hit {
-            HitId::Tab(id) => Some(*id),
+            HitId::Tab(TabHit::Item(id)) => Some(*id),
             _ => None,
         });
         let menu_release = if button == MouseButton::Left
@@ -245,11 +235,9 @@ impl MainWindow {
             && self.mode() == InputMode::Popup
         {
             match top {
-                hit @ Some(
-                    HitId::MenuItem { .. }
-                    | HitId::SubmenuItem { .. }
-                    | HitId::MenuCommand { .. },
-                ) => hit,
+                hit @ Some(HitId::Menu(
+                    MenuHit::Item { .. } | MenuHit::SubmenuItem { .. } | MenuHit::Command { .. },
+                )) => hit,
                 _ => None,
             }
         } else {
@@ -291,60 +279,48 @@ impl MainWindow {
             })
             .flatten();
         if let Some(anchor) = open_ctx {
-            let state = self.menu_state(cx.shell);
-            let out = self.menu_bar.open_context_menu(anchor, state);
+            let state = menu_state(&self.tabs, cx.shell);
+            let out = self.menus.open_context_menu(anchor, state);
             let _ = self.apply_menu_outcome(out, cx);
             return;
         }
 
         match activated {
-            Some(HitId::DialogButton(ix)) => self.finish_dialog(Some(ix), cx),
+            Some(HitId::Dialog(DialogHit::Button(ix))) => self.finish_dialog(Some(ix), cx),
             Some(HitId::FieldClear(slot)) => {
                 if let Some(ed) = self.editor_by_slot_mut(slot) {
                     ed.set_value("", cx.ts());
                 }
                 self.set_focus(Focus::Editor(slot), cx.shell);
             }
-            Some(HitId::FindToggleReplace) => {
+            Some(HitId::Find(FindHit::ToggleReplace)) => {
                 self.find.toggle_replace();
                 self.refocus_find(cx.shell);
             }
-            Some(HitId::FindNext) => self.find_step(true, cx.shell),
-            Some(HitId::FindPrev) => self.find_step(false, cx.shell),
-            Some(HitId::FindOptions) => {
-                let entries = vec![
-                    Entry::toggle(
-                        "Match case",
-                        self.find.match_case(),
-                        AppCommand::ToggleMatchCase,
-                    ),
-                    Entry::toggle(
-                        "Wrap around",
-                        self.find.wrap_around(),
-                        AppCommand::ToggleWrapAround,
-                    ),
-                ];
-                let out =
-                    self.menu_bar
-                        .open_flyout(entries, HitId::FindOptions, EditorSlot::FindQuery);
+            Some(HitId::Find(FindHit::Next)) => self.find_step(true, cx.shell),
+            Some(HitId::Find(FindHit::Prev)) => self.find_step(false, cx.shell),
+            Some(HitId::Find(FindHit::Options)) => {
+                let out = self
+                    .menus
+                    .open_find_options(self.find.match_case(), self.find.wrap_around());
                 let _ = self.apply_menu_outcome(out, cx);
             }
-            Some(HitId::FindClose) => self.close_find(cx.shell),
-            Some(HitId::FindReplace) => self.replace_next(cx.shell),
-            Some(HitId::FindReplaceAll) => self.replace_all(cx.shell),
-            Some(HitId::MenuItem { ix, .. }) => {
-                let out = self.menu_bar.activate(RowPath::Root(ix), false);
+            Some(HitId::Find(FindHit::Close)) => self.close_find(cx.shell),
+            Some(HitId::Find(FindHit::Replace)) => self.replace_next(cx.shell),
+            Some(HitId::Find(FindHit::ReplaceAll)) => self.replace_all(cx.shell),
+            Some(HitId::Menu(MenuHit::Item { ix, .. })) => {
+                let out = self.menus.activate(RowPath::Root(ix), false);
                 let _ = self.apply_menu_outcome(out, cx);
             }
-            Some(HitId::SubmenuItem { ix: sub_ix, .. }) => {
-                let out = self.menu_bar.activate(RowPath::Sub(sub_ix), false);
+            Some(HitId::Menu(MenuHit::SubmenuItem { ix: sub_ix, .. })) => {
+                let out = self.menus.activate(RowPath::Sub(sub_ix), false);
                 let _ = self.apply_menu_outcome(out, cx);
             }
-            Some(HitId::MenuCommand { ix, .. }) => {
-                let out = self.menu_bar.click_command(ix);
+            Some(HitId::Menu(MenuHit::Command { ix, .. })) => {
+                let out = self.menus.click_command(ix);
                 let _ = self.apply_menu_outcome(out, cx);
             }
-            Some(HitId::TabClose(id)) => {
+            Some(HitId::Tab(TabHit::Close(id))) => {
                 if self.tabs.index_of(id).is_some() {
                     cx.emit(Effect::File(FileRequest::CloseTab {
                         window: self.id(),
@@ -352,7 +328,7 @@ impl MainWindow {
                     }));
                 }
             }
-            Some(HitId::NewTab) => self.add_tab(cx.shell),
+            Some(HitId::Tab(TabHit::New)) => self.add_tab(cx.shell),
             Some(HitId::ThemeToggle) => cx.emit(Effect::ToggleTheme),
             _ => {}
         }
@@ -369,7 +345,7 @@ impl MainWindow {
             return;
         }
         let chain = self.ui.frame().hit_chain(pos);
-        if self.tabs.overflow() && chain.contains(&HitId::TabList) {
+        if self.tabs.overflow() && chain.contains(&HitId::Tab(TabHit::List)) {
             let viewport = self.tabs.scroll_viewport();
             let notches = if delta_lines.y != 0. {
                 delta_lines.y
@@ -425,9 +401,12 @@ impl MainWindow {
             };
         }
 
-        let was_popup = self.menu_bar.is_open();
-        let state = self.menu_state(cx.shell);
-        let out = self.menu_bar.on_key_down(ev, self.focus, state);
+        let was_popup = self.menus.is_open();
+        let tabs = &self.tabs;
+        let shell = cx.shell;
+        let out = self
+            .menus
+            .on_key_down(ev, self.focus, || menu_state(tabs, shell));
         let handled = self.apply_menu_outcome(out, cx);
         if handled || was_popup {
             return handled;
@@ -469,7 +448,7 @@ impl MainWindow {
         if self.mode() == InputMode::Dialog {
             return false;
         }
-        let menu_out = self.menu_bar.on_key_up(ev, self.focus);
+        let menu_out = self.menus.on_key_up(ev, self.focus);
         if menu_out.handled {
             return self.apply_menu_outcome(menu_out, cx);
         }

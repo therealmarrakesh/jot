@@ -7,7 +7,7 @@ use ropey::Rope;
 use crate::color::Rgba;
 use crate::geom::{Axis, Edges, Point, Rect, Size, point, size};
 use crate::gfx::{Canvas, TextStyle, TextSystem, fill};
-use crate::ids::{EditorSlot, Node, UiState};
+use crate::ids::{AppNode, AppUi, EditorSlot};
 use crate::platform::{Modifiers, MouseButton, TimerHandle};
 use crate::theme::Palette;
 use crate::types::SharedStr;
@@ -596,9 +596,9 @@ impl Editor {
         slot: EditorSlot,
         p: Palette,
         now: Instant,
-        ui: &mut UiState,
+        ui: &mut AppUi,
         timers: &mut dyn EditorTimers,
-    ) -> Vec<Node> {
+    ) -> Vec<AppNode> {
         let input_size = self.input_bounds.size;
         if input_size.width <= 0. || input_size.height <= 0. {
             return Vec::new();

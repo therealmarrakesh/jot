@@ -4,7 +4,7 @@ use crate::color::transparent_black;
 use crate::command::{AppCommand, shortcut_tooltip};
 use crate::document;
 use crate::geom::size;
-use crate::ids::{AnimKey, HitId, Node, UiState};
+use crate::ids::{AnimKey, AppNode, AppUi, HitId, TabHit};
 use crate::platform::CursorStyle;
 use crate::theme::{OVERLAY_RADIUS, Palette, SMALL_FONT};
 use crate::types::SharedStr;
@@ -46,7 +46,7 @@ pub(crate) struct StripFrame {
 }
 
 impl TabSet {
-    pub(crate) fn sample(&mut self, column: f32, ui: &mut UiState) -> StripFrame {
+    pub(crate) fn sample(&mut self, column: f32, ui: &mut AppUi) -> StripFrame {
         if column != self.column {
             self.column = column;
             self.snap();
@@ -104,7 +104,7 @@ impl TabSet {
         }
     }
 
-    pub(crate) fn render(&self, sampled: &StripFrame, p: Palette, ui: &mut UiState) -> Node {
+    pub(crate) fn render(&self, sampled: &StripFrame, p: Palette, ui: &mut AppUi) -> AppNode {
         let shift = sampled.shift;
         let viewport = sampled.viewport;
         let lifted = self.lifted.and_then(|id| self.index_of(id));
@@ -115,9 +115,9 @@ impl TabSet {
         let hovered_ix = self
             .tabs
             .iter()
-            .position(|t| ui.is_hovered(HitId::Tab(t.data.id)));
+            .position(|t| ui.is_hovered(HitId::Tab(TabHit::Item(t.data.id))));
 
-        let ghosts: Vec<Node> = sampled
+        let ghosts: Vec<AppNode> = sampled
             .ghosts
             .iter()
             .map(|(name, x, width, was_active)| {
@@ -141,7 +141,7 @@ impl TabSet {
             })
             .collect();
 
-        let tab_nodes: Vec<Node> = (0..self.tabs.len())
+        let tab_nodes: Vec<AppNode> = (0..self.tabs.len())
             .filter(|&ix| Some(ix) != lifted)
             .chain(lifted)
             .map(|ix| {
@@ -159,7 +159,7 @@ impl TabSet {
         let scroll_fwd = self.buttons.then(|| self.scroll_button(true, p, ui));
         let new_tab = icon_button(
             p,
-            HitId::NewTab,
+            HitId::Tab(TabHit::New),
             shortcut_tooltip("New tab", AppCommand::NewTab.into()),
             (ADD_GLYPH, BUTTON_GLYPH_SIZE),
             size(BUTTON_WIDTH, BUTTON_HEIGHT),
@@ -170,12 +170,12 @@ impl TabSet {
         .mt(BUTTON_TOP);
 
         row()
-            .hit(HitId::TabStrip)
+            .hit(HitId::Tab(TabHit::Strip))
             .h(TAB_HEIGHT)
             .when_some(scroll_back, |this, btn| this.child(btn))
             .child(
                 box_()
-                    .hit(HitId::TabList)
+                    .hit(HitId::Tab(TabHit::List))
                     .flex_none()
                     .h_full()
                     .w(viewport)
@@ -187,7 +187,7 @@ impl TabSet {
             .child(new_tab)
     }
 
-    fn scroll_button(&self, forward: bool, p: Palette, ui: &mut UiState) -> Node {
+    fn scroll_button(&self, forward: bool, p: Palette, ui: &mut AppUi) -> AppNode {
         let target = self.scroll;
         let enabled = if forward {
             target < self.max_scroll() - 0.1
@@ -196,13 +196,13 @@ impl TabSet {
         };
         let (hit, tip, glyph) = if forward {
             (
-                HitId::TabScrollRight,
+                HitId::Tab(TabHit::ScrollRight),
                 "Scroll tab list forward",
                 CARET_RIGHT,
             )
         } else {
             (
-                HitId::TabScrollLeft,
+                HitId::Tab(TabHit::ScrollLeft),
                 "Scroll tab list backward",
                 CARET_LEFT,
             )
@@ -232,7 +232,7 @@ impl TabSet {
     }
 }
 
-fn slide(key: AnimKey, seed: f32, target: f32, snap: bool, ui: &mut UiState) -> (f32, bool) {
+fn slide(key: AnimKey, seed: f32, target: f32, snap: bool, ui: &mut AppUi) -> (f32, bool) {
     let duration = if snap { Duration::ZERO } else { SLIDE_DURATION };
     let sample = ui.animate_f32_from(key, seed, target, duration, SLIDE_EASING);
     (sample.value.round(), sample.status == AnimStatus::Running)
@@ -251,7 +251,7 @@ fn visible(x: f32, right: f32, cover: Option<(f32, f32)>) -> (f32, f32) {
     }
 }
 
-fn tab_frame(x: f32, width: f32, cover: Option<(f32, f32)>, content: Node) -> Node {
+fn tab_frame(x: f32, width: f32, cover: Option<(f32, f32)>, content: AppNode) -> AppNode {
     let (left, right) = visible(x, x + width, cover);
     box_()
         .absolute()
@@ -277,8 +277,8 @@ fn render_tab(
     active_ix: usize,
     hovered_ix: Option<usize>,
     p: Palette,
-    ui: &mut UiState,
-) -> Node {
+    ui: &mut AppUi,
+) -> AppNode {
     let tab = &tabs[ix];
     let id = tab.data.id;
     let active = ix == active_ix;
@@ -301,7 +301,7 @@ fn render_tab(
         .map_or_else(|| name.clone(), |path| path.display().to_string())
         .into();
 
-    let hit = HitId::Tab(id);
+    let hit = HitId::Tab(TabHit::Item(id));
     let face_bg = if active {
         p.layer
     } else {
@@ -319,7 +319,7 @@ fn render_tab(
     let close_node = show_close.then(|| {
         icon_button(
             p,
-            HitId::TabClose(id),
+            HitId::Tab(TabHit::Close(id)),
             shortcut_tooltip("Close tab", AppCommand::CloseTab.into()),
             (CLOSE_GLYPH, BUTTON_GLYPH_SIZE),
             size(BUTTON_WIDTH, BUTTON_HEIGHT),
@@ -356,7 +356,7 @@ fn tab_face(
     bg: crate::color::Rgba,
     trailing: f32,
     name: impl Into<SharedStr>,
-) -> Node {
+) -> AppNode {
     row()
         .items_center()
         .size_full()
@@ -384,7 +384,7 @@ fn tab_face(
         )
 }
 
-fn unsaved_dot(p: Palette, inset: f32) -> Node {
+fn unsaved_dot(p: Palette, inset: f32) -> AppNode {
     box_()
         .absolute()
         .top(UNSAVED_DOT_TOP - inset)
@@ -394,7 +394,7 @@ fn unsaved_dot(p: Palette, inset: f32) -> Node {
         .bg(p.text_tertiary)
 }
 
-fn tab_separator(p: Palette) -> Node {
+fn tab_separator(p: Palette) -> AppNode {
     box_()
         .absolute()
         .right(0.)

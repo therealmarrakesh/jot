@@ -54,29 +54,41 @@ impl From<RECT> for ScreenRect {
 pub(crate) struct WindowPlacement(WINDOWPLACEMENT);
 
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct WindowHwnd(HWND);
+pub(crate) struct WindowHandle(isize);
 
-impl WindowHwnd {
-    pub(crate) fn from_raw(hwnd: HWND) -> Self {
-        Self(hwnd)
+impl WindowHandle {
+    pub(super) fn from_raw(hwnd: HWND) -> Self {
+        Self(hwnd.0 as isize)
     }
 
-    pub(crate) fn raw(self) -> HWND {
+    #[inline]
+    pub(super) fn raw(self) -> HWND {
+        HWND(self.0 as *mut _)
+    }
+
+    #[inline]
+    pub(crate) fn raw_isize(self) -> isize {
         self.0
     }
 
+    #[cfg(test)]
+    #[inline]
+    pub(crate) fn raw_hwnd(self) -> HWND {
+        self.raw()
+    }
+
     pub(crate) fn is_null(self) -> bool {
-        self.0.is_invalid()
+        self.0 == 0
     }
 
     pub(crate) fn client_origin(self) -> ScreenPoint {
         let mut origin = POINT::default();
-        let _ = unsafe { ClientToScreen(self.0, &mut origin) };
+        let _ = unsafe { ClientToScreen(self.raw(), &mut origin) };
         origin.into()
     }
 
     pub(crate) fn dpi_scale(self) -> f32 {
-        match unsafe { GetDpiForWindow(self.0) } {
+        match unsafe { GetDpiForWindow(self.raw()) } {
             0 => 1.,
             dpi => dpi as f32 / USER_DEFAULT_SCREEN_DPI as f32,
         }
@@ -84,20 +96,20 @@ impl WindowHwnd {
 
     pub(crate) fn window_rect(self) -> ScreenRect {
         let mut rect = RECT::default();
-        let _ = unsafe { GetWindowRect(self.0, &mut rect) };
+        let _ = unsafe { GetWindowRect(self.raw(), &mut rect) };
         rect.into()
     }
 
     pub(crate) fn is_maximized(self) -> bool {
-        unsafe { IsZoomed(self.0) }.as_bool()
+        unsafe { IsZoomed(self.raw()) }.as_bool()
     }
 
     pub(crate) fn is_enabled(self) -> bool {
-        unsafe { IsWindowEnabled(self.0) }.as_bool()
+        unsafe { IsWindowEnabled(self.raw()) }.as_bool()
     }
 
     pub(crate) fn restore(self) {
-        let _ = unsafe { ShowWindow(self.0, SW_RESTORE) };
+        let _ = unsafe { ShowWindow(self.raw(), SW_RESTORE) };
     }
 
     pub(crate) fn bring_to_front(self) {
@@ -105,21 +117,21 @@ impl WindowHwnd {
             return;
         }
         unsafe {
-            if IsIconic(self.0).as_bool() {
-                let _ = ShowWindow(self.0, SW_RESTORE);
+            if IsIconic(self.raw()).as_bool() {
+                let _ = ShowWindow(self.raw(), SW_RESTORE);
             }
-            let _ = SetForegroundWindow(self.0);
+            let _ = SetForegroundWindow(self.raw());
         }
     }
 
     pub(crate) fn set_foreground(self) {
-        let _ = unsafe { SetForegroundWindow(self.0) };
+        let _ = unsafe { SetForegroundWindow(self.raw()) };
     }
 
     pub(crate) fn place_topmost_noactivate(self, rect: ScreenRect) {
         let _ = unsafe {
             SetWindowPos(
-                self.0,
+                self.raw(),
                 Some(HWND_TOPMOST),
                 rect.left,
                 rect.top,
@@ -131,17 +143,17 @@ impl WindowHwnd {
     }
 
     pub(crate) fn show_noactivate(self) {
-        let _ = unsafe { ShowWindow(self.0, SW_SHOWNOACTIVATE) };
+        let _ = unsafe { ShowWindow(self.raw(), SW_SHOWNOACTIVATE) };
     }
 
     pub(crate) fn hide(self) {
-        let _ = unsafe { ShowWindow(self.0, SW_HIDE) };
+        let _ = unsafe { ShowWindow(self.raw(), SW_HIDE) };
     }
 
     pub(crate) fn move_noactivate(self, x: i32, y: i32) {
         let _ = unsafe {
             SetWindowPos(
-                self.0,
+                self.raw(),
                 None,
                 x,
                 y,
@@ -153,7 +165,7 @@ impl WindowHwnd {
     }
 
     pub(crate) fn set_capture(self) {
-        unsafe { SetCapture(self.0) };
+        unsafe { SetCapture(self.raw()) };
     }
 
     pub(crate) fn begin_system_move(self, point: ScreenPoint) {
@@ -161,7 +173,7 @@ impl WindowHwnd {
         unsafe {
             let _ = ReleaseCapture();
             let _ = PostMessageW(
-                Some(self.0),
+                Some(self.raw()),
                 WM_SYSCOMMAND,
                 WPARAM(SC_MOVE as usize | HTCAPTION as usize),
                 position,
@@ -170,7 +182,7 @@ impl WindowHwnd {
     }
 
     pub(crate) fn cancel_mode(self) {
-        let _ = unsafe { PostMessageW(Some(self.0), WM_CANCELMODE, WPARAM(0), LPARAM(0)) };
+        let _ = unsafe { PostMessageW(Some(self.raw()), WM_CANCELMODE, WPARAM(0), LPARAM(0)) };
     }
 
     pub(crate) fn in_move_loop(self) -> bool {
@@ -179,7 +191,7 @@ impl WindowHwnd {
             ..Default::default()
         };
         unsafe {
-            let thread = GetWindowThreadProcessId(self.0, None);
+            let thread = GetWindowThreadProcessId(self.raw(), None);
             GetGUIThreadInfo(thread, &mut info).is_ok() && (info.flags & GUI_INMOVESIZE).0 != 0
         }
     }
@@ -189,7 +201,7 @@ impl WindowHwnd {
             length: size_of::<WINDOWPLACEMENT>() as u32,
             ..Default::default()
         };
-        unsafe { GetWindowPlacement(self.0, &mut placement) }
+        unsafe { GetWindowPlacement(self.raw(), &mut placement) }
             .is_ok()
             .then_some(WindowPlacement(placement))
     }
@@ -204,12 +216,12 @@ impl WindowHwnd {
     }
 
     pub(crate) fn restore_placement(self, placement: WindowPlacement) {
-        let _ = unsafe { SetWindowPlacement(self.0, &placement.0) };
+        let _ = unsafe { SetWindowPlacement(self.raw(), &placement.0) };
     }
 
     pub(crate) fn complete_ime_composition(self) {
         if !self.is_null() {
-            super::input::complete_ime_composition(self.0);
+            super::input::complete_ime_composition(self.raw());
         }
     }
 }
@@ -248,8 +260,8 @@ pub(crate) fn monitor_work_area_and_scale(point: ScreenPoint) -> (ScreenRect, f3
 
 pub(crate) fn top_visible_window_at(
     point: ScreenPoint,
-    exclude: Option<WindowHwnd>,
-) -> Option<WindowHwnd> {
+    exclude: Option<WindowHandle>,
+) -> Option<WindowHandle> {
     struct Search {
         point: POINT,
         exclude: Option<HWND>,
@@ -304,9 +316,9 @@ pub(crate) fn top_visible_window_at(
 
     let mut search = Search {
         point: point.into(),
-        exclude: exclude.map(WindowHwnd::raw),
+        exclude: exclude.map(WindowHandle::raw),
         found: None,
     };
     let _ = unsafe { EnumWindows(Some(visit), LPARAM((&raw mut search) as isize)) };
-    search.found.map(WindowHwnd::from_raw)
+    search.found.map(WindowHandle::from_raw)
 }

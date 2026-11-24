@@ -1,7 +1,7 @@
 use std::time::{Duration, Instant};
 
 use crate::geom::{Axis, Point, Rect, Size};
-use crate::ids::{AnimKey, EditorSlot, HitId, Node, UiState};
+use crate::ids::{AnimKey, AppNode, AppUi, EditorSlot, HitId};
 use crate::platform::{CursorStyle, TimerHandle};
 use crate::theme::Palette;
 use crate::ui::{Easing, box_};
@@ -197,9 +197,9 @@ impl ScrollbarState {
         vp: ScrollbarViewport,
         p: Palette,
         now: Instant,
-        ui: &mut UiState,
+        ui: &mut AppUi,
         schedule_idle: impl FnOnce(Duration) -> Option<TimerHandle>,
-    ) -> Vec<Node> {
+    ) -> Vec<AppNode> {
         let scroll_offset = vp.scroll_offset;
         if scroll_offset != self.last_offset {
             self.last_offset = scroll_offset;
@@ -207,7 +207,7 @@ impl ScrollbarState {
             self.idle_timer = None;
         }
 
-        let is_axis_hovered = |axis: Axis, ui: &UiState| {
+        let is_axis_hovered = |axis: Axis, ui: &AppUi| {
             ui.is_hovered(HitId::ScrollTrack(slot, axis))
                 || ui.is_hovered(HitId::ScrollThumb(slot, axis))
         };
@@ -483,7 +483,7 @@ mod tests {
     fn scene_scrollbar_renders_fades_and_snaps_on_reduce_motion() {
         let t0 = Instant::now();
         let mut sb = ScrollbarState::new_at(t0);
-        let mut ui = UiState::default();
+        let mut ui = AppUi::default();
         let p = Palette::resolve(false, None, None);
         let slot = EditorSlot::Tab(TabId::next());
         let vp = ScrollbarViewport {
@@ -499,7 +499,7 @@ mod tests {
         let nodes = sb.render(slot, vp, p, t0, &mut ui, |_| None);
         assert_eq!(nodes.len(), 1);
         assert!(sb.is_interactive(Axis::Vertical));
-        assert!(ui.finish_frame(crate::ids::Frame::default()));
+        assert!(ui.finish_frame(crate::ids::AppFrame::default()));
 
         ui.begin_frame(t0 + FADE_IN_DURATION, false);
         let _ = sb.render(
@@ -510,7 +510,7 @@ mod tests {
             &mut ui,
             |_| None,
         );
-        assert!(!ui.finish_frame(crate::ids::Frame::default()));
+        assert!(!ui.finish_frame(crate::ids::AppFrame::default()));
 
         let after_idle = t0 + IDLE_HOLD + Duration::from_millis(10);
         ui.begin_frame(after_idle, true);

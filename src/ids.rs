@@ -1,16 +1,6 @@
-use std::sync::atomic::{AtomicU64, Ordering};
-
 use crate::geom::Axis;
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct TabId(u64);
-
-impl TabId {
-    pub(crate) fn next() -> Self {
-        static NEXT: AtomicU64 = AtomicU64::new(1);
-        Self(NEXT.fetch_add(1, Ordering::Relaxed))
-    }
-}
+crate::types::id_type!(TabId);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum MenuKind {
@@ -53,41 +43,73 @@ pub(crate) enum CustomDraw {
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
-pub(crate) enum HitId {
-    CaptionMin,
-    CaptionMax,
-    CaptionClose,
-    TabStrip,
-    TabList,
-    Tab(TabId),
-    TabClose(TabId),
-    NewTab,
-    TabScrollLeft,
-    TabScrollRight,
-    MenuBar,
-    MenuTrigger(MenuKind),
-    MenuPanel,
-    MenuItem { serial: usize, ix: usize },
-    MenuCommand { serial: usize, ix: usize },
+pub(crate) enum CaptionHit {
+    Min,
+    Max,
+    Close,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum TabHit {
+    Strip,
+    List,
+    Item(TabId),
+    Close(TabId),
+    New,
+    ScrollLeft,
+    ScrollRight,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum MenuHit {
+    Bar,
+    Trigger(MenuKind),
+    Panel,
+    Item { serial: usize, ix: usize },
+    Command { serial: usize, ix: usize },
     SubmenuPanel,
     SubmenuItem { serial: usize, ix: usize },
+}
+
+impl MenuHit {
+    #[inline]
+    pub(crate) fn is_popup(self) -> bool {
+        !matches!(self, Self::Bar | Self::Trigger(_))
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum FindHit {
+    Card,
+    ToggleReplace,
+    Next,
+    Prev,
+    Options,
+    Close,
+    Replace,
+    ReplaceAll,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum DialogHit {
+    Backdrop,
+    Card,
+    Button(usize),
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum HitId {
+    Caption(CaptionHit),
+    Tab(TabHit),
+    Menu(MenuHit),
+    Find(FindHit),
+    Dialog(DialogHit),
     ThemeToggle,
     EditorArea,
     Editor(EditorSlot),
     ScrollTrack(EditorSlot, Axis),
     ScrollThumb(EditorSlot, Axis),
     FieldClear(EditorSlot),
-    FindCard,
-    FindToggleReplace,
-    FindNext,
-    FindPrev,
-    FindOptions,
-    FindClose,
-    FindReplace,
-    FindReplaceAll,
-    DialogBackdrop,
-    DialogCard,
-    DialogButton(usize),
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
@@ -109,6 +131,6 @@ impl From<HitId> for AnimKey {
     }
 }
 
-pub(crate) type Node = crate::ui::Node<HitId, CustomDraw>;
-pub(crate) type Frame = crate::ui::Frame<HitId, CustomDraw>;
-pub(crate) type UiState = crate::ui::UiState<HitId, CustomDraw, AnimKey>;
+pub(crate) type AppNode = crate::ui::Node<HitId, CustomDraw>;
+pub(crate) type AppFrame = crate::ui::Frame<HitId, CustomDraw>;
+pub(crate) type AppUi = crate::ui::UiState<HitId, CustomDraw, AnimKey>;

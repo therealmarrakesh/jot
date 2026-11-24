@@ -4,7 +4,7 @@ use crate::files::{FileOps, PromptId};
 use crate::geom::{Point, ScreenPoint};
 use crate::ids::TabId;
 use crate::platform::{
-    TimerHandle, WindowHwnd, WindowId, WindowPlacement, cursor_screen_pos,
+    TimerHandle, WindowHandle, WindowId, WindowPlacement, cursor_screen_pos,
     primary_mouse_button_down, release_mouse_capture, top_visible_window_at,
 };
 use crate::shell::{AppEvent, Shell};
@@ -431,7 +431,7 @@ fn strip_window(
     })
 }
 
-fn place_window(hwnd: WindowHwnd, pt: ScreenPoint, offset: Point) {
+fn place_window(hwnd: WindowHandle, pt: ScreenPoint, offset: Point) {
     let scale = hwnd.dpi_scale();
     let origin = hwnd.client_origin();
     let frame = hwnd.window_rect();

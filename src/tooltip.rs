@@ -4,15 +4,15 @@ use std::time::{Duration, Instant};
 use crate::shell::AppEvent;
 use crate::geom::{ScreenPoint, ScreenRect};
 use crate::gfx::{Gpu, TextSystem};
-use crate::ids::{Frame, HitId};
+use crate::ids::{AppFrame, HitId};
 use crate::platform::{
     Jobs, Modifiers, TimerHandle, WindowId, cursor_screen_pos, monitor_work_area_and_scale,
 };
 use crate::theme::{CONTROL_RADIUS, Palette, SMALL_FONT, theme_shadow};
 use crate::types::SharedStr;
 use crate::ui::{
-    AnimTracks, AvailSize, Curve, Easing, Frame as GenericFrame, Node as GenericNode,
-    OverlayAnchor, OverlaySurface, PointerState, box_, text,
+    AnimTracks, AvailSize, Curve, Easing, Frame, Node, OverlayAnchor, OverlaySurface,
+    PointerState, box_, text,
 };
 
 const PADDING_X: f32 = 9.;
@@ -41,7 +41,7 @@ pub(crate) struct TooltipTarget {
 pub(crate) struct TooltipProbe<'a> {
     pub(crate) anchor: OverlayAnchor,
     pub(crate) pointer: Option<PointerState>,
-    pub(crate) frame: &'a Frame,
+    pub(crate) frame: &'a AppFrame,
 }
 
 #[derive(Clone)]
@@ -336,7 +336,7 @@ impl Tooltips {
     fn show(&mut self, snap: Snap, gpu: &Rc<Gpu>, ts: &TextSystem) {
         let entered = snap.entered;
         let (work, scale) = monitor_work_area_and_scale(entered);
-        let measured = GenericFrame::measure(
+        let measured = Frame::measure(
             tooltip_card(Palette::resolve(false, None, None), snap.text.clone()),
             AvailSize::MAX,
             scale,
@@ -413,7 +413,7 @@ fn show_delay(hover_time: Duration, reshow: bool) -> Duration {
     hover_time.mul_f32(factor)
 }
 
-fn tooltip_card(p: Palette, content: SharedStr) -> GenericNode<(), ()> {
+fn tooltip_card(p: Palette, content: SharedStr) -> Node<(), ()> {
     box_()
         .max_w(MAX_WIDTH)
         .rounded(CONTROL_RADIUS)
@@ -459,18 +459,20 @@ mod tests {
 
     #[test]
     fn tooltip_state_machine_transitions() {
+        use crate::ids::TabHit;
         let w1 = WindowId(1);
         let w2 = WindowId(2);
+        let new_tab = HitId::Tab(TabHit::New);
         let k1 = TooltipTarget {
             window: w1,
-            hit: HitId::NewTab,
+            hit: new_tab,
         };
         let k2 = TooltipTarget {
             window: w1,
             hit: HitId::ThemeToggle,
         };
 
-        let s = transition_state(State::Idle, Report::Owner(snap(w1, HitId::NewTab, "One")));
+        let s = transition_state(State::Idle, Report::Owner(snap(w1, new_tab, "One")));
         assert!(matches!(s, State::Waiting { .. }));
 
         let s = transition_state(s, Report::Timer(k2));
@@ -480,7 +482,7 @@ mod tests {
 
         let s = transition_state(s, Report::Dismiss);
         assert!(matches!(s, State::Suppressed { .. }));
-        let s = transition_state(s, Report::Owner(snap(w1, HitId::NewTab, "One")));
+        let s = transition_state(s, Report::Owner(snap(w1, new_tab, "One")));
         assert!(matches!(s, State::Suppressed { .. }));
 
         let s = transition_state(s, Report::NoneIn(w2));
@@ -488,7 +490,7 @@ mod tests {
         let s = transition_state(s, Report::NoneIn(w1));
         assert!(matches!(s, State::Idle));
 
-        let s = transition_state(s, Report::Owner(snap(w1, HitId::NewTab, "One")));
+        let s = transition_state(s, Report::Owner(snap(w1, new_tab, "One")));
         let s = transition_state(s, Report::Owner(snap(w1, HitId::ThemeToggle, "Two")));
         assert!(matches!(s, State::Waiting { ref snap } if snap.key == k2));
 

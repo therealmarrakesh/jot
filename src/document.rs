@@ -27,9 +27,25 @@ const REPLACE_RETRY_DELAY: Duration = Duration::from_millis(25);
 const MAX_SIBLING_STEM_CHARS: usize = 200;
 const TEMP_SUFFIX: &str = ".jot-save";
 const BACKUP_SUFFIX: &str = ".jot-backup";
-pub(crate) const READ_ONLY: &str = "This file is read-only.";
 
 pub(crate) const UNTITLED: &str = "Untitled";
+
+#[derive(Debug)]
+pub(crate) enum SaveError {
+    ReadOnly,
+    Kept {
+        source: io::Error,
+        backup: PathBuf,
+        temp: PathBuf,
+    },
+    Io(io::Error),
+}
+
+impl From<io::Error> for SaveError {
+    fn from(err: io::Error) -> Self {
+        Self::Io(err)
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum LineEnding {
@@ -698,27 +714,25 @@ fn write_in_place(target: &Path, rope: &Rope, format: Format) -> io::Result<()> 
     file.sync_all()
 }
 
-pub(crate) fn write_rope(path: &Path, rope: &Rope, format: Format) -> io::Result<()> {
+pub(crate) fn write_rope(path: &Path, rope: &Rope, format: Format) -> Result<(), SaveError> {
     let target = resolve(path)?;
     let existing = match fs::metadata(&target) {
-        Ok(metadata) if metadata.permissions().readonly() => {
-            return Err(io::Error::new(io::ErrorKind::PermissionDenied, READ_ONLY));
-        }
+        Ok(metadata) if metadata.permissions().readonly() => return Err(SaveError::ReadOnly),
         Ok(_) => true,
         Err(error) if error.kind() == io::ErrorKind::NotFound => false,
-        Err(error) => return Err(error),
+        Err(error) => return Err(error.into()),
     };
 
     if existing && file_hard_link_count(&target).unwrap_or(1) > 1 {
-        return write_in_place(&target, rope, format);
+        return write_in_place(&target, rope, format).map_err(SaveError::from);
     }
 
     let (temp, file) = match create_temp(&target) {
         Ok(pair) => pair,
         Err(err) if existing && err.kind() == io::ErrorKind::PermissionDenied => {
-            return write_in_place(&target, rope, format);
+            return write_in_place(&target, rope, format).map_err(SaveError::from);
         }
-        Err(err) => return Err(err),
+        Err(err) => return Err(err.into()),
     };
 
     let written = {
@@ -730,14 +744,16 @@ pub(crate) fn write_rope(path: &Path, rope: &Rope, format: Format) -> io::Result
     };
     if let Err(error) = written {
         fs::remove_file(&temp).ok();
-        return Err(error);
+        return Err(error.into());
     }
     if existing {
         replace(path, &target, &temp, rope, format)
     } else {
-        fs::rename(&temp, &target).inspect_err(|_| {
-            fs::remove_file(&temp).ok();
-        })
+        fs::rename(&temp, &target)
+            .inspect_err(|_| {
+                fs::remove_file(&temp).ok();
+            })
+            .map_err(SaveError::from)
     }
 }
 
@@ -763,7 +779,7 @@ fn replace(
     temp: &Path,
     rope: &Rope,
     format: Format,
-) -> io::Result<()> {
+) -> Result<(), SaveError> {
     let mut last_err = None;
     for attempt in 0..REPLACE_RETRIES {
         let backup = free_sibling(target, BACKUP_SUFFIX)?;
@@ -779,30 +795,28 @@ fn replace(
                     thread::sleep(REPLACE_RETRY_DELAY);
                 }
             }
-            Err(ReplaceFileError::UnableToMoveReplacement(error))
+            Err(ReplaceFileError::UnableToMoveReplacement(source))
                 if fs::rename(&backup, target).is_err() =>
             {
                 let shown =
                     |sibling: &Path| path.with_file_name(sibling.file_name().unwrap_or_default());
-                return Err(io::Error::new(
-                    error.kind(),
-                    format!(
-                        "{error}\nThe original file was kept as {}\nThe new text was saved as {}",
-                        shown(&backup).display(),
-                        shown(temp).display()
-                    ),
-                ));
+                return Err(SaveError::Kept {
+                    source,
+                    backup: shown(&backup),
+                    temp: shown(temp),
+                });
             }
             Err(
                 ReplaceFileError::UnableToMoveReplacement(error) | ReplaceFileError::Other(error),
             ) => {
                 fs::remove_file(temp).ok();
-                return Err(error);
+                return Err(error.into());
             }
         }
     }
     fs::remove_file(temp).ok();
-    write_in_place(target, rope, format).map_err(|_| last_err.unwrap_or_else(|| io::Error::other("replace failed")))
+    write_in_place(target, rope, format)
+        .map_err(|_| SaveError::Io(last_err.unwrap_or_else(|| io::Error::other("replace failed"))))
 }
 
 fn free_sibling(path: &Path, suffix: &str) -> io::Result<PathBuf> {
@@ -1101,7 +1115,7 @@ mod tests {
         readonly.set_readonly(true);
         fs::set_permissions(&file, readonly).unwrap();
         let err = write_rope(&file, &Rope::from("blocked"), format).unwrap_err();
-        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+        assert!(matches!(err, SaveError::ReadOnly));
     }
 
     #[test]

@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use crate::editor::{Editor, FieldOptions};
 use crate::files::{Prompt, PromptId};
-use crate::ids::{AnimKey, EditorSlot, Focus, HitId, Node, TabId, UiState};
+use crate::ids::{AnimKey, AppNode, AppUi, DialogHit, EditorSlot, Focus, HitId, TabId};
 use crate::platform::{CursorStyle, Key, KeyEvent};
 use crate::theme::{
     BODY_LINE, BODY_SIZE, FIELD_CARET, OVERLAY_RADIUS, Palette, TEXT_FONT, theme_shadow,
@@ -87,15 +87,15 @@ impl DialogKind {
     }
 }
 
-struct OpenDialog {
+struct ActiveDialog {
     kind: DialogKind,
     transition: Transition,
     scale: f32,
     opacity: f32,
 }
 
-impl OpenDialog {
-    fn sample(&mut self, ui: &mut UiState) -> bool {
+impl ActiveDialog {
+    fn sample(&mut self, ui: &mut AppUi) -> bool {
         let serial = self.transition.serial();
         let closing = self.transition.is_closing();
         let shown = ui
@@ -116,7 +116,7 @@ impl OpenDialog {
 }
 
 pub(crate) struct Dialogs {
-    open: Vec<OpenDialog>,
+    open: Vec<ActiveDialog>,
     pending: VecDeque<DialogKind>,
     pub(crate) line: Editor,
 }
@@ -139,7 +139,7 @@ impl Dialogs {
         self.active().is_some()
     }
 
-    fn active(&self) -> Option<&OpenDialog> {
+    fn active(&self) -> Option<&ActiveDialog> {
         self.open.iter().rev().find(|d| d.transition.is_open())
     }
 
@@ -158,7 +158,7 @@ impl Dialogs {
         } else {
             Focus::DialogButton(0)
         };
-        self.open.push(OpenDialog {
+        self.open.push(ActiveDialog {
             kind,
             transition: Transition::open_new(),
             scale: OPEN_SCALE,
@@ -272,12 +272,12 @@ impl Dialogs {
         Some(ring[next])
     }
 
-    pub(crate) fn render(&mut self, focus: Focus, p: Palette, ui: &mut UiState) -> Option<Node> {
+    pub(crate) fn render(&mut self, focus: Focus, p: Palette, ui: &mut AppUi) -> Option<AppNode> {
         self.open.retain_mut(|d| !d.sample(ui));
         if self.open.is_empty() {
             return None;
         }
-        let layers: Vec<Node> = self
+        let layers: Vec<AppNode> = self
             .open
             .iter()
             .map(|d| self.render_layer(d, focus, p, ui))
@@ -285,14 +285,14 @@ impl Dialogs {
         Some(box_().absolute().inset_0().children(layers))
     }
 
-    fn render_layer(&self, dialog: &OpenDialog, focus: Focus, p: Palette, ui: &mut UiState) -> Node {
+    fn render_layer(&self, dialog: &ActiveDialog, focus: Focus, p: Palette, ui: &mut AppUi) -> AppNode {
         let focused_btn = match focus {
             Focus::DialogButton(ix) => Some(ix),
             _ => None,
         };
         let labels = dialog.kind.button_labels();
         let closing = dialog.transition.is_closing();
-        let buttons: Vec<Node> = labels
+        let buttons: Vec<AppNode> = labels
             .iter()
             .enumerate()
             .map(|(ix, &label)| {
@@ -301,7 +301,7 @@ impl Dialogs {
                 button(
                     p,
                     p.command_surface,
-                    HitId::DialogButton(ix),
+                    HitId::Dialog(DialogHit::Button(ix)),
                     label,
                     accented,
                     is_focused,
@@ -336,16 +336,17 @@ impl Dialogs {
             .bg(p.smoke)
             .opacity(dialog.opacity)
             .when(!closing, |this| {
-                this.hit(HitId::DialogBackdrop).cursor(CursorStyle::Arrow)
+                this.hit(HitId::Dialog(DialogHit::Backdrop))
+                    .cursor(CursorStyle::Arrow)
             })
             .child(
                 dialog_frame(p, fixed_width, title, body, buttons)
                     .scale(dialog.scale, dialog.scale)
-                    .when(closing, Node::inert),
+                    .when(closing, AppNode::inert),
             )
     }
 
-    fn render_go_to_body(&self, focus: Focus, p: Palette, ui: &UiState) -> Node {
+    fn render_go_to_body(&self, focus: Focus, p: Palette, ui: &AppUi) -> AppNode {
         let slot = EditorSlot::GoToLine;
         let field = text_field(
             p,
@@ -362,7 +363,7 @@ impl Dialogs {
     }
 }
 
-fn message_body(message: SharedStr) -> Node {
+fn message_body(message: SharedStr) -> AppNode {
     box_()
         .top(BODY_BASELINE_SNAP)
         .line_height(BODY_LINE)
@@ -373,12 +374,12 @@ fn dialog_frame(
     p: Palette,
     fixed_width: Option<f32>,
     title: SharedStr,
-    body: Node,
-    buttons: Vec<Node>,
-) -> Node {
+    body: AppNode,
+    buttons: Vec<AppNode>,
+) -> AppNode {
     let spacer = (buttons.len() == 1).then(|| box_().flex_1().min_w_0());
     box_()
-        .hit(HitId::DialogCard)
+        .hit(HitId::Dialog(DialogHit::Card))
         .when_some(fixed_width, |this, w| this.w(w).max_w_full())
         .when(fixed_width.is_none(), |this| {
             this.min_w(MIN_WIDTH).max_w(MAX_WIDTH)
@@ -408,7 +409,7 @@ fn dialog_frame(
         )
 }
 
-fn dialog_content(p: Palette, title: SharedStr, body: Node) -> Node {
+fn dialog_content(p: Palette, title: SharedStr, body: AppNode) -> AppNode {
     box_()
         .p(PADDING)
         .rounded_t(OVERLAY_RADIUS - BORDER)

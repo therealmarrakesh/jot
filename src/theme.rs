@@ -14,7 +14,7 @@ pub(crate) const BODY_LINE: f32 = 18.;
 pub(crate) const FIELD_CARET: f32 = 19.;
 
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct Surface {
+pub(crate) struct ControlColors {
     pub(crate) panel: Rgba,
     pub(crate) fill: Rgba,
     pub(crate) field_stroke: Rgba,
@@ -57,9 +57,9 @@ pub(crate) struct Palette {
     pub(crate) smoke: Rgba,
     pub(crate) surface_stroke: Rgba,
     pub(crate) dialog_divider: Rgba,
-    pub(crate) content_surface: Surface,
-    pub(crate) command_surface: Surface,
-    pub(crate) card_surface: Surface,
+    pub(crate) content_surface: ControlColors,
+    pub(crate) command_surface: ControlColors,
+    pub(crate) card_surface: ControlColors,
     pub(crate) notice_fill: Rgba,
     pub(crate) field_focused: Rgba,
     pub(crate) focus_outer: Rgba,
@@ -100,7 +100,7 @@ impl Palette {
         let window_frame = rgb(hc.window_frame);
         let hotlight = rgb(hc.hotlight);
         let dark = (0.299 * window.r + 0.587 * window.g + 0.114 * window.b) < 128.0 / 255.0;
-        let surface = Surface {
+        let surface = ControlColors {
             panel: window,
             fill: btn_face,
             field_stroke: window_frame,
@@ -190,7 +190,7 @@ pub(crate) const LIGHT: Palette = Palette {
     smoke: rgba(0x0000004d),
     surface_stroke: rgba(0x75757566),
     dialog_divider: rgb(0xe5e5e5),
-    content_surface: Surface {
+    content_surface: ControlColors {
         panel: rgb(0xffffff),
         fill: rgb(0xffffff),
         field_stroke: rgb(0xf0f0f0),
@@ -200,7 +200,7 @@ pub(crate) const LIGHT: Palette = Palette {
         button_stroke: rgb(0xf0f0f0),
         button_bottom: rgb(0xd6d6d6),
     },
-    command_surface: Surface {
+    command_surface: ControlColors {
         panel: rgb(0xf3f3f3),
         fill: rgb(0xfbfbfb),
         field_stroke: rgb(0xe5e5e5),
@@ -210,7 +210,7 @@ pub(crate) const LIGHT: Palette = Palette {
         button_stroke: rgb(0xe5e5e5),
         button_bottom: rgb(0xcccccc),
     },
-    card_surface: Surface {
+    card_surface: ControlColors {
         panel: rgb(0xf9f9f9),
         fill: rgb(0xfdfdfd),
         field_stroke: rgb(0xeaeaea),
@@ -264,7 +264,7 @@ pub(crate) const DARK: Palette = Palette {
     smoke: rgba(0x0000004d),
     surface_stroke: rgba(0x75757566),
     dialog_divider: rgb(0x1d1d1d),
-    content_surface: Surface {
+    content_surface: ControlColors {
         panel: rgb(0x2b2b2b),
         fill: rgb(0x373737),
         field_stroke: rgb(0x3a3a3a),
@@ -274,7 +274,7 @@ pub(crate) const DARK: Palette = Palette {
         button_stroke: rgb(0x3c3c3c),
         button_bottom: rgb(0x353535),
     },
-    command_surface: Surface {
+    command_surface: ControlColors {
         panel: rgb(0x202020),
         fill: rgb(0x2d2d2d),
         field_stroke: rgb(0x353535),
@@ -284,7 +284,7 @@ pub(crate) const DARK: Palette = Palette {
         button_stroke: rgb(0x353535),
         button_bottom: rgb(0x2f2f2f),
     },
-    card_surface: Surface {
+    card_surface: ControlColors {
         panel: rgb(0x282828),
         fill: rgb(0x353535),
         field_stroke: rgb(0x373737),

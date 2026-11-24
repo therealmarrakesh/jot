@@ -1,6 +1,9 @@
-use crate::editor::RopeExt as _;
+use crate::command::AppCommand;
+use crate::editor::{EditCommand, RopeExt as _};
 use crate::geom::point;
-use crate::ids::{EditorSlot, Focus, Frame, HitId, MenuKind};
+use crate::ids::{
+    AppFrame, CaptionHit, DialogHit, EditorSlot, FindHit, Focus, HitId, MenuHit, MenuKind,
+};
 use crate::platform::window::hit_test_control_areas;
 use crate::platform::{
     Key, KeyEvent, Modifiers, MouseButton, PlatformEvent, PlatformHandler, WindowControlArea,
@@ -14,23 +17,23 @@ use super::{EDITOR_PADDING_LEFT, EDITOR_PADDING_TOP, TestHarness};
 fn menus_shortcuts_toggles_submenus_and_context_menu() {
     let mut h = TestHarness::new();
 
-    h.click_hit(HitId::MenuTrigger(MenuKind::File));
-    h.read(|w, _| assert!(w.is_menu_open()));
-    h.click_menu_item(0);
+    h.click_hit(HitId::Menu(MenuHit::Trigger(MenuKind::File)));
+    h.read(|w, _| assert!(w.menus().is_open()));
+    h.click_menu_command(AppCommand::NewTab);
     h.read(|w, _| {
         assert_eq!(w.tabs().len(), 2, "File -> New tab must add a tab");
-        assert!(!w.is_menu_open(), "menu must close after activation");
+        assert!(!w.menus().is_open(), "menu must close after activation");
     });
 
-    h.click_hit(HitId::MenuTrigger(MenuKind::View));
-    h.click_menu_item(0);
+    h.click_hit(HitId::Menu(MenuHit::Trigger(MenuKind::View)));
+    h.click_menu_submenu("Zoom");
     h.read(|w, _| {
         assert!(
             !w.ui_state().last_input_was_keyboard(),
             "clicking submenu item must not activate keyboard focus rings"
         );
     });
-    h.click_submenu_item(0);
+    h.click_menu_command(AppCommand::ZoomIn);
     h.read(|w, _| {
         assert_eq!(
             (w.zoom() * 100.).round() as u32,
@@ -39,24 +42,24 @@ fn menus_shortcuts_toggles_submenus_and_context_menu() {
         );
     });
 
-    h.click_hit(HitId::MenuTrigger(MenuKind::View));
-    h.click_menu_item(2);
+    h.click_hit(HitId::Menu(MenuHit::Trigger(MenuKind::View)));
+    h.click_menu_command(AppCommand::ToggleWordWrap);
     h.read(|_, app| assert!(!app.shell.view.word_wrap));
 
-    h.click_hit(HitId::MenuTrigger(MenuKind::View));
-    h.click_menu_item(1);
+    h.click_hit(HitId::Menu(MenuHit::Trigger(MenuKind::View)));
+    h.click_menu_command(AppCommand::ToggleStatusBar);
     h.read(|_, app| assert!(!app.shell.view.status_bar));
 
-    h.click_hit(HitId::MenuTrigger(MenuKind::File));
-    h.hover_hit(HitId::MenuTrigger(MenuKind::Edit));
+    h.click_hit(HitId::Menu(MenuHit::Trigger(MenuKind::File)));
+    h.hover_hit(HitId::Menu(MenuHit::Trigger(MenuKind::Edit)));
     h.read(|w, _| {
-        assert_eq!(w.open_menu_kind(), Some(MenuKind::Edit));
+        assert_eq!(w.menus().open_kind(), Some(MenuKind::Edit));
     });
     let editor_bounds = h.hit_rect(HitId::EditorArea).unwrap();
     h.click_point(editor_bounds.center(), MouseButton::Left);
     h.read(|w, _| {
         assert!(
-            !w.is_menu_open(),
+            !w.menus().is_open(),
             "clicking outside menu must close it"
         )
     });
@@ -64,12 +67,12 @@ fn menus_shortcuts_toggles_submenus_and_context_menu() {
     h.press_key("alt");
     h.read(|w, _| assert!(w.key_tips_active()));
     h.press_key("f");
-    h.read(|w, _| assert!(w.is_menu_open(), "Alt then F must open File menu"));
+    h.read(|w, _| assert!(w.menus().is_open(), "Alt then F must open File menu"));
     h.press_key("down");
     h.press_key("escape");
     h.press_key("escape");
     h.read(|w, _| {
-        assert!(!w.is_menu_open());
+        assert!(!w.menus().is_open());
         assert!(!w.key_tips_active());
     });
 
@@ -82,13 +85,13 @@ fn menus_shortcuts_toggles_submenus_and_context_menu() {
     h.click_point(on_text, MouseButton::Right);
     h.read(|w, _| {
         assert!(
-            w.is_menu_open(),
+            w.menus().is_open(),
             "right-click must open context menu"
         )
     });
-    h.click_menu_command(4);
+    h.click_menu_command(EditCommand::Delete);
     h.read(|w, _| {
-        assert!(!w.is_menu_open());
+        assert!(!w.menus().is_open());
         assert_eq!(
             w.active_editor().model().text().len(),
             0,
@@ -126,21 +129,21 @@ fn find_replace_bar_clear_button_and_key_contexts() {
     );
 
     h.type_text("ALPHA");
-    h.click_hit(HitId::FindOptions);
-    h.read(|w, _| assert!(w.is_menu_open(), "find-options must open flyout"));
-    h.click_menu_item(0);
+    h.click_hit(HitId::Find(FindHit::Options));
+    h.read(|w, _| assert!(w.menus().is_open(), "find-options must open flyout"));
+    h.click_menu_command(AppCommand::ToggleMatchCase);
     h.read(|w, _| assert!(w.find_match_case()));
-    h.click_hit(HitId::FindOptions);
-    h.click_menu_item(0);
+    h.click_hit(HitId::Find(FindHit::Options));
+    h.click_menu_command(AppCommand::ToggleMatchCase);
     h.read(|w, _| assert!(!w.find_match_case()));
 
-    h.click_hit(HitId::FindToggleReplace);
+    h.click_hit(HitId::Find(FindHit::ToggleReplace));
     h.click_hit(HitId::Editor(EditorSlot::FindReplace));
     h.type_text("OMEGA");
     h.read(|w, _| {
         assert_eq!(w.active_editor().model().value(), "alpha beta alpha gamma");
     });
-    h.click_hit(HitId::FindNext);
+    h.click_hit(HitId::Find(FindHit::Next));
     h.press_key("enter");
     h.read(|w, _| {
         assert_eq!(
@@ -149,7 +152,7 @@ fn find_replace_bar_clear_button_and_key_contexts() {
             "Enter in replacement field must replace current match"
         );
     });
-    h.click_hit(HitId::FindReplaceAll);
+    h.click_hit(HitId::Find(FindHit::ReplaceAll));
     h.read(|w, _| {
         assert_eq!(
             w.active_editor().model().value(),
@@ -159,7 +162,7 @@ fn find_replace_bar_clear_button_and_key_contexts() {
     });
 
     let ed_bounds = h.hit_rect(HitId::EditorArea).unwrap();
-    let find_card = h.hit_rect(HitId::FindCard).unwrap();
+    let find_card = h.hit_rect(HitId::Find(FindHit::Card)).unwrap();
     let beside_find = point(ed_bounds.right() - 30.0, find_card.center().y);
     h.read(|w, _| {
         let chain = w.frame().hit_chain(beside_find);
@@ -182,7 +185,7 @@ fn find_replace_bar_clear_button_and_key_contexts() {
         );
     });
 
-    h.click_hit(HitId::FindClose);
+    h.click_hit(HitId::Find(FindHit::Close));
     h.read(|w, _| assert!(!w.is_find_open(), "find-close 'x' must close Find bar"));
 }
 
@@ -211,7 +214,7 @@ fn go_to_dialog_navigation_and_out_of_range_flow() {
     h.type_text("999");
     h.press_key("enter");
     h.read(|w, _| assert!(w.is_dialog_open()));
-    h.click_hit(HitId::DialogButton(0));
+    h.click_hit(HitId::Dialog(DialogHit::Button(0)));
     h.read(|w, _| {
         assert!(w.is_dialog_open());
         assert_eq!(w.focus(), Focus::Editor(EditorSlot::GoToLine));
@@ -325,9 +328,9 @@ fn theme_zoom_editing_undo_scrollbar_and_caption_hit_tests() {
         );
     });
 
-    let close_pt = h.hit_rect(HitId::CaptionClose).unwrap().center();
-    let max_pt = h.hit_rect(HitId::CaptionMax).unwrap().center();
-    let min_pt = h.hit_rect(HitId::CaptionMin).unwrap().center();
+    let close_pt = h.hit_rect(HitId::Caption(CaptionHit::Close)).unwrap().center();
+    let max_pt = h.hit_rect(HitId::Caption(CaptionHit::Max)).unwrap().center();
+    let min_pt = h.hit_rect(HitId::Caption(CaptionHit::Min)).unwrap().center();
     h.read(|w, _| {
         let areas = w.frame().control_areas();
         assert_eq!(
@@ -370,7 +373,7 @@ fn status_bar_min_width_and_no_vertical_char_wrapping() {
     let mut mmi = MINMAXINFO::default();
     unsafe {
         let _ = SendMessageW(
-            hwnd.raw(),
+            hwnd.raw_hwnd(),
             WM_GETMINMAXINFO,
             Some(WPARAM(0)),
             Some(LPARAM((&raw mut mmi) as isize)),
@@ -387,7 +390,7 @@ fn status_bar_min_width_and_no_vertical_char_wrapping() {
     let ts = &app.shell.text_system;
     let p = app.shell.palette;
     let live_bar = app.windows[0].status_bar_for_test(p);
-    let live_frame = Frame::layout(live_bar, AvailSize::definite(min_size.width, 32.), scale, ts);
+    let live_frame = AppFrame::layout(live_bar, AvailSize::definite(min_size.width, 32.), scale, ts);
     let spacer_w = live_frame
         .custom_rects()
         .find_map(|(tok, rect)| {
@@ -412,34 +415,34 @@ fn status_bar_min_width_and_no_vertical_char_wrapping() {
             .nowrap()
             .child(
                 box_()
-                    .hit(HitId::MenuItem { serial: 0, ix: 0 })
+                    .hit(HitId::Menu(MenuHit::Item { serial: 0, ix: 0 }))
                     .child(text("Ln 1, Col 1")),
             )
             .child(
                 box_()
-                    .hit(HitId::MenuItem { serial: 0, ix: 1 })
+                    .hit(HitId::Menu(MenuHit::Item { serial: 0, ix: 1 }))
                     .child(text("1 character")),
             )
             .child(box_().flex_1().min_w(1.).h(16.))
             .child(
                 box_()
-                    .hit(HitId::MenuItem { serial: 0, ix: 2 })
+                    .hit(HitId::Menu(MenuHit::Item { serial: 0, ix: 2 }))
                     .child(text("100%")),
             )
             .child(
                 box_()
-                    .hit(HitId::MenuItem { serial: 0, ix: 3 })
+                    .hit(HitId::Menu(MenuHit::Item { serial: 0, ix: 3 }))
                     .child(text("Windows (CRLF)")),
             )
             .child(
                 box_()
-                    .hit(HitId::MenuItem { serial: 0, ix: 4 })
+                    .hit(HitId::Menu(MenuHit::Item { serial: 0, ix: 4 }))
                     .child(text("UTF-8")),
             );
-        let frame = Frame::layout(bar, AvailSize::definite(test_width, 31.), scale, ts);
+        let frame = AppFrame::layout(bar, AvailSize::definite(test_width, 31.), scale, ts);
         for ix in 0..5 {
             let b = frame
-                .rect_of(HitId::MenuItem { serial: 0, ix })
+                .rect_of(HitId::Menu(MenuHit::Item { serial: 0, ix }))
                 .expect("status bar label rect missing");
             assert!(
                 b.size.height <= 31.0,
@@ -459,12 +462,12 @@ fn status_bar_min_width_and_no_vertical_char_wrapping() {
         .line_height(20.0)
         .child(
             box_()
-                .hit(HitId::DialogCard)
+                .hit(HitId::Dialog(DialogHit::Card))
                 .child(text(
                     "Do you want to save changes to a very long untitled document?",
                 )),
         );
-    let dlg_frame = Frame::layout(
+    let dlg_frame = AppFrame::layout(
         dialog_body,
         AvailSize {
             width: Space::Definite(180.0),
@@ -473,7 +476,7 @@ fn status_bar_min_width_and_no_vertical_char_wrapping() {
         scale,
         ts,
     );
-    let msg_rect = dlg_frame.rect_of(HitId::DialogCard).unwrap();
+    let msg_rect = dlg_frame.rect_of(HitId::Dialog(DialogHit::Card)).unwrap();
     assert!(
         msg_rect.size.height >= 40.0,
         "constrained dialog text must wrap across multiple lines: {msg_rect:?}"
@@ -508,8 +511,8 @@ fn window_anim_tracks_prune_unused_tracks_and_word_wrap_updates_tabs() {
             assert!(tab.data.editor.soft_wrap_enabled());
         }
     });
-    h.click_hit(HitId::MenuTrigger(MenuKind::View));
-    h.click_menu_item(2);
+    h.click_hit(HitId::Menu(MenuHit::Trigger(MenuKind::View)));
+    h.click_menu_command(AppCommand::ToggleWordWrap);
     h.read(|w, app| {
         assert!(!app.shell.view.word_wrap);
         for tab in w.tabs().iter() {
@@ -553,8 +556,8 @@ fn keyboard_system_chords_altgr_menu_gate_popup_occlusion_and_fractional_borders
         event: alt_f4,
     }));
 
-    h.click_hit(HitId::MenuTrigger(MenuKind::File));
-    h.read(|w, _| assert!(w.is_menu_open()));
+    h.click_hit(HitId::Menu(MenuHit::Trigger(MenuKind::File)));
+    h.read(|w, _| assert!(w.menus().is_open()));
     h.press_key("ctrl-w");
     h.read(|w, _| {
         assert_eq!(w.tabs().len(), 2, "Ctrl+W must not fire behind an open menu");
@@ -584,7 +587,7 @@ fn keyboard_system_chords_altgr_menu_gate_popup_occlusion_and_fractional_borders
         window_id: h.window_id,
         event: alt_f4,
     }));
-    let close_pt = h.hit_rect(HitId::CaptionClose).unwrap().center();
+    let close_pt = h.hit_rect(HitId::Caption(CaptionHit::Close)).unwrap().center();
     h.read(|w, _| {
         assert_eq!(
             hit_test_control_areas(&w.frame().control_areas(), close_pt),

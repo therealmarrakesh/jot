@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use crate::geom::{Point, Rect, Size, point};
-use crate::ids::{AnimKey, EditorSlot, HitId, MenuKind, UiState};
+use crate::ids::{AnimKey, AppUi, EditorSlot, HitId, MenuHit, MenuKind};
 use crate::ui::{Anchor, AnimStatus, Curve, Easing, Transition};
 
 use super::MENU_BAR_HEIGHT;
@@ -70,7 +70,7 @@ impl PopupKind {
     pub(super) fn anchor(&self) -> Anchor<HitId> {
         match self {
             Self::Bar(kind) => Anchor::Target {
-                target: HitId::MenuTrigger(*kind),
+                target: HitId::Menu(MenuHit::Trigger(*kind)),
                 place: place_below,
             },
             Self::Context { anchor, .. } => Anchor::Point(*anchor),
@@ -89,14 +89,14 @@ impl PopupKind {
     }
 }
 
-pub(super) struct Motion {
+pub(super) struct PopupTransition {
     pub(super) transition: Transition,
     fade_in: bool,
     pub(super) unroll: f32,
     pub(super) opacity: f32,
 }
 
-impl Motion {
+impl PopupTransition {
     pub(super) fn new(fade_in: bool) -> Self {
         Self {
             transition: Transition::open_new(),
@@ -120,7 +120,7 @@ impl Motion {
         self.transition.close();
     }
 
-    pub(super) fn sample(&mut self, ui: &mut UiState) -> bool {
+    pub(super) fn sample(&mut self, ui: &mut AppUi) -> bool {
         let serial = self.transition.serial();
         let closing = self.transition.is_closing();
         if !closing {
@@ -152,7 +152,7 @@ pub(super) enum PopupFocus {
 pub(super) struct OpenSubmenu {
     pub(super) ix: usize,
     pub(super) panel: Panel,
-    pub(super) motion: Motion,
+    pub(super) motion: PopupTransition,
 }
 
 pub(super) struct OpenMenu {
@@ -160,7 +160,7 @@ pub(super) struct OpenMenu {
     pub(super) panel: Panel,
     pub(super) submenu: Option<OpenSubmenu>,
     leaving_submenu: Option<OpenSubmenu>,
-    pub(super) motion: Motion,
+    pub(super) motion: PopupTransition,
     pub(super) focus: PopupFocus,
 }
 
@@ -172,7 +172,7 @@ impl OpenMenu {
             panel,
             submenu: None,
             leaving_submenu: None,
-            motion: Motion::new(fade_in),
+            motion: PopupTransition::new(fade_in),
             focus,
         }
     }
@@ -299,7 +299,7 @@ impl OpenMenu {
         }
     }
 
-    pub(super) fn sample(&mut self, ui: &mut UiState) -> bool {
+    pub(super) fn sample(&mut self, ui: &mut AppUi) -> bool {
         if let Some(sub) = &mut self.submenu {
             sub.motion.sample(ui);
         }

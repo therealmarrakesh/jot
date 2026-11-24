@@ -1,10 +1,11 @@
 use crate::color::{black, transparent_black, white};
 use crate::editor::Editor;
 use crate::geom::{Edges, Size};
-use crate::ids::{CustomDraw, EditorSlot, HitId, Node, UiState};
+use crate::ids::{AppNode, AppUi, CustomDraw, EditorSlot, HitId};
 use crate::platform::CursorStyle;
 use crate::theme::{
-    BODY_LINE, BODY_SIZE, CONTROL_HEIGHT, CONTROL_RADIUS, ICON_FONT, Palette, Surface, TEXT_FONT,
+    BODY_LINE, BODY_SIZE, CONTROL_HEIGHT, CONTROL_RADIUS, ControlColors, ICON_FONT, Palette,
+    TEXT_FONT,
 };
 use crate::types::SharedStr;
 use crate::ui::{Brushes, box_, row, text};
@@ -29,13 +30,13 @@ pub(crate) fn subtle_brushes(p: Palette) -> Brushes {
 
 pub(crate) fn button(
     p: Palette,
-    surface: Surface,
+    surface: ControlColors,
     hit: HitId,
     label: impl Into<SharedStr>,
     accented: bool,
     focused: bool,
-    ui: &mut UiState,
-) -> Node {
+    ui: &mut AppUi,
+) -> AppNode {
     let ring = focused && ui.last_input_was_keyboard();
     let pressed = ui.is_pressed(hit);
     let accent = p.accent;
@@ -113,8 +114,8 @@ pub(crate) fn icon_button(
     glyph: (&'static str, f32),
     dims: Size,
     enabled: bool,
-    ui: &mut UiState,
-) -> Node {
+    ui: &mut AppUi,
+) -> AppNode {
     let (glyph, glyph_size) = glyph;
     let bg = ui.brush(hit, subtle_brushes(p), enabled);
     let fg = if !enabled {
@@ -142,7 +143,7 @@ pub(crate) fn icon_button(
         .child(text(glyph))
 }
 
-pub(crate) fn focus_ring(p: Palette, outset: Edges<f32>, radius: f32) -> Node {
+pub(crate) fn focus_ring(p: Palette, outset: Edges<f32>, radius: f32) -> AppNode {
     box_()
         .absolute()
         .top(-outset.top)
@@ -159,7 +160,7 @@ pub(crate) fn focus_ring(p: Palette, outset: Edges<f32>, radius: f32) -> Node {
         )
 }
 
-fn field_glyph(p: Palette, glyph: &'static str, right: f32) -> Node {
+fn field_glyph(p: Palette, glyph: &'static str, right: f32) -> AppNode {
     row()
         .absolute()
         .top(2.)
@@ -178,13 +179,13 @@ fn field_glyph(p: Palette, glyph: &'static str, right: f32) -> Node {
 
 pub(crate) fn text_field(
     p: Palette,
-    surface: Surface,
+    surface: ControlColors,
     slot: EditorSlot,
     editor: &Editor,
     focused: bool,
     search_icon: bool,
-    ui: &UiState,
-) -> Node {
+    ui: &AppUi,
+) -> AppNode {
     let field_hit = HitId::Editor(slot);
     let clear_hit = HitId::FieldClear(slot);
     let empty = editor.model().text().len() == 0;

@@ -1,11 +1,11 @@
-use crate::command::Command;
+use crate::command::{AppCommand, Command};
 use crate::geom::Point;
-use crate::ids::{EditorSlot, Focus, HitId, MenuKind, UiState};
+use crate::ids::{AppUi, EditorSlot, FindHit, Focus, HitId, MenuHit, MenuKind};
 use crate::platform::{Key, KeyEvent, TimerHandle};
 use crate::shell::{WindowTimer, WindowTimers};
 
 use super::model::{Entry, MenuState, Panel, context_menu_items};
-use super::popup::{Motion, OpenMenu, OpenSubmenu, PopupFocus, PopupKind};
+use super::popup::{OpenMenu, OpenSubmenu, PopupFocus, PopupKind, PopupTransition};
 
 const MIN_WIDTH: f32 = 232.;
 const FLYOUT_MIN_WIDTH: f32 = 198.;
@@ -80,7 +80,7 @@ pub(super) enum MenuMode {
 }
 
 #[derive(Default)]
-pub(crate) struct MenuBar {
+pub(crate) struct Menus {
     mode: MenuMode,
     leaving: Option<Box<OpenMenu>>,
     alt_armed: bool,
@@ -88,7 +88,7 @@ pub(crate) struct MenuBar {
     submenu_timer: Option<TimerHandle>,
 }
 
-impl MenuBar {
+impl Menus {
     pub(crate) fn is_open(&self) -> bool {
         matches!(self.mode, MenuMode::Open { .. })
     }
@@ -232,7 +232,23 @@ impl MenuBar {
         )
     }
 
-    pub(crate) fn open_flyout(
+    pub(crate) fn open_find_options(
+        &mut self,
+        match_case: bool,
+        wrap_around: bool,
+    ) -> MenuOutcome {
+        let entries = vec![
+            Entry::toggle("Match case", match_case, AppCommand::ToggleMatchCase),
+            Entry::toggle("Wrap around", wrap_around, AppCommand::ToggleWrapAround),
+        ];
+        self.open_flyout(
+            entries,
+            HitId::Find(FindHit::Options),
+            EditorSlot::FindQuery,
+        )
+    }
+
+    fn open_flyout(
         &mut self,
         entries: Vec<Entry>,
         target: HitId,
@@ -266,15 +282,15 @@ impl MenuBar {
     pub(crate) fn on_hover_change(
         &mut self,
         top: Option<HitId>,
-        state: MenuState,
-        ui: &mut UiState,
+        state: impl FnOnce() -> MenuState,
+        ui: &mut AppUi,
         timers: WindowTimers<'_>,
     ) -> MenuOutcome {
-        if let Some(HitId::MenuTrigger(kind)) = top
+        if let Some(HitId::Menu(MenuHit::Trigger(kind))) = top
             && self.open_kind().is_some_and(|open| open != kind)
         {
             ui.mark_pointer_input();
-            return self.open_kind_menu(kind, state);
+            return self.open_kind_menu(kind, state());
         }
 
         let MenuMode::Open { menu, .. } = &mut self.mode else {
@@ -282,12 +298,12 @@ impl MenuBar {
             return MenuOutcome::default();
         };
         let hovered = match top {
-            Some(HitId::MenuItem { ix, .. }) => Some(HoveredTarget::Item(ix)),
-            Some(HitId::SubmenuItem { ix: sub_ix, .. }) => menu
+            Some(HitId::Menu(MenuHit::Item { ix, .. })) => Some(HoveredTarget::Item(ix)),
+            Some(HitId::Menu(MenuHit::SubmenuItem { ix: sub_ix, .. })) => menu
                 .submenu
                 .as_ref()
                 .map(|s| HoveredTarget::SubmenuItem(s.ix, sub_ix)),
-            Some(HitId::MenuCommand { ix, .. }) => Some(HoveredTarget::Command(ix)),
+            Some(HitId::Menu(MenuHit::Command { ix, .. })) => Some(HoveredTarget::Command(ix)),
             _ => None,
         };
         if hovered == self.hovered_target {
@@ -403,7 +419,7 @@ impl MenuBar {
             menu.set_submenu(OpenSubmenu {
                 ix,
                 panel,
-                motion: Motion::new(false),
+                motion: PopupTransition::new(false),
             });
         }
         menu.focus = if focus_first {
@@ -437,7 +453,7 @@ impl MenuBar {
         &mut self,
         ev: KeyEvent,
         focus: Focus,
-        state: MenuState,
+        state: impl FnOnce() -> MenuState,
     ) -> MenuOutcome {
         let m = ev.modifiers;
         if m.alt && !m.ctrl && !m.win && matches!(ev.key, Key::F(4) | Key::Space) {
@@ -466,6 +482,7 @@ impl MenuBar {
             _ => None,
         };
 
+        let mut state = Some(state);
         if !self.access_active(focus) {
             if let Some(ch) = access_ch
                 && m.alt
@@ -473,7 +490,7 @@ impl MenuBar {
                 && !m.win
                 && !m.alt_gr
             {
-                let out = self.invoke_access(ch, true, state);
+                let out = self.invoke_access(ch, true, || (state.take().unwrap())());
                 if out.handled {
                     return out;
                 }
@@ -482,12 +499,12 @@ impl MenuBar {
                 if let Some(ch) = access_ch
                     && m.none()
                 {
-                    let out = self.invoke_access(ch, false, state);
+                    let out = self.invoke_access(ch, false, || (state.take().unwrap())());
                     if out.handled {
                         return out;
                     }
                 }
-                let nav = self.handle_nav_key(ev, focus, state);
+                let nav = self.handle_nav_key(ev, focus, || (state.take().unwrap())());
                 return if nav.handled {
                     nav
                 } else {
@@ -495,7 +512,7 @@ impl MenuBar {
                 };
             }
             if focus == Focus::MenuBar {
-                return self.handle_nav_key(ev, focus, state);
+                return self.handle_nav_key(ev, focus, || (state.take().unwrap())());
             }
             return MenuOutcome::default();
         }
@@ -512,7 +529,8 @@ impl MenuBar {
             | Key::Space
             | Key::Enter => {
                 self.set_tips(false);
-                self.handle_nav_key(ev, focus, state).dirty()
+                self.handle_nav_key(ev, focus, || (state.take().unwrap())())
+                    .dirty()
             }
             _ => {
                 if let Some(ch) = access_ch
@@ -520,7 +538,7 @@ impl MenuBar {
                     && !m.win
                     && !m.alt_gr
                 {
-                    let out = self.invoke_access(ch, true, state);
+                    let out = self.invoke_access(ch, true, || (state.take().unwrap())());
                     if out.handled || !m.alt {
                         return MenuOutcome {
                             handled: true,
@@ -576,7 +594,12 @@ impl MenuBar {
         }
     }
 
-    fn invoke_access(&mut self, key: char, show_access: bool, state: MenuState) -> MenuOutcome {
+    fn invoke_access(
+        &mut self,
+        key: char,
+        show_access: bool,
+        state: impl FnOnce() -> MenuState,
+    ) -> MenuOutcome {
         let MenuMode::Open { menu, .. } = &mut self.mode else {
             let Some(kind) = MenuKind::ALL
                 .into_iter()
@@ -584,7 +607,7 @@ impl MenuBar {
             else {
                 return MenuOutcome::default();
             };
-            return self.open_by_keyboard(kind, state, show_access);
+            return self.open_by_keyboard(kind, state(), show_access);
         };
         if menu.kind.bar_kind().is_none() {
             return MenuOutcome::default();
@@ -609,7 +632,12 @@ impl MenuBar {
         }
     }
 
-    fn handle_nav_key(&mut self, ev: KeyEvent, focus: Focus, state: MenuState) -> MenuOutcome {
+    fn handle_nav_key(
+        &mut self,
+        ev: KeyEvent,
+        focus: Focus,
+        state: impl FnOnce() -> MenuState,
+    ) -> MenuOutcome {
         if !ev.modifiers.none() {
             return MenuOutcome::default();
         }
@@ -634,12 +662,17 @@ impl MenuBar {
         MenuOutcome::handled().dirty()
     }
 
-    fn step_active(&mut self, delta: isize, focus: Focus, state: MenuState) -> MenuOutcome {
+    fn step_active(
+        &mut self,
+        delta: isize,
+        focus: Focus,
+        state: impl FnOnce() -> MenuState,
+    ) -> MenuOutcome {
         let MenuMode::Open { menu, .. } = &mut self.mode else {
             if delta > 0
                 && let Some(kind) = self.bar_focused(focus)
             {
-                return self.open_by_keyboard(kind, state, false);
+                return self.open_by_keyboard(kind, state(), false);
             }
             return MenuOutcome::handled();
         };
@@ -647,10 +680,10 @@ impl MenuBar {
         MenuOutcome::handled().dirty()
     }
 
-    fn on_confirm(&mut self, focus: Focus, state: MenuState) -> MenuOutcome {
+    fn on_confirm(&mut self, focus: Focus, state: impl FnOnce() -> MenuState) -> MenuOutcome {
         let MenuMode::Open { menu, .. } = &self.mode else {
             if let Some(kind) = self.bar_focused(focus) {
-                return self.open_by_keyboard(kind, state, false);
+                return self.open_by_keyboard(kind, state(), false);
             }
             return MenuOutcome::handled();
         };
@@ -706,7 +739,7 @@ impl MenuBar {
         MenuOutcome::handled().dirty()
     }
 
-    fn on_left(&mut self, state: MenuState) -> MenuOutcome {
+    fn on_left(&mut self, state: impl FnOnce() -> MenuState) -> MenuOutcome {
         let MenuMode::Open { menu, .. } = &mut self.mode else {
             return self.cycle_bar(-1);
         };
@@ -717,13 +750,13 @@ impl MenuBar {
             self.close_submenu();
             MenuOutcome::handled().dirty()
         } else if let Some(kind) = menu.kind.bar_kind() {
-            self.open_by_keyboard(kind.cycle(-1), state, false)
+            self.open_by_keyboard(kind.cycle(-1), state(), false)
         } else {
             MenuOutcome::handled()
         }
     }
 
-    fn on_right(&mut self, state: MenuState) -> MenuOutcome {
+    fn on_right(&mut self, state: impl FnOnce() -> MenuState) -> MenuOutcome {
         let MenuMode::Open { menu, .. } = &mut self.mode else {
             return self.cycle_bar(1);
         };
@@ -749,19 +782,77 @@ impl MenuBar {
                 MenuOutcome::handled().dirty()
             }
             None => match menu.kind.bar_kind() {
-                Some(kind) => self.open_by_keyboard(kind.cycle(1), state, false),
+                Some(kind) => self.open_by_keyboard(kind.cycle(1), state(), false),
                 None => MenuOutcome::handled(),
             },
         }
     }
 
-    pub(crate) fn sample(&mut self, ui: &mut UiState) {
+    pub(crate) fn sample(&mut self, ui: &mut AppUi) {
         if let MenuMode::Open { menu, .. } = &mut self.mode {
             menu.sample(ui);
         }
         if self.leaving.as_mut().is_some_and(|menu| menu.sample(ui)) {
             self.leaving = None;
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn hit_for_command(&self, cmd: Command) -> Option<HitId> {
+        let MenuMode::Open { menu, .. } = &self.mode else {
+            return None;
+        };
+        if let Some(sub) = &menu.submenu
+            && let Some(ix) = sub
+                .panel
+                .entries
+                .iter()
+                .position(|e| e.command_id() == Some(cmd))
+        {
+            return Some(HitId::Menu(MenuHit::SubmenuItem {
+                serial: sub.motion.serial(),
+                ix,
+            }));
+        }
+        if let Some(ix) = menu
+            .kind
+            .commands()
+            .iter()
+            .position(|b| b.command.command == cmd)
+        {
+            return Some(HitId::Menu(MenuHit::Command {
+                serial: menu.motion.serial(),
+                ix,
+            }));
+        }
+        menu.panel
+            .entries
+            .iter()
+            .position(|e| e.command_id() == Some(cmd))
+            .map(|ix| {
+                HitId::Menu(MenuHit::Item {
+                    serial: menu.motion.serial(),
+                    ix,
+                })
+            })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn hit_for_submenu(&self, title: &str) -> Option<HitId> {
+        let MenuMode::Open { menu, .. } = &self.mode else {
+            return None;
+        };
+        menu.panel
+            .entries
+            .iter()
+            .enumerate()
+            .find_map(|(ix, e)| {
+                (matches!(e, Entry::Submenu(..)) && menu.panel.labels[ix].as_ref() == title)
+                    .then_some(HitId::Menu(MenuHit::Item {
+                        serial: menu.motion.serial(),
+                        ix,
+                    }))
+            })
     }
 }
 
@@ -770,7 +861,6 @@ mod tests {
     use super::*;
     use std::time::{Duration, Instant};
 
-    use crate::command::AppCommand;
     use crate::editor::EditCommand;
     use crate::geom::point;
     use crate::ids::TabId;
@@ -798,8 +888,8 @@ mod tests {
     fn alt_access_keys_submenu_hover_and_system_chords() {
         let jobs = Jobs::new();
         let timers = WindowTimers::for_test(&jobs);
-        let mut ui = UiState::default();
-        let mut bar = MenuBar::default();
+        let mut ui = AppUi::default();
+        let mut bar = Menus::default();
         let ed_focus = Focus::Editor(EditorSlot::Tab(TabId::next()));
         let state = MenuState {
             can_undo: true,
@@ -812,22 +902,22 @@ mod tests {
         };
 
         // Alt tap arms and focuses menu bar with key tips.
-        assert!(!bar.on_key_down(key(Key::Alt), ed_focus, state).handled);
+        assert!(!bar.on_key_down(key(Key::Alt), ed_focus, || state).handled);
         let up = bar.on_key_up(key(Key::Alt), ed_focus);
         assert!(up.handled);
         assert_eq!(up.focus, FocusRequest::MenuBar);
         assert!(bar.access_active(Focus::MenuBar));
 
         // Pressing 'V' opens View menu with key tips, Escape returns to bar, second Escape restores editor.
-        let open = bar.on_key_down(key(Key::Char('v')), Focus::MenuBar, state);
+        let open = bar.on_key_down(key(Key::Char('v')), Focus::MenuBar, || state);
         assert!(open.handled);
         assert_eq!(bar.open_kind(), Some(MenuKind::View));
         assert!(bar.access_active(Focus::MenuBar));
 
         // Hovering row 0 (Zoom submenu) arms submenu timer; timer opens submenu; Enter activates ZoomIn.
         let _ = bar.on_hover_change(
-            Some(HitId::MenuItem { serial: 1, ix: 0 }),
-            state,
+            Some(HitId::Menu(MenuHit::Item { serial: 1, ix: 0 })),
+            || state,
             &mut ui,
             timers,
         );
@@ -839,15 +929,15 @@ mod tests {
             })
         ));
         assert!(bar.on_submenu_timer(Some(0)));
-        let enter_sub = bar.on_key_down(key(Key::Right), Focus::MenuBar, state);
+        let enter_sub = bar.on_key_down(key(Key::Right), Focus::MenuBar, || state);
         assert!(enter_sub.handled);
-        let act = bar.on_key_down(key(Key::Enter), Focus::MenuBar, state);
+        let act = bar.on_key_down(key(Key::Enter), Focus::MenuBar, || state);
         assert_eq!(act.command, Some(AppCommand::ZoomIn.into()));
         assert!(!bar.is_open());
 
         // Alt+F4 cancels open menu and returns handled=false for OS pass-through.
         bar.open_kind_menu(MenuKind::File, state);
-        let alt_f4 = bar.on_key_down(alt_key(Key::F(4)), Focus::MenuBar, state);
+        let alt_f4 = bar.on_key_down(alt_key(Key::F(4)), Focus::MenuBar, || state);
         assert!(!alt_f4.handled);
         assert!(!bar.is_open());
     }
@@ -856,8 +946,8 @@ mod tests {
     fn context_menu_uses_snapshot_and_flyout_restores_slot_focus() {
         let jobs = Jobs::new();
         let timers = WindowTimers::for_test(&jobs);
-        let mut ui = UiState::default();
-        let mut bar = MenuBar::default();
+        let mut ui = AppUi::default();
+        let mut bar = Menus::default();
         let state = MenuState {
             can_undo: false,
             has_selection: false,
@@ -870,14 +960,14 @@ mod tests {
         assert!(bar.is_open());
         // Hovering a context menu command clears keyboard focus modality on UiState.
         let _ = bar.on_hover_change(
-            Some(HitId::MenuCommand { serial: 1, ix: 2 }),
-            state,
+            Some(HitId::Menu(MenuHit::Command { serial: 1, ix: 2 })),
+            || state,
             &mut ui,
             timers,
         );
         assert!(!ui.last_input_was_keyboard());
         // Cut(0) and Copy(1) disabled; Paste(2) enabled -> focused command must be 2.
-        let act = bar.on_key_down(key(Key::Enter), Focus::MenuBar, state);
+        let act = bar.on_key_down(key(Key::Enter), Focus::MenuBar, || state);
         assert_eq!(act.command, Some(EditCommand::Paste.into()));
         assert_eq!(act.focus, FocusRequest::RestoreEditor);
 
@@ -886,11 +976,7 @@ mod tests {
         let _ = bar.activate(RowPath::Root(0), false);
         assert!(bar.open_popup().is_some_and(|o| o.submenu.is_some() && !o.in_submenu()));
 
-        bar.open_flyout(
-            vec![Entry::toggle("Match case", false, AppCommand::ToggleMatchCase)],
-            HitId::FindOptions,
-            EditorSlot::FindQuery,
-        );
+        bar.open_find_options(false, true);
         let closed = bar.close();
         assert_eq!(closed.focus, FocusRequest::Editor(EditorSlot::FindQuery));
     }

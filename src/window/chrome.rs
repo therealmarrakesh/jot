@@ -4,7 +4,7 @@ use crate::color::transparent_black;
 use crate::document::Format;
 use crate::geom::{Rect, Size, point, size};
 use crate::gfx::TextSystem;
-use crate::ids::{CustomDraw, Frame, HitId, Node, UiState};
+use crate::ids::{AppFrame, AppNode, AppUi, CaptionHit, CustomDraw, HitId, MenuHit};
 use crate::menu::MENU_BAR_HEIGHT;
 use crate::platform::WindowControlArea;
 use crate::shell::Shell;
@@ -88,7 +88,7 @@ impl MainWindow {
         &mut self,
         logical: Size,
         metrics: Option<StatusMetrics>,
-        frame: &Frame,
+        frame: &AppFrame,
         p: Palette,
         ts: &TextSystem,
     ) {
@@ -101,10 +101,10 @@ impl MainWindow {
                     Some(w) if w > STATUS_DIVIDER_WIDTH + 0.5 => {
                         logical.width - (w - STATUS_DIVIDER_WIDTH)
                     }
-                    _ => Frame::measure(
+                    _ => AppFrame::measure(
                         self.status_bar(m, p),
                         AvailSize::MIN,
-                        self.native.scale_factor(),
+                        self.win.window.scale_factor(),
                         ts,
                     )
                     .width,
@@ -117,7 +117,9 @@ impl MainWindow {
         } else {
             0.0
         };
-        let menu_width = frame.rect_of(HitId::MenuBar).map_or(0.0, |r| r.size.width);
+        let menu_width = frame
+            .rect_of(HitId::Menu(MenuHit::Bar))
+            .map_or(0.0, |r| r.size.width);
         let menu_row = MENU_BAR_LEFT + menu_width + THEME_BUTTON_WIDTH + THEME_BUTTON_RIGHT;
         let width = status_w.max(menu_row).max(TITLE_BAR_MIN_WIDTH);
         let chrome_top = frame.rect_of(HitId::EditorArea).map_or(0., |r| r.top());
@@ -127,7 +129,7 @@ impl MainWindow {
             (prev.width - next.width).abs() > 0.5 || (prev.height - next.height).abs() > 0.5
         }) {
             self.min_size = Some(next);
-            self.native.set_min_size(Some(next));
+            self.win.window.set_min_size(Some(next));
         }
     }
 
@@ -137,7 +139,7 @@ impl MainWindow {
         window_active: bool,
         maximized: bool,
         p: Palette,
-    ) -> Node {
+    ) -> AppNode {
         let strip_node = self.tabs.render(strip, p, &mut self.ui);
         let captions = caption_buttons(window_active, maximized, p, &mut self.ui);
         row()
@@ -169,8 +171,8 @@ impl MainWindow {
             .child(captions)
     }
 
-    pub(super) fn menu_bar_row(&mut self, p: Palette) -> Node {
-        let menu = self.menu_bar.render_bar(self.focus, p, &mut self.ui);
+    pub(super) fn menu_bar_row(&mut self, p: Palette) -> AppNode {
+        let menu = self.menus.render_bar(self.focus, p, &mut self.ui);
         let theme_btn = icon_button(
             p,
             HitId::ThemeToggle,
@@ -197,10 +199,10 @@ impl MainWindow {
 
     pub(super) fn editor_area(
         &mut self,
-        find: Option<Node>,
+        find: Option<AppNode>,
         now: Instant,
         shell: &Shell,
-    ) -> Node {
+    ) -> AppNode {
         let p = shell.palette;
         let slot = self.active_slot();
         let lh = self.line_height();
@@ -240,11 +242,11 @@ impl MainWindow {
     }
 
     #[cfg(test)]
-    pub(crate) fn status_bar_for_test(&self, p: Palette) -> crate::ids::Node {
+    pub(crate) fn status_bar_for_test(&self, p: Palette) -> AppNode {
         self.status_bar(self.status_metrics(), p)
     }
 
-    pub(super) fn status_bar(&self, metrics: StatusMetrics, p: Palette) -> Node {
+    pub(super) fn status_bar(&self, metrics: StatusMetrics, p: Palette) -> AppNode {
         box_().flex_none().child(separator(p)).child(
             row()
                 .items_center()
@@ -274,14 +276,14 @@ impl MainWindow {
     }
 }
 
-fn separator(p: Palette) -> Node {
+fn separator(p: Palette) -> AppNode {
     box_()
         .flex_none()
         .h(SEPARATOR_HEIGHT)
         .bg(p.stroke_on_layer)
 }
 
-fn status_divider(p: Palette) -> Node {
+fn status_divider(p: Palette) -> AppNode {
     box_()
         .flex_none()
         .w(STATUS_DIVIDER_WIDTH)
@@ -328,11 +330,11 @@ enum Caption {
 
 impl Caption {
     fn hit(self) -> HitId {
-        match self {
-            Self::Minimize => HitId::CaptionMin,
-            Self::Maximize | Self::Restore => HitId::CaptionMax,
-            Self::Close => HitId::CaptionClose,
-        }
+        HitId::Caption(match self {
+            Self::Minimize => CaptionHit::Min,
+            Self::Maximize | Self::Restore => CaptionHit::Max,
+            Self::Close => CaptionHit::Close,
+        })
     }
 
     fn glyph(self) -> &'static str {
@@ -352,7 +354,7 @@ impl Caption {
         }
     }
 
-    fn render(self, active: bool, p: Palette, ui: &mut UiState) -> Node {
+    fn render(self, active: bool, p: Palette, ui: &mut AppUi) -> AppNode {
         let hit = self.hit();
         let (hover_bg, pressed_bg, hover_fg, pressed_fg) = match self {
             Self::Close => (
@@ -412,7 +414,7 @@ impl Caption {
     }
 }
 
-fn caption_buttons(active: bool, maximized: bool, p: Palette, ui: &mut UiState) -> Node {
+fn caption_buttons(active: bool, maximized: bool, p: Palette, ui: &mut AppUi) -> AppNode {
     let maximize = if maximized {
         Caption::Restore
     } else {

@@ -6,15 +6,41 @@ use crate::document::{self, DocPath, Format, PathKey};
 use crate::editor::Rope;
 use crate::files::{DocHost, Prompt, TabSnapshot};
 use crate::geom::{Point, Rect, ScreenPoint, Size, point, size};
-use crate::gfx::Surface;
+use crate::gfx::WindowSurface;
 use crate::ids::TabId;
 use crate::platform::{
-    MainWindowConfig, NativeWindow, WindowAppearance, WindowHwnd, WindowId, WindowsDisplay,
+    MainWindowConfig, NativeWindow, WindowAppearance, WindowHandle, WindowId, WindowsDisplay,
     cursor_screen_pos, diag,
 };
 use crate::shell::Shell;
 use crate::tabs::TabData;
 use crate::window::{MainWindow, WINDOW_HEIGHT, WINDOW_MAX_SCREEN_SHARE, WINDOW_WIDTH};
+
+#[derive(Copy, Clone, Debug)]
+pub(crate) struct WindowLaunch {
+    pub(crate) show: bool,
+    pub(crate) focus: bool,
+    pub(crate) use_cursor_display: bool,
+}
+
+impl Default for WindowLaunch {
+    fn default() -> Self {
+        Self {
+            show: true,
+            focus: true,
+            use_cursor_display: true,
+        }
+    }
+}
+
+impl WindowLaunch {
+    #[cfg(test)]
+    pub(crate) const HIDDEN: Self = Self {
+        show: false,
+        focus: false,
+        use_cursor_display: false,
+    };
+}
 
 pub(crate) struct OpenWindowError {
     pub(crate) tab: Option<TabData>,
@@ -34,24 +60,17 @@ pub(crate) struct Windows {
     list: Vec<MainWindow>,
     active: Option<WindowId>,
     cascade_step: u32,
-    #[cfg(test)]
-    headless: bool,
+    launch: WindowLaunch,
 }
 
 impl Windows {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(launch: WindowLaunch) -> Self {
         Self {
             list: Vec::new(),
             active: None,
             cascade_step: 0,
-            #[cfg(test)]
-            headless: false,
+            launch,
         }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn set_headless(&mut self, headless: bool) {
-        self.headless = headless;
     }
 
     #[inline]
@@ -98,7 +117,7 @@ impl Windows {
         self.list.iter_mut().find(|w| w.id() == id)
     }
 
-    pub(crate) fn hwnd(&self, id: WindowId) -> Option<WindowHwnd> {
+    pub(crate) fn hwnd(&self, id: WindowId) -> Option<WindowHandle> {
         self.get(id).map(MainWindow::hwnd)
     }
 
@@ -205,17 +224,10 @@ impl Windows {
             .map(|w| w.hwnd().client_origin())
         {
             WindowsDisplay::from_point(origin).or_else(WindowsDisplay::primary)
+        } else if self.launch.use_cursor_display {
+            WindowsDisplay::from_point(cursor_screen_pos()).or_else(WindowsDisplay::primary)
         } else {
-            #[cfg(test)]
-            let fallback = if self.headless {
-                WindowsDisplay::primary()
-            } else {
-                WindowsDisplay::from_point(cursor_screen_pos()).or_else(WindowsDisplay::primary)
-            };
-            #[cfg(not(test))]
-            let fallback =
-                WindowsDisplay::from_point(cursor_screen_pos()).or_else(WindowsDisplay::primary);
-            fallback
+            WindowsDisplay::primary()
         };
         let visible = display.map(|d| d.visible_bounds());
         let screen = visible.map_or(size(WINDOW_WIDTH, WINDOW_HEIGHT), |v| v.size);
@@ -243,16 +255,12 @@ impl Windows {
                 bounds.origin = point(bounds.origin.x + step, bounds.origin.y + step);
             }
         }
-        #[cfg(test)]
-        let (focus, show) = (!self.headless, !self.headless);
-        #[cfg(not(test))]
-        let (focus, show) = (true, true);
         MainWindowConfig {
             bounds: Some(bounds),
             title: APP_NAME.into(),
             display_id: display.map(|d| d.id()),
-            focus,
-            show,
+            focus: self.launch.focus,
+            show: self.launch.show,
         }
     }
 
@@ -261,7 +269,7 @@ impl Windows {
         initial: Option<TabData>,
         window_size: Option<Size>,
         shell: &Shell,
-    ) -> std::result::Result<(WindowId, WindowHwnd), Box<OpenWindowError>> {
+    ) -> std::result::Result<(WindowId, WindowHandle), Box<OpenWindowError>> {
         self.open_at(initial, window_size, None, shell)
     }
 
@@ -271,33 +279,24 @@ impl Windows {
         window_size: Option<Size>,
         target_point: Option<ScreenPoint>,
         shell: &Shell,
-    ) -> std::result::Result<(WindowId, WindowHwnd), Box<OpenWindowError>> {
+    ) -> std::result::Result<(WindowId, WindowHandle), Box<OpenWindowError>> {
         let config = self.window_config(window_size, target_point);
-        let (native, surface) =
-            match NativeWindow::create_main(&config, shell.appearance()).and_then(|n| {
-                let (w, h) = n.physical_size();
-                let s = Surface::new(
-                    shell.gpu.clone(),
-                    n.hwnd().raw(),
-                    w,
-                    h,
-                    n.scale_factor(),
-                )?;
-                Ok((n, s))
-            }) {
-                Ok(created) => created,
-                Err(err) => {
-                    let message = err.to_string();
-                    diag::debug_log(&format!("window/surface create failed: {message}"));
-                    return Err(Box::new(OpenWindowError {
-                        tab: initial,
-                        message,
-                    }));
-                }
-            };
-        let id = native.id;
-        let hwnd = native.hwnd();
-        let win = MainWindow::new(native, surface, initial, shell);
+        let win_surface = match NativeWindow::create_main(&config, shell.appearance())
+            .and_then(|n| WindowSurface::new(shell.gpu.clone(), n))
+        {
+            Ok(created) => created,
+            Err(err) => {
+                let message = err.to_string();
+                diag::debug_log(&format!("window/surface create failed: {message}"));
+                return Err(Box::new(OpenWindowError {
+                    tab: initial,
+                    message,
+                }));
+            }
+        };
+        let id = win_surface.window.id;
+        let hwnd = win_surface.window.hwnd();
+        let win = MainWindow::new(win_surface, initial, shell);
         self.list.push(win);
         self.active = Some(id);
         Ok((id, hwnd))

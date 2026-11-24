@@ -3,9 +3,8 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use crate::geom::point;
-use crate::ids::HitId;
+use crate::ids::{DialogHit, HitId, TabHit, TabId};
 use crate::platform::{Platform, PlatformEvent, PlatformHandler};
-use crate::ids::TabId;
 
 use super::TestHarness;
 
@@ -13,17 +12,17 @@ use super::TestHarness;
 fn tab_close_button_new_tab_hover_and_middle_click() {
     let mut h = TestHarness::new();
 
-    h.click_hit(HitId::NewTab);
-    h.click_hit(HitId::NewTab);
+    h.click_hit(HitId::Tab(TabHit::New));
+    h.click_hit(HitId::Tab(TabHit::New));
     let ids: Vec<TabId> = h.read(|w, _| {
         assert_eq!(w.tabs().len(), 3);
         assert_eq!(w.tabs().active_index(), 2);
         w.tabs().iter().map(|t| t.data.id).collect()
     });
 
-    h.click_hit(HitId::Tab(ids[0]));
+    h.click_hit(HitId::Tab(TabHit::Item(ids[0])));
     h.read(|w, _| assert_eq!(w.tabs().active_index(), 0));
-    h.click_hit(HitId::TabClose(ids[0]));
+    h.click_hit(HitId::Tab(TabHit::Close(ids[0])));
     h.read(|w, app| {
         assert_eq!(w.tabs().len(), 2, "clicking active tab 'x' must close tab");
         assert!(w.tabs().index_of(ids[0]).is_none());
@@ -33,12 +32,12 @@ fn tab_close_button_new_tab_hover_and_middle_click() {
         );
     });
 
-    h.hover_hit(HitId::Tab(ids[2]));
+    h.hover_hit(HitId::Tab(TabHit::Item(ids[2])));
     assert!(
-        h.hit_rect(HitId::TabClose(ids[2])).is_some(),
+        h.hit_rect(HitId::Tab(TabHit::Close(ids[2]))).is_some(),
         "hovering inactive tab must reveal its 'x' button"
     );
-    h.click_hit(HitId::TabClose(ids[2]));
+    h.click_hit(HitId::Tab(TabHit::Close(ids[2])));
     h.read(|w, _| {
         assert_eq!(
             w.tabs().len(),
@@ -48,25 +47,25 @@ fn tab_close_button_new_tab_hover_and_middle_click() {
         assert_eq!(w.tabs()[0].data.id, ids[1]);
     });
 
-    h.click_hit(HitId::NewTab);
+    h.click_hit(HitId::Tab(TabHit::New));
     let second_id = h.read(|w, _| {
         assert_eq!(w.tabs().len(), 2);
         w.tabs()[1].data.id
     });
-    h.middle_click_hit(HitId::Tab(second_id));
+    h.middle_click_hit(HitId::Tab(TabHit::Item(second_id)));
     h.read(|w, _| assert_eq!(w.tabs().len(), 1, "middle-clicking tab must close it"));
 
     h.type_text("unsaved text");
     let last_id = h.read(|w, _| w.tabs()[0].data.id);
-    h.hover_hit(HitId::Tab(last_id));
-    h.click_hit(HitId::TabClose(last_id));
+    h.hover_hit(HitId::Tab(TabHit::Item(last_id)));
+    h.click_hit(HitId::Tab(TabHit::Close(last_id)));
     h.read(|w, _| {
         assert!(
             w.is_dialog_open(),
             "closing dirty tab via 'x' must open save confirmation dialog"
         );
     });
-    h.click_hit(HitId::DialogButton(1));
+    h.click_hit(HitId::Dialog(DialogHit::Button(1)));
     assert!(
         !h.window_open(),
         "confirming Don't save on last tab must close the window"
@@ -74,7 +73,7 @@ fn tab_close_button_new_tab_hover_and_middle_click() {
 
     let mut h2 = TestHarness::new();
     let sole_id = h2.read(|w, _| w.tabs()[0].data.id);
-    h2.click_hit(HitId::TabClose(sole_id));
+    h2.click_hit(HitId::Tab(TabHit::Close(sole_id)));
     assert!(
         !h2.window_open(),
         "clicking 'x' on sole clean tab must close the window"
@@ -125,7 +124,7 @@ fn dirty_window_close_file_drop_and_multi_window() {
         "dirty window must intercept close and show prompt"
     );
     h.read(|w, _| assert!(w.is_dialog_open()));
-    h.click_hit(HitId::DialogButton(2));
+    h.click_hit(HitId::Dialog(DialogHit::Button(2)));
     assert!(h.window_open(), "Cancel must keep window open");
 
     h.app
@@ -134,7 +133,7 @@ fn dirty_window_close_file_drop_and_multi_window() {
             window_id: h.window_id,
         });
     h.draw();
-    h.click_hit(HitId::DialogButton(1));
+    h.click_hit(HitId::Dialog(DialogHit::Button(1)));
     assert!(!h.window_open(), "Don't save must close the window");
 }
 
@@ -159,7 +158,10 @@ fn tab_drag_pop_out_and_reattach_does_not_panic() {
 
     let (hwnd1, scale, tab_rect, tab_id) = h.read(|w, _| {
         let id = w.tabs()[1].data.id;
-        let rect = w.frame().rect_of(HitId::Tab(id)).expect("tab 1 rect");
+        let rect = w
+            .frame()
+            .rect_of(HitId::Tab(TabHit::Item(id)))
+            .expect("tab 1 rect");
         (w.hwnd(), w.scale_factor(), rect, id)
     });
 
@@ -167,13 +169,13 @@ fn tab_drag_pop_out_and_reattach_does_not_panic() {
     let cy = (tab_rect.center().y * scale).round() as i32;
     let down_lp = LPARAM((((cy as u16 as u32) << 16) | (cx as u16 as u32)) as isize);
     unsafe {
-        let _ = SendMessageW(hwnd1.raw(), WM_LBUTTONDOWN, Some(WPARAM(1)), Some(down_lp));
+        let _ = SendMessageW(hwnd1.raw_hwnd(), WM_LBUTTONDOWN, Some(WPARAM(1)), Some(down_lp));
     }
 
     let move_y = ((tab_rect.center().y + 200.0) * scale).round() as i32;
     let move_lp = LPARAM((((move_y as u16 as u32) << 16) | (cx as u16 as u32)) as isize);
     unsafe {
-        let _ = SendMessageW(hwnd1.raw(), WM_MOUSEMOVE, Some(WPARAM(1)), Some(move_lp));
+        let _ = SendMessageW(hwnd1.raw_hwnd(), WM_MOUSEMOVE, Some(WPARAM(1)), Some(move_lp));
     }
 
     let hwnd2 = {
@@ -195,9 +197,9 @@ fn tab_drag_pop_out_and_reattach_does_not_panic() {
     };
 
     unsafe {
-        let _ = SendMessageW(hwnd1.raw(), WM_MOUSELEAVE, Some(WPARAM(0)), Some(LPARAM(0)));
-        let _ = SendMessageW(hwnd1.raw(), WM_NCMOUSELEAVE, Some(WPARAM(0)), Some(LPARAM(0)));
-        let _ = SendMessageW(hwnd2.raw(), WM_NCHITTEST, Some(WPARAM(0)), Some(LPARAM(0)));
+        let _ = SendMessageW(hwnd1.raw_hwnd(), WM_MOUSELEAVE, Some(WPARAM(0)), Some(LPARAM(0)));
+        let _ = SendMessageW(hwnd1.raw_hwnd(), WM_NCMOUSELEAVE, Some(WPARAM(0)), Some(LPARAM(0)));
+        let _ = SendMessageW(hwnd2.raw_hwnd(), WM_NCHITTEST, Some(WPARAM(0)), Some(LPARAM(0)));
     }
 
     {

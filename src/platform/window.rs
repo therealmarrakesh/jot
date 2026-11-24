@@ -4,7 +4,6 @@ use std::ffi::OsString;
 use std::os::windows::ffi::OsStringExt;
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use windows::Win32::{
     Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
@@ -69,7 +68,7 @@ use super::input::{
     ClickTracker, Key, KeyEvent, Modifiers, MouseButton, current_modifiers, is_syskey_passthrough,
     read_ime_string, set_ime_candidate_pos, translate_vk,
 };
-use super::os::WindowHwnd;
+use super::os::WindowHandle;
 use super::settings::SystemSettings;
 use super::{ACTIVE_HANDLER, DisplayId, WindowsDisplay};
 
@@ -78,15 +77,7 @@ const OVERLAY_CLASS: PCWSTR = w!("JotOverlay");
 const DWMSBT_TABBEDWINDOW: i32 = 4;
 const SIZE_MOVE_TIMER_ID: usize = 1;
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct WindowId(pub(crate) u64);
-
-impl WindowId {
-    pub(crate) fn next() -> Self {
-        static NEXT: AtomicU64 = AtomicU64::new(1);
-        Self(NEXT.fetch_add(1, Ordering::Relaxed))
-    }
-}
+crate::types::id_type!(WindowId);
 
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) enum WindowAppearance {
@@ -436,7 +427,7 @@ fn lookup(hwnd: HWND) -> Option<Rc<WindowShared>> {
 }
 
 #[cfg(test)]
-pub(crate) fn has_hwnd_entry(hwnd: WindowHwnd) -> bool {
+pub(crate) fn has_hwnd_entry(hwnd: WindowHandle) -> bool {
     lookup(hwnd.raw()).is_some()
 }
 
@@ -452,7 +443,7 @@ fn release_capture_suppressed(hwnd: HWND, release: impl FnOnce()) {
 }
 
 #[cfg(test)]
-pub(crate) fn simulate_release_capture_callback(hwnd: WindowHwnd) {
+pub(crate) fn simulate_release_capture_callback(hwnd: WindowHandle) {
     release_capture_suppressed(hwnd.raw(), || unsafe {
         let _ = windows::Win32::UI::WindowsAndMessaging::SendMessageW(
             hwnd.raw(),
@@ -727,8 +718,8 @@ impl NativeWindow {
         unsafe { IsZoomed(self.hwnd) }.as_bool()
     }
 
-    pub(crate) fn hwnd(&self) -> WindowHwnd {
-        WindowHwnd::from_raw(self.hwnd)
+    pub(crate) fn hwnd(&self) -> WindowHandle {
+        WindowHandle::from_raw(self.hwnd)
     }
 
     #[inline]

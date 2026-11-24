@@ -46,10 +46,6 @@ pub(crate) enum AppEvent {
     },
     TabDragPoll,
     File(FileEvent),
-    #[cfg(test)]
-    TestCloseWindow(WindowId),
-    #[cfg(test)]
-    TestFlag(std::sync::Arc<std::sync::atomic::AtomicBool>),
 }
 
 #[derive(Copy, Clone)]
@@ -155,7 +151,7 @@ pub(crate) struct Shell {
 }
 
 impl Shell {
-    pub(crate) fn new(platform: &Rc<Platform>, gpu: Rc<Gpu>) -> Self {
+    pub(crate) fn new(platform: &Rc<Platform>, gpu: Rc<Gpu>, text_system: TextSystem) -> Self {
         let jobs = Jobs::new();
         jobs.attach_platform(platform);
         let settings = platform.settings();
@@ -163,7 +159,7 @@ impl Shell {
         let dark = matches!(appearance, WindowAppearance::Dark);
         let palette = Palette::resolve(dark, settings.accent(dark), settings.high_contrast);
         Self {
-            text_system: TextSystem::new(),
+            text_system,
             jobs,
             appearance_override: None,
             appearance,

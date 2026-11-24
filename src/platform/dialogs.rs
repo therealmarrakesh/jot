@@ -3,7 +3,7 @@ use std::os::windows::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
 
 use windows::Win32::{
-    Foundation::{ERROR_CANCELLED, HWND},
+    Foundation::ERROR_CANCELLED,
     System::{
         Com::{CLSCTX_INPROC_SERVER, CoCreateInstance, CoTaskMemFree},
         Ole::{OleInitialize, OleUninitialize},
@@ -18,6 +18,8 @@ use windows::Win32::{
 use windows::core::{HSTRING, Interface, PCWSTR};
 
 use crate::types::{Result, SharedStr};
+
+use super::os::WindowHandle;
 
 const ENCODING_COMBO_ID: u32 = 1001;
 
@@ -112,9 +114,8 @@ unsafe fn configure_dialog(
     Ok(())
 }
 
-unsafe fn show_dialog(dialog: &IFileDialog, owner_raw: isize) -> Result<bool> {
-    let owner = HWND(owner_raw as *mut _);
-    let parent = (!owner.0.is_null()).then_some(owner);
+unsafe fn show_dialog(dialog: &IFileDialog, owner: WindowHandle) -> Result<bool> {
+    let parent = (!owner.is_null()).then(|| owner.raw());
     match unsafe { dialog.Show(parent) } {
         Ok(()) => Ok(true),
         Err(err) if is_cancelled(&err) => Ok(false),
@@ -123,7 +124,7 @@ unsafe fn show_dialog(dialog: &IFileDialog, owner_raw: isize) -> Result<bool> {
 }
 
 pub(crate) fn run_open_dialog(
-    owner_raw: isize,
+    owner: WindowHandle,
     options: OpenDialogOptions,
 ) -> Result<Option<Vec<PathBuf>>> {
     let _ole = OleGuard::init();
@@ -137,7 +138,7 @@ pub(crate) fn run_open_dialog(
         dialog.SetOptions(flags)?;
         configure_dialog(&dialog, options.directory.as_deref(), &options.file_types)?;
 
-        if !show_dialog(&dialog, owner_raw)? {
+        if !show_dialog(&dialog, owner)? {
             return Ok(None);
         }
         let items = dialog.GetResults()?;
@@ -151,7 +152,7 @@ pub(crate) fn run_open_dialog(
     }
 }
 
-pub(crate) fn run_save_dialog(owner_raw: isize, options: SaveDialogOptions) -> SaveDialogResult {
+pub(crate) fn run_save_dialog(owner: WindowHandle, options: SaveDialogOptions) -> SaveDialogResult {
     let _ole = OleGuard::init();
     unsafe {
         let dialog: IFileSaveDialog =
@@ -183,7 +184,7 @@ pub(crate) fn run_save_dialog(owner_raw: isize, options: SaveDialogOptions) -> S
             Some(cust)
         });
 
-        if !show_dialog(&dialog, owner_raw)? {
+        if !show_dialog(&dialog, owner)? {
             return Ok(None);
         }
 

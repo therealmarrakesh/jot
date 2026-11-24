@@ -1445,7 +1445,7 @@ mod tests {
         use crate::gfx::{LabelLayout, TextStyle, TextSystem};
         use crate::types::SharedStr;
 
-        let ts = TextSystem::new();
+        let ts = TextSystem::new().unwrap();
         let style = TextStyle::regular("Segoe UI Variable Small", 12.0);
         let labels = ["Ln 1, Col 1", "0 characters", "100%", "Windows (CRLF)", "UTF-8"];
 
