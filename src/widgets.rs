@@ -15,6 +15,7 @@ const FIELD_PADDING: f32 = 10.;
 const FIELD_GLYPH_WIDTH: f32 = 31.;
 const FIELD_GLYPH_RIGHT: f32 = 2.;
 const FIELD_GLYPH_SIZE: f32 = 12.;
+const NO_BOTTOM_EDGE: Edges = Edges { top: 1., right: 1., bottom: 0., left: 1. };
 const CLEAR_GLYPH: &str = "\u{E894}";
 const SEARCH_GLYPH: &str = "\u{E721}";
 
@@ -88,12 +89,7 @@ pub(crate) fn button(
                 .size_full()
                 .rounded(CONTROL_RADIUS)
                 .border_widths(
-                    Edges {
-                        top: 1.,
-                        left: 1.,
-                        right: 1.,
-                        bottom: 0.,
-                    },
+                    NO_BOTTOM_EDGE,
                     if pressed { pressed_edge } else { edge },
                 )
                 .bg(face_bg)
@@ -213,12 +209,7 @@ pub(crate) fn text_field(
         .overflow_hidden()
         .bg(bg)
         .border_widths(
-            Edges {
-                top: 1.,
-                left: 1.,
-                right: 1.,
-                bottom: 0.,
-            },
+            NO_BOTTOM_EDGE,
             surface.field_stroke,
         )
         .pb(1.)
