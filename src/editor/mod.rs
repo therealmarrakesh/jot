@@ -50,7 +50,7 @@ pub(super) struct RevealRequest {
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub(crate) enum EditorTimer {
-    Blink(usize),
+    Blink,
     AutoScroll,
     ScrollbarIdle,
     ScrollbarDrag,

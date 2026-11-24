@@ -190,15 +190,12 @@ pub(crate) fn spawn_open_dialog(
             .map(|(name, spec)| (SharedStr::new_static(name), SharedStr::new_static(spec)))
             .into(),
     };
-    jobs.spawn_dedicated_guarded(
+    jobs.spawn(
         "jot-open-dialog",
-        move || {
-            let result = run_open_dialog(owner_raw, options);
-            AppEvent::OpenDialogDone { window, result }
-        },
-        move |msg| AppEvent::OpenDialogDone {
+        move || run_open_dialog(owner_raw, options),
+        move |res| AppEvent::OpenDialogDone {
             window,
-            result: Err(Error::new(msg)),
+            result: res.unwrap_or_else(|msg| Err(Error::new(msg))),
         },
     );
 }
@@ -208,29 +205,31 @@ pub(crate) fn spawn_load_files(
     paths: Vec<(PathBuf, String)>,
     jobs: &Jobs<AppEvent>,
 ) {
-    let fallback_paths = paths.clone();
-    jobs.spawn_bg_guarded(
+    let fallback_paths: Vec<(PathBuf, String)> = paths.clone();
+    jobs.spawn(
+        "jot-load-files",
         move || {
-            let results = paths
+            paths
                 .into_iter()
                 .map(|(path, quick_key)| {
                     let loaded = document::load(&path);
                     (path, quick_key, loaded)
                 })
-                .collect();
-            AppEvent::FilesLoaded { window, results }
+                .collect::<Vec<_>>()
         },
-        move |msg| {
-            let results = fallback_paths
-                .into_iter()
-                .map(|(path, quick_key)| {
-                    (
-                        path,
-                        quick_key,
-                        Err(LoadError::Io(io::Error::other(msg.clone()))),
-                    )
-                })
-                .collect();
+        move |res| {
+            let results = res.unwrap_or_else(|msg| {
+                fallback_paths
+                    .into_iter()
+                    .map(|(path, quick_key)| {
+                        (
+                            path,
+                            quick_key,
+                            Err(LoadError::Io(io::Error::other(msg.clone()))),
+                        )
+                    })
+                    .collect()
+            });
             AppEvent::FilesLoaded { window, results }
         },
     );
@@ -267,24 +266,15 @@ pub(crate) fn spawn_save_dialog(
         }),
     };
     let owner_raw = hwnd.raw().0 as isize;
-    jobs.spawn_dedicated_guarded(
+    jobs.spawn(
         "jot-save-dialog",
-        move || {
-            let result = run_save_dialog(owner_raw, options);
-            AppEvent::SaveDialogDone {
-                window,
-                wf_gen,
-                tab,
-                format,
-                result,
-            }
-        },
-        move |msg| AppEvent::SaveDialogDone {
+        move || run_save_dialog(owner_raw, options),
+        move |res| AppEvent::SaveDialogDone {
             window,
             wf_gen,
             tab,
             format,
-            result: Err(Error::new(msg)),
+            result: res.unwrap_or_else(|msg| Err(Error::new(msg))),
         },
     );
 }
@@ -301,31 +291,19 @@ pub(crate) fn spawn_lossy_check(
     jobs: &Jobs<AppEvent>,
 ) {
     let path = std::path::absolute(&path).unwrap_or(path);
-    let fallback_path = path.clone();
-    let fallback_text = text.clone();
-    jobs.spawn_bg_guarded(
-        move || {
-            let result = document::is_lossy(&text, format);
-            AppEvent::LossyCheckDone {
-                window,
-                wf_gen,
-                tab,
-                snapshot,
-                text,
-                path,
-                format,
-                result,
-            }
-        },
-        move |msg| AppEvent::LossyCheckDone {
+    let check_text = text.clone();
+    jobs.spawn(
+        "jot-lossy-check",
+        move || document::is_lossy(&check_text, format),
+        move |res| AppEvent::LossyCheckDone {
             window,
             wf_gen,
             tab,
             snapshot,
-            text: fallback_text,
-            path: fallback_path,
+            text,
+            path,
             format,
-            result: Err(io::Error::other(msg)),
+            result: res.unwrap_or_else(|msg| Err(io::Error::other(msg))),
         },
     );
 }
@@ -342,17 +320,31 @@ pub(crate) fn spawn_write_file(
     jobs: &Jobs<AppEvent>,
 ) {
     let guard = WriteFlightGuard::enter();
-    let fallback_path = path.clone();
-    let fallback_key = document::quick_path_key(&path);
-    jobs.spawn_dedicated_guarded(
+    let write_path = path.clone();
+    jobs.spawn(
         "jot-write-file",
         move || {
             let _guard = guard;
-            let result = document::write_rope(&path, &text, format);
+            let result = document::write_rope(&write_path, &text, format);
             let path_key = if result.is_ok() {
-                document::canonical_path_key(&path)
+                document::canonical_path_key(&write_path)
             } else {
-                document::quick_path_key(&path)
+                document::quick_path_key(&write_path)
+            };
+            (path_key, result)
+        },
+        move |res| {
+            let (path_key, result) = res.unwrap_or_else(|msg| {
+                (document::quick_path_key(&path), Err(io::Error::other(msg)))
+            });
+            let saved_format = if result.is_ok() {
+                Format {
+                    mixed_line_endings: false,
+                    lossy_decode: false,
+                    ..format
+                }
+            } else {
+                format
             };
             AppEvent::FileSaved {
                 window,
@@ -361,23 +353,9 @@ pub(crate) fn spawn_write_file(
                 snapshot,
                 path,
                 path_key,
-                format: Format {
-                    mixed_line_endings: false,
-                    lossy_decode: false,
-                    ..format
-                },
+                format: saved_format,
                 result,
             }
-        },
-        move |msg| AppEvent::FileSaved {
-            window,
-            wf_gen,
-            tab,
-            snapshot,
-            path: fallback_path,
-            path_key: fallback_key,
-            format,
-            result: Err(io::Error::other(msg)),
         },
     );
 }

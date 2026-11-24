@@ -914,12 +914,11 @@ fn hwnd_registry_cleanup_reentrant_queue_and_modal_size_move_timer() {
 fn real_win32_message_loop_wakes_timers_and_quits_cleanly() {
     let platform = Rc::new(Platform::new().expect("Platform::new failed"));
     let app = Rc::new(RefCell::new(App::new(platform)));
+    let mut _timer = None;
     Platform::run(app, |app| {
         app.headless = true;
         let (id, _) = app.open_window(None, None).expect("open_window failed");
-        app.jobs
-            .after(Duration::from_millis(25), AppEvent::TestCloseWindow(id))
-            .detach();
+        _timer = Some(app.jobs.after(Duration::from_millis(25), AppEvent::TestCloseWindow(id)));
     });
 }
 

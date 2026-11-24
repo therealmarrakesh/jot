@@ -57,9 +57,10 @@ use windows::Win32::{
         },
         WindowsAndMessaging::{
             CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW,
-            HWND_MESSAGE, MB_ICONERROR, MB_OK, MSG, MessageBoxW, PostMessageW, PostQuitMessage,
-            RegisterClassW, SetWindowTextW, TranslateMessage, USER_DEFAULT_SCREEN_DPI, WM_APP,
-            WM_COPYDATA, WINDOW_EX_STYLE, WINDOW_STYLE, WNDCLASSW,
+            HWND_MESSAGE, KillTimer, MB_ICONERROR, MB_OK, MSG, MessageBoxW, PostMessageW,
+            PostQuitMessage, RegisterClassW, SetTimer, SetWindowTextW, TranslateMessage,
+            USER_DEFAULT_SCREEN_DPI, USER_TIMER_MAXIMUM, USER_TIMER_MINIMUM, WM_APP, WM_COPYDATA,
+            WM_TIMER, WINDOW_EX_STYLE, WINDOW_STYLE, WNDCLASSW,
         },
     },
 };
@@ -71,6 +72,7 @@ use crate::types::{Error, Result};
 
 const WM_APP_WAKE: u32 = WM_APP + 1;
 const WM_APP_VSYNC: u32 = WM_APP + 2;
+const JOBS_TIMER_ID: usize = 2;
 pub(super) const WAKE_CLASS_NAME: PCWSTR = w!("JotWakeWindow");
 
 pub(crate) fn output_debug_string(message: &str) {
@@ -314,7 +316,7 @@ impl Platform {
         self.gpu_generation.get()
     }
 
-    pub(crate) fn wake_callback(&self) -> Arc<dyn Fn() + Send + Sync> {
+    pub(super) fn wake_callback(&self) -> Arc<dyn Fn() + Send + Sync> {
         let wake_raw = self.wake_hwnd.0 as isize;
         Arc::new(move || {
             unsafe {
@@ -325,6 +327,22 @@ impl Platform {
                     LPARAM(0),
                 );
             }
+        })
+    }
+
+    pub(super) fn timer_callback(&self) -> Box<dyn Fn(Option<u32>)> {
+        let wake_hwnd = self.wake_hwnd;
+        Box::new(move |delay_ms| match delay_ms {
+            Some(0) => unsafe {
+                let _ = PostMessageW(Some(wake_hwnd), WM_APP_WAKE, WPARAM(0), LPARAM(0));
+            },
+            Some(ms) => unsafe {
+                let clamped = ms.clamp(USER_TIMER_MINIMUM, USER_TIMER_MAXIMUM);
+                let _ = SetTimer(Some(wake_hwnd), JOBS_TIMER_ID, clamped, None);
+            },
+            None => unsafe {
+                let _ = KillTimer(Some(wake_hwnd), JOBS_TIMER_ID);
+            },
         })
     }
 
@@ -398,6 +416,12 @@ unsafe extern "system" fn wake_wnd_proc(
 fn wake_wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match msg {
         WM_APP_WAKE => {
+            mark_wake_pending();
+            window::service();
+            LRESULT(0)
+        }
+        WM_TIMER if wparam.0 == JOBS_TIMER_ID => {
+            let _ = unsafe { KillTimer(Some(hwnd), JOBS_TIMER_ID) };
             mark_wake_pending();
             window::service();
             LRESULT(0)
@@ -484,7 +508,7 @@ mod tests {
     fn real_win32_loop_wakes_timers_cleans_hwnd_registry_and_paints_d2d() {
         let platform = Rc::new(Platform::new().expect("Platform::new failed"));
         let jobs = Jobs::new();
-        jobs.set_wake_callback(platform.wake_callback());
+        jobs.attach_platform(&platform);
 
         let opts = WindowOptions {
             bounds: Some(rect(40.0, 40.0, 320.0, 200.0)),

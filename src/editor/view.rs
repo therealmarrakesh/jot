@@ -50,9 +50,9 @@ pub(super) struct ScrollAnchor {
 }
 
 pub(crate) struct BlinkState {
+    active: bool,
     visible: bool,
     paused: bool,
-    epoch: usize,
     started_at: Option<Instant>,
     timer: TimerHandle,
 }
@@ -66,9 +66,9 @@ impl Default for BlinkState {
 impl BlinkState {
     pub(crate) fn new() -> Self {
         Self {
+            active: false,
             visible: false,
             paused: false,
-            epoch: 0,
             started_at: None,
             timer: TimerHandle::default(),
         }
@@ -80,55 +80,45 @@ impl BlinkState {
     }
 
     pub(crate) fn stop(&mut self) {
-        self.epoch = 0;
+        self.active = false;
         self.paused = false;
         self.visible = false;
         self.started_at = None;
         self.timer.cancel();
     }
 
-    fn bump_epoch(&mut self) -> usize {
-        self.epoch += 1;
-        self.epoch
-    }
-
     pub(crate) fn start(&mut self, timers: &mut dyn EditorTimers) {
+        self.active = true;
+        self.paused = false;
         self.visible = false;
         self.started_at = Some(Instant::now());
-        let epoch = self.epoch;
-        self.step(epoch, timers);
+        self.step(timers);
     }
 
     pub(crate) fn pause(&mut self, timers: &mut dyn EditorTimers) {
-        if self.epoch == 0 && !self.visible {
+        if !self.active && !self.visible {
             return;
         }
         self.paused = true;
         self.visible = true;
         self.started_at = Some(Instant::now());
-        let epoch = self.bump_epoch();
         let Some(delay) = system_settings().caret_blink_interval else {
             self.timer.cancel();
             return;
         };
-        self.timer = timers.after(delay, EditorTimer::Blink(epoch));
+        self.timer = timers.after(delay, EditorTimer::Blink);
     }
 
-    pub(crate) fn on_timer(&mut self, epoch: usize, timers: &mut dyn EditorTimers) -> bool {
-        if epoch != self.epoch {
+    pub(crate) fn on_timer(&mut self, timers: &mut dyn EditorTimers) -> bool {
+        if !self.active {
             return false;
         }
-        if self.paused {
-            self.paused = false;
-        }
-        self.step(epoch, timers);
+        self.paused = false;
+        self.step(timers);
         true
     }
 
-    fn step(&mut self, epoch: usize, timers: &mut dyn EditorTimers) {
-        if epoch != self.epoch {
-            return;
-        }
+    fn step(&mut self, timers: &mut dyn EditorTimers) {
         if self.paused {
             self.visible = true;
             return;
@@ -149,8 +139,7 @@ impl BlinkState {
             return;
         }
         self.visible = !self.visible;
-        let next_epoch = self.bump_epoch();
-        self.timer = timers.after(interval, EditorTimer::Blink(next_epoch));
+        self.timer = timers.after(interval, EditorTimer::Blink);
     }
 }
 
@@ -575,7 +564,7 @@ impl Editor {
 
     pub(crate) fn on_timer(&mut self, kind: EditorTimer, timers: &mut dyn EditorTimers) -> bool {
         match kind {
-            EditorTimer::Blink(epoch) => self.blink.on_timer(epoch, timers),
+            EditorTimer::Blink => self.blink.on_timer(timers),
             EditorTimer::AutoScroll => {
                 let Some(delta) = self.auto_scroll.delta else {
                     self.auto_scroll.stop();

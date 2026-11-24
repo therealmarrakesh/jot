@@ -19,7 +19,7 @@ use crate::tab_drag::TabDragState;
 use crate::tabs::{TabData, TabId};
 use crate::theme::Palette;
 use crate::tooltip::Tooltips;
-use crate::ui::EditorSlot;
+use crate::ui::{EditorSlot, HitId};
 use crate::window::{
     MainWindow, WINDOW_HEIGHT, WINDOW_MAX_SCREEN_SHARE, WINDOW_WIDTH, WindowAction,
 };
@@ -58,7 +58,7 @@ pub(crate) enum AppEvent {
     },
     TooltipShowTimer {
         window: WindowId,
-        epoch: u64,
+        hit: HitId,
     },
     TooltipHideTimer,
     TabDragPoll,
@@ -142,7 +142,7 @@ pub(crate) struct App {
 impl App {
     pub(crate) fn new(platform: Rc<Platform>) -> Self {
         let jobs = Jobs::new();
-        jobs.set_wake_callback(platform.wake_callback());
+        jobs.attach_platform(&platform);
         let settings = system_settings();
         let appearance = settings.appearance;
         let dark = matches!(appearance, WindowAppearance::Dark);
@@ -827,7 +827,7 @@ impl PlatformHandler for App {
                         self.windows[ix].on_find_notice_dismiss();
                     }
                 }
-                AppEvent::TooltipShowTimer { window, epoch } => {
+                AppEvent::TooltipShowTimer { window, hit } => {
                     let state = self.window_ix(window).map(|ix| {
                         let w = &self.windows[ix];
                         (
@@ -841,7 +841,7 @@ impl PlatformHandler for App {
                     let devices = self.platform.devices();
                     self.tooltips.on_show_timer(
                         window,
-                        epoch,
+                        hit,
                         state,
                         &devices,
                         self.appearance,

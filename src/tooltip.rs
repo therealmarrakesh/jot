@@ -51,7 +51,6 @@ enum State {
     Idle,
     Waiting {
         snap: Snap,
-        epoch: u64,
     },
     Showing {
         snap: Snap,
@@ -65,7 +64,7 @@ impl State {
     fn key(&self) -> Option<Key> {
         match self {
             Self::Idle => None,
-            Self::Waiting { snap, .. } | Self::Showing { snap } => Some(snap.key),
+            Self::Waiting { snap } | Self::Showing { snap } => Some(snap.key),
             Self::Suppressed { key } => Some(*key),
         }
     }
@@ -77,43 +76,33 @@ enum Report {
     Gone(Key),
     Suppress(WindowId),
     Dismiss,
-    Timer(u64),
+    Timer(Key),
 }
 
-fn transition_state(state: State, report: Report, epoch: &mut u64) -> State {
-    let mut wait = |snap| {
-        *epoch += 1;
-        State::Waiting {
-            snap,
-            epoch: *epoch,
-        }
-    };
+fn transition_state(state: State, report: Report) -> State {
     match (state, report) {
-        (State::Waiting { snap, epoch }, Report::Owner(seen)) if snap.key == seen.key => {
-            State::Waiting {
-                snap: Snap {
-                    text: seen.text,
-                    owner: seen.owner,
-                    ..snap
-                },
-                epoch,
-            }
-        }
+        (State::Waiting { snap }, Report::Owner(seen)) if snap.key == seen.key => State::Waiting {
+            snap: Snap {
+                text: seen.text,
+                owner: seen.owner,
+                ..snap
+            },
+        },
         (state, Report::Owner(snap)) if state.key() == Some(snap.key) => state,
-        (_, Report::Owner(snap)) => wait(snap),
+        (_, Report::Owner(snap)) => State::Waiting { snap },
         (state, Report::NoneIn(window)) if state.key().is_some_and(|k| k.window == window) => {
             State::Idle
         }
         (state, Report::Gone(key)) if state.key() == Some(key) => State::Idle,
-        (State::Waiting { snap, .. } | State::Showing { snap }, Report::Suppress(window))
+        (State::Waiting { snap } | State::Showing { snap }, Report::Suppress(window))
             if snap.key.window == window =>
         {
             State::Suppressed { key: snap.key }
         }
-        (State::Waiting { snap, .. } | State::Showing { snap }, Report::Dismiss) => {
+        (State::Waiting { snap } | State::Showing { snap }, Report::Dismiss) => {
             State::Suppressed { key: snap.key }
         }
-        (State::Waiting { snap, epoch }, Report::Timer(fired)) if epoch == fired => {
+        (State::Waiting { snap }, Report::Timer(key)) if snap.key == key => {
             State::Showing { snap }
         }
         (state, _) => state,
@@ -135,12 +124,11 @@ pub(crate) struct Tooltips {
     visible: bool,
     dirty: bool,
     state: State,
-    epoch: u64,
     pressed: bool,
     shown: Option<Shown>,
     closed_at: Option<Instant>,
     control_only: bool,
-    opening: Option<(u64, TimerHandle)>,
+    opening: Option<(Key, TimerHandle)>,
     hiding: Option<TimerHandle>,
 }
 
@@ -237,7 +225,7 @@ impl Tooltips {
     pub(crate) fn on_show_timer(
         &mut self,
         window: WindowId,
-        epoch: u64,
+        hit: HitId,
         window_state: Option<(bool, crate::geom::Point, ScreenPoint, f32, &Frame)>,
         devices: &Direct2DDevices,
         appearance: WindowAppearance,
@@ -266,7 +254,7 @@ impl Tooltips {
                 }
             }
         }
-        self.transition(Report::Timer(epoch));
+        self.transition(Report::Timer(Key { window, hit }));
         self.sync(devices, appearance, ts, jobs);
     }
 
@@ -293,7 +281,7 @@ impl Tooltips {
 
     fn transition(&mut self, report: Report) {
         let prev = std::mem::take(&mut self.state);
-        self.state = transition_state(prev, report, &mut self.epoch);
+        self.state = transition_state(prev, report);
     }
 
     fn apply_report(&mut self, report: Report, jobs: &Jobs<AppEvent>) {
@@ -314,18 +302,24 @@ impl Tooltips {
             self.hide(jobs);
         }
         let waiting = match &self.state {
-            State::Waiting { snap, epoch } => Some((snap.key.window, *epoch)),
+            State::Waiting { snap } => Some(snap.key),
             _ => None,
         };
         match waiting {
-            Some((_, epoch)) if self.opening.as_ref().is_some_and(|(e, _)| *e == epoch) => {}
-            Some((window, epoch)) => {
+            Some(key) if self.opening.as_ref().is_some_and(|(k, _)| *k == key) => {}
+            Some(key) => {
                 let reshow = self
                     .closed_at
                     .is_some_and(|closed| closed.elapsed() < RESHOW_WINDOW);
                 let delay = show_delay(reshow);
-                let timer = jobs.after(delay, AppEvent::TooltipShowTimer { window, epoch });
-                self.opening = Some((epoch, timer));
+                let timer = jobs.after(
+                    delay,
+                    AppEvent::TooltipShowTimer {
+                        window: key.window,
+                        hit: key.hit,
+                    },
+                );
+                self.opening = Some((key, timer));
             }
             None => self.opening = None,
         }
@@ -586,50 +580,38 @@ mod tests {
     fn tooltip_state_machine_transitions() {
         let w1 = WindowId(1);
         let w2 = WindowId(2);
-        let mut epoch = 0;
+        let k1 = Key {
+            window: w1,
+            hit: HitId::NewTab,
+        };
+        let k2 = Key {
+            window: w1,
+            hit: HitId::ThemeToggle,
+        };
 
-        let s = transition_state(
-            State::Idle,
-            Report::Owner(snap(w1, HitId::NewTab, "One")),
-            &mut epoch,
-        );
-        assert_eq!(epoch, 1);
-        assert!(matches!(s, State::Waiting { epoch: 1, .. }));
+        let s = transition_state(State::Idle, Report::Owner(snap(w1, HitId::NewTab, "One")));
+        assert!(matches!(s, State::Waiting { .. }));
 
-        let s = transition_state(s, Report::Timer(99), &mut epoch);
-        assert!(matches!(s, State::Waiting { epoch: 1, .. }));
-        let s = transition_state(s, Report::Timer(1), &mut epoch);
+        let s = transition_state(s, Report::Timer(k2));
+        assert!(matches!(s, State::Waiting { .. }));
+        let s = transition_state(s, Report::Timer(k1));
         assert!(matches!(s, State::Showing { .. }));
 
-        let s = transition_state(s, Report::Dismiss, &mut epoch);
+        let s = transition_state(s, Report::Dismiss);
         assert!(matches!(s, State::Suppressed { .. }));
-        let s = transition_state(
-            s,
-            Report::Owner(snap(w1, HitId::NewTab, "One")),
-            &mut epoch,
-        );
+        let s = transition_state(s, Report::Owner(snap(w1, HitId::NewTab, "One")));
         assert!(matches!(s, State::Suppressed { .. }));
 
-        let s = transition_state(s, Report::NoneIn(w2), &mut epoch);
+        let s = transition_state(s, Report::NoneIn(w2));
         assert!(matches!(s, State::Suppressed { .. }));
-        let s = transition_state(s, Report::NoneIn(w1), &mut epoch);
+        let s = transition_state(s, Report::NoneIn(w1));
         assert!(matches!(s, State::Idle));
 
-        let s = transition_state(
-            s,
-            Report::Owner(snap(w1, HitId::NewTab, "One")),
-            &mut epoch,
-        );
-        assert_eq!(epoch, 2);
-        let s = transition_state(
-            s,
-            Report::Owner(snap(w1, HitId::ThemeToggle, "Two")),
-            &mut epoch,
-        );
-        assert_eq!(epoch, 3);
-        assert!(matches!(s, State::Waiting { epoch: 3, .. }));
+        let s = transition_state(s, Report::Owner(snap(w1, HitId::NewTab, "One")));
+        let s = transition_state(s, Report::Owner(snap(w1, HitId::ThemeToggle, "Two")));
+        assert!(matches!(s, State::Waiting { ref snap } if snap.key == k2));
 
-        let s = transition_state(s, Report::Suppress(w1), &mut epoch);
+        let s = transition_state(s, Report::Suppress(w1));
         assert!(matches!(s, State::Suppressed { .. }));
     }
 }
