@@ -777,56 +777,46 @@ impl Editor {
                 } else {
                     MoveDirection::Down
                 };
-                if extend {
-                    let goal = self
-                        .goal
-                        .or_else(|| self.preferred_x_for(sel.head, sel.end_affinity));
-                    let mut target =
-                        self.vertical_target(doc, sel.head, goal, sel.end_affinity, delta);
-                    if doc.lines.visual_row_count() > 0 {
-                        let text = self.model.text();
-                        let before_row = doc
-                            .lines
-                            .offset_to_display(text, sel.head, sel.end_affinity)
-                            .row;
-                        let after_row = doc.lines.offset_to_display(text, target.0, target.1).row;
-                        if before_row == after_row {
-                            target = (if delta < 0 { 0 } else { len }, false);
-                        }
-                    }
-                    (target.0, target.1, goal, Some(dir))
+                // Up or Down collapses a selection from its edge in that direction; otherwise the
+                // caret moves, keeping the column it was moving in.
+                let collapse =
+                    !extend && !sel.is_empty() && matches!(motion, Motion::Up | Motion::Down);
+                let (base, aff) = if !collapse {
+                    (sel.head, sel.end_affinity)
+                } else if delta < 0 {
+                    (sel.start(), false)
                 } else {
-                    let collapse = matches!(motion, Motion::Up | Motion::Down);
-                    let (base, goal, aff) = if sel.is_empty() || !collapse {
-                        (
-                            sel.head,
-                            self.goal
-                                .or_else(|| self.preferred_x_for(sel.head, sel.end_affinity)),
-                            sel.end_affinity,
-                        )
-                    } else if delta < 0 {
-                        (sel.start(), self.preferred_x_for(sel.start(), false), false)
-                    } else {
-                        let a = sel.end() == self.model.cursor() && sel.end_affinity;
-                        (sel.end(), self.preferred_x_for(sel.end(), a), a)
-                    };
-                    let (t, t_aff) = self.vertical_target(doc, base, goal, aff, delta);
-                    (t, t_aff, goal, Some(dir))
+                    (
+                        sel.end(),
+                        sel.end() == self.model.cursor() && sel.end_affinity,
+                    )
+                };
+                let goal = self
+                    .goal
+                    .filter(|_| !collapse)
+                    .or_else(|| self.preferred_x_for(base, aff));
+                let mut target = self.vertical_target(doc, base, goal, aff, delta);
+                // Extending from the first or last row selects to the document's start or end.
+                if extend && doc.lines.visual_row_count() > 0 {
+                    let text = self.model.text();
+                    let row = |(offset, aff)| doc.lines.offset_to_display(text, offset, aff).row;
+                    if row((base, aff)) == row(target) {
+                        target = (if delta < 0 { 0 } else { len }, false);
+                    }
                 }
+                (target.0, target.1, goal, Some(dir))
             }
         };
 
         self.goal = next_goal;
+        self.pause_blink();
         if extend {
-            self.pause_blink();
             self.model.break_coalescing();
             self.model.extend_selection(target, target_aff, None);
-            self.request_reveal(None, true);
         } else {
             self.model.place_caret(target, target_aff);
-            self.request_reveal(direction, true);
-            self.pause_blink();
         }
+        self.request_reveal(direction.filter(|_| !extend), true);
         true
     }
 
@@ -1200,27 +1190,23 @@ impl DocumentView {
 }
 
 impl Editor {
-    fn clamp_and_set_scroll_f64(&mut self, mut x: f32, y: f64) -> bool {
-        let y_changed = if self.doc.is_some() {
-            let min_y =
-                (-self.scroll.content_h + f64::from(self.input_bounds.size.height)).min(0.0);
-            let next_y = y.clamp(min_y, 0.0);
-            let changed = self.scroll.y != next_y;
-            self.scroll.y = next_y;
-            changed
-        } else {
-            false
-        };
-        x = clamp_horizontal_scroll(x, self.scroll.content_w, self.input_bounds.size.width);
-        let x_changed = self.scroll.x != x;
-        self.scroll.x = x;
-        x_changed || y_changed
+    /// Scrolls a document to (`x`, `y`), kept within its content; whether it moved.
+    fn scroll_to(&mut self, x: f32, y: f64) -> bool {
+        let view = self.input_bounds.size;
+        let min_y = (f64::from(view.height) - self.scroll.content_h).min(0.0);
+        let next = (
+            clamp_horizontal_scroll(x, self.scroll.content_w, view.width),
+            y.clamp(min_y, 0.0),
+        );
+        let moved = next != (self.scroll.x, self.scroll.y);
+        (self.scroll.x, self.scroll.y) = next;
+        moved
     }
 
     fn apply_scrollbar_scroll(&mut self, next: Option<Point>) {
         if let Some(next) = next {
             self.reveal = None;
-            self.clamp_and_set_scroll_f64(next.x, f64::from(next.y));
+            self.scroll_to(next.x, f64::from(next.y));
         }
     }
 
@@ -1296,7 +1282,7 @@ impl Editor {
         };
 
         self.reveal = None;
-        self.clamp_and_set_scroll_f64(self.scroll.x + dx, self.scroll.y + dy)
+        self.scroll_to(self.scroll.x + dx, self.scroll.y + dy)
     }
 
     /// Acts on whatever is due at `now`: blinking, auto-scrolling, scrollbar fading. Returns
@@ -1315,7 +1301,7 @@ impl Editor {
             doc.auto_scroll.next = Some(now + AUTO_SCROLL_INTERVAL);
             let drag_pos = doc.auto_scroll.last_drag_pos;
             self.reveal = None;
-            self.clamp_and_set_scroll_f64(self.scroll.x, self.scroll.y + f64::from(delta));
+            self.scroll_to(self.scroll.x, self.scroll.y + f64::from(delta));
             if let Some(pos) = drag_pos {
                 let (offset, aff) = self.hit_test_point(pos);
                 self.select_to_with_affinity(offset, aff);
