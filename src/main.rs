@@ -686,38 +686,38 @@ impl Windows {
                     .map(|w| w.hwnd.client_origin())
             })
             .or_else(|| self.launch.use_cursor_display.then(cursor_screen_pos))
-            .map(WindowsDisplay::from_point)
-            .or_else(WindowsDisplay::primary);
-        let visible = display.map(|d| d.visible_bounds());
-        let screen = visible.map_or(size(WINDOW_WIDTH, WINDOW_HEIGHT), |v| v.size);
-        let target_size = window_size.unwrap_or_else(|| {
+            .map_or_else(
+                || WindowsDisplay::from_point(ScreenPoint::default()),
+                WindowsDisplay::from_point,
+            );
+        let vis = display.visible_bounds();
+        let target = window_size.unwrap_or_else(|| {
             size(
-                WINDOW_WIDTH.min(screen.width * WINDOW_MAX_SCREEN_SHARE),
-                WINDOW_HEIGHT.min(screen.height * WINDOW_MAX_SCREEN_SHARE),
+                WINDOW_WIDTH.min(vis.size.width * WINDOW_MAX_SCREEN_SHARE),
+                WINDOW_HEIGHT.min(vis.size.height * WINDOW_MAX_SCREEN_SHARE),
             )
         });
-        let mut bounds = display.map_or_else(
-            || Rect::new(Point::ZERO, target_size),
-            |d| d.centered_rect(target_size),
-        );
+        // Centred in the work area (pinned to its top left if larger), and cascaded from the
+        // last new window.
+        let centre = |span: f32, of: f32| ((span - of) * 0.5).max(0.0);
+        let mut origin = vis.origin
+            + point(
+                centre(vis.size.width, target.width),
+                centre(vis.size.height, target.height),
+            );
         if target_point.is_none() && !self.list.is_empty() && window_size.is_none() {
             let step = (self.cascade_step % 8) as f32 * 28.0;
             self.cascade_step = self.cascade_step.wrapping_add(1);
-            if let Some(vis) = visible {
-                let max_x = (vis.right() - target_size.width).max(vis.left());
-                let max_y = (vis.bottom() - target_size.height).max(vis.top());
-                bounds.origin = point(
-                    (bounds.origin.x + step).clamp(vis.left(), max_x),
-                    (bounds.origin.y + step).clamp(vis.top(), max_y),
-                );
-            } else {
-                bounds.origin = point(bounds.origin.x + step, bounds.origin.y + step);
-            }
+            let max_x = (vis.right() - target.width).max(vis.left());
+            let max_y = (vis.bottom() - target.height).max(vis.top());
+            origin = point(
+                (origin.x + step).clamp(vis.left(), max_x),
+                (origin.y + step).clamp(vis.top(), max_y),
+            );
         }
         MainWindowConfig {
-            bounds: Some(bounds),
-            title: APP_NAME.into(),
-            display_id: display.map(|d| d.id()),
+            bounds: Rect::new(origin, target),
+            scale: display.scale_factor(),
             focus: self.launch.focus,
             show: self.launch.show,
         }

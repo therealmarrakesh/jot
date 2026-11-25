@@ -48,9 +48,8 @@ use windows::Win32::{
         Gdi::{
             COLOR_BTNFACE, COLOR_BTNTEXT, COLOR_GRAYTEXT, COLOR_HIGHLIGHT, COLOR_HIGHLIGHTTEXT,
             COLOR_HOTLIGHT, COLOR_WINDOW, COLOR_WINDOWFRAME, COLOR_WINDOWTEXT, ClientToScreen,
-            GetMonitorInfoW, GetSysColor, HMONITOR, MONITOR_DEFAULTTONEAREST,
-            MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MonitorFromPoint, PtInRect, SYS_COLOR_INDEX,
-            ScreenToClient, ValidateRect,
+            GetMonitorInfoW, GetSysColor, HMONITOR, MONITOR_DEFAULTTONEAREST, MONITORINFO,
+            MonitorFromPoint, PtInRect, SYS_COLOR_INDEX, ScreenToClient, ValidateRect,
         },
     },
     Security::{
@@ -312,23 +311,12 @@ pub(crate) enum CursorStyle {
 
 #[derive(Clone, Debug)]
 pub(crate) struct MainWindowConfig {
-    pub(crate) bounds: Option<Rect>,
-    pub(crate) title: SharedStr,
-    pub(crate) display_id: Option<DisplayId>,
+    /// The client area, in the logical units of the display it opens on, and that display's
+    /// scale.
+    pub(crate) bounds: Rect,
+    pub(crate) scale: f32,
     pub(crate) focus: bool,
     pub(crate) show: bool,
-}
-
-impl Default for MainWindowConfig {
-    fn default() -> Self {
-        Self {
-            bounds: None,
-            title: SharedStr::Static("Jot"),
-            display_id: None,
-            focus: true,
-            show: true,
-        }
-    }
 }
 
 /// What the app hears about: something that happened to one of its windows, or to the app.
@@ -955,7 +943,7 @@ impl NativeWindow {
             CreateWindowExW(
                 WS_EX_APPWINDOW | WS_EX_NOREDIRECTIONBITMAP,
                 WINDOW_CLASS,
-                &HSTRING::from(config.title.as_str()),
+                &HSTRING::from(crate::types::APP_NAME),
                 WS_SYSMENU | WS_THICKFRAME | WS_MAXIMIZEBOX | WS_MINIMIZEBOX,
                 CW_USEDEFAULT,
                 CW_USEDEFAULT,
@@ -988,25 +976,14 @@ impl NativeWindow {
             DWM_SYSTEMBACKDROP_TYPE(DWMSBT_TABBEDWINDOW),
         );
         window.set_dark(dark);
-        if let Some(b) = config.bounds {
-            let display = config.display_id.and_then(WindowsDisplay::from_id);
-            let scale = display.map_or(window.state.scale.get(), |d| d.scale_factor());
-            let (bx, by) = frame_thickness((scale * USER_DEFAULT_SCREEN_DPI as f32).round() as u32);
-            let px = |v: f32| (v * scale).round() as i32;
-            let (w, h) = (px(b.size.width).max(1), px(b.size.height).max(1));
-            let flags = SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED;
-            let _ = unsafe {
-                SetWindowPos(
-                    hwnd,
-                    None,
-                    px(b.origin.x) - bx,
-                    px(b.origin.y),
-                    w + bx * 2,
-                    h + by,
-                    flags,
-                )
-            };
-        }
+        // Placed in pixels, the frame around the client area.
+        let (b, scale) = (config.bounds, config.scale);
+        let (bx, by) = frame_thickness((scale * USER_DEFAULT_SCREEN_DPI as f32).round() as u32);
+        let px = |v: f32| (v * scale).round() as i32;
+        let (w, h) = (px(b.size.width).max(1), px(b.size.height).max(1));
+        let flags = SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED;
+        let (x, y) = (px(b.origin.x) - bx, px(b.origin.y));
+        let _ = unsafe { SetWindowPos(hwnd, None, x, y, w + bx * 2, h + by, flags) };
         unsafe { DragAcceptFiles(hwnd, true) };
         window.state.scale.set(window_scale(hwnd));
         window.state.physical.set(client_size(hwnd));
@@ -1967,9 +1944,6 @@ impl From<RECT> for ScreenRect {
     }
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct DisplayId(pub(crate) usize);
-
 /// A monitor.
 #[derive(Copy, Clone, Debug)]
 pub(crate) struct WindowsDisplay {
@@ -1977,25 +1951,11 @@ pub(crate) struct WindowsDisplay {
 }
 
 impl WindowsDisplay {
-    pub(crate) fn primary() -> Option<Self> {
-        let monitor = unsafe { MonitorFromPoint(POINT::default(), MONITOR_DEFAULTTOPRIMARY) };
-        (!monitor.is_invalid()).then_some(Self { monitor })
-    }
-
-    /// The monitor showing `pt`, or the nearest one.
+    /// The monitor showing `pt`, or the nearest one (at the origin, the primary monitor).
     pub(crate) fn from_point(pt: ScreenPoint) -> Self {
         Self {
             monitor: unsafe { MonitorFromPoint(pt.into(), MONITOR_DEFAULTTONEAREST) },
         }
-    }
-
-    fn from_id(id: DisplayId) -> Option<Self> {
-        let monitor = HMONITOR(id.0 as *mut _);
-        (!monitor.is_invalid()).then_some(Self { monitor })
-    }
-
-    pub(crate) fn id(&self) -> DisplayId {
-        DisplayId(self.monitor.0 as usize)
     }
 
     pub(crate) fn scale_factor(&self) -> f32 {
@@ -2032,14 +1992,6 @@ impl WindowsDisplay {
             at(rc.right - rc.left, rc.bottom - rc.top),
         );
         Rect::new(point(x, y), size(w, h))
-    }
-
-    /// A rect of `target` size centered in the work area (pinned to its top left if larger).
-    pub(crate) fn centered_rect(&self, target: Size) -> Rect {
-        let vis = self.visible_bounds();
-        let x = vis.origin.x + ((vis.size.width - target.width) * 0.5).max(0.0);
-        let y = vis.origin.y + ((vis.size.height - target.height) * 0.5).max(0.0);
-        Rect::new(point(x, y), target)
     }
 }
 
@@ -2883,9 +2835,10 @@ mod tests {
 
     fn hidden_window() -> NativeWindow {
         let config = MainWindowConfig {
+            bounds: Rect::new(point(0., 0.), size(400., 300.)),
+            scale: 1.,
             show: false,
             focus: false,
-            ..Default::default()
         };
         NativeWindow::create_main(&config, false).expect("window")
     }
