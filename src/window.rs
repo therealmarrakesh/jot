@@ -10,7 +10,7 @@ use crate::find::{FindBar, FindKey, FindOutcome};
 use crate::geom::{Edges, Point, Rect, ScreenPoint, Size, point, size, transparent_black};
 use crate::gfx::{TextStyle, TextSystem, WindowSurface, fill};
 use crate::layout::AvailSize;
-use crate::menu::{FocusRequest, MENU_BAR_HEIGHT, MenuOutcome, MenuState, Menus, RowPath};
+use crate::menu::{FocusRequest, MENU_BAR_HEIGHT, MenuOutcome, MenuState, Menus};
 use crate::platform::{
     KeyEvent, Modifiers, MouseButton, WindowAppearance, WindowControlArea, WindowHandle, WindowId,
     clipboard_has_text, format_local_time_date, read_clipboard_text, write_clipboard_text,
@@ -1008,16 +1008,14 @@ impl MainWindow {
         click_count: usize,
         cx: &mut Cx<'_>,
     ) {
-        let menu_out = self.menus.pointer_down(self.focus);
-        let _ = self.apply_menu_outcome(menu_out, cx);
-        let chain = self.ui.on_mouse_down(pos, button);
+        let chain = self.ui.on_mouse_down(pos, button).to_vec();
+        let mode = self.mode();
+        let state = menu_state(&self.tabs, cx.shell);
+        let out = self.menus.on_mouse_down(&chain, button, self.focus, state);
+        if self.apply_menu_outcome(out, cx) {
+            return;
+        }
         let top = chain.first().copied();
-        let in_menu_ui = chain.iter().any(|h| {
-            matches!(
-                h,
-                HitId::Menu(MenuHit::Panel | MenuHit::SubmenuPanel | MenuHit::Trigger(_))
-            )
-        });
         let tab_hit = chain.iter().find_map(|hit| match hit {
             HitId::Tab(TabHit::Item(id)) => Some(*id),
             _ => None,
@@ -1026,12 +1024,6 @@ impl MainWindow {
             HitId::Editor(slot) => Some(*slot),
             _ => None,
         });
-
-        let mode = self.mode();
-        if mode == InputMode::Popup && !in_menu_ui {
-            let out = self.menus.close();
-            let _ = self.apply_menu_outcome(out, cx);
-        }
 
         if button == MouseButton::Middle && mode != InputMode::Dialog {
             self.middle_pressed_tab = tab_hit;
@@ -1046,13 +1038,6 @@ impl MainWindow {
                     | HitId::Find(_)
                     | HitId::Tab(TabHit::Close(_)),
                 ) => return,
-                Some(HitId::Menu(m)) if m.is_popup() => return,
-                Some(HitId::Menu(MenuHit::Trigger(kind))) => {
-                    let state = menu_state(&self.tabs, cx.shell);
-                    let out = self.menus.toggle_trigger(kind, state);
-                    let _ = self.apply_menu_outcome(out, cx);
-                    return;
-                }
                 Some(HitId::Tab(TabHit::Item(id))) => {
                     if let Some(ix) = self.tabs.index_of(id) {
                         self.activate_tab(ix, cx.shell);
@@ -1092,8 +1077,6 @@ impl MainWindow {
                 }
                 _ => {}
             }
-        } else if in_menu_ui {
-            return;
         }
 
         if let Some(slot) = editor_hit {
@@ -1117,9 +1100,7 @@ impl MainWindow {
             && self.mode() == InputMode::Popup
         {
             match top {
-                hit @ Some(HitId::Menu(
-                    MenuHit::Item { .. } | MenuHit::SubmenuItem { .. } | MenuHit::Command { .. },
-                )) => hit,
+                hit @ Some(HitId::Menu(MenuHit::Row { .. })) => hit,
                 _ => None,
             }
         } else {
@@ -1187,16 +1168,8 @@ impl MainWindow {
             Some(HitId::Find(FindHit::Close)) => self.close_find(cx.shell),
             Some(HitId::Find(FindHit::Replace)) => self.replace_next(cx.shell),
             Some(HitId::Find(FindHit::ReplaceAll)) => self.replace_all(cx.shell),
-            Some(HitId::Menu(MenuHit::Item { ix, .. })) => {
-                let out = self.menus.activate(RowPath::Root(ix), false);
-                let _ = self.apply_menu_outcome(out, cx);
-            }
-            Some(HitId::Menu(MenuHit::SubmenuItem { ix: sub_ix, .. })) => {
-                let out = self.menus.activate(RowPath::Sub(sub_ix), false);
-                let _ = self.apply_menu_outcome(out, cx);
-            }
-            Some(HitId::Menu(MenuHit::Command { ix, .. })) => {
-                let out = self.menus.click_command(ix);
+            Some(HitId::Menu(hit)) => {
+                let out = self.menus.on_click(hit);
                 let _ = self.apply_menu_outcome(out, cx);
             }
             Some(HitId::Tab(TabHit::Close(id))) => {
@@ -1283,11 +1256,8 @@ impl MainWindow {
         }
 
         let was_popup = self.menus.is_open();
-        let tabs = &self.tabs;
-        let shell = cx.shell;
-        let out = self
-            .menus
-            .on_key_down(ev, self.focus, || menu_state(tabs, shell));
+        let state = menu_state(&self.tabs, cx.shell);
+        let out = self.menus.on_key_down(ev, self.focus, state);
         let handled = self.apply_menu_outcome(out, cx);
         if handled || was_popup {
             return handled;

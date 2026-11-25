@@ -1406,18 +1406,6 @@ pub(crate) enum MenuKind {
     View,
 }
 
-impl MenuKind {
-    pub(crate) const ALL: [Self; 3] = [Self::File, Self::Edit, Self::View];
-
-    pub(crate) fn title(self) -> &'static str {
-        match self {
-            Self::File => "File",
-            Self::Edit => "Edit",
-            Self::View => "View",
-        }
-    }
-}
-
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum EditorSlot {
     Tab(TabId),
@@ -1462,10 +1450,12 @@ pub(crate) enum MenuHit {
     Bar,
     Trigger(MenuKind),
     Panel,
-    Item { serial: usize, ix: usize },
-    Command { serial: usize, ix: usize },
-    SubmenuPanel,
-    SubmenuItem { serial: usize, ix: usize },
+    /// Row `ix` of the open panel with transition `serial` (button `col` of a button row).
+    Row {
+        serial: usize,
+        ix: usize,
+        col: usize,
+    },
 }
 
 impl MenuHit {

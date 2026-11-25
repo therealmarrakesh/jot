@@ -416,34 +416,58 @@ fn status_bar_min_width_and_no_vertical_char_wrapping() {
             .nowrap()
             .child(
                 box_()
-                    .hit(HitId::Menu(MenuHit::Item { serial: 0, ix: 0 }))
+                    .hit(HitId::Menu(MenuHit::Row {
+                        serial: 0,
+                        ix: 0,
+                        col: 0,
+                    }))
                     .child(text("Ln 1, Col 1")),
             )
             .child(
                 box_()
-                    .hit(HitId::Menu(MenuHit::Item { serial: 0, ix: 1 }))
+                    .hit(HitId::Menu(MenuHit::Row {
+                        serial: 0,
+                        ix: 1,
+                        col: 0,
+                    }))
                     .child(text("1 character")),
             )
             .child(box_().flex_1().min_w(1.).h(16.))
             .child(
                 box_()
-                    .hit(HitId::Menu(MenuHit::Item { serial: 0, ix: 2 }))
+                    .hit(HitId::Menu(MenuHit::Row {
+                        serial: 0,
+                        ix: 2,
+                        col: 0,
+                    }))
                     .child(text("100%")),
             )
             .child(
                 box_()
-                    .hit(HitId::Menu(MenuHit::Item { serial: 0, ix: 3 }))
+                    .hit(HitId::Menu(MenuHit::Row {
+                        serial: 0,
+                        ix: 3,
+                        col: 0,
+                    }))
                     .child(text("Windows (CRLF)")),
             )
             .child(
                 box_()
-                    .hit(HitId::Menu(MenuHit::Item { serial: 0, ix: 4 }))
+                    .hit(HitId::Menu(MenuHit::Row {
+                        serial: 0,
+                        ix: 4,
+                        col: 0,
+                    }))
                     .child(text("UTF-8")),
             );
         let frame = AppFrame::layout(bar, AvailSize::definite(test_width, 31.), scale, ts);
         for ix in 0..5 {
             let b = frame
-                .rect_of(HitId::Menu(MenuHit::Item { serial: 0, ix }))
+                .rect_of(HitId::Menu(MenuHit::Row {
+                    serial: 0,
+                    ix,
+                    col: 0,
+                }))
                 .expect("status bar label rect missing");
             assert!(
                 b.size.height <= 31.0,
