@@ -1793,8 +1793,8 @@ enum Phase {
 
 /// A tab being dragged: from `source`, now in `owner` (they differ once it has moved windows).
 pub(crate) struct TabDrag {
-    pub(crate) owner: WindowId,
-    pub(crate) source: WindowId,
+    owner: WindowId,
+    source: WindowId,
     tab: TabId,
     /// Where the tab was held (from its top left), and where the press was, along the strip and
     /// on the screen.
@@ -1942,10 +1942,23 @@ impl TabDrag {
         self.owner == window_id && self.is_dragging() && self.on_release(windows)
     }
 
-    /// Puts the tab back where it came from: in its slot, its source window back in place, or
-    /// (with the source gone) in a window of its own.
-    pub(crate) fn cancel(&mut self, windows: &mut Windows, shell: &Shell) {
-        self.poll_at = None;
+    /// Ends the drag, repainting the windows it touched.
+    pub(crate) fn end(self, windows: &mut Windows) {
+        windows.mark_dirty(self.owner);
+        if self.source != self.owner {
+            windows.mark_dirty(self.source);
+        }
+    }
+
+    /// Ends the drag with the tab put back where it came from.
+    pub(crate) fn cancel(self, windows: &mut Windows, shell: &Shell) {
+        self.put_back(windows, shell);
+        self.end(windows);
+    }
+
+    /// Puts the tab back: in its slot, its source window back in place, or (with the source
+    /// gone) in a window of its own.
+    fn put_back(&self, windows: &mut Windows, shell: &Shell) {
         release_mouse_capture();
         if matches!(self.phase, Phase::Pressed) {
             return;
@@ -2048,7 +2061,7 @@ impl TabDrag {
             windows.mark_dirty(self.owner);
             false
         } else if pressed {
-            self.cancel(windows, shell);
+            self.put_back(windows, shell);
             true
         } else {
             windows.mark_dirty(self.owner);

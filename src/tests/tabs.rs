@@ -5,6 +5,7 @@ use std::time::Duration;
 use crate::geom::point;
 use crate::platform::{Platform, PlatformHandler, WindowEvent};
 use crate::ui::{DialogHit, HitId, TabHit, TabId};
+use crate::window::TabDrag;
 
 use super::TestHarness;
 
@@ -27,7 +28,7 @@ fn tab_close_button_new_tab_hover_and_middle_click() {
         assert_eq!(w.tabs.len(), 2, "clicking active tab 'x' must close tab");
         assert!(w.tabs.index_of(ids[0]).is_none());
         assert!(
-            !app.is_tab_drag_active(),
+            app.tab_drag.is_none(),
             "tab close button must not start parent tab drag"
         );
     });
@@ -172,13 +173,12 @@ fn tab_drag_pop_out_and_reattach_does_not_panic() {
         let hwnd2 = {
             let mut app = h.app.borrow_mut();
             if app.windows.len() == 1 {
-                app.tab_drag_start_and_detach_for_test(
-                    h.window_id,
-                    tab_id,
-                    1,
-                    point(20.0, 12.0),
-                    tab_rect.center(),
-                );
+                let (grab, at) = (point(20.0, 12.0), tab_rect.center());
+                app.tab_drag = TabDrag::start(h.window_id, tab_id, 1, grab, at, &mut app.windows);
+                app.drive_drag(|drag, windows, _, shell| {
+                    drag.detach_for_test(windows, shell);
+                    false
+                });
             }
             app.drive_frames();
             assert_eq!(app.windows.len(), 2, "popping out tab must create 2nd window");
@@ -195,9 +195,12 @@ fn tab_drag_pop_out_and_reattach_does_not_panic() {
 
         {
             let mut app = h.app.borrow_mut();
-            app.tab_drag_poll_for_test();
+            let app = &mut *app;
+            app.drive_drag(TabDrag::on_poll);
             app.drive_frames();
-            app.tab_drag_cancel_for_test();
+            if let Some(drag) = app.tab_drag.take() {
+                drag.cancel(&mut app.windows, &app.shell);
+            }
             app.drive_frames();
             assert_eq!(
                 app.windows.len(),

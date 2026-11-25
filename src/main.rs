@@ -205,12 +205,8 @@ impl App {
             self.tooltips.window_closed(window);
             self.file_ops.on_window_closed(window, &prompts);
         }
-        if self
-            .tab_drag
-            .as_ref()
-            .is_some_and(|d| !d.is_alive(&self.windows))
-        {
-            self.end_tab_drag();
+        if let Some(drag) = self.tab_drag.take_if(|d| !d.is_alive(&self.windows)) {
+            drag.end(&mut self.windows);
         }
         let unsaved = self
             .windows
@@ -309,7 +305,9 @@ impl App {
                     && key.modifiers.none()
                     && !window_wants_it
                 {
-                    self.cancel_tab_drag();
+                    if let Some(drag) = self.tab_drag.take() {
+                        drag.cancel(&mut self.windows, &self.shell);
+                    }
                     return true;
                 }
             }
@@ -366,60 +364,9 @@ impl App {
     /// Runs `f` on the tab drag, if one is going on, and ends the drag if `f` says to.
     fn drive_drag(&mut self, f: impl FnOnce(&mut TabDrag, &mut Windows, &FileOps, &Shell) -> bool) {
         let (windows, ops, shell) = (&mut self.windows, &self.file_ops, &self.shell);
-        if self
-            .tab_drag
-            .as_mut()
-            .is_some_and(|d| f(d, windows, ops, shell))
-        {
-            self.end_tab_drag();
+        if let Some(drag) = self.tab_drag.take_if(|d| f(d, windows, ops, shell)) {
+            drag.end(windows);
         }
-    }
-
-    fn end_tab_drag(&mut self) {
-        if let Some(drag) = self.tab_drag.take() {
-            self.windows.mark_dirty(drag.owner);
-            if drag.source != drag.owner {
-                self.windows.mark_dirty(drag.source);
-            }
-        }
-    }
-
-    fn cancel_tab_drag(&mut self) {
-        if let Some(drag) = &mut self.tab_drag {
-            drag.cancel(&mut self.windows, &self.shell);
-        }
-        self.end_tab_drag();
-    }
-
-    #[cfg(test)]
-    pub(crate) fn is_tab_drag_active(&self) -> bool {
-        self.tab_drag.is_some()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn tab_drag_start_and_detach_for_test(
-        &mut self,
-        window: WindowId,
-        tab: crate::ui::TabId,
-        index: usize,
-        grab: crate::geom::Point,
-        position: crate::geom::Point,
-    ) {
-        self.tab_drag = TabDrag::start(window, tab, index, grab, position, &mut self.windows);
-        self.drive_drag(|drag, windows, _, shell| {
-            drag.detach_for_test(windows, shell);
-            false
-        });
-    }
-
-    #[cfg(test)]
-    pub(crate) fn tab_drag_poll_for_test(&mut self) {
-        self.drive_drag(TabDrag::on_poll);
-    }
-
-    #[cfg(test)]
-    pub(crate) fn tab_drag_cancel_for_test(&mut self) {
-        self.cancel_tab_drag();
     }
 }
 
