@@ -339,6 +339,8 @@ impl FindBar {
     }
 
     /// The bar, centred at the top of the document with room for its shadow, and its notice.
+    /// Kept out of line: inlined into the window's frame it duplicates kilobytes of builders.
+    #[inline(never)]
     pub(crate) fn render(
         &mut self,
         focused_slot: Option<EditorSlot>,
