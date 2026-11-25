@@ -1134,6 +1134,17 @@ impl NativeWindow {
         size(w as f32 / scale, h as f32 / scale)
     }
 
+    /// The size the window has when not maximized.
+    pub(crate) fn restored_size(&self) -> Size {
+        let hwnd = self.hwnd();
+        let current = self.logical_size();
+        if hwnd.is_maximized() {
+            hwnd.restored_logical_size().unwrap_or(current)
+        } else {
+            current
+        }
+    }
+
     pub(crate) fn is_active(&self) -> bool {
         self.state.active.get()
     }
@@ -1817,6 +1828,24 @@ impl WindowHandle {
 
     pub(crate) fn dpi_scale(self) -> f32 {
         window_scale(self.raw())
+    }
+
+    /// `pt` in the client area's logical coordinates.
+    pub(crate) fn to_client(self, pt: ScreenPoint) -> Point {
+        let (origin, scale) = (self.client_origin(), self.dpi_scale());
+        point(
+            (pt.x - origin.x) as f32 / scale,
+            (pt.y - origin.y) as f32 / scale,
+        )
+    }
+
+    /// The screen point at `pos` in the client area's logical coordinates.
+    pub(crate) fn to_screen(self, pos: Point) -> ScreenPoint {
+        let (origin, scale) = (self.client_origin(), self.dpi_scale());
+        ScreenPoint {
+            x: origin.x + (pos.x * scale).round() as i32,
+            y: origin.y + (pos.y * scale).round() as i32,
+        }
     }
 
     pub(crate) fn window_rect(self) -> ScreenRect {

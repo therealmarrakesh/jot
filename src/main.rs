@@ -975,7 +975,7 @@ impl TabDrag {
         windows: &mut Windows,
     ) -> Option<Self> {
         let win = windows.get_mut(window_id)?;
-        let press = win.local_to_screen(position);
+        let press = win.hwnd.to_screen(position);
         win.dirty = true;
         Some(Self {
             owner: window_id,
@@ -1261,7 +1261,7 @@ impl TabDrag {
         if !alone {
             let source_win = self.owner;
             let taken = windows.get_mut(source_win).and_then(|w| {
-                let sz = w.restored_logical_size();
+                let sz = w.win.window.restored_size();
                 w.take_tab(self.tab, shell).map(|data| (data, sz))
             });
             let Some((data, sz)) = taken else {
@@ -1342,10 +1342,6 @@ fn strip_window(
 }
 
 fn place_window(hwnd: WindowHandle, pt: ScreenPoint, offset: Point) {
-    let scale = hwnd.dpi_scale();
-    let origin = hwnd.client_origin();
-    let frame = hwnd.window_rect();
-    let x = pt.x - (offset.x * scale).round() as i32 - (origin.x - frame.left);
-    let y = pt.y - (offset.y * scale).round() as i32 - (origin.y - frame.top);
-    hwnd.move_noactivate(x, y);
+    let (at, frame) = (hwnd.to_screen(offset), hwnd.window_rect());
+    hwnd.move_noactivate(pt.x - (at.x - frame.left), pt.y - (at.y - frame.top));
 }

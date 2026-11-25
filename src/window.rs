@@ -151,10 +151,9 @@ impl MainWindow {
     pub(crate) fn deadline(&self) -> Option<Instant> {
         let tabs = self.tabs.iter().map(|tab| &tab.data.editor);
         let editors = tabs.chain(self.fields()).filter_map(Editor::deadline);
-        let repeat = self.tabs.repeat.map(|(at, _)| at);
         let submenu = self.menus.submenu_at.map(|(at, _)| at);
         editors
-            .chain(repeat)
+            .chain(self.tabs.repeat.map(|(at, _)| at))
             .chain(submenu)
             .chain(self.find.notice_until)
             .min()
@@ -339,26 +338,25 @@ impl MainWindow {
         }
 
         let dragging = pressed == Some(MouseButton::Left);
-        let active = self.tabs.active_slot();
-        if let Some(axis) = self.tabs.active().editor.scrollbar_drag_axis() {
-            let track = self.ui.frame().rect_of(HitId::ScrollTrack(active, axis));
-            let ed = &mut self.tabs.active_mut().editor;
-            if let Some(notify) = ed.on_scrollbar_mouse_move(pos, dragging, track) {
-                self.dirty |= notify;
-                self.sync_cursor(pos);
-                return;
-            }
+        if let Some(track) = self.dragged_track()
+            && let Some(notify) = self
+                .tabs
+                .active_mut()
+                .editor
+                .on_scrollbar_mouse_move(pos, dragging, track)
+        {
+            self.dirty |= notify;
+            self.sync_cursor(pos);
+            return;
         }
         // A field being drag-selected keeps its selection going.
-        if let Some(slot) = self.focused_slot()
-            && slot != active
-            && self
-                .editor_mut(slot)
-                .is_some_and(|ed| ed.on_mouse_move(pos, dragging, true))
+        if self
+            .focused_field()
+            .is_some_and(|ed| ed.on_mouse_move(pos, dragging, true))
         {
             self.dirty = true;
         }
-        let focused = self.focus == Focus::Editor(active);
+        let focused = self.focus == Focus::Editor(self.tabs.active_slot());
         let ed = &mut self.tabs.active_mut().editor;
         if matches!(mode, InputMode::Normal | InputMode::MenuBar) || ed.is_selecting() {
             self.dirty |= ed.on_mouse_move(pos, dragging, focused);
@@ -381,15 +379,11 @@ impl MainWindow {
         if self.apply_menu_outcome(out, cx) {
             return;
         }
-        let top = chain.first().copied();
-        let tab = chain.iter().find_map(|hit| match hit {
-            HitId::Tab(TabHit::Item(id)) => Some(*id),
-            _ => None,
-        });
         if button == MouseButton::Middle && mode != InputMode::Dialog {
-            self.middle_pressed_tab = tab;
+            self.middle_pressed_tab = tab_at(&chain);
             return;
         }
+        let top = chain.first().copied();
         if button == MouseButton::Left {
             match top {
                 Some(
@@ -417,11 +411,7 @@ impl MainWindow {
                     return;
                 }
                 Some(HitId::Tab(hit @ (TabHit::ScrollLeft | TabHit::ScrollRight))) => {
-                    let step = if hit == TabHit::ScrollLeft {
-                        -SCROLL_STEP
-                    } else {
-                        SCROLL_STEP
-                    };
+                    let step = SCROLL_STEP * if hit == TabHit::ScrollLeft { -1. } else { 1. };
                     if self.scroll_tabs(step) {
                         self.tabs.repeat = Some((Instant::now() + SCROLL_REPEAT_DELAY, step));
                     }
@@ -459,43 +449,29 @@ impl MainWindow {
     fn on_mouse_up(&mut self, button: MouseButton, pos: Point, cx: &mut Cx<'_>) {
         let (clicked, chain) = self.ui.on_mouse_up(pos, button);
         let top = chain.first().copied();
-        let tab_over = chain.iter().find_map(|hit| match hit {
-            HitId::Tab(TabHit::Item(id)) => Some(*id),
-            _ => None,
-        });
+        let over = tab_at(chain);
+        self.tabs.repeat = None;
         // A press that opened a menu, released on one of its rows, runs the row.
         let menu_release =
             (button == MouseButton::Left && clicked.is_none() && self.mode() == InputMode::Popup)
                 .then_some(top)
                 .flatten()
                 .filter(|hit| matches!(hit, HitId::Menu(MenuHit::Row { .. })));
-        let activated = clicked.or(menu_release);
-        self.tabs.repeat = None;
-
         if button == MouseButton::Middle {
-            let pressed = self.middle_pressed_tab.take();
-            if let Some(tab) = pressed
-                && pressed == tab_over
-                && self.tabs.index_of(tab).is_some()
+            if let Some(tab) = self.middle_pressed_tab.take()
+                && over == Some(tab)
             {
-                let window = self.id;
-                cx.emit(Effect::File(FileRequest::CloseTab { window, tab }));
+                self.request_close(tab, cx);
             }
             return;
         }
-
-        let active = self.tabs.active_slot();
-        if let Some(axis) = self.tabs.active().editor.scrollbar_drag_axis() {
-            let track = self.ui.frame().rect_of(HitId::ScrollTrack(active, axis));
+        if let Some(track) = self.dragged_track() {
             self.tabs
                 .active_mut()
                 .editor
                 .on_scrollbar_mouse_up(pos, track);
         }
-        if let Some(slot) = self.focused_slot()
-            && slot != active
-            && let Some(ed) = self.editor_mut(slot)
-        {
+        if let Some(ed) = self.focused_field() {
             ed.on_mouse_up(button);
         }
         if let Some(anchor) = self.tabs.active_mut().editor.on_mouse_up(button) {
@@ -505,8 +481,7 @@ impl MainWindow {
             self.apply_menu_outcome(out, cx);
             return;
         }
-
-        match activated {
+        match clicked.or(menu_release) {
             Some(HitId::Dialog(DialogHit::Button(ix))) => self.finish_dialog(Some(ix), cx),
             Some(HitId::FieldClear(slot)) => {
                 if let Some(ed) = self.editor_mut(slot) {
@@ -523,17 +498,20 @@ impl MainWindow {
                 let out = self.menus.on_click(hit);
                 self.apply_menu_outcome(out, cx);
             }
-            Some(HitId::Tab(TabHit::Close(tab))) => {
-                if self.tabs.index_of(tab).is_some() {
-                    let window = self.id;
-                    cx.emit(Effect::File(FileRequest::CloseTab { window, tab }));
-                }
-            }
+            Some(HitId::Tab(TabHit::Close(tab))) => self.request_close(tab, cx),
             Some(HitId::Tab(TabHit::New)) => {
                 self.dispatch_app_command(AppCommand::NewTab, cx);
             }
             Some(HitId::ThemeToggle) => cx.emit(Effect::ToggleTheme),
             _ => {}
+        }
+    }
+
+    /// Asks the app to close tab `tab` (it may prompt to save first), if it's still here.
+    fn request_close(&self, tab: TabId, cx: &mut Cx<'_>) {
+        if self.tabs.index_of(tab).is_some() {
+            let window = self.id;
+            cx.emit(Effect::File(FileRequest::CloseTab { window, tab }));
         }
     }
 
@@ -708,15 +686,12 @@ impl MainWindow {
             AppCommand::ReplaceNext => {
                 let ed = &mut self.tabs.active_mut().editor;
                 self.find.replace_next(ed, &cx.shell.text_system);
-                self.dirty = true;
             }
             AppCommand::ReplaceAll => {
                 let ed = &mut self.tabs.active_mut().editor;
                 let out = self.find.replace_all(ed, &cx.shell.text_system);
                 if matches!(out, FindOutcome::Replaced(_)) {
                     self.refocus_find(cx.shell);
-                } else {
-                    self.dirty = true;
                 }
             }
             AppCommand::ToggleReplace => {
@@ -799,7 +774,6 @@ impl MainWindow {
         let selected = model.text().slice(model.selection().range()).to_string();
         self.find.open(replace, &selected, &shell.text_system);
         self.set_focus(Focus::Editor(EditorSlot::FindQuery), shell);
-        self.dirty = true;
     }
 
     /// Closes the find bar, if it's open; whether it was.
@@ -809,7 +783,6 @@ impl MainWindow {
         }
         if self.find.close() {
             self.focus_active_editor(shell);
-            self.dirty = true;
         }
         true
     }
@@ -826,7 +799,6 @@ impl MainWindow {
             };
             self.set_focus(Focus::Editor(slot), shell);
         }
-        self.dirty = true;
     }
 
     fn find_step(&mut self, forward: bool, shell: &Shell) {
@@ -838,7 +810,6 @@ impl MainWindow {
         if !self.find.is_open() {
             self.focus_active_editor(shell);
         }
-        self.dirty = true;
     }
 
     // ---- Dialogs
@@ -855,7 +826,6 @@ impl MainWindow {
         self.cancel_menu(shell);
         let next = self.dialogs.show_now(kind);
         self.set_focus(next, shell);
-        self.dirty = true;
     }
 
     fn close_dialog(&mut self, shell: &Shell) {
@@ -865,7 +835,6 @@ impl MainWindow {
         } else {
             self.focus_active_editor(shell);
         }
-        self.dirty = true;
     }
 
     /// Shows the go-to dialog, its field holding `line` (or what was typed before).
@@ -983,16 +952,16 @@ impl MainWindow {
         }
     }
 
+    fn scroll_tabs(&mut self, delta: f32) -> bool {
+        self.dirty = true;
+        self.tabs.scroll_by(delta)
+    }
+
     /// Activates tab `ix`, if there is one and it isn't the active one.
     fn go_to_tab(&mut self, ix: usize, shell: &Shell) {
         if ix < self.tabs.len() && ix != self.tabs.active_index() {
             self.activate_tab(ix, shell);
         }
-    }
-
-    fn scroll_tabs(&mut self, delta: f32) -> bool {
-        self.dirty = true;
-        self.tabs.scroll_by(delta)
     }
 
     /// Shows a loaded file: in the active tab if that's blank, else in a new one.
@@ -1088,14 +1057,14 @@ impl MainWindow {
         grab: f32,
         shell: &Shell,
     ) {
-        let x = self.screen_to_local(at).x - HEADER_WIDTH;
+        let x = self.hwnd.to_client(at).x - HEADER_WIDTH;
         let ix = self.tabs.insert_dragged(data, x, grab);
         self.activate_tab(ix, shell);
     }
 
     /// Moves tab `id`, grabbed `grab` from its left after a press at `start`, to the pointer.
     pub(crate) fn drag_tab(&mut self, id: TabId, at: ScreenPoint, grab: f32, start: f32) {
-        let x = self.screen_to_local(at).x;
+        let x = self.hwnd.to_client(at).x;
         self.tabs
             .drag(id, x - HEADER_WIDTH, grab, start - HEADER_WIDTH);
         self.dirty = true;
@@ -1112,7 +1081,7 @@ impl MainWindow {
 
     /// Whether `pt` is over the tab strip, give or take `magnetism` above and below.
     pub(crate) fn strip_hit(&self, pt: ScreenPoint, magnetism: f32) -> bool {
-        let pos = self.screen_to_local(pt);
+        let pos = self.hwnd.to_client(pt);
         let frame = self.ui.frame();
         let right = frame.rect_of(HitId::Caption(CaptionHit::Min)).map_or_else(
             || self.win.window.logical_size().width - CAPTION_WIDTH,
@@ -1133,34 +1102,17 @@ impl MainWindow {
     pub(crate) fn strip_grab_offset(&self, grab: Point) -> Point {
         point(HEADER_WIDTH + tabs::LIST_PAD + grab.x, STRIP_TOP + grab.y)
     }
-
-    pub(crate) fn restored_logical_size(&self) -> Size {
-        let size = self.win.window.logical_size();
-        if self.hwnd.is_maximized() {
-            self.hwnd.restored_logical_size().unwrap_or(size)
-        } else {
-            size
-        }
-    }
-
-    fn screen_to_local(&self, pt: ScreenPoint) -> Point {
-        let (origin, scale) = (self.hwnd.client_origin(), self.hwnd.dpi_scale());
-        point(
-            (pt.x - origin.x) as f32 / scale,
-            (pt.y - origin.y) as f32 / scale,
-        )
-    }
-
-    pub(crate) fn local_to_screen(&self, pos: Point) -> ScreenPoint {
-        let (origin, scale) = (self.hwnd.client_origin(), self.hwnd.dpi_scale());
-        ScreenPoint {
-            x: origin.x + (pos.x * scale).round() as i32,
-            y: origin.y + (pos.y * scale).round() as i32,
-        }
-    }
 }
 
 // ---- Editors and focus
+
+/// The tab, if any, among the hits under the pointer.
+fn tab_at(chain: &[HitId]) -> Option<TabId> {
+    chain.iter().find_map(|hit| match hit {
+        HitId::Tab(TabHit::Item(id)) => Some(*id),
+        _ => None,
+    })
+}
 
 fn slot_editor<'a>(
     tabs: &'a TabSet,
@@ -1177,10 +1129,6 @@ fn slot_editor<'a>(
 }
 
 impl MainWindow {
-    fn editor(&self, slot: EditorSlot) -> Option<&Editor> {
-        slot_editor(&self.tabs, &self.find, &self.dialogs, slot)
-    }
-
     fn editor_mut(&mut self, slot: EditorSlot) -> Option<&mut Editor> {
         match slot {
             EditorSlot::Tab(id) => self.tabs.editor_mut(id),
@@ -1208,6 +1156,21 @@ impl MainWindow {
             Focus::Editor(slot) => Some(slot),
             Focus::MenuBar | Focus::DialogButton(_) => None,
         }
+    }
+
+    /// The focused editor when it isn't the document's (a find or go-to field).
+    fn focused_field(&mut self) -> Option<&mut Editor> {
+        let slot = self
+            .focused_slot()
+            .filter(|&slot| slot != self.tabs.active_slot())?;
+        self.editor_mut(slot)
+    }
+
+    /// While the document's scrollbar is dragged: its track, as laid out.
+    fn dragged_track(&self) -> Option<Option<Rect>> {
+        let axis = self.tabs.active().editor.scrollbar_drag_axis()?;
+        let track = HitId::ScrollTrack(self.tabs.active_slot(), axis);
+        Some(self.ui.frame().rect_of(track))
     }
 
     /// Keeps the focused caret steady while keys go to it.
@@ -1271,16 +1234,6 @@ const THEME_GLYPH_SIZE: f32 = 16.;
 const MOON_GLYPH: &str = "\u{E708}";
 const SUN_GLYPH: &str = "\u{E706}";
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-struct StatusMetrics {
-    line: usize,
-    column: usize,
-    selected: usize,
-    total: usize,
-    zoom_pct: u32,
-    format: Format,
-}
-
 impl MainWindow {
     /// Lays out and paints the window; whether another frame should follow on the next vsync.
     pub(crate) fn render_frame(&mut self, now: Instant, shell: &Shell) -> bool {
@@ -1292,7 +1245,6 @@ impl MainWindow {
         let logical = self.win.window.logical_size();
         let scale = self.win.window.scale_factor();
         let window_active = self.win.window.is_active();
-        let status_metrics = view.status_bar.then(|| self.status_metrics());
 
         self.ui.begin_frame(now, shell.settings.reduce_motion);
         let strip_column =
@@ -1335,7 +1287,7 @@ impl MainWindow {
         let menu_bar = self.menu_bar_row(p);
         let find_node = self.find.render(self.focused_slot(), p, &mut self.ui);
         let editor_node = self.editor_area(find_node, now, p);
-        let status_node = status_metrics.map(|m| self.status_bar(m, p));
+        let status_node = view.status_bar.then(|| self.status_bar(p));
         let menu_popup = self.menus.render_popup(p, &mut self.ui);
         let dialog_node = self.dialogs.render(self.focus, p, &mut self.ui);
 
@@ -1357,36 +1309,35 @@ impl MainWindow {
             ts,
         );
         self.win.window.set_control_areas(frame.control_areas());
-        self.update_min_size(logical, status_metrics, &frame, p, ts);
+        self.update_min_size(view.status_bar, &frame, p, ts);
 
-        let editor_rects: Vec<(EditorSlot, Rect)> = frame
-            .custom_rects()
-            .filter_map(|(token, rect)| match token {
-                CustomDraw::Editor(slot) => Some((slot, rect)),
-                CustomDraw::StatusSpacer => None,
-            })
-            .collect();
-        for (slot, rect) in editor_rects {
-            if slot == active_slot {
-                if rect != estimated_rect {
-                    let ed = &mut self.tabs.active_mut().editor;
-                    editor_needs_redraw |= ed.prepare(rect, active_params, ts);
-                    editor_needs_redraw |= (rect.size.width - estimated_rect.size.width).abs()
-                        > 1.0
-                        || (rect.size.height - estimated_rect.size.height).abs() > 1.0;
-                }
+        // Lay out the fields, and the document again if it didn't land where estimated (its
+        // scrollbars, built from the estimate, then need another frame).
+        for (token, rect) in frame.custom_rects() {
+            let CustomDraw::Editor(slot) = token else {
+                continue;
+            };
+            let document = slot == active_slot;
+            if document && rect == estimated_rect {
                 continue;
             }
             let focused = self.focus == Focus::Editor(slot);
-            let params = EditorPaintParams {
-                style: &field_style,
-                focused,
-                show_selection: focused,
-                ..active_params
+            let params = if document {
+                active_params
+            } else {
+                EditorPaintParams {
+                    style: &field_style,
+                    focused,
+                    show_selection: focused,
+                    ..active_params
+                }
             };
             if let Some(ed) = self.editor_mut(slot) {
                 editor_needs_redraw |= ed.prepare(rect, params, ts);
             }
+            editor_needs_redraw |= document
+                && ((rect.size.width - estimated_rect.size.width).abs() > 1.0
+                    || (rect.size.height - estimated_rect.size.height).abs() > 1.0);
         }
 
         let (tabs, find, dialogs) = (&self.tabs, &self.find, &self.dialogs);
@@ -1414,7 +1365,7 @@ impl MainWindow {
 
         let ime_caret = self
             .focused_slot()
-            .and_then(|slot| self.editor(slot))
+            .and_then(|slot| slot_editor(&self.tabs, &self.find, &self.dialogs, slot))
             .and_then(Editor::ime_caret_bounds);
         self.win
             .window
@@ -1449,50 +1400,14 @@ impl MainWindow {
         )
     }
 
-    fn status_metrics(&self) -> StatusMetrics {
-        let model = self.tabs.active().editor.model();
-        let text = model.text();
-        let (line, column) = model.caret_line_col();
-        let selection = model.selection().range();
-        StatusMetrics {
-            line,
-            column,
-            selected: text
-                .byte_to_char_idx(selection.end)
-                .saturating_sub(text.byte_to_char_idx(selection.start)),
-            total: text.len_chars(),
-            zoom_pct: (self.zoom() * 100.).round() as u32,
-            format: self.tabs.active().format,
-        }
-    }
-
     /// Keeps the window from shrinking past its chrome, the status bar's text and one line.
-    fn update_min_size(
-        &mut self,
-        logical: Size,
-        metrics: Option<StatusMetrics>,
-        frame: &AppFrame,
-        p: Palette,
-        ts: &TextSystem,
-    ) {
-        let status_w = metrics.map_or(0., |m| {
-            let spacer_w = frame
-                .custom_rects()
-                .find_map(|(tok, r)| (tok == CustomDraw::StatusSpacer).then_some(r.size.width));
-            match spacer_w {
-                Some(w) if w > STATUS_DIVIDER_WIDTH + 0.5 => {
-                    logical.width - (w - STATUS_DIVIDER_WIDTH)
-                }
-                _ => {
-                    let scale = self.win.window.scale_factor();
-                    AppFrame::measure(self.status_bar(m, p), AvailSize::MIN, scale, ts).width
-                }
-            }
-        });
-        let status_h = if metrics.is_some() {
-            SEPARATOR_HEIGHT + STATUS_BAR_HEIGHT
+    fn update_min_size(&mut self, status_bar: bool, frame: &AppFrame, p: Palette, ts: &TextSystem) {
+        let scale = self.win.window.scale_factor();
+        let (status_w, status_h) = if status_bar {
+            let bar = AppFrame::measure(self.status_bar(p), AvailSize::MIN, scale, ts);
+            (bar.width, SEPARATOR_HEIGHT + STATUS_BAR_HEIGHT)
         } else {
-            0.
+            (0., 0.)
         };
         let menu_width = frame
             .rect_of(HitId::Menu(MenuHit::Bar))
@@ -1587,12 +1502,17 @@ impl MainWindow {
             .when_some(find, AppNode::child)
     }
 
-    #[cfg(test)]
-    pub(crate) fn status_bar_for_test(&self, p: Palette) -> AppNode {
-        self.status_bar(self.status_metrics(), p)
-    }
-
-    fn status_bar(&self, metrics: StatusMetrics, p: Palette) -> AppNode {
+    /// The status bar: where the caret is, how much is selected, the zoom and the file format.
+    pub(crate) fn status_bar(&self, p: Palette) -> AppNode {
+        let tab = self.tabs.active();
+        let model = tab.editor.model();
+        let text = model.text();
+        let (line, column) = model.caret_line_col();
+        let selection = model.selection().range();
+        let selected = text
+            .byte_to_char_idx(selection.end)
+            .saturating_sub(text.byte_to_char_idx(selection.start));
+        let zoom_pct = (tab.zoom * 100.).round() as u32;
         box_().flex_none().child(separator(p)).child(
             row()
                 .items_center()
@@ -1604,20 +1524,20 @@ impl MainWindow {
                 .text_size(12.)
                 .text_color(p.text_secondary)
                 .nowrap()
-                .text_child(format!("Ln {}, Col {}", metrics.line, metrics.column))
+                .text_child(format!("Ln {line}, Col {column}"))
                 .child(status_divider(p))
-                .text_child(character_count(metrics.selected, metrics.total))
+                .text_child(character_count(selected, text.len_chars()))
                 .child(
                     custom(CustomDraw::StatusSpacer)
                         .flex_1()
                         .min_w(STATUS_DIVIDER_WIDTH)
                         .h(STATUS_DIVIDER_HEIGHT),
                 )
-                .text_child(format!("{}%", metrics.zoom_pct))
+                .text_child(format!("{zoom_pct}%"))
                 .child(status_divider(p))
-                .text_child(metrics.format.line_ending_label())
+                .text_child(tab.format.line_ending_label())
                 .child(status_divider(p))
-                .text_child(metrics.format.encoding.label()),
+                .text_child(tab.format.encoding.label()),
         )
     }
 }
@@ -1663,86 +1583,78 @@ fn character_count(selected: usize, total: usize) -> String {
     }
 }
 
-#[derive(Clone, Copy)]
-enum Caption {
-    Minimize,
-    Maximize,
-    Restore,
-    Close,
-}
-
-impl Caption {
-    fn render(self, active: bool, p: Palette, ui: &mut AppUi) -> AppNode {
-        let (hit, area, glyph) = match self {
-            Self::Minimize => (CaptionHit::Min, WindowControlArea::Min, "\u{E921}"),
-            Self::Maximize => (CaptionHit::Max, WindowControlArea::Max, "\u{E922}"),
-            Self::Restore => (CaptionHit::Max, WindowControlArea::Max, "\u{E923}"),
-            Self::Close => (CaptionHit::Close, WindowControlArea::Close, "\u{E8BB}"),
-        };
-        let hit = HitId::Caption(hit);
-        let (hover_bg, pressed_bg, hover_fg, pressed_fg) = match self {
-            Self::Close => (
-                p.close_hover,
-                p.close_pressed,
-                p.close_glyph_hover,
-                p.close_glyph_pressed,
-            ),
-            _ => (
-                p.layer_hover,
-                p.subtle_tertiary,
-                p.caption_glyph,
-                p.caption_glyph_pressed,
-            ),
-        };
-        let brushes = Brushes {
-            rest: transparent_black(),
-            hover: hover_bg,
-            pressed: pressed_bg,
-        };
-        let bg = ui.brush(hit, brushes, true);
-        let fg = if ui.is_pressed(hit) {
-            pressed_fg
-        } else if ui.is_hovered(hit) {
-            hover_fg
-        } else if active {
-            p.caption_glyph
-        } else {
-            p.caption_glyph_inactive
-        };
-        row()
-            .hit(hit)
-            .flex_none()
-            .w(CAPTION_BUTTON_WIDTH)
-            .h(30.)
-            .items_center()
-            .justify_center()
-            .bg(bg)
-            .font_family(ICON_FONT)
-            .text_size(10.)
-            .text_color(fg)
-            .window_area(area)
-            .child(
-                box_()
-                    .when(matches!(self, Self::Minimize), |this| this.left(1.).top(1.))
-                    .child(text(glyph)),
-            )
-    }
-}
-
+/// The minimize, maximize (or restore) and close buttons, then room to drag the window by.
 fn caption_buttons(active: bool, maximized: bool, p: Palette, ui: &mut AppUi) -> AppNode {
-    let maximize = if maximized {
-        Caption::Restore
-    } else {
-        Caption::Maximize
-    };
+    let max_glyph = if maximized { "\u{E923}" } else { "\u{E922}" };
+    let buttons = [
+        (CaptionHit::Min, WindowControlArea::Min, "\u{E921}"),
+        (CaptionHit::Max, WindowControlArea::Max, max_glyph),
+        (CaptionHit::Close, WindowControlArea::Close, "\u{E8BB}"),
+    ]
+    .map(|(hit, area, glyph)| caption_button(hit, area, glyph, active, p, ui));
     box_()
         .flex_none()
         .h_full()
-        .child(
-            row()
-                .child(Caption::Minimize.render(active, p, ui))
-                .child(maximize.render(active, p, ui))
-                .child(Caption::Close.render(active, p, ui)),
-        )
+        .child(row().children(buttons))
         .child(box_().flex_1().window_area(WindowControlArea::Drag))
+}
+
+/// A caption button; Close lights up red.
+fn caption_button(
+    hit: CaptionHit,
+    area: WindowControlArea,
+    glyph: &'static str,
+    active: bool,
+    p: Palette,
+    ui: &mut AppUi,
+) -> AppNode {
+    let (hover_bg, pressed_bg, hover_fg, pressed_fg) = if hit == CaptionHit::Close {
+        (
+            p.close_hover,
+            p.close_pressed,
+            p.close_glyph_hover,
+            p.close_glyph_pressed,
+        )
+    } else {
+        (
+            p.layer_hover,
+            p.subtle_tertiary,
+            p.caption_glyph,
+            p.caption_glyph_pressed,
+        )
+    };
+    let minimize = hit == CaptionHit::Min;
+    let hit = HitId::Caption(hit);
+    let brushes = Brushes {
+        rest: transparent_black(),
+        hover: hover_bg,
+        pressed: pressed_bg,
+    };
+    let bg = ui.brush(hit, brushes, true);
+    let fg = if ui.is_pressed(hit) {
+        pressed_fg
+    } else if ui.is_hovered(hit) {
+        hover_fg
+    } else if active {
+        p.caption_glyph
+    } else {
+        p.caption_glyph_inactive
+    };
+    row()
+        .hit(hit)
+        .flex_none()
+        .w(CAPTION_BUTTON_WIDTH)
+        .h(30.)
+        .items_center()
+        .justify_center()
+        .bg(bg)
+        .font_family(ICON_FONT)
+        .text_size(10.)
+        .text_color(fg)
+        .window_area(area)
+        .child(
+            box_()
+                .when(minimize, |this| this.left(1.).top(1.))
+                .child(text(glyph)),
+        )
 }

@@ -398,7 +398,7 @@ fn status_bar_min_width_and_no_vertical_char_wrapping() {
     let app = h.app.borrow();
     let ts = &app.shell.text_system;
     let p = app.shell.palette;
-    let live_bar = app.windows[0].status_bar_for_test(p);
+    let live_bar = app.windows[0].status_bar(p);
     let live_frame = AppFrame::layout(live_bar, AvailSize::definite(min_size.width, 32.), scale, ts);
     let spacer_w = live_frame
         .custom_rects()
