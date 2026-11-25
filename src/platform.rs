@@ -660,201 +660,152 @@ impl Vsync {
     }
 }
 
-/// The process's link to Windows: per-monitor DPI, COM, the window classes, and a hidden
-/// window the loop is woken through (which also receives other launches' files).
-pub(crate) struct Platform {
-    wake_hwnd: HWND,
-    vsync: Arc<Vsync>,
-    com_initialized: bool,
-    _instance_lock: Option<InstanceLock>,
+// ---- 4. System settings ---------------------------------------------------------------------
+
+/// Lines (or characters, sideways) per wheel notch when the system doesn't say.
+const DEFAULT_WHEEL_STEP: u32 = 3;
+const DEFAULT_HOVER_TIME_MS: u32 = 400;
+const DEFAULT_MENU_SHOW_DELAY_MS: u32 = 400;
+
+/// The high-contrast theme's colors, as 0xRRGGBB.
+#[derive(Copy, Clone, Debug)]
+pub(crate) struct HighContrastColors {
+    pub(crate) window: u32,
+    pub(crate) window_text: u32,
+    pub(crate) highlight: u32,
+    pub(crate) highlight_text: u32,
+    pub(crate) gray_text: u32,
+    pub(crate) btn_face: u32,
+    pub(crate) btn_text: u32,
+    pub(crate) window_frame: u32,
+    pub(crate) hotlight: u32,
 }
 
-impl Platform {
-    pub(crate) fn new(instance_lock: Option<InstanceLock>) -> Result<Self> {
-        unsafe {
-            let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-        }
-        let com_initialized = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }.is_ok();
-        let hinstance: HINSTANCE = unsafe { GetModuleHandleW(None)? }.into();
-        let icon = unsafe { LoadIconW(Some(hinstance), PCWSTR(std::ptr::without_provenance(1))) };
-        let classes = [
-            WNDCLASSW {
-                style: CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS,
-                lpfnWndProc: Some(window_proc),
-                hInstance: hinstance,
-                hIcon: icon.unwrap_or_default(),
-                hCursor: unsafe { LoadCursorW(None, IDC_ARROW) }.unwrap_or_default(),
-                lpszClassName: WINDOW_CLASS,
-                ..Default::default()
-            },
-            WNDCLASSW {
-                lpfnWndProc: Some(overlay_proc),
-                hInstance: hinstance,
-                lpszClassName: OVERLAY_CLASS,
-                ..Default::default()
-            },
-            WNDCLASSW {
-                lpfnWndProc: Some(wake_proc),
-                hInstance: hinstance,
-                lpszClassName: WAKE_CLASS,
-                ..Default::default()
-            },
-        ];
-        for class in &classes {
-            unsafe { RegisterClassW(class) };
-        }
-        let title = instance_lock.as_ref().map_or_else(HSTRING::new, |lock| {
-            HSTRING::from(lock.window_title.as_str())
-        });
-        let wake_hwnd = unsafe {
-            CreateWindowExW(
-                WINDOW_EX_STYLE(0),
-                WAKE_CLASS,
-                &title,
-                WINDOW_STYLE(0),
-                0,
-                0,
-                0,
-                0,
-                Some(HWND_MESSAGE),
-                None,
-                Some(hinstance),
-                None,
-            )?
+/// The user's settings that change how Jot looks and behaves.
+#[derive(Copy, Clone, Debug)]
+pub(crate) struct SystemSettings {
+    /// Apps are set to the dark theme.
+    pub(crate) dark: bool,
+    /// The accent colour for the light theme and for the dark one.
+    pub(crate) accent: [Option<u32>; 2],
+    pub(crate) high_contrast: Option<HighContrastColors>,
+    pub(crate) reduce_motion: bool,
+    pub(crate) caret_blink_interval: Option<Duration>,
+    pub(crate) caret_blink_timeout: Option<Duration>,
+    pub(crate) caret_width_px: u32,
+    pub(crate) mouse_hover_time: Duration,
+    pub(crate) menu_show_delay: Duration,
+}
+
+impl SystemSettings {
+    pub(crate) fn query() -> Self {
+        const SPI_GETCARETTIMEOUT: u32 = 0x2022;
+        let ms = |action: u32, default: u32| {
+            Duration::from_millis(system_parameters_u32(action).unwrap_or(default).into())
         };
-        Ok(Self {
-            wake_hwnd,
-            vsync: Vsync::spawn(wake_hwnd.0 as isize)?,
-            com_initialized,
-            _instance_lock: instance_lock,
-        })
-    }
-
-    /// A handle any thread can use to wake the loop (delivering `PlatformEvent::Wake`).
-    pub(crate) fn waker(&self) -> Waker {
-        Waker(self.wake_hwnd.0 as isize)
-    }
-
-    /// Wakes the loop at `at`, replacing the previous request; `None` cancels it.
-    pub(crate) fn wake_at(&self, at: Option<Instant>) {
-        let Some(at) = at else {
-            let _ = unsafe { KillTimer(Some(self.wake_hwnd), WAKE_TIMER_ID) };
-            return;
-        };
-        let wait = at.saturating_duration_since(Instant::now());
-        if wait.is_zero() {
-            self.waker().wake();
-            return;
-        }
-        let ms = (wait.as_millis().min(u128::from(u32::MAX)) as u32)
-            .clamp(USER_TIMER_MINIMUM, USER_TIMER_MAXIMUM);
-        let _ = unsafe { SetTimer(Some(self.wake_hwnd), WAKE_TIMER_ID, ms, None) };
-    }
-
-    /// Lets the app draw again once the display has shown the current frame.
-    pub(crate) fn request_frame_tick(&self) {
-        self.vsync.arm();
-    }
-
-    /// Asks Windows to stop a shutdown or logoff (giving `reason`) while there are unsaved
-    /// changes; `None` lifts it.
-    pub(crate) fn set_block_shutdown(&self, reason: Option<&'static str>) {
-        let prev = LOOP.with(|l| std::mem::replace(&mut l.borrow_mut().shutdown_block, reason));
-        if prev.is_some() && reason.is_none() {
-            unsafe extern "system" fn clear(hwnd: HWND, _: LPARAM) -> BOOL {
-                let _ = unsafe { ShutdownBlockReasonDestroy(hwnd) };
-                BOOL(1)
-            }
-            let _ = unsafe { EnumThreadWindows(GetCurrentThreadId(), Some(clear), LPARAM(0)) };
-        }
-    }
-
-    /// Stops taking files from other launches (they find the wake window by its title).
-    fn stop_handoff(&self) {
-        let _ = unsafe { SetWindowTextW(self.wake_hwnd, w!("")) };
-    }
-
-    pub(crate) fn post_quit(&self) {
-        self.stop_handoff();
-        unsafe { PostQuitMessage(0) };
-    }
-
-    /// Runs the message loop with `handler` as the app until the app quits.
-    pub(crate) fn run<H: PlatformHandler + 'static>(
-        handler: Rc<RefCell<H>>,
-        on_ready: impl FnOnce(&mut H),
-    ) {
-        let _installed = install(handler.clone());
-        on_ready(&mut handler.borrow_mut());
-        deliver(None);
-        let mut msg = MSG::default();
-        while unsafe { GetMessageW(&mut msg, None, 0, 0) }.0 > 0 {
-            unsafe {
-                let _ = TranslateMessage(&msg);
-                DispatchMessageW(&msg);
-            }
-            deliver(None);
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn with_test_handler<R>(
-        handler: Rc<RefCell<dyn PlatformHandler>>,
-        f: impl FnOnce() -> R,
-    ) -> R {
-        let _installed = install(handler);
-        f()
-    }
-}
-
-impl Drop for Platform {
-    fn drop(&mut self) {
-        self.stop_handoff();
-        unsafe {
-            let _ = DestroyWindow(self.wake_hwnd);
-            if self.com_initialized {
-                CoUninitialize();
-            }
+        let blink = |ms: u32| (ms != 0 && ms != u32::MAX).then(|| Duration::from_millis(ms.into()));
+        Self {
+            dark: apps_use_dark(),
+            accent: accent_colors(),
+            high_contrast: high_contrast_colors(),
+            reduce_motion: system_parameters_u32(SPI_GETCLIENTAREAANIMATION.0) == Some(0),
+            caret_blink_interval: blink(unsafe { GetCaretBlinkTime() }),
+            caret_blink_timeout: blink(system_parameters_u32(SPI_GETCARETTIMEOUT).unwrap_or(5_000)),
+            caret_width_px: system_parameters_u32(SPI_GETCARETWIDTH.0)
+                .unwrap_or(1)
+                .clamp(1, 20),
+            mouse_hover_time: ms(SPI_GETMOUSEHOVERTIME.0, DEFAULT_HOVER_TIME_MS),
+            menu_show_delay: ms(SPI_GETMENUSHOWDELAY.0, DEFAULT_MENU_SHOW_DELAY_MS),
         }
     }
 }
 
-unsafe extern "system" fn wake_proc(
-    hwnd: HWND,
-    msg: u32,
-    wparam: WPARAM,
-    lparam: LPARAM,
-) -> LRESULT {
-    ffi_guard("wake_proc", LRESULT(0), || match msg {
-        WM_APP_WAKE => {
-            deliver(Some(PlatformEvent::Wake));
-            LRESULT(0)
-        }
-        WM_TIMER if wparam.0 == WAKE_TIMER_ID => {
-            let _ = unsafe { KillTimer(Some(hwnd), WAKE_TIMER_ID) };
-            deliver(Some(PlatformEvent::Wake));
-            LRESULT(0)
-        }
-        WM_APP_VSYNC => {
-            deliver(None);
-            LRESULT(0)
-        }
-        WM_COPYDATA => {
-            let cds = unsafe { &*(lparam.0 as *const COPYDATASTRUCT) };
-            let accepting = unsafe { GetWindowTextLengthW(hwnd) } > 0;
-            match decode_paths(cds).filter(|_| accepting) {
-                Some(paths) => {
-                    deliver(Some(PlatformEvent::Launch(paths)));
-                    LRESULT(1)
-                }
-                None => LRESULT(0),
-            }
-        }
-        _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
+/// Reads registry value `name` under the current user's `key` into `out`; the bytes read.
+fn read_user_registry(
+    key: PCWSTR,
+    name: PCWSTR,
+    kind: windows::Win32::System::Registry::REG_ROUTINE_FLAGS,
+    out: &mut [u8],
+) -> Option<usize> {
+    let mut len = out.len() as u32;
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            key,
+            name,
+            kind,
+            None,
+            Some(out.as_mut_ptr().cast()),
+            Some(&mut len),
+        )
+    };
+    status.is_ok().then_some(len as usize)
+}
+
+fn apps_use_dark() -> bool {
+    let mut light = [0u8; 4];
+    let read = read_user_registry(
+        w!(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"),
+        w!("AppsUseLightTheme"),
+        RRF_RT_REG_DWORD,
+        &mut light,
+    );
+    read.is_some() && u32::from_ne_bytes(light) == 0
+}
+
+/// The accent colors for light and dark backgrounds (0xRRGGBB), from the accent palette.
+fn accent_colors() -> [Option<u32>; 2] {
+    let mut shades = [0u8; 32];
+    let Some(len) = read_user_registry(
+        w!(r"Software\Microsoft\Windows\CurrentVersion\Explorer\Accent"),
+        w!("AccentPalette"),
+        RRF_RT_REG_BINARY,
+        &mut shades,
+    ) else {
+        return [None; 2];
+    };
+    let shade = |at: usize| {
+        (len >= at + 3).then(|| u32::from_be_bytes([0, shades[at], shades[at + 1], shades[at + 2]]))
+    };
+    [shade(16), shade(4)]
+}
+
+fn high_contrast_colors() -> Option<HighContrastColors> {
+    let mut hc = HIGHCONTRASTW {
+        cbSize: size_of::<HIGHCONTRASTW>() as u32,
+        ..Default::default()
+    };
+    let flags = SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0);
+    unsafe {
+        SystemParametersInfoW(
+            SPI_GETHIGHCONTRAST,
+            hc.cbSize,
+            Some((&raw mut hc).cast()),
+            flags,
+        )
+    }
+    .ok()?;
+    if (hc.dwFlags & HCF_HIGHCONTRASTON).0 == 0 {
+        return None;
+    }
+    let color = |idx: SYS_COLOR_INDEX| {
+        let c = unsafe { GetSysColor(idx) }; // 0x00BBGGRR
+        (c & 0xFF) << 16 | (c & 0xFF00) | (c >> 16) & 0xFF
+    };
+    Some(HighContrastColors {
+        window: color(COLOR_WINDOW),
+        window_text: color(COLOR_WINDOWTEXT),
+        highlight: color(COLOR_HIGHLIGHT),
+        highlight_text: color(COLOR_HIGHLIGHTTEXT),
+        gray_text: color(COLOR_GRAYTEXT),
+        btn_face: color(COLOR_BTNFACE),
+        btn_text: color(COLOR_BTNTEXT),
+        window_frame: color(COLOR_WINDOWFRAME),
+        hotlight: color(COLOR_HOTLIGHT),
     })
 }
 
-// ---- 4. Windows -----------------------------------------------------------------------------
+// ---- 5. Windows -----------------------------------------------------------------------------
 
 const WINDOW_CLASS: PCWSTR = w!("JotWindow");
 const OVERLAY_CLASS: PCWSTR = w!("JotOverlay");
@@ -1914,7 +1865,7 @@ impl WindowHandle {
     }
 }
 
-// ---- 5. Displays and the desktop ------------------------------------------------------------
+// ---- 6. Displays and the desktop ------------------------------------------------------------
 
 impl From<POINT> for ScreenPoint {
     fn from(p: POINT) -> Self {
@@ -2056,332 +2007,7 @@ pub(crate) fn top_visible_window_at(
     search.found.map(|hwnd| WindowHandle(hwnd.0 as isize))
 }
 
-// ---- 6. The single-instance handoff ---------------------------------------------------------
-//
-// The first launch for a user (separately for elevated launches) holds a named mutex and titles
-// its wake window after it. A later launch that finds the mutex taken sends its files to that
-// window and exits.
-
-const HANDOFF_TAG: usize = 0x4A4F_5401;
-const MAX_HANDOFF_BYTES: usize = 1024 * 1024;
-const HANDOFF_TIMEOUT_MS: u32 = 2000;
-
-/// Held by the first launch for as long as it takes other launches' files.
-pub(crate) struct InstanceLock {
-    _mutex: Owned<HANDLE>,
-    window_title: String,
-}
-
-pub(crate) enum Arbitration {
-    /// This is the first launch (without a lock if the check couldn't be made).
-    Primary(Option<InstanceLock>),
-    HandedOff,
-}
-
-pub(crate) fn arbitrate_instance(paths: &[PathBuf]) -> Arbitration {
-    match instance_key() {
-        Some(key) => arbitrate_for(&key, paths),
-        None => Arbitration::Primary(None),
-    }
-}
-
-/// The user's SID, tagged with whether this launch is elevated: Windows won't pass messages
-/// from a normal process to an elevated one, so each gets its own first launch.
-fn instance_key() -> Option<String> {
-    let mut raw = HANDLE::default();
-    unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut raw).ok()? };
-    let token = unsafe { Owned::new(raw) };
-    let mut len = 0u32;
-    let _ = unsafe { GetTokenInformation(*token, TokenUser, None, 0, &mut len) };
-    let mut user = vec![0u8; len as usize];
-    unsafe {
-        GetTokenInformation(
-            *token,
-            TokenUser,
-            Some(user.as_mut_ptr().cast()),
-            len,
-            &mut len,
-        )
-        .ok()?
-    };
-    if user.len() < size_of::<TOKEN_USER>() {
-        return None;
-    }
-    let sid = unsafe { std::ptr::read_unaligned(user.as_ptr().cast::<TOKEN_USER>()) }
-        .User
-        .Sid;
-    let mut text = PWSTR::null();
-    unsafe { ConvertSidToStringSidW(sid, &mut text).ok()? };
-    let _free = unsafe { Owned::new(HLOCAL(text.0.cast())) };
-    let sid = String::from_utf16_lossy(unsafe { text.as_wide() });
-
-    let mut elevation = TOKEN_ELEVATION::default();
-    let elevated = unsafe {
-        let len = size_of::<TOKEN_ELEVATION>() as u32;
-        GetTokenInformation(
-            *token,
-            TokenElevation,
-            Some((&raw mut elevation).cast()),
-            len,
-            &mut 0,
-        )
-    }
-    .is_ok()
-        && elevation.TokenIsElevated != 0;
-    Some(format!("{}.{sid}", if elevated { "elev" } else { "std" }))
-}
-
-fn arbitrate_for(key: &str, paths: &[PathBuf]) -> Arbitration {
-    let mutex_name = HSTRING::from(format!(r"Local\Jot.Mutex.{key}"));
-    let window_title = format!("Jot.Handoff.{key}");
-    // The first launch may have claimed the mutex but not yet titled its window: try a while.
-    for _ in 0..20 {
-        let Ok(handle) = (unsafe { CreateMutexW(None, false, &mutex_name) }) else {
-            return Arbitration::Primary(None);
-        };
-        let taken = unsafe { GetLastError() } == ERROR_ALREADY_EXISTS;
-        let mutex = unsafe { Owned::new(handle) };
-        if !taken {
-            return Arbitration::Primary(Some(InstanceLock {
-                _mutex: mutex,
-                window_title,
-            }));
-        }
-        drop(mutex);
-        if send_handoff(&window_title, paths) {
-            return Arbitration::HandedOff;
-        }
-        thread::sleep(Duration::from_millis(25));
-    }
-    Arbitration::Primary(None)
-}
-
-/// Sends `paths` to the first launch's wake window; whether it took them.
-fn send_handoff(window_title: &str, paths: &[PathBuf]) -> bool {
-    let title = HSTRING::from(window_title);
-    let target = unsafe { FindWindowExW(Some(HWND_MESSAGE), None, WAKE_CLASS, &title) };
-    let Some(target) = target.ok().filter(|hwnd| !hwnd.is_invalid()) else {
-        return false;
-    };
-    let mut pid = 0u32;
-    unsafe { GetWindowThreadProcessId(target, Some(&mut pid)) };
-    // Let the first launch bring its window to the front.
-    let _ = unsafe { AllowSetForegroundWindow(pid) };
-
-    let payload = encode_paths(paths);
-    if payload.len() > MAX_HANDOFF_BYTES {
-        return false;
-    }
-    let cds = COPYDATASTRUCT {
-        dwData: HANDOFF_TAG,
-        cbData: payload.len() as u32,
-        lpData: if payload.is_empty() {
-            std::ptr::null_mut()
-        } else {
-            payload.as_ptr() as *mut c_void
-        },
-    };
-    let mut result = 0usize;
-    let sent = unsafe {
-        SendMessageTimeoutW(
-            target,
-            WM_COPYDATA,
-            WPARAM(0),
-            LPARAM((&raw const cds) as isize),
-            SMTO_ABORTIFHUNG | SMTO_BLOCK,
-            HANDOFF_TIMEOUT_MS,
-            Some(&mut result),
-        )
-    };
-    sent.0 != 0 && result == 1
-}
-
-/// Absolute paths as UTF-16, separated by NULs.
-fn encode_paths(paths: &[PathBuf]) -> Vec<u8> {
-    let mut bytes = Vec::new();
-    for (ix, path) in paths.iter().enumerate() {
-        if ix > 0 {
-            bytes.extend([0, 0]);
-        }
-        let path = std::path::absolute(path).unwrap_or_else(|_| path.clone());
-        bytes.extend(path.as_os_str().encode_wide().flat_map(u16::to_le_bytes));
-    }
-    bytes
-}
-
-/// The paths another launch sent, if the message is a well-formed handoff.
-fn decode_paths(cds: &COPYDATASTRUCT) -> Option<Vec<PathBuf>> {
-    let len = cds.cbData as usize;
-    if cds.dwData != HANDOFF_TAG {
-        return None;
-    }
-    if len == 0 {
-        return Some(Vec::new());
-    }
-    if len > MAX_HANDOFF_BYTES || !len.is_multiple_of(2) || cds.lpData.is_null() {
-        return None;
-    }
-    let bytes = unsafe { std::slice::from_raw_parts(cds.lpData.cast::<u8>(), len) };
-    let units: Vec<u16> = bytes
-        .as_chunks::<2>()
-        .0
-        .iter()
-        .map(|&b| u16::from_le_bytes(b))
-        .collect();
-    let paths: Vec<PathBuf> = units
-        .split(|&u| u == 0)
-        .filter(|part| !part.is_empty())
-        .map(|part| PathBuf::from(OsString::from_wide(part)))
-        .collect();
-    (!paths.is_empty()).then_some(paths)
-}
-
-// ---- 7. System settings ---------------------------------------------------------------------
-
-/// Lines (or characters, sideways) per wheel notch when the system doesn't say.
-const DEFAULT_WHEEL_STEP: u32 = 3;
-const DEFAULT_HOVER_TIME_MS: u32 = 400;
-const DEFAULT_MENU_SHOW_DELAY_MS: u32 = 400;
-
-/// The high-contrast theme's colors, as 0xRRGGBB.
-#[derive(Copy, Clone, Debug)]
-pub(crate) struct HighContrastColors {
-    pub(crate) window: u32,
-    pub(crate) window_text: u32,
-    pub(crate) highlight: u32,
-    pub(crate) highlight_text: u32,
-    pub(crate) gray_text: u32,
-    pub(crate) btn_face: u32,
-    pub(crate) btn_text: u32,
-    pub(crate) window_frame: u32,
-    pub(crate) hotlight: u32,
-}
-
-/// The user's settings that change how Jot looks and behaves.
-#[derive(Copy, Clone, Debug)]
-pub(crate) struct SystemSettings {
-    /// Apps are set to the dark theme.
-    pub(crate) dark: bool,
-    /// The accent colour for the light theme and for the dark one.
-    pub(crate) accent: [Option<u32>; 2],
-    pub(crate) high_contrast: Option<HighContrastColors>,
-    pub(crate) reduce_motion: bool,
-    pub(crate) caret_blink_interval: Option<Duration>,
-    pub(crate) caret_blink_timeout: Option<Duration>,
-    pub(crate) caret_width_px: u32,
-    pub(crate) mouse_hover_time: Duration,
-    pub(crate) menu_show_delay: Duration,
-}
-
-impl SystemSettings {
-    pub(crate) fn query() -> Self {
-        const SPI_GETCARETTIMEOUT: u32 = 0x2022;
-        let ms = |action: u32, default: u32| {
-            Duration::from_millis(system_parameters_u32(action).unwrap_or(default).into())
-        };
-        let blink = |ms: u32| (ms != 0 && ms != u32::MAX).then(|| Duration::from_millis(ms.into()));
-        Self {
-            dark: apps_use_dark(),
-            accent: accent_colors(),
-            high_contrast: high_contrast_colors(),
-            reduce_motion: system_parameters_u32(SPI_GETCLIENTAREAANIMATION.0) == Some(0),
-            caret_blink_interval: blink(unsafe { GetCaretBlinkTime() }),
-            caret_blink_timeout: blink(system_parameters_u32(SPI_GETCARETTIMEOUT).unwrap_or(5_000)),
-            caret_width_px: system_parameters_u32(SPI_GETCARETWIDTH.0)
-                .unwrap_or(1)
-                .clamp(1, 20),
-            mouse_hover_time: ms(SPI_GETMOUSEHOVERTIME.0, DEFAULT_HOVER_TIME_MS),
-            menu_show_delay: ms(SPI_GETMENUSHOWDELAY.0, DEFAULT_MENU_SHOW_DELAY_MS),
-        }
-    }
-}
-
-/// Reads registry value `name` under the current user's `key` into `out`; the bytes read.
-fn read_user_registry(
-    key: PCWSTR,
-    name: PCWSTR,
-    kind: windows::Win32::System::Registry::REG_ROUTINE_FLAGS,
-    out: &mut [u8],
-) -> Option<usize> {
-    let mut len = out.len() as u32;
-    let status = unsafe {
-        RegGetValueW(
-            HKEY_CURRENT_USER,
-            key,
-            name,
-            kind,
-            None,
-            Some(out.as_mut_ptr().cast()),
-            Some(&mut len),
-        )
-    };
-    status.is_ok().then_some(len as usize)
-}
-
-fn apps_use_dark() -> bool {
-    let mut light = [0u8; 4];
-    let read = read_user_registry(
-        w!(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"),
-        w!("AppsUseLightTheme"),
-        RRF_RT_REG_DWORD,
-        &mut light,
-    );
-    read.is_some() && u32::from_ne_bytes(light) == 0
-}
-
-/// The accent colors for light and dark backgrounds (0xRRGGBB), from the accent palette.
-fn accent_colors() -> [Option<u32>; 2] {
-    let mut shades = [0u8; 32];
-    let Some(len) = read_user_registry(
-        w!(r"Software\Microsoft\Windows\CurrentVersion\Explorer\Accent"),
-        w!("AccentPalette"),
-        RRF_RT_REG_BINARY,
-        &mut shades,
-    ) else {
-        return [None; 2];
-    };
-    let shade = |at: usize| {
-        (len >= at + 3).then(|| u32::from_be_bytes([0, shades[at], shades[at + 1], shades[at + 2]]))
-    };
-    [shade(16), shade(4)]
-}
-
-fn high_contrast_colors() -> Option<HighContrastColors> {
-    let mut hc = HIGHCONTRASTW {
-        cbSize: size_of::<HIGHCONTRASTW>() as u32,
-        ..Default::default()
-    };
-    let flags = SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0);
-    unsafe {
-        SystemParametersInfoW(
-            SPI_GETHIGHCONTRAST,
-            hc.cbSize,
-            Some((&raw mut hc).cast()),
-            flags,
-        )
-    }
-    .ok()?;
-    if (hc.dwFlags & HCF_HIGHCONTRASTON).0 == 0 {
-        return None;
-    }
-    let color = |idx: SYS_COLOR_INDEX| {
-        let c = unsafe { GetSysColor(idx) }; // 0x00BBGGRR
-        (c & 0xFF) << 16 | (c & 0xFF00) | (c >> 16) & 0xFF
-    };
-    Some(HighContrastColors {
-        window: color(COLOR_WINDOW),
-        window_text: color(COLOR_WINDOWTEXT),
-        highlight: color(COLOR_HIGHLIGHT),
-        highlight_text: color(COLOR_HIGHLIGHTTEXT),
-        gray_text: color(COLOR_GRAYTEXT),
-        btn_face: color(COLOR_BTNFACE),
-        btn_text: color(COLOR_BTNTEXT),
-        window_frame: color(COLOR_WINDOWFRAME),
-        hotlight: color(COLOR_HOTLIGHT),
-    })
-}
-
-// ---- 8. OS services -------------------------------------------------------------------------
+// ---- 7. OS services -------------------------------------------------------------------------
 
 // File dialogs.
 
@@ -2818,6 +2444,383 @@ pub(crate) fn format_local_time_date() -> String {
     };
     let text = |buf: &[u16], len: i32| String::from_utf16_lossy(&buf[..(len.max(1) - 1) as usize]);
     format!("{} {}", text(&time, time_len), text(&date, date_len))
+}
+
+// ---- 8. The single-instance handoff ---------------------------------------------------------
+
+//
+// The first launch for a user (separately for elevated launches) holds a named mutex and titles
+// its wake window after it. A later launch that finds the mutex taken sends its files to that
+// window and exits.
+
+const HANDOFF_TAG: usize = 0x4A4F_5401;
+const MAX_HANDOFF_BYTES: usize = 1024 * 1024;
+const HANDOFF_TIMEOUT_MS: u32 = 2000;
+
+/// Held by the first launch for as long as it takes other launches' files.
+pub(crate) struct InstanceLock {
+    _mutex: Owned<HANDLE>,
+    window_title: String,
+}
+
+pub(crate) enum Arbitration {
+    /// This is the first launch (without a lock if the check couldn't be made).
+    Primary(Option<InstanceLock>),
+    HandedOff,
+}
+
+pub(crate) fn arbitrate_instance(paths: &[PathBuf]) -> Arbitration {
+    match instance_key() {
+        Some(key) => arbitrate_for(&key, paths),
+        None => Arbitration::Primary(None),
+    }
+}
+
+/// The user's SID, tagged with whether this launch is elevated: Windows won't pass messages
+/// from a normal process to an elevated one, so each gets its own first launch.
+fn instance_key() -> Option<String> {
+    let mut raw = HANDLE::default();
+    unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut raw).ok()? };
+    let token = unsafe { Owned::new(raw) };
+    let mut len = 0u32;
+    let _ = unsafe { GetTokenInformation(*token, TokenUser, None, 0, &mut len) };
+    let mut user = vec![0u8; len as usize];
+    unsafe {
+        GetTokenInformation(
+            *token,
+            TokenUser,
+            Some(user.as_mut_ptr().cast()),
+            len,
+            &mut len,
+        )
+        .ok()?
+    };
+    if user.len() < size_of::<TOKEN_USER>() {
+        return None;
+    }
+    let sid = unsafe { std::ptr::read_unaligned(user.as_ptr().cast::<TOKEN_USER>()) }
+        .User
+        .Sid;
+    let mut text = PWSTR::null();
+    unsafe { ConvertSidToStringSidW(sid, &mut text).ok()? };
+    let _free = unsafe { Owned::new(HLOCAL(text.0.cast())) };
+    let sid = String::from_utf16_lossy(unsafe { text.as_wide() });
+
+    let mut elevation = TOKEN_ELEVATION::default();
+    let elevated = unsafe {
+        let len = size_of::<TOKEN_ELEVATION>() as u32;
+        GetTokenInformation(
+            *token,
+            TokenElevation,
+            Some((&raw mut elevation).cast()),
+            len,
+            &mut 0,
+        )
+    }
+    .is_ok()
+        && elevation.TokenIsElevated != 0;
+    Some(format!("{}.{sid}", if elevated { "elev" } else { "std" }))
+}
+
+fn arbitrate_for(key: &str, paths: &[PathBuf]) -> Arbitration {
+    let mutex_name = HSTRING::from(format!(r"Local\Jot.Mutex.{key}"));
+    let window_title = format!("Jot.Handoff.{key}");
+    // The first launch may have claimed the mutex but not yet titled its window: try a while.
+    for _ in 0..20 {
+        let Ok(handle) = (unsafe { CreateMutexW(None, false, &mutex_name) }) else {
+            return Arbitration::Primary(None);
+        };
+        let taken = unsafe { GetLastError() } == ERROR_ALREADY_EXISTS;
+        let mutex = unsafe { Owned::new(handle) };
+        if !taken {
+            return Arbitration::Primary(Some(InstanceLock {
+                _mutex: mutex,
+                window_title,
+            }));
+        }
+        drop(mutex);
+        if send_handoff(&window_title, paths) {
+            return Arbitration::HandedOff;
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    Arbitration::Primary(None)
+}
+
+/// Sends `paths` to the first launch's wake window; whether it took them.
+fn send_handoff(window_title: &str, paths: &[PathBuf]) -> bool {
+    let title = HSTRING::from(window_title);
+    let target = unsafe { FindWindowExW(Some(HWND_MESSAGE), None, WAKE_CLASS, &title) };
+    let Some(target) = target.ok().filter(|hwnd| !hwnd.is_invalid()) else {
+        return false;
+    };
+    let mut pid = 0u32;
+    unsafe { GetWindowThreadProcessId(target, Some(&mut pid)) };
+    // Let the first launch bring its window to the front.
+    let _ = unsafe { AllowSetForegroundWindow(pid) };
+
+    let payload = encode_paths(paths);
+    if payload.len() > MAX_HANDOFF_BYTES {
+        return false;
+    }
+    let cds = COPYDATASTRUCT {
+        dwData: HANDOFF_TAG,
+        cbData: payload.len() as u32,
+        lpData: if payload.is_empty() {
+            std::ptr::null_mut()
+        } else {
+            payload.as_ptr() as *mut c_void
+        },
+    };
+    let mut result = 0usize;
+    let sent = unsafe {
+        SendMessageTimeoutW(
+            target,
+            WM_COPYDATA,
+            WPARAM(0),
+            LPARAM((&raw const cds) as isize),
+            SMTO_ABORTIFHUNG | SMTO_BLOCK,
+            HANDOFF_TIMEOUT_MS,
+            Some(&mut result),
+        )
+    };
+    sent.0 != 0 && result == 1
+}
+
+/// Absolute paths as UTF-16, separated by NULs.
+fn encode_paths(paths: &[PathBuf]) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    for (ix, path) in paths.iter().enumerate() {
+        if ix > 0 {
+            bytes.extend([0, 0]);
+        }
+        let path = std::path::absolute(path).unwrap_or_else(|_| path.clone());
+        bytes.extend(path.as_os_str().encode_wide().flat_map(u16::to_le_bytes));
+    }
+    bytes
+}
+
+/// The paths another launch sent, if the message is a well-formed handoff.
+fn decode_paths(cds: &COPYDATASTRUCT) -> Option<Vec<PathBuf>> {
+    let len = cds.cbData as usize;
+    if cds.dwData != HANDOFF_TAG {
+        return None;
+    }
+    if len == 0 {
+        return Some(Vec::new());
+    }
+    if len > MAX_HANDOFF_BYTES || !len.is_multiple_of(2) || cds.lpData.is_null() {
+        return None;
+    }
+    let bytes = unsafe { std::slice::from_raw_parts(cds.lpData.cast::<u8>(), len) };
+    let units: Vec<u16> = bytes
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|&b| u16::from_le_bytes(b))
+        .collect();
+    let paths: Vec<PathBuf> = units
+        .split(|&u| u == 0)
+        .filter(|part| !part.is_empty())
+        .map(|part| PathBuf::from(OsString::from_wide(part)))
+        .collect();
+    (!paths.is_empty()).then_some(paths)
+}
+
+// ---- 9. The platform ------------------------------------------------------------------------
+
+/// The process's link to Windows: per-monitor DPI, COM, the window classes, and a hidden
+/// window the loop is woken through (which also receives other launches' files).
+pub(crate) struct Platform {
+    wake_hwnd: HWND,
+    vsync: Arc<Vsync>,
+    com_initialized: bool,
+    _instance_lock: Option<InstanceLock>,
+}
+
+impl Platform {
+    pub(crate) fn new(instance_lock: Option<InstanceLock>) -> Result<Self> {
+        unsafe {
+            let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        }
+        let com_initialized = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }.is_ok();
+        let hinstance: HINSTANCE = unsafe { GetModuleHandleW(None)? }.into();
+        let icon = unsafe { LoadIconW(Some(hinstance), PCWSTR(std::ptr::without_provenance(1))) };
+        let classes = [
+            WNDCLASSW {
+                style: CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS,
+                lpfnWndProc: Some(window_proc),
+                hInstance: hinstance,
+                hIcon: icon.unwrap_or_default(),
+                hCursor: unsafe { LoadCursorW(None, IDC_ARROW) }.unwrap_or_default(),
+                lpszClassName: WINDOW_CLASS,
+                ..Default::default()
+            },
+            WNDCLASSW {
+                lpfnWndProc: Some(overlay_proc),
+                hInstance: hinstance,
+                lpszClassName: OVERLAY_CLASS,
+                ..Default::default()
+            },
+            WNDCLASSW {
+                lpfnWndProc: Some(wake_proc),
+                hInstance: hinstance,
+                lpszClassName: WAKE_CLASS,
+                ..Default::default()
+            },
+        ];
+        for class in &classes {
+            unsafe { RegisterClassW(class) };
+        }
+        let title = instance_lock.as_ref().map_or_else(HSTRING::new, |lock| {
+            HSTRING::from(lock.window_title.as_str())
+        });
+        let wake_hwnd = unsafe {
+            CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                WAKE_CLASS,
+                &title,
+                WINDOW_STYLE(0),
+                0,
+                0,
+                0,
+                0,
+                Some(HWND_MESSAGE),
+                None,
+                Some(hinstance),
+                None,
+            )?
+        };
+        Ok(Self {
+            wake_hwnd,
+            vsync: Vsync::spawn(wake_hwnd.0 as isize)?,
+            com_initialized,
+            _instance_lock: instance_lock,
+        })
+    }
+
+    /// A handle any thread can use to wake the loop (delivering `PlatformEvent::Wake`).
+    pub(crate) fn waker(&self) -> Waker {
+        Waker(self.wake_hwnd.0 as isize)
+    }
+
+    /// Wakes the loop at `at`, replacing the previous request; `None` cancels it.
+    pub(crate) fn wake_at(&self, at: Option<Instant>) {
+        let Some(at) = at else {
+            let _ = unsafe { KillTimer(Some(self.wake_hwnd), WAKE_TIMER_ID) };
+            return;
+        };
+        let wait = at.saturating_duration_since(Instant::now());
+        if wait.is_zero() {
+            self.waker().wake();
+            return;
+        }
+        let ms = (wait.as_millis().min(u128::from(u32::MAX)) as u32)
+            .clamp(USER_TIMER_MINIMUM, USER_TIMER_MAXIMUM);
+        let _ = unsafe { SetTimer(Some(self.wake_hwnd), WAKE_TIMER_ID, ms, None) };
+    }
+
+    /// Lets the app draw again once the display has shown the current frame.
+    pub(crate) fn request_frame_tick(&self) {
+        self.vsync.arm();
+    }
+
+    /// Asks Windows to stop a shutdown or logoff (giving `reason`) while there are unsaved
+    /// changes; `None` lifts it.
+    pub(crate) fn set_block_shutdown(&self, reason: Option<&'static str>) {
+        let prev = LOOP.with(|l| std::mem::replace(&mut l.borrow_mut().shutdown_block, reason));
+        if prev.is_some() && reason.is_none() {
+            unsafe extern "system" fn clear(hwnd: HWND, _: LPARAM) -> BOOL {
+                let _ = unsafe { ShutdownBlockReasonDestroy(hwnd) };
+                BOOL(1)
+            }
+            let _ = unsafe { EnumThreadWindows(GetCurrentThreadId(), Some(clear), LPARAM(0)) };
+        }
+    }
+
+    /// Stops taking files from other launches (they find the wake window by its title).
+    fn stop_handoff(&self) {
+        let _ = unsafe { SetWindowTextW(self.wake_hwnd, w!("")) };
+    }
+
+    pub(crate) fn post_quit(&self) {
+        self.stop_handoff();
+        unsafe { PostQuitMessage(0) };
+    }
+
+    /// Runs the message loop with `handler` as the app until the app quits.
+    pub(crate) fn run<H: PlatformHandler + 'static>(
+        handler: Rc<RefCell<H>>,
+        on_ready: impl FnOnce(&mut H),
+    ) {
+        let _installed = install(handler.clone());
+        on_ready(&mut handler.borrow_mut());
+        deliver(None);
+        let mut msg = MSG::default();
+        while unsafe { GetMessageW(&mut msg, None, 0, 0) }.0 > 0 {
+            unsafe {
+                let _ = TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+            deliver(None);
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_test_handler<R>(
+        handler: Rc<RefCell<dyn PlatformHandler>>,
+        f: impl FnOnce() -> R,
+    ) -> R {
+        let _installed = install(handler);
+        f()
+    }
+}
+
+impl Drop for Platform {
+    fn drop(&mut self) {
+        self.stop_handoff();
+        unsafe {
+            let _ = DestroyWindow(self.wake_hwnd);
+            if self.com_initialized {
+                CoUninitialize();
+            }
+        }
+    }
+}
+
+unsafe extern "system" fn wake_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    ffi_guard("wake_proc", LRESULT(0), || match msg {
+        WM_APP_WAKE => {
+            deliver(Some(PlatformEvent::Wake));
+            LRESULT(0)
+        }
+        WM_TIMER if wparam.0 == WAKE_TIMER_ID => {
+            let _ = unsafe { KillTimer(Some(hwnd), WAKE_TIMER_ID) };
+            deliver(Some(PlatformEvent::Wake));
+            LRESULT(0)
+        }
+        WM_APP_VSYNC => {
+            deliver(None);
+            LRESULT(0)
+        }
+        WM_COPYDATA => {
+            let cds = unsafe { &*(lparam.0 as *const COPYDATASTRUCT) };
+            let accepting = unsafe { GetWindowTextLengthW(hwnd) } > 0;
+            match decode_paths(cds).filter(|_| accepting) {
+                Some(paths) => {
+                    deliver(Some(PlatformEvent::Launch(paths)));
+                    LRESULT(1)
+                }
+                None => LRESULT(0),
+            }
+        }
+        _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
+    })
 }
 
 #[cfg(test)]
