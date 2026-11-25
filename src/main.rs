@@ -106,7 +106,7 @@ fn main() {
 pub(crate) struct App {
     pub(crate) windows: Windows,
     tab_drag: Option<TabDrag>,
-    pub(crate) file_ops: FileOps,
+    file_ops: FileOps,
     file_events: FileEvents,
     keytips: KeyTips,
     tooltips: Tooltips,
@@ -330,7 +330,7 @@ impl App {
         self.windows.open_at(initial, window_size, None, &self.shell)
     }
 
-    pub(crate) fn request_quit(&mut self) {
+    fn request_quit(&mut self) {
         if !self.quit {
             self.quit = true;
             self.platform.post_quit();
@@ -528,7 +528,7 @@ impl PlatformHandler for App {
 pub(crate) struct WindowLaunch {
     pub(crate) show: bool,
     pub(crate) focus: bool,
-    pub(crate) use_cursor_display: bool,
+    use_cursor_display: bool,
 }
 
 impl Default for WindowLaunch {
@@ -581,7 +581,7 @@ impl Windows {
         }
     }
 
-    pub(crate) fn set_active(&mut self, id: WindowId) {
+    fn set_active(&mut self, id: WindowId) {
         self.active = Some(id);
     }
 
@@ -633,7 +633,7 @@ impl Windows {
         }
     }
 
-    pub(crate) fn mark_all_dirty(&mut self) {
+    fn mark_all_dirty(&mut self) {
         for w in &mut self.list {
             w.dirty = true;
         }
@@ -651,11 +651,11 @@ impl Windows {
         }
     }
 
-    pub(crate) fn any_dirty(&self) -> bool {
+    fn any_dirty(&self) -> bool {
         self.list.iter().any(|w| w.tabs.has_dirty())
     }
 
-    pub(crate) fn sweep_closed(&mut self) -> Vec<(WindowId, Vec<crate::files::PromptId>)> {
+    fn sweep_closed(&mut self) -> Vec<(WindowId, Vec<crate::files::PromptId>)> {
         if !self.list.iter().any(|w| w.pending_close) {
             return Vec::new();
         }
@@ -723,7 +723,7 @@ impl Windows {
         }
     }
 
-    pub(crate) fn open_at(
+    fn open_at(
         &mut self,
         initial: Option<TabData>,
         window_size: Option<Size>,
@@ -926,21 +926,21 @@ impl TabDrag {
         })
     }
 
-    pub(crate) fn is_dragging(&self) -> bool {
+    fn is_dragging(&self) -> bool {
         matches!(self.phase, Phase::Dragging)
     }
 
-    pub(crate) fn is_in_move_loop(&self) -> bool {
+    fn is_in_move_loop(&self) -> bool {
         matches!(self.phase, Phase::Entering { .. } | Phase::Moving { .. })
     }
 
-    pub(crate) fn is_alive(&self, windows: &Windows) -> bool {
+    fn is_alive(&self, windows: &Windows) -> bool {
         windows
             .get(self.owner)
             .is_some_and(|w| w.tabs.index_of(self.tab).is_some())
     }
 
-    pub(crate) fn on_size_move_changed(
+    fn on_size_move_changed(
         &mut self,
         window_id: WindowId,
         entering: bool,
@@ -1007,7 +1007,7 @@ impl TabDrag {
         false
     }
 
-    pub(crate) fn on_release(&mut self, windows: &mut Windows) -> bool {
+    fn on_release(&mut self, windows: &mut Windows) -> bool {
         if self.is_in_move_loop() {
             return false;
         }
@@ -1083,7 +1083,7 @@ impl TabDrag {
         }
     }
 
-    pub(crate) fn on_poll(
+    fn on_poll(
         &mut self,
         windows: &mut Windows,
         file_ops: &FileOps,
@@ -1228,7 +1228,7 @@ impl TabDrag {
     }
 
     #[cfg(test)]
-    pub(crate) fn detach_for_test(&mut self, windows: &mut Windows, shell: &Shell) {
+    fn detach_for_test(&mut self, windows: &mut Windows, shell: &Shell) {
         self.phase = Phase::Dragging;
         let pt = ScreenPoint {
             x: self.press.x + 120,

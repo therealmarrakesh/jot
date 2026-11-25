@@ -1813,7 +1813,7 @@ impl WindowHandle {
         origin.into()
     }
 
-    pub(crate) fn dpi_scale(self) -> f32 {
+    fn dpi_scale(self) -> f32 {
         window_scale(self.raw())
     }
 
@@ -1941,7 +1941,7 @@ impl WindowHandle {
     }
 
     /// The window's size when not maximized or minimized.
-    pub(crate) fn restored_logical_size(self) -> Option<Size> {
+    fn restored_logical_size(self) -> Option<Size> {
         let rc = self.saved_placement()?.0.rcNormalPosition;
         let scale = self.dpi_scale();
         let (w, h) = (
@@ -2013,7 +2013,7 @@ impl WindowsDisplay {
         }
     }
 
-    pub(crate) fn from_id(id: DisplayId) -> Option<Self> {
+    fn from_id(id: DisplayId) -> Option<Self> {
         let monitor = HMONITOR(id.0 as *mut _);
         (!monitor.is_invalid()).then_some(Self { monitor })
     }
@@ -2338,8 +2338,8 @@ pub(crate) struct HighContrastColors {
 #[derive(Copy, Clone, Debug)]
 pub(crate) struct SystemSettings {
     pub(crate) appearance: WindowAppearance,
-    pub(crate) accent_light: Option<u32>,
-    pub(crate) accent_dark: Option<u32>,
+    accent_light: Option<u32>,
+    accent_dark: Option<u32>,
     pub(crate) high_contrast: Option<HighContrastColors>,
     pub(crate) reduce_motion: bool,
     pub(crate) caret_blink_interval: Option<Duration>,

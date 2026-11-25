@@ -241,11 +241,11 @@ impl<T: Copy> Edges<T> {
 impl Edges<f32> {
     pub(crate) const ZERO: Self = Self::all(0.0);
 
-    pub(crate) fn horiz(self) -> f32 {
+    fn horiz(self) -> f32 {
         self.left + self.right
     }
 
-    pub(crate) fn vert(self) -> f32 {
+    fn vert(self) -> f32 {
         self.top + self.bottom
     }
 

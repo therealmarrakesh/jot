@@ -1679,7 +1679,7 @@ impl TextSystem {
     }
 
     #[cfg(test)]
-    pub(crate) fn label_cache_counts(&self) -> (usize, usize) {
+    fn label_cache_counts(&self) -> (usize, usize) {
         self.state.borrow().labels.age_counts()
     }
 }

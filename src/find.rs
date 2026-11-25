@@ -661,7 +661,7 @@ impl Matcher {
         }
     }
 
-    pub(crate) fn is_match(&self, text: &str) -> bool {
+    fn is_match(&self, text: &str) -> bool {
         if self.match_case {
             text == self.query
         } else {
@@ -671,7 +671,7 @@ impl Matcher {
         }
     }
 
-    pub(crate) fn max_match_bytes(&self) -> usize {
+    fn max_match_bytes(&self) -> usize {
         if self.match_case {
             self.query.len()
         } else {

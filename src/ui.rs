@@ -891,7 +891,7 @@ impl AppUi {
     }
 }
 
-pub(crate) fn cubic_bezier(x1: f32, y1: f32, x2: f32, y2: f32, t: f32) -> f32 {
+fn cubic_bezier(x1: f32, y1: f32, x2: f32, y2: f32, t: f32) -> f32 {
     let t = t.clamp(0.0, 1.0);
     if t <= 0.0 {
         return 0.0;
@@ -1254,7 +1254,7 @@ impl<K: Copy + Eq + Hash> AnimTracks<K> {
         self.animate(|t| &mut t.scalars, key, initial, target, curve)
     }
 
-    pub(crate) fn animate_color(&mut self, key: K, target: Rgba, curve: Curve) -> Rgba {
+    fn animate_color(&mut self, key: K, target: Rgba, curve: Curve) -> Rgba {
         self.animate(|t| &mut t.colors, key, target, target, curve)
             .value
     }

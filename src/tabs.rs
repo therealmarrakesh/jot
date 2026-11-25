@@ -541,7 +541,7 @@ impl TabData {
         self.doc_path.as_ref().map(DocPath::as_path)
     }
 
-    pub(crate) fn path_key(&self) -> Option<&PathKey> {
+    fn path_key(&self) -> Option<&PathKey> {
         self.doc_path.as_ref().map(DocPath::key)
     }
 

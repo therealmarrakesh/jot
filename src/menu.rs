@@ -87,7 +87,7 @@ impl MenuOutcome {
 }
 
 impl MenuKind {
-    pub(crate) const ALL: [Self; 3] = [Self::File, Self::Edit, Self::View];
+    const ALL: [Self; 3] = [Self::File, Self::Edit, Self::View];
 
     pub(crate) fn title(self) -> &'static str {
         match self {
@@ -691,7 +691,7 @@ impl Menus {
     // ---- Opening and closing
 
     #[cfg(test)]
-    pub(crate) fn open_kind_menu(&mut self, kind: MenuKind, state: MenuState) -> MenuOutcome {
+    fn open_kind_menu(&mut self, kind: MenuKind, state: MenuState) -> MenuOutcome {
         self.open_bar_menu(kind, state, false, false)
     }
 

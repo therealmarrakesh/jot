@@ -236,7 +236,7 @@ pub(crate) const LIGHT: Palette = Palette {
     selection: rgb(0x55a0fc).alpha(0.3),
 };
 
-pub(crate) const DARK: Palette = Palette {
+const DARK: Palette = Palette {
     dark: true,
     window_clear: transparent_black(),
     layer: rgba(0x3a3a3a73),

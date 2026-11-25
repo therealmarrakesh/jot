@@ -58,7 +58,7 @@ impl OverlaySurface {
         }
     }
 
-    pub(crate) fn paint_scene(
+    fn paint_scene(
         &mut self,
         ts: &TextSystem,
         build: impl FnOnce(Size) -> Node<(), ()>,
