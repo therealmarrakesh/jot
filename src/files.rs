@@ -62,7 +62,7 @@ pub(crate) enum FileRequest {
 }
 
 pub(crate) enum WriteOutcome {
-    Saved { doc_path: DocPath, format: Format },
+    Saved { format: Format },
     NeedsLossyConfirm,
     Error(SaveError),
 }
@@ -91,7 +91,7 @@ pub(crate) struct SaveJob {
     pub(crate) tab: TabId,
     pub(crate) snapshot: u64,
     pub(crate) text: Rope,
-    pub(crate) path: PathBuf,
+    pub(crate) path: DocPath,
     pub(crate) format: Format,
 }
 
@@ -107,7 +107,7 @@ pub(crate) enum FileIo {
     SaveDialog {
         wf: WorkflowId,
         owner: WindowId,
-        current: Option<PathBuf>,
+        current: Option<DocPath>,
         format: Format,
     },
     WriteFile {
@@ -120,7 +120,7 @@ pub(crate) enum FileIo {
 pub(crate) struct TabSnapshot {
     pub(crate) window: WindowId,
     pub(crate) name: String,
-    pub(crate) path: Option<PathBuf>,
+    pub(crate) path: Option<DocPath>,
     pub(crate) format: Format,
     pub(crate) dirty: bool,
     pub(crate) revision: u64,
@@ -153,9 +153,19 @@ enum Goal {
 
 enum Awaiting {
     Idle,
-    DiscardPrompt { prompt: PromptId, tab: TabId },
-    SaveDialog { tab: TabId, format: Format },
-    QueuedWrite { tab: TabId, path: PathBuf, format: Format },
+    DiscardPrompt {
+        prompt: PromptId,
+        tab: TabId,
+    },
+    SaveDialog {
+        tab: TabId,
+        format: Format,
+    },
+    QueuedWrite {
+        tab: TabId,
+        path: DocPath,
+        format: Format,
+    },
     Write(SaveJob),
     LossyPrompt { prompt: PromptId, job: SaveJob },
 }
@@ -455,12 +465,7 @@ impl FileOps {
             FileEvent::FilesLoaded { window, results } => {
                 for (doc_path, res) in results {
                     self.loading.remove(doc_path.key());
-                    let dup = res
-                        .as_ref()
-                        .ok()
-                        .and_then(|loaded| host.find_tab_by_key(loaded.doc_path.key()))
-                        .or_else(|| host.find_tab_by_key(doc_path.key()));
-                    if let Some((win, tab)) = dup {
+                    if let Some((win, tab)) = host.find_tab_by_key(doc_path.key()) {
                         host.activate_tab(win, tab, true);
                         continue;
                     }
@@ -489,12 +494,13 @@ impl FileOps {
                 };
                 match resolve_save_dialog(format, result) {
                     Ok(Some((path, next_format))) => {
-                        let key = PathKey::new(&path);
+                        let path = DocPath::new(path);
                         let conflict = host
-                            .find_tab_by_key(&key)
+                            .find_tab_by_key(path.key())
                             .is_some_and(|(_, existing)| existing != tab);
                         if conflict {
-                            self.show_prompt_for(tab, origin, already_open_save_prompt(&path), host);
+                            let prompt = already_open_save_prompt(path.as_path());
+                            self.show_prompt_for(tab, origin, prompt, host);
                             self.remove_flow(wf);
                         } else {
                             self.begin_write(wf, tab, path, next_format, host, io);
@@ -523,10 +529,10 @@ impl FileOps {
                     return;
                 };
                 match outcome {
-                    WriteOutcome::Saved { doc_path, format } => {
+                    WriteOutcome::Saved { format } => {
                         let tab = job.tab;
                         self.writing.remove(&tab);
-                        host.mark_saved(tab, job.snapshot, doc_path, format);
+                        host.mark_saved(tab, job.snapshot, job.path, format);
                         self.advance(wf, host, io);
                         self.wake_queued_write(tab, host, io);
                     }
@@ -539,7 +545,7 @@ impl FileOps {
                             return;
                         };
                         let prompt_id = PromptId::next();
-                        let prompt = lossy_ansi_prompt(prompt_id, job.tab, &job.path);
+                        let prompt = lossy_ansi_prompt(prompt_id, job.tab, job.path.as_path());
                         self.flows[ix].awaiting = Awaiting::LossyPrompt {
                             prompt: prompt_id,
                             job,
@@ -549,7 +555,8 @@ impl FileOps {
                     WriteOutcome::Error(err) => {
                         let tab = job.tab;
                         self.writing.remove(&tab);
-                        self.show_prompt_for(tab, origin, save_error_prompt(&job.path, &err), host);
+                        let prompt = save_error_prompt(job.path.as_path(), &err);
+                        self.show_prompt_for(tab, origin, prompt, host);
                         self.remove_flow(wf);
                         self.wake_queued_write(tab, host, io);
                     }
@@ -747,7 +754,7 @@ impl FileOps {
         &mut self,
         wf: WorkflowId,
         tab: TabId,
-        path: PathBuf,
+        path: DocPath,
         format: Format,
         host: &mut impl DocHost,
         io: &mut Vec<FileIo>,
@@ -762,7 +769,6 @@ impl FileOps {
             self.remove_flow(wf);
             return;
         };
-        let path = std::path::absolute(&path).unwrap_or(path);
         let job = SaveJob {
             tab,
             snapshot,
@@ -948,7 +954,7 @@ fn spawn_file_io(
                     paths
                         .into_iter()
                         .map(|doc_path| {
-                            let loaded = document::load(doc_path.as_path());
+                            let loaded = document::load(&doc_path);
                             (doc_path, loaded)
                         })
                         .collect::<Vec<_>>()
@@ -979,11 +985,11 @@ fn spawn_file_io(
                 });
                 return;
             };
-            let suggested =
-                file_name(current.as_deref()).unwrap_or_else(|| UNTITLED_FILE_NAME.into());
+            let current = current.as_ref().map(DocPath::as_path);
+            let suggested = file_name(current).unwrap_or_else(|| UNTITLED_FILE_NAME.into());
             let options = SaveDialogOptions {
                 title: Some(SAVE_AS_TITLE.into()),
-                directory: default_directory(current.as_deref()),
+                directory: default_directory(current),
                 file_name: Some(suggested),
                 file_types: file_types(),
                 default_extension: Some(TEXT_EXTENSION.into()),
@@ -1024,14 +1030,9 @@ fn spawn_file_io(
                             Err(err) => return WriteOutcome::Error(err.into()),
                         }
                     }
-                    match document::write_rope(&job.path, &job.text, job.format) {
+                    match document::write_rope(job.path.as_path(), &job.text, job.format) {
                         Ok(()) => WriteOutcome::Saved {
-                            doc_path: DocPath::new(job.path),
-                            format: Format {
-                                mixed_line_endings: false,
-                                lossy_decode: false,
-                                ..job.format
-                            },
+                            format: job.format.written(),
                         },
                         Err(err) => WriteOutcome::Error(err),
                     }
@@ -1257,7 +1258,7 @@ mod tests {
             Some(TabSnapshot {
                 window: t.window,
                 name: display_name(t.doc_path.as_ref().map(DocPath::as_path)),
-                path: t.doc_path.as_ref().map(|p| p.as_path().to_path_buf()),
+                path: t.doc_path.clone(),
                 format: t.format,
                 dirty: t.is_dirty(),
                 revision: t.rev,
@@ -1368,7 +1369,6 @@ mod tests {
             FileEvent::WriteDone {
                 wf: WorkflowId::next(),
                 outcome: WriteOutcome::Saved {
-                    doc_path: DocPath::new(PathBuf::from(r"C:\a.txt")),
                     format: Format::default(),
                 },
             },
@@ -1381,10 +1381,7 @@ mod tests {
         ops.on_event(
             FileEvent::WriteDone {
                 wf,
-                outcome: WriteOutcome::Saved {
-                    doc_path: DocPath::new(job.path),
-                    format: job.format,
-                },
+                outcome: WriteOutcome::Saved { format: job.format },
             },
             &mut host,
             &mut io,
@@ -1476,7 +1473,6 @@ mod tests {
             FileEvent::WriteDone {
                 wf: wf1,
                 outcome: WriteOutcome::Saved {
-                    doc_path: DocPath::new(job1.path),
                     format: job1.format,
                 },
             },
@@ -1496,7 +1492,6 @@ mod tests {
             FileEvent::WriteDone {
                 wf: wf2,
                 outcome: WriteOutcome::Saved {
-                    doc_path: DocPath::new(job2.path),
                     format: job2.format,
                 },
             },

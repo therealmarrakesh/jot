@@ -847,7 +847,7 @@ impl DocHost for WindowsHost<'_> {
         Some(TabSnapshot {
             window: w.id,
             name: tabs.tab_name(tix),
-            path: data.path().map(PathBuf::from),
+            path: data.doc_path.clone(),
             format: data.format,
             dirty: data.is_dirty(),
             revision: data.editor.model().revision(),

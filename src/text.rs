@@ -260,7 +260,7 @@ pub(crate) struct Selection {
 }
 
 impl Selection {
-    pub(crate) fn caret(offset: usize) -> Self {
+    fn caret(offset: usize) -> Self {
         Self {
             anchor: offset,
             head: offset,
@@ -268,7 +268,7 @@ impl Selection {
         }
     }
 
-    pub(crate) fn from_range(range: Range<usize>) -> Self {
+    fn from_range(range: Range<usize>) -> Self {
         Self {
             anchor: range.start,
             head: range.end,
@@ -296,7 +296,7 @@ impl Selection {
         self.range().contains(&offset)
     }
 
-    pub(crate) fn place(&mut self, offset: usize, end_affinity: bool) {
+    fn place(&mut self, offset: usize, end_affinity: bool) {
         *self = Self {
             anchor: offset,
             head: offset,
@@ -306,7 +306,7 @@ impl Selection {
 
     /// Moves the head to `offset`. While extending a double-click (`anchor_word`), the whole
     /// word stays selected and the anchor moves to whichever end of it is away from the head.
-    pub(crate) fn extend_to(
+    fn extend_to(
         &mut self,
         offset: usize,
         end_affinity: bool,
@@ -464,28 +464,30 @@ impl TextModel {
 
     /// Ends any composition and typing run; returns the version to pass to `mark_saved_version`
     /// once the save succeeds.
-    pub(crate) fn begin_save(&mut self) -> u64 {
-        self.commit_composition();
-        self.history.coalesce_broken = true;
-        self.history.version
+    /// Starts a save: the version being saved (for `mark_saved_version`) and the text to write.
+    pub(crate) fn begin_save(&mut self) -> (u64, Rope) {
+        self.break_coalescing();
+        (self.history.version, self.text.clone())
     }
 
     pub(crate) fn mark_saved_version(&mut self, version: u64) {
         self.history.saved = version;
     }
 
+    /// Ends the current undo step: any composition is committed and the next edit starts anew.
     pub(crate) fn break_coalescing(&mut self) {
+        self.commit_composition();
         self.history.coalesce_broken = true;
     }
 
-    pub(crate) fn snap_boundary(&self, offset: usize, bias: Bias) -> usize {
+    fn snap_boundary(&self, offset: usize, bias: Bias) -> usize {
         snap_grapheme_boundary(&self.text, offset, bias)
     }
 
-    /// Single-line fields drop line breaks; documents store every line break as `\n`.
+    /// Single-line fields keep only the first line; documents store every line break as `\n`.
     fn normalize<'a>(&self, text: &'a str) -> Cow<'a, str> {
-        if !self.policy.multi_line && text.contains(['\n', '\r']) {
-            Cow::Owned(text.replace(['\n', '\r'], ""))
+        if !self.policy.multi_line {
+            Cow::Borrowed(text.split(['\n', '\r']).next().unwrap_or_default())
         } else if self.policy.multi_line && text.contains('\r') {
             Cow::Owned(text.replace("\r\n", "\n").replace('\r', "\n"))
         } else {
@@ -799,9 +801,6 @@ impl TextModel {
     /// Tab: inserts a tab, or with `block` or a multi-line selection indents every selected
     /// line. Single-line fields don't take tabs.
     pub(crate) fn indent(&mut self, block: bool) -> Option<LineChange> {
-        if !self.policy.multi_line {
-            return None;
-        }
         self.commit_composition();
         let sel = self.selection;
         let row = |offset| self.text.offset_to_point(offset).row;
@@ -822,9 +821,6 @@ impl TextModel {
 
     /// Removes one tab, or up to eight spaces, from the start of every selected line.
     pub(crate) fn outdent(&mut self) -> Option<LineChange> {
-        if !self.policy.multi_line {
-            return None;
-        }
         self.commit_composition();
         let edits = self.selected_rows().filter_map(|r| {
             let start = self.text.line_start_offset(r);

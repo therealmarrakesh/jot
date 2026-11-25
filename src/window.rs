@@ -630,9 +630,8 @@ impl MainWindow {
                     .replace(&stamp, &cx.shell.text_system);
             }
             AppCommand::GoTo => {
-                let m = self.tabs.active().editor.model();
-                let row = m.text().offset_to_point(m.cursor()).row;
-                self.show_go_to(Some(row + 1), cx.shell);
+                let (line, _) = self.tabs.active().editor.model().caret_line_col();
+                self.show_go_to(Some(line), cx.shell);
             }
             AppCommand::Find | AppCommand::Replace => {
                 if self.has_text() {
@@ -890,8 +889,7 @@ impl MainWindow {
     }
 
     pub(crate) fn begin_tab_save(&mut self, tab: TabId) -> Option<(u64, Rope)> {
-        let ed = self.tabs.editor_mut(tab)?;
-        Some((ed.begin_save(), ed.model().text().clone()))
+        self.tabs.editor_mut(tab).map(Editor::begin_save)
     }
 
     pub(crate) fn mark_tab_saved(

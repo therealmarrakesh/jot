@@ -256,7 +256,7 @@ fn real_disk_save_routes_completion_to_migrated_tab() {
     std::fs::write(&path, "initial").unwrap();
 
     let mut h = TestHarness::new();
-    let loaded = document::load(&path).unwrap();
+    let loaded = document::load(&document::DocPath::new(path.clone())).unwrap();
     let tab_id = {
         let mut app_guard = h.app.borrow_mut();
         let app = &mut *app_guard;

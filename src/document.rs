@@ -20,7 +20,7 @@ const IO_CHUNK: usize = 64 * 1024;
 const ANSI_WIDE_CHUNK: usize = 32 * 1024;
 const MAX_FILE_BYTES: u64 = 512 * 1024 * 1024;
 
-pub(crate) const UNTITLED: &str = "Untitled";
+const UNTITLED: &str = "Untitled";
 
 #[derive(Debug)]
 pub(crate) enum SaveError {
@@ -109,6 +109,18 @@ impl Format {
     }
 }
 
+impl Format {
+    /// The format a file has once saved in this one: one line ending throughout, and nothing a
+    /// lossy read replaced.
+    pub(crate) fn written(self) -> Self {
+        Self {
+            mixed_line_endings: false,
+            lossy_decode: false,
+            ..self
+        }
+    }
+}
+
 pub(crate) struct Loaded {
     pub(crate) doc_path: DocPath,
     pub(crate) text: Rope,
@@ -122,8 +134,8 @@ pub(crate) enum LoadError {
     TooLarge(u64),
 }
 
-pub(crate) fn load(path: &Path) -> Result<Loaded, LoadError> {
-    let mut file = fs::File::open(path).map_err(LoadError::Io)?;
+pub(crate) fn load(doc_path: &DocPath) -> Result<Loaded, LoadError> {
+    let mut file = fs::File::open(doc_path.as_path()).map_err(LoadError::Io)?;
     if let Ok(meta) = file.metadata()
         && meta.len() > MAX_FILE_BYTES
     {
@@ -131,7 +143,7 @@ pub(crate) fn load(path: &Path) -> Result<Loaded, LoadError> {
     }
     let decoded = load_reader_with_page(&mut file, IO_CHUNK, AnsiCodePage::current())?;
     Ok(Loaded {
-        doc_path: DocPath::new(path.to_path_buf()),
+        doc_path: doc_path.clone(),
         text: decoded.text,
         format: decoded.format,
     })
@@ -142,9 +154,7 @@ pub(crate) struct PathKey(String);
 
 impl PathKey {
     pub(crate) fn new(path: &Path) -> Self {
-        let resolved = fs::canonicalize(path)
-            .or_else(|_| std::path::absolute(path))
-            .unwrap_or_else(|_| path.to_path_buf());
+        let resolved = resolve(path).unwrap_or_else(|_| path.to_path_buf());
         Self(normalize_path_key(&resolved))
     }
 }
@@ -1029,13 +1039,13 @@ mod tests {
             ..Default::default()
         };
         write_rope(&file, &Rope::from("first\nline"), format).unwrap();
-        let loaded = load(&file).unwrap();
+        let loaded = load(&DocPath::new(file.clone())).unwrap();
         assert_eq!(loaded.text.to_string(), "first\nline");
         assert_eq!(loaded.format.encoding, Encoding::Utf8Bom);
         assert_eq!(loaded.format.line_ending, LineEnding::Lf);
 
         write_rope(&file, &Rope::from("second\nline"), format).unwrap();
-        let loaded = load(&file).unwrap();
+        let loaded = load(&DocPath::new(file.clone())).unwrap();
         assert_eq!(loaded.text.to_string(), "second\nline");
 
         let entries: Vec<_> = fs::read_dir(&dir)
@@ -1059,7 +1069,10 @@ mod tests {
                 .unwrap();
             write_rope(&file, &Rope::from("in-place fallback"), format).unwrap();
         }
-        assert_eq!(load(&file).unwrap().text.to_string(), "in-place fallback");
+        assert_eq!(
+            load(&DocPath::new(file.clone())).unwrap().text.to_string(),
+            "in-place fallback"
+        );
 
         let original = fs::metadata(&file).unwrap().permissions();
         let mut readonly = original.clone();
@@ -1106,7 +1119,7 @@ mod tests {
             },
         ] {
             write_rope(&file, &original, format).unwrap();
-            let loaded = load(&file).unwrap();
+            let loaded = load(&DocPath::new(file.clone())).unwrap();
             assert_eq!(loaded.format, format);
             assert_eq!(loaded.text, original);
         }
@@ -1146,7 +1159,7 @@ mod tests {
         for (name, bytes) in cases {
             let p = dir.join(name);
             std::fs::write(&p, bytes).unwrap();
-            let loaded = load(&p).unwrap();
+            let loaded = load(&DocPath::new(p.clone())).unwrap();
             assert!(
                 !loaded.format.mixed_line_endings,
                 "{name} should not be mixed"
@@ -1161,7 +1174,7 @@ mod tests {
 
         let mixed_path = dir.join("mixed.txt");
         std::fs::write(&mixed_path, b"a\r\nb\nc\r\n").unwrap();
-        let mixed = load(&mixed_path).unwrap();
+        let mixed = load(&DocPath::new(mixed_path.clone())).unwrap();
         assert!(mixed.format.mixed_line_endings);
 
         use std::os::windows::fs::OpenOptionsExt;

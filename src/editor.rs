@@ -9,8 +9,8 @@ use crate::platform::{
     CursorStyle, Modifiers, MouseButton, SystemSettings, read_clipboard_text, write_clipboard_text,
 };
 use crate::text::{
-    Bias, EditPolicy, LineChange, Rope, RopeExt as _, TextModel, ValidateFn,
-    next_grapheme_boundary, next_word_end, prev_grapheme_boundary, prev_word_start,
+    EditPolicy, LineChange, Rope, RopeExt as _, TextModel, ValidateFn, next_grapheme_boundary,
+    next_word_end, prev_grapheme_boundary, prev_word_start,
 };
 use crate::theme::Palette;
 use crate::types::{SharedStr, take_due};
@@ -264,7 +264,7 @@ impl Editor {
         }
     }
 
-    pub(crate) fn begin_save(&mut self) -> u64 {
+    pub(crate) fn begin_save(&mut self) -> (u64, Rope) {
         self.model.begin_save()
     }
 
@@ -283,7 +283,6 @@ impl Editor {
     /// the caret stops and a pointer selection in progress ends.
     pub(crate) fn blur(&mut self) {
         self.focused = false;
-        self.model.commit_composition();
         self.model.break_coalescing();
         self.blink.stop();
         self.reset_pointer_selection_state();
@@ -467,7 +466,6 @@ impl Editor {
         modifiers: Modifiers,
         click_count: usize,
     ) {
-        self.model.commit_composition();
         self.model.break_coalescing();
         self.selecting = true;
         let (offset, aff) = self.hit_test_point(position);
@@ -542,16 +540,9 @@ impl Editor {
         (!self.model.selection().is_empty()).then(|| self.model.text().slice(self.model.selection().range()).to_string())
     }
 
-    fn paste(&mut self, raw: &str, ts: &TextSystem) {
-        let text = if self.model.is_multi_line() {
-            raw
-        } else {
-            raw.split(['\r', '\n']).next().unwrap_or("")
-        };
-        if !text.is_empty() {
-            let change = self.model.replace_selection(text);
-            self.commit_edit(change, ts);
-        }
+    fn paste(&mut self, text: &str, ts: &TextSystem) {
+        let change = self.model.replace_selection(text);
+        self.commit_edit(change, ts);
     }
 
     pub(crate) fn handle_command(&mut self, command: EditCommand, ts: &TextSystem) -> bool {
@@ -806,7 +797,7 @@ impl Editor {
                 target_offset = line_start + byte_col.min(max_len);
             }
         }
-        (self.model.snap_boundary(target_offset, Bias::Left), target_affinity)
+        (target_offset, target_affinity)
     }
 
     fn move_caret(&mut self, motion: Motion, extend: bool) -> bool {
