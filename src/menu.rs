@@ -60,6 +60,8 @@ pub(crate) struct MenuOutcome {
     pub(crate) command: Option<Command>,
     pub(crate) focus: FocusRequest,
     pub(crate) dirty: bool,
+    /// The menu moved its focus to follow the pointer.
+    pub(crate) followed_pointer: bool,
 }
 
 impl MenuOutcome {
@@ -72,6 +74,11 @@ impl MenuOutcome {
 
     fn dirty(mut self) -> Self {
         self.dirty = true;
+        self
+    }
+
+    fn followed_pointer(mut self) -> Self {
+        self.followed_pointer = true;
         self
     }
 
@@ -884,8 +891,7 @@ impl Menus {
     }
 
     /// The pointer moved onto `top`: rows under it take focus, submenus open (or close) after a
-    /// delay, and a different bar menu's title opens it. A dirty outcome means the menu followed
-    /// the pointer.
+    /// delay, and a different bar menu's title opens it.
     pub(crate) fn on_hover_change(
         &mut self,
         top: Option<HitId>,
@@ -895,7 +901,9 @@ impl Menus {
         if let Some(HitId::Menu(MenuHit::Trigger(kind))) = top
             && self.open_kind().is_some_and(|open| open != kind)
         {
-            return self.open_bar_menu(kind, state(), false, false);
+            return self
+                .open_bar_menu(kind, state(), false, false)
+                .followed_pointer();
         }
         let Mode::Open { menu, .. } = &mut self.mode else {
             self.hovered = None;
@@ -928,7 +936,7 @@ impl Menus {
         }
         self.hovered = hovered;
         self.submenu_at = pending.map(|target| (Instant::now() + show_delay, target));
-        MenuOutcome::default().dirty()
+        MenuOutcome::default().dirty().followed_pointer()
     }
 
     pub(crate) fn deadline(&self) -> Option<Instant> {
@@ -1799,7 +1807,8 @@ mod tests {
         // Hovering a button ends keyboard focus display. Cut and Copy are disabled, so Paste is
         // the first enabled button and Enter runs it.
         let paste = row_hit(&bar, 0, 0, 2);
-        assert!(bar.on_hover_change(paste, || state, SHOW_DELAY).dirty);
+        let hover = bar.on_hover_change(paste, || state, SHOW_DELAY);
+        assert!(hover.followed_pointer);
         let run = bar.on_key_down(key(Key::Enter), Focus::MenuBar, state);
         assert_eq!(run.command, Some(EditCommand::Paste.into()));
         assert_eq!(run.focus, FocusRequest::RestoreEditor);

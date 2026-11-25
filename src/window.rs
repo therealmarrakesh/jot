@@ -305,8 +305,8 @@ impl MainWindow {
             let out = self
                 .menus
                 .on_hover_change(top, state, shell.settings.menu_show_delay);
-            // The menu followed the pointer, so focus no longer shows as from the keyboard.
-            self.ui.last_input_was_keyboard &= !out.dirty;
+            // Focus that follows the pointer no longer shows as from the keyboard.
+            self.ui.last_input_was_keyboard &= !out.followed_pointer;
             self.apply_menu_outcome(out, cx);
         }
         if !self.pointer_in_strip(pos) {
