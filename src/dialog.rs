@@ -4,15 +4,13 @@ use std::time::Duration;
 use crate::editor::{Editor, FieldOptions};
 use crate::files::{Prompt, PromptId};
 use crate::platform::{CursorStyle, Key, KeyEvent};
-use crate::theme::{
-    BODY_LINE, BODY_SIZE, FIELD_CARET, OVERLAY_RADIUS, Palette, TEXT_FONT, theme_shadow,
-};
+use crate::theme::{BODY_LINE, BODY_SIZE, BORDER, FIELD_CARET, OVERLAY_RADIUS, Palette, TEXT_FONT};
 use crate::types::SharedStr;
 use crate::ui::{
-    AnimKey, AnimStatus, AppNode, AppUi, Curve, DialogHit, Easing, EditorSlot, Focus, HitId, TabId,
+    AnimStatus, AppNode, AppUi, Curve, DialogHit, Easing, EditorSlot, Focus, HitId, TabId,
     Transition, box_, row, text,
 };
-use crate::widgets::{button, text_field};
+use crate::widgets::{button, card, text_field};
 
 const TITLE_FONT: &str = "Segoe UI Variable Display";
 const OPEN_SCALE: f32 = 1.05;
@@ -33,7 +31,6 @@ const GO_TO_TITLE: &str = "Go to line";
 const GO_TO_BUTTONS: &[&str] = &["Go to", "Cancel"];
 const OUT_OF_RANGE_MESSAGE: &str = "The line number is beyond the total number of lines";
 const OK_BUTTONS: &[&str] = &["OK"];
-const BORDER: f32 = 1.;
 const BODY_BASELINE_SNAP: f32 = -1.;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -98,18 +95,12 @@ struct ActiveDialog {
 
 impl ActiveDialog {
     fn sample(&mut self, ui: &mut AppUi) -> bool {
-        let serial = self.transition.serial();
-        let closing = self.transition.is_closing();
-        let shown = ui
-            .progress(AnimKey::Transition { serial, track: 0 }, true, SHOW_CURVE)
-            .value;
-        let faded_in = ui
-            .progress(AnimKey::Transition { serial, track: 1 }, true, FADE_CURVE)
-            .value;
-        let hidden = ui
-            .progress(AnimKey::Transition { serial, track: 2 }, closing, HIDE_CURVE)
-            .value;
-        let fade_out = ui.progress(AnimKey::Transition { serial, track: 3 }, closing, FADE_CURVE);
+        let t = self.transition;
+        let closing = t.is_closing();
+        let shown = t.progress(ui, 0, true, SHOW_CURVE).value;
+        let faded_in = t.progress(ui, 1, true, FADE_CURVE).value;
+        let hidden = t.progress(ui, 2, closing, HIDE_CURVE).value;
+        let fade_out = t.progress(ui, 3, closing, FADE_CURVE);
         let growth = OPEN_SCALE - 1.;
         self.scale = 1. + growth * (1. - shown) + growth * hidden;
         self.opacity = faded_in * (1. - fade_out.value);
@@ -380,35 +371,28 @@ fn dialog_frame(
     buttons: Vec<AppNode>,
 ) -> AppNode {
     let spacer = (buttons.len() == 1).then(|| box_().flex_1().min_w_0());
-    box_()
+    let buttons = buttons
+        .into_iter()
+        .map(|btn| box_().flex_1().min_w_0().child(btn));
+    let face = box_()
+        .font_family(TEXT_FONT)
+        .text_size(BODY_SIZE)
+        .text_color(p.text_primary)
+        .child(dialog_content(p, title, body))
+        .child(
+            row()
+                .p(PADDING)
+                .gap(BUTTON_GAP)
+                .when_some(spacer, |this, sp| this.child(sp))
+                .children(buttons),
+        );
+    let fill = p.command_surface.panel;
+    card(p, p.surface_stroke, fill, OVERLAY_RADIUS, DIALOG_Z, face)
         .hit(HitId::Dialog(DialogHit::Card))
         .when_some(fixed_width, |this, w| this.w(w).max_w_full())
         .when(fixed_width.is_none(), |this| {
             this.min_w(MIN_WIDTH).max_w(MAX_WIDTH)
         })
-        .border(BORDER, p.surface_stroke)
-        .rounded(OVERLAY_RADIUS)
-        .shadows(theme_shadow(p.dark, DIALOG_Z))
-        .child(
-            box_()
-                .rounded(OVERLAY_RADIUS - BORDER)
-                .bg(p.command_surface.panel)
-                .font_family(TEXT_FONT)
-                .text_size(BODY_SIZE)
-                .text_color(p.text_primary)
-                .child(dialog_content(p, title, body))
-                .child(
-                    row()
-                        .p(PADDING)
-                        .gap(BUTTON_GAP)
-                        .when_some(spacer, |this, sp| this.child(sp))
-                        .children(
-                            buttons
-                                .into_iter()
-                                .map(|btn| box_().flex_1().min_w_0().child(btn)),
-                        ),
-                ),
-        )
 }
 
 fn dialog_content(p: Palette, title: SharedStr, body: AppNode) -> AppNode {

@@ -8,13 +8,13 @@ use crate::editor::{Editor, FieldOptions};
 use crate::geom::{Point, Rect, Size, point, size};
 use crate::gfx::TextSystem;
 use crate::platform::{CursorStyle, Key, KeyEvent};
-use crate::theme::{BODY_SIZE, FIELD_CARET, OVERLAY_RADIUS, Palette, TEXT_FONT, theme_shadow};
+use crate::theme::{BODY_SIZE, BORDER, FIELD_CARET, OVERLAY_RADIUS, Palette, TEXT_FONT};
 use crate::types::{SharedStr, take_due};
 use crate::ui::{
-    Anchor, AnimKey, AnimStatus, AppNode, AppUi, Curve, Easing, EditorSlot, FindHit, Focus, HitId,
+    Anchor, AnimStatus, AppNode, AppUi, Curve, Easing, EditorSlot, FindHit, Focus, HitId,
     Transform, Transition, box_, row, text,
 };
-use crate::widgets::{button, icon_button, text_field};
+use crate::widgets::{button, card, icon_button, text_field};
 
 const EXPAND_CURVE: Curve = Curve::new(
     Duration::from_millis(300),
@@ -58,7 +58,6 @@ const NOTICE_PADDING_X: f32 = 18.;
 const NOTICE_PADDING_TOP: f32 = 16.;
 const NOTICE_PADDING_BOTTOM: f32 = 15.;
 const NOTICE_LINE: f32 = 20.;
-const BORDER: f32 = 1.;
 const CHEVRON_UP_GLYPH: &str = "\u{E70E}";
 const CHEVRON_DOWN_GLYPH: &str = "\u{E70D}";
 const ARROW_DOWN_GLYPH: &str = "\u{E74B}";
@@ -285,16 +284,10 @@ impl FindBar {
         if !self.transition.is_visible() {
             return None;
         }
-        let serial = self.transition.serial();
-        let closing = self.transition.is_closing();
-        let shown = ui
-            .progress(AnimKey::Transition { serial, track: 0 }, true, EXPAND_CURVE)
-            .value;
-        let hidden = ui.progress(
-            AnimKey::Transition { serial, track: 1 },
-            closing,
-            CONTRACT_CURVE,
-        );
+        let t = self.transition;
+        let closing = t.is_closing();
+        let shown = t.progress(ui, 0, true, EXPAND_CURVE).value;
+        let hidden = t.progress(ui, 1, closing, CONTRACT_CURVE);
         if closing && hidden.status == AnimStatus::Finished {
             self.transition.finish();
             return None;
@@ -350,23 +343,17 @@ impl FindBar {
             .replace
             .then(|| self.render_replace_row(p, focused_slot, ui));
 
-        box_()
+        let face = box_()
+            .hit(HitId::Find(FindHit::Card))
+            .cursor(CursorStyle::Arrow)
+            .w_full()
+            .p(CARD_PADDING)
+            .child(query_row)
+            .when_some(replace_row, AppNode::child);
+        let fill = p.card_surface.panel;
+        card(p, p.surface_stroke, fill, OVERLAY_RADIUS, CARD_Z, face)
             .w(CARD_WIDTH)
             .max_w_full()
-            .border(BORDER, p.surface_stroke)
-            .rounded(OVERLAY_RADIUS)
-            .shadows(theme_shadow(p.dark, CARD_Z))
-            .child(
-                box_()
-                    .hit(HitId::Find(FindHit::Card))
-                    .cursor(CursorStyle::Arrow)
-                    .w_full()
-                    .p(CARD_PADDING)
-                    .rounded(OVERLAY_RADIUS - BORDER)
-                    .bg(p.card_surface.panel)
-                    .child(query_row)
-                    .when_some(replace_row, AppNode::child),
-            )
     }
 
     fn render_query_row(
@@ -483,27 +470,20 @@ fn place_notice(card: Rect, popup: Size, _viewport: Size) -> Point {
 }
 
 fn render_notice(p: Palette, msg: SharedStr) -> AppNode {
-    box_()
-        .anchored(Anchor::Target {
-            target: HitId::Find(FindHit::Card),
-            place: place_notice,
-        })
-        .border(BORDER, p.flyout_stroke)
-        .rounded(OVERLAY_RADIUS)
-        .shadows(theme_shadow(p.dark, NOTICE_Z))
-        .child(
-            box_()
-                .px(NOTICE_PADDING_X)
-                .pt(NOTICE_PADDING_TOP)
-                .pb(NOTICE_PADDING_BOTTOM)
-                .rounded(OVERLAY_RADIUS - BORDER)
-                .bg(p.notice_fill)
-                .font_family(TEXT_FONT)
-                .text_size(BODY_SIZE)
-                .line_height(NOTICE_LINE)
-                .text_color(p.text_primary)
-                .child(text(msg)),
-        )
+    let face = box_()
+        .px(NOTICE_PADDING_X)
+        .pt(NOTICE_PADDING_TOP)
+        .pb(NOTICE_PADDING_BOTTOM)
+        .font_family(TEXT_FONT)
+        .text_size(BODY_SIZE)
+        .line_height(NOTICE_LINE)
+        .text_color(p.text_primary)
+        .child(text(msg));
+    let (stroke, fill) = (p.flyout_stroke, p.notice_fill);
+    card(p, stroke, fill, OVERLAY_RADIUS, NOTICE_Z, face).anchored(Anchor::Target {
+        target: HitId::Find(FindHit::Card),
+        place: place_notice,
+    })
 }
 
 const BLOCK_SIZE: usize = 256 * 1024;

@@ -14,15 +14,15 @@ use crate::geom::{Edges, Point, Rect, Size, point, transparent_black};
 use crate::gfx::TextSystem;
 use crate::platform::{CursorStyle, Key, KeyEvent, MouseButton};
 use crate::theme::{
-    CONTROL_RADIUS, ICON_FONT, OVERLAY_RADIUS, Palette, SMALL_FONT, TEXT_FONT, theme_shadow,
+    BORDER, CONTROL_RADIUS, ICON_FONT, OVERLAY_RADIUS, Palette, SMALL_FONT, TEXT_FONT,
 };
 use crate::tooltip::{self, KeyTip};
 use crate::types::SharedStr;
 use crate::ui::{
-    Anchor, AnimKey, AnimStatus, AppFrame, AppNode, AppUi, Curve, Easing, EditorSlot, FindHit,
-    Focus, HitId, MenuHit, MenuKind, Transform, Transition, box_, row, text,
+    Anchor, AnimStatus, AppFrame, AppNode, AppUi, Curve, Easing, EditorSlot, FindHit, Focus, HitId,
+    MenuHit, MenuKind, Transform, Transition, box_, row, text,
 };
-use crate::widgets::{focus_ring, subtle_brushes};
+use crate::widgets::{card, focus_ring, subtle_brushes, subtle_text};
 
 pub(crate) const MENU_BAR_HEIGHT: f32 = 32.;
 
@@ -438,24 +438,17 @@ impl PopupTransition {
 
     /// Advances the animations; whether a closing popup has finished fading out.
     fn sample(&mut self, ui: &mut AppUi) -> bool {
-        let serial = self.transition.serial();
-        let closing = self.transition.is_closing();
+        let t = self.transition;
+        let closing = t.is_closing();
         if !closing {
-            self.unroll = ui
-                .progress(AnimKey::Transition { serial, track: 0 }, true, OPEN_CURVE)
-                .value;
+            self.unroll = t.progress(ui, 0, true, OPEN_CURVE).value;
         }
         let appear = if self.fade_in {
-            ui.progress(AnimKey::Transition { serial, track: 1 }, true, FADE_CURVE)
-                .value
+            t.progress(ui, 1, true, FADE_CURVE).value
         } else {
             1.
         };
-        let fade = ui.progress(
-            AnimKey::Transition { serial, track: 2 },
-            closing,
-            FADE_CURVE,
-        );
+        let fade = t.progress(ui, 2, closing, FADE_CURVE);
         self.opacity = (1. - fade.value) * appear;
         closing && fade.status == AnimStatus::Finished
     }
@@ -1273,7 +1266,6 @@ impl Menus {
 
 // ---- Drawing
 
-const BORDER: f32 = 1.;
 const PADDING_Y: f32 = 2.;
 const ROW_INSET: f32 = 4.;
 const ROW_PADDING: f32 = 11.;
@@ -1490,28 +1482,22 @@ fn render_panel(
     let rows: Vec<AppNode> = (buttons..panel.entries.len())
         .map(|ix| render_row(menu, panel, level, ix, context, p, ui))
         .collect();
-    let fill = box_()
+    let face = box_()
         .w_full()
-        .rounded(OVERLAY_RADIUS - BORDER)
-        .bg(p.menu_fill)
         .children(
             (0..buttons)
                 .map(|ix| render_buttons(menu, panel, ix, p, ui))
                 .collect::<Vec<_>>(),
         )
         .child(box_().w_full().py(PADDING_Y).children(rows));
-    box_()
+    card(p, p.flyout_stroke, p.menu_fill, OVERLAY_RADIUS, z, face)
         .hit(HitId::Menu(MenuHit::Panel))
         .cursor(CursorStyle::Arrow)
         .min_w(panel.min_width)
-        .border(BORDER, p.flyout_stroke)
-        .rounded(OVERLAY_RADIUS)
-        .shadows(theme_shadow(p.dark, z))
         .transform(Transform::RevealY {
             shown_ratio: 1. - closed_ratio * (1. - panel.motion.unroll),
             slide: !context,
         })
-        .child(fill)
 }
 
 /// The context menu's button row, with a divider under it.
@@ -1541,13 +1527,7 @@ fn render_buttons(
         let focused = ui.last_input_was_keyboard && menu.focus == Some(spot);
         let hit = panel.hit(ix, col);
         let bg = ui.brush(hit, subtle_brushes(p), button.enabled);
-        let fg = if !button.enabled {
-            p.text_disabled
-        } else if ui.is_pressed(hit) {
-            p.text_secondary
-        } else {
-            p.text_primary
-        };
+        let fg = subtle_text(p, button.enabled, ui.is_pressed(hit));
         let line = |size: f32, font| {
             box_()
                 .h(COMMAND_LINE)
@@ -1625,19 +1605,11 @@ fn render_row(
     } else {
         GLYPH_SIZE
     };
+    let label_color = subtle_text(p, enabled, fade && pressed);
     let mark_color = match entry {
-        _ if !enabled => p.text_disabled,
-        Entry::Toggle { .. } if hovered => p.text_primary,
-        Entry::Toggle { .. } => p.text_secondary,
-        _ if fade && pressed => p.text_secondary,
-        _ => p.text_primary,
-    };
-    let label_color = if !enabled {
-        p.text_disabled
-    } else if fade && pressed {
-        p.text_secondary
-    } else {
-        p.text_primary
+        // Toggles are always enabled.
+        Entry::Toggle { .. } => subtle_text(p, true, !hovered),
+        _ => label_color,
     };
     let bg = if fade {
         ui.brush(hit, subtle_brushes(p), enabled)

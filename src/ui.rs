@@ -1190,6 +1190,24 @@ impl Transition {
         self.serial
     }
 
+    /// Animation `track` of this showing, running while `active`.
+    pub(crate) fn progress(
+        self,
+        ui: &mut AppUi,
+        track: u8,
+        active: bool,
+        curve: Curve,
+    ) -> AnimSample<f32> {
+        ui.progress(
+            AnimKey::Transition {
+                serial: self.serial,
+                track,
+            },
+            active,
+            curve,
+        )
+    }
+
     pub(crate) fn is_visible(self) -> bool {
         self.phase != Presence::Hidden
     }

@@ -1,12 +1,12 @@
 use crate::editor::Editor;
-use crate::geom::{Edges, Size, black, transparent_black, white};
+use crate::geom::{Edges, Rgba, Size, black, transparent_black, white};
 use crate::platform::CursorStyle;
 use crate::theme::{
-    BODY_LINE, BODY_SIZE, CONTROL_HEIGHT, CONTROL_RADIUS, ControlColors, ICON_FONT, Palette,
-    TEXT_FONT,
+    BODY_LINE, BODY_SIZE, BORDER, CONTROL_HEIGHT, CONTROL_RADIUS, ControlColors, ICON_FONT,
+    Palette, TEXT_FONT, theme_shadow,
 };
 use crate::types::SharedStr;
-use crate::ui::{AppNode, AppUi, Brushes, CustomDraw, EditorSlot, HitId, box_, row, text};
+use crate::ui::{AppNode, AppUi, Brushes, CustomDraw, EditorSlot, HitId, Node, box_, row, text};
 
 const ACCENT_TOP_EDGE: f32 = 0x14 as f32 / 255.;
 const ACCENT_HOVER_OPACITY: f32 = 0.9;
@@ -25,6 +25,34 @@ pub(crate) fn subtle_brushes(p: Palette) -> Brushes {
         hover: p.subtle_secondary,
         pressed: p.subtle_tertiary,
     }
+}
+
+/// The text (or glyph) colour on a subtle control, which dims while pressed.
+pub(crate) fn subtle_text(p: Palette, enabled: bool, pressed: bool) -> Rgba {
+    if !enabled {
+        p.text_disabled
+    } else if pressed {
+        p.text_secondary
+    } else {
+        p.text_primary
+    }
+}
+
+/// A raised card: a `stroke` border with `radius` corners and the shadow for elevation `z`,
+/// around `face`, which is filled with `fill` inside the border.
+pub(crate) fn card<H, C>(
+    p: Palette,
+    stroke: Rgba,
+    fill: Rgba,
+    radius: f32,
+    z: f32,
+    face: Node<H, C>,
+) -> Node<H, C> {
+    box_()
+        .border(BORDER, stroke)
+        .rounded(radius)
+        .shadows(theme_shadow(p.dark, z))
+        .child(face.rounded(radius - BORDER).bg(fill))
 }
 
 pub(crate) fn button(
@@ -112,13 +140,7 @@ pub(crate) fn icon_button(
 ) -> AppNode {
     let (glyph, glyph_size) = glyph;
     let bg = ui.brush(hit, subtle_brushes(p), enabled);
-    let fg = if !enabled {
-        p.text_disabled
-    } else if ui.is_pressed(hit) {
-        p.text_secondary
-    } else {
-        p.text_primary
-    };
+    let fg = subtle_text(p, enabled, ui.is_pressed(hit));
     row()
         .hit(hit)
         .flex_none()

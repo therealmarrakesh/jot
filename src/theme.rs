@@ -8,6 +8,8 @@ pub(crate) const ICON_FONT: &str = "Segoe Fluent Icons";
 pub(crate) const CONTROL_HEIGHT: f32 = 32.;
 pub(crate) const CONTROL_RADIUS: f32 = 4.;
 pub(crate) const OVERLAY_RADIUS: f32 = 8.;
+/// The stroke around cards and popups.
+pub(crate) const BORDER: f32 = 1.;
 pub(crate) const BODY_SIZE: f32 = 14.;
 pub(crate) const BODY_LINE: f32 = 18.;
 pub(crate) const FIELD_CARET: f32 = 19.;

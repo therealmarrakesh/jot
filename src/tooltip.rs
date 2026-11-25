@@ -5,17 +5,17 @@ use crate::geom::{Rect, ScreenPoint, ScreenRect, point, round_half_up, size};
 use crate::gfx::{Gpu, TextStyle, TextSystem};
 use crate::layout::AvailSize;
 use crate::platform::{Modifiers, WindowId, WindowsDisplay, cursor_screen_pos};
-use crate::theme::{CONTROL_RADIUS, Palette, SMALL_FONT, theme_shadow};
+use crate::theme::{CONTROL_RADIUS, Palette, SMALL_FONT};
 use crate::types::SharedStr;
 use crate::ui::{
     AnimTracks, AppFrame, Curve, Easing, Frame, HitId, Node, OverlayAnchor,
     OverlaySurface, PointerState, box_, text,
 };
+use crate::widgets::card;
 
 const PADDING_X: f32 = 9.;
 const PADDING_TOP: f32 = 6.;
 const PADDING_BOTTOM: f32 = 8.;
-const BORDER: f32 = 1.;
 const MAX_WIDTH: f32 = 320.;
 const FONT_SIZE: f32 = 12.;
 const LINE_HEIGHT: f32 = 16.;
@@ -371,29 +371,22 @@ impl Tooltips {
 }
 
 fn tooltip_card(p: Palette, content: SharedStr) -> Node<(), ()> {
-    box_()
-        .max_w(MAX_WIDTH)
-        .rounded(CONTROL_RADIUS)
-        .border(BORDER, p.flyout_stroke)
-        .shadows(theme_shadow(p.dark, ELEVATION * 2.))
+    let face = box_()
+        .overflow_hidden()
+        .child(box_().absolute().inset_0().bg(p.acrylic_luminosity))
         .child(
             box_()
-                .rounded(CONTROL_RADIUS - BORDER)
-                .overflow_hidden()
-                .bg(p.acrylic_fallback)
-                .child(box_().absolute().inset_0().bg(p.acrylic_luminosity))
-                .child(
-                    box_()
-                        .px(PADDING_X)
-                        .pt(PADDING_TOP)
-                        .pb(PADDING_BOTTOM)
-                        .font_family(SMALL_FONT)
-                        .text_size(FONT_SIZE)
-                        .line_height(LINE_HEIGHT)
-                        .text_color(p.text_primary)
-                        .child(text(content)),
-                ),
-        )
+                .px(PADDING_X)
+                .pt(PADDING_TOP)
+                .pb(PADDING_BOTTOM)
+                .font_family(SMALL_FONT)
+                .text_size(FONT_SIZE)
+                .line_height(LINE_HEIGHT)
+                .text_color(p.text_primary)
+                .child(text(content)),
+        );
+    let (stroke, fill) = (p.flyout_stroke, p.acrylic_fallback);
+    card(p, stroke, fill, CONTROL_RADIUS, ELEVATION * 2., face).max_w(MAX_WIDTH)
 }
 
 const PADDING: f32 = 4.;
