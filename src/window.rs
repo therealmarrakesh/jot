@@ -1,24 +1,31 @@
-//! A main window: its tabs, menus, find bar and dialogs, the input that reaches it, and its frame.
+//! The main windows. A `MainWindow` is one window: its tabs, menus, find bar and dialogs, the
+//! input that reaches it, and its frame. `Windows` is the list of them, which opens, places and
+//! sweeps them, lets file work see their tabs (`WindowsHost`), and moves tabs between them
+//! (`TabDrag`).
 //!
 //! The app forwards each window event to `on_event`, which also decides whether the window needs
 //! painting. What spans windows (files, tab drags between windows, new windows) leaves as an
 //! `Effect`; the app calls back in through the tab and file methods below.
 
-use std::time::Instant;
+use std::ops::{Deref, DerefMut};
+use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use crate::command::{AppCommand, Command, app_shortcut, edit_shortcut};
 use crate::dialog::{DialogKey, DialogKind, Dialogs};
-use crate::document::{self, DocPath, Format};
+use crate::document::{self, DocPath, Format, PathKey};
 use crate::editor::{EditCommand, Editor, EditorPaintParams, EditorPaintStyle};
-use crate::files::{FileRequest, Prompt};
+use crate::files::{DocHost, FileOps, FileRequest, Prompt, TabSnapshot};
 use crate::find::{FindBar, FindKey, FindOutcome};
 use crate::geom::{Edges, Point, Rect, ScreenPoint, Size, point, size, transparent_black};
 use crate::gfx::{TextStyle, TextSystem, WindowSurface, fill};
 use crate::layout::AvailSize;
 use crate::menu::{FocusRequest, MENU_BAR_HEIGHT, MenuOutcome, MenuState, Menus};
 use crate::platform::{
-    KeyEvent, Modifiers, MouseButton, WindowControlArea, WindowEvent, WindowHandle, WindowId,
-    clipboard_has_text, format_local_time_date,
+    KeyEvent, MainWindowConfig, Modifiers, MouseButton, NativeWindow, WindowControlArea,
+    WindowEvent, WindowHandle, WindowId, WindowPlacement, WindowsDisplay, clipboard_has_text,
+    cursor_screen_pos, debug_log, format_local_time_date, primary_mouse_button_down,
+    release_mouse_capture, top_visible_window_at,
 };
 use crate::shell::{Cx, Effect, Shell};
 use crate::tabs::{self, Removal, StripFrame, TAB_HEIGHT, TabData, TabSet};
@@ -32,9 +39,9 @@ use crate::ui::{
 };
 use crate::widgets::icon_button;
 
-pub(crate) const WINDOW_WIDTH: f32 = 2213.;
-pub(crate) const WINDOW_HEIGHT: f32 = 1107.;
-pub(crate) const WINDOW_MAX_SCREEN_SHARE: f32 = 0.9;
+const WINDOW_WIDTH: f32 = 2213.;
+const WINDOW_HEIGHT: f32 = 1107.;
+const WINDOW_MAX_SCREEN_SHARE: f32 = 0.9;
 
 const EDITOR_FONT: &str = "Consolas";
 const EDITOR_FONT_SIZE: f32 = 11. * 96. / 72.;
@@ -879,11 +886,11 @@ impl MainWindow {
         self.activate_tab(ix, shell);
     }
 
-    pub(crate) fn begin_tab_save(&mut self, tab: TabId) -> Option<(u64, Rope)> {
+    fn begin_tab_save(&mut self, tab: TabId) -> Option<(u64, Rope)> {
         self.tabs.editor_mut(tab).map(Editor::begin_save)
     }
 
-    pub(crate) fn mark_tab_saved(
+    fn mark_tab_saved(
         &mut self,
         tab: TabId,
         snapshot: u64,
@@ -937,7 +944,7 @@ impl MainWindow {
     }
 
     /// Puts a tab back at `ix` (a cancelled drag's, or one a failed window couldn't take).
-    pub(crate) fn restore_tab(&mut self, data: TabData, ix: usize, shell: &Shell) {
+    fn restore_tab(&mut self, data: TabData, ix: usize, shell: &Shell) {
         let ix = self.tabs.restore(data, ix);
         self.activate_tab(ix, shell);
     }
@@ -951,7 +958,7 @@ impl MainWindow {
     }
 
     /// Drops a tab dragged in from another window where the pointer is.
-    pub(crate) fn insert_dragged_tab(
+    fn insert_dragged_tab(
         &mut self,
         data: TabData,
         at: ScreenPoint,
@@ -964,24 +971,24 @@ impl MainWindow {
     }
 
     /// Moves tab `id`, grabbed `grab` from its left after a press at `start`, to the pointer.
-    pub(crate) fn drag_tab(&mut self, id: TabId, at: ScreenPoint, grab: f32, start: f32) {
+    fn drag_tab(&mut self, id: TabId, at: ScreenPoint, grab: f32, start: f32) {
         let x = self.hwnd.to_client(at).x;
         self.tabs
             .drag(id, x - HEADER_WIDTH, grab, start - HEADER_WIDTH);
         self.dirty = true;
     }
 
-    pub(crate) fn release_tab(&mut self) {
+    fn release_tab(&mut self) {
         self.dirty |= self.tabs.release_drag();
     }
 
     /// Whether a tab dragged from another window may land here.
-    pub(crate) fn accepts_tab_drop(&self) -> bool {
+    fn accepts_tab_drop(&self) -> bool {
         !self.dialogs.is_open() && !self.pending_close && self.hwnd.is_enabled()
     }
 
     /// Whether `pt` is over the tab strip, give or take `magnetism` above and below.
-    pub(crate) fn strip_hit(&self, pt: ScreenPoint, magnetism: f32) -> bool {
+    fn strip_hit(&self, pt: ScreenPoint, magnetism: f32) -> bool {
         let pos = self.hwnd.to_client(pt);
         let frame = &self.ui.frame;
         let right = frame.rect_of(HitId::Caption(CaptionHit::Min)).map_or_else(
@@ -1000,7 +1007,7 @@ impl MainWindow {
     }
 
     /// Moves the window so a tab grabbed at `grab`, as the strip's first, sits under `pt`.
-    pub(crate) fn place_under(&self, pt: ScreenPoint, grab: Point) {
+    fn place_under(&self, pt: ScreenPoint, grab: Point) {
         let offset = point(HEADER_WIDTH + tabs::LIST_PAD + grab.x, STRIP_TOP + grab.y);
         let (at, frame) = (self.hwnd.to_screen(offset), self.hwnd.window_rect());
         self.hwnd
@@ -1504,4 +1511,735 @@ fn caption_button(
                 .when(minimize, |this| this.left(1.).top(1.))
                 .child(text(glyph)),
         )
+}
+
+#[derive(Copy, Clone, Debug)]
+pub(crate) struct WindowLaunch {
+    pub(crate) show: bool,
+    pub(crate) focus: bool,
+    use_cursor_display: bool,
+}
+
+impl Default for WindowLaunch {
+    fn default() -> Self {
+        Self {
+            show: true,
+            focus: true,
+            use_cursor_display: true,
+        }
+    }
+}
+
+impl WindowLaunch {
+    #[cfg(test)]
+    pub(crate) const HIDDEN: Self = Self {
+        show: false,
+        focus: false,
+        use_cursor_display: false,
+    };
+}
+
+pub(crate) struct OpenWindowError {
+    pub(crate) tab: Option<TabData>,
+    pub(crate) message: String,
+}
+
+impl std::fmt::Debug for OpenWindowError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OpenWindowError")
+            .field("has_tab", &self.tab.is_some())
+            .field("message", &self.message)
+            .finish()
+    }
+}
+
+pub(crate) struct Windows {
+    list: Vec<MainWindow>,
+    active: Option<WindowId>,
+    cascade_step: u32,
+    launch: WindowLaunch,
+}
+
+impl Windows {
+    pub(crate) fn new(launch: WindowLaunch) -> Self {
+        Self {
+            list: Vec::new(),
+            active: None,
+            cascade_step: 0,
+            launch,
+        }
+    }
+
+    pub(crate) fn set_active(&mut self, id: WindowId) {
+        self.active = Some(id);
+    }
+
+    pub(crate) fn ix(&self, id: WindowId) -> Option<usize> {
+        self.list.iter().position(|w| w.id == id)
+    }
+
+    pub(crate) fn get(&self, id: WindowId) -> Option<&MainWindow> {
+        self.list.iter().find(|w| w.id == id)
+    }
+
+    pub(crate) fn get_mut(&mut self, id: WindowId) -> Option<&mut MainWindow> {
+        self.list.iter_mut().find(|w| w.id == id)
+    }
+
+    pub(crate) fn hwnd(&self, id: WindowId) -> Option<WindowHandle> {
+        self.get(id).map(|w| w.hwnd)
+    }
+
+    pub(crate) fn ids(&self) -> Vec<WindowId> {
+        self.list.iter().map(|w| w.id).collect()
+    }
+
+    pub(crate) fn owner_of(&self, tab: TabId) -> Option<(usize, usize)> {
+        self.list
+            .iter()
+            .enumerate()
+            .find_map(|(wix, w)| w.tabs.index_of(tab).map(|tix| (wix, tix)))
+    }
+
+    pub(crate) fn find_by_key(&self, key: &PathKey) -> Option<(WindowId, TabId)> {
+        self.list.iter().find_map(|w| {
+            let tix = w.tabs.find_by_key(key)?;
+            Some((w.id, w.tabs[tix].data.id))
+        })
+    }
+
+    pub(crate) fn fallback(&self, preferred: Option<WindowId>) -> Option<WindowId> {
+        preferred
+            .and_then(|id| self.ix(id))
+            .or_else(|| self.active.and_then(|id| self.ix(id)))
+            .or_else(|| (!self.list.is_empty()).then_some(self.list.len() - 1))
+            .map(|ix| self.list[ix].id)
+    }
+
+    pub(crate) fn mark_dirty(&mut self, id: WindowId) {
+        if let Some(w) = self.get_mut(id) {
+            w.dirty = true;
+        }
+    }
+
+    pub(crate) fn mark_all_dirty(&mut self) {
+        for w in &mut self.list {
+            w.dirty = true;
+        }
+    }
+
+    pub(crate) fn apply_theme(&mut self, dark: bool) {
+        for w in &mut self.list {
+            w.apply_theme(dark);
+        }
+    }
+
+    pub(crate) fn set_word_wrap(&mut self, shell: &Shell) {
+        for w in &mut self.list {
+            w.set_word_wrap(shell);
+        }
+    }
+
+    pub(crate) fn any_dirty(&self) -> bool {
+        self.list.iter().any(|w| w.tabs.has_dirty())
+    }
+
+    pub(crate) fn sweep_closed(&mut self) -> Vec<(WindowId, Vec<crate::files::PromptId>)> {
+        if !self.list.iter().any(|w| w.pending_close) {
+            return Vec::new();
+        }
+        let closed: Vec<(WindowId, Vec<crate::files::PromptId>)> = self
+            .list
+            .iter_mut()
+            .filter(|w| w.pending_close)
+            .map(|w| (w.id, w.dialogs.drain_prompt_ids()))
+            .collect();
+        self.list.retain(|w| !w.pending_close);
+        if let Some(active) = self.active
+            && self.get(active).is_none()
+        {
+            self.active = self.list.last().map(|w| w.id);
+        }
+        closed
+    }
+
+    fn window_config(
+        &mut self,
+        window_size: Option<Size>,
+        target_point: Option<ScreenPoint>,
+    ) -> MainWindowConfig {
+        let display = target_point
+            .or_else(|| {
+                self.active
+                    .and_then(|id| self.get(id))
+                    .map(|w| w.hwnd.client_origin())
+            })
+            .or_else(|| self.launch.use_cursor_display.then(cursor_screen_pos))
+            .map_or_else(
+                || WindowsDisplay::from_point(ScreenPoint::default()),
+                WindowsDisplay::from_point,
+            );
+        let vis = display.visible_bounds();
+        let target = window_size.unwrap_or_else(|| {
+            size(
+                WINDOW_WIDTH.min(vis.size.width * WINDOW_MAX_SCREEN_SHARE),
+                WINDOW_HEIGHT.min(vis.size.height * WINDOW_MAX_SCREEN_SHARE),
+            )
+        });
+        // Centred in the work area (pinned to its top left if larger), and cascaded from the
+        // last new window.
+        let centre = |span: f32, of: f32| ((span - of) * 0.5).max(0.0);
+        let mut origin = vis.origin
+            + point(
+                centre(vis.size.width, target.width),
+                centre(vis.size.height, target.height),
+            );
+        if target_point.is_none() && !self.list.is_empty() && window_size.is_none() {
+            let step = (self.cascade_step % 8) as f32 * 28.0;
+            self.cascade_step = self.cascade_step.wrapping_add(1);
+            let max_x = (vis.right() - target.width).max(vis.left());
+            let max_y = (vis.bottom() - target.height).max(vis.top());
+            origin = point(
+                (origin.x + step).clamp(vis.left(), max_x),
+                (origin.y + step).clamp(vis.top(), max_y),
+            );
+        }
+        MainWindowConfig {
+            bounds: Rect::new(origin, target),
+            scale: display.scale_factor(),
+            focus: self.launch.focus,
+            show: self.launch.show,
+        }
+    }
+
+    pub(crate) fn open_at(
+        &mut self,
+        initial: Option<TabData>,
+        window_size: Option<Size>,
+        target_point: Option<ScreenPoint>,
+        shell: &Shell,
+    ) -> std::result::Result<(WindowId, WindowHandle), Box<OpenWindowError>> {
+        let config = self.window_config(window_size, target_point);
+        let win_surface = match NativeWindow::create_main(&config, shell.dark())
+            .and_then(|n| WindowSurface::new(shell.gpu.clone(), n))
+        {
+            Ok(created) => created,
+            Err(err) => {
+                let message = err.to_string();
+                debug_log(&format!("window/surface create failed: {message}"));
+                return Err(Box::new(OpenWindowError {
+                    tab: initial,
+                    message,
+                }));
+            }
+        };
+        let id = win_surface.window.id;
+        let hwnd = win_surface.window.hwnd();
+        let win = MainWindow::new(win_surface, initial, shell);
+        self.list.push(win);
+        self.active = Some(id);
+        Ok((id, hwnd))
+    }
+
+    pub(crate) fn host<'a>(&'a mut self, shell: &'a Shell) -> WindowsHost<'a> {
+        WindowsHost {
+            windows: self,
+            shell,
+        }
+    }
+}
+
+impl Deref for Windows {
+    type Target = [MainWindow];
+
+    fn deref(&self) -> &[MainWindow] {
+        &self.list
+    }
+}
+
+impl DerefMut for Windows {
+    fn deref_mut(&mut self) -> &mut [MainWindow] {
+        &mut self.list
+    }
+}
+
+pub(crate) struct WindowsHost<'a> {
+    windows: &'a mut Windows,
+    shell: &'a Shell,
+}
+
+impl DocHost for WindowsHost<'_> {
+    fn tab_info(&self, tab: TabId) -> Option<TabSnapshot> {
+        let (wix, tix) = self.windows.owner_of(tab)?;
+        let w = &self.windows[wix];
+        let tabs = &w.tabs;
+        let data = &tabs[tix].data;
+        Some(TabSnapshot {
+            window: w.id,
+            name: tabs.tab_name(tix),
+            path: data.doc_path.clone(),
+            format: data.format,
+            dirty: data.is_dirty(),
+            revision: data.editor.model().revision(),
+        })
+    }
+
+    fn window_dirty_tabs(&self, window: WindowId) -> Vec<TabId> {
+        self.windows
+            .get(window)
+            .map(|w| w.tabs.dirty_tabs())
+            .unwrap_or_default()
+    }
+
+    fn active_tab_path(&self, window: WindowId) -> Option<PathBuf> {
+        self.windows
+            .get(window)?
+            .tabs
+            .active()
+            .path()
+            .map(PathBuf::from)
+    }
+
+    fn fallback_window(&self, preferred: WindowId) -> Option<WindowId> {
+        self.windows.fallback(Some(preferred))
+    }
+
+    fn find_tab_by_key(&self, key: &PathKey) -> Option<(WindowId, TabId)> {
+        self.windows.find_by_key(key)
+    }
+
+    fn activate_tab(&mut self, window: WindowId, tab: TabId, bring_to_front: bool) {
+        let Some(w) = self.windows.get_mut(window) else {
+            return;
+        };
+        let Some(tix) = w.tabs.index_of(tab) else {
+            return;
+        };
+        let hwnd = w.hwnd;
+        w.activate_tab(tix, self.shell);
+        if bring_to_front {
+            hwnd.bring_to_front();
+        }
+    }
+
+    fn begin_save(&mut self, tab: TabId) -> Option<(u64, Rope)> {
+        let (wix, _) = self.windows.owner_of(tab)?;
+        self.windows[wix].begin_tab_save(tab)
+    }
+
+    fn mark_saved(&mut self, tab: TabId, snapshot: u64, doc_path: DocPath, format: Format) {
+        if let Some((wix, _)) = self.windows.owner_of(tab) {
+            self.windows[wix].mark_tab_saved(tab, snapshot, doc_path, format);
+        }
+    }
+
+    fn adopt_loaded(&mut self, window: WindowId, loaded: document::Loaded) {
+        if let Some(w) = self.windows.get_mut(window) {
+            w.adopt_loaded_file(loaded, self.shell);
+        }
+    }
+
+    fn remove_tab(&mut self, tab: TabId) {
+        if let Some((wix, tix)) = self.windows.owner_of(tab) {
+            self.windows[wix].remove_tab(tix, self.shell);
+        }
+    }
+
+    fn mark_window_close(&mut self, window: WindowId) {
+        if let Some(w) = self.windows.get_mut(window) {
+            w.pending_close = true;
+        }
+    }
+
+    fn window_handle(&self, window: WindowId) -> Option<WindowHandle> {
+        self.windows.hwnd(window)
+    }
+
+    fn show_prompt(&mut self, window: WindowId, prompt: Prompt) {
+        if let Some(w) = self.windows.get_mut(window) {
+            w.show_prompt(prompt, self.shell);
+        }
+    }
+}
+
+const DRAG_THRESHOLD: f32 = 10.;
+const DETACH_MAGNETISM: f32 = 15.;
+const MOVE_POLL: Duration = Duration::from_millis(16);
+const MOVE_LOOP_START_TIMEOUT: Duration = Duration::from_millis(500);
+
+#[derive(Clone, Copy)]
+enum Phase {
+    Pressed,
+    Dragging,
+    Entering { since: Instant },
+    Moving { attaching: bool },
+}
+
+pub(crate) struct TabDrag {
+    pub(crate) owner: WindowId,
+    pub(crate) source: WindowId,
+    tab: TabId,
+    grab: Point,
+    start: f32,
+    press: ScreenPoint,
+    phase: Phase,
+    source_index: usize,
+    source_placement: Option<WindowPlacement>,
+    /// While Windows moves the dragged tab's window: when to check on the move next.
+    pub(crate) poll_at: Option<Instant>,
+}
+
+impl TabDrag {
+    pub(crate) fn start(
+        window_id: WindowId,
+        tab: TabId,
+        index: usize,
+        grab: Point,
+        position: Point,
+        windows: &mut Windows,
+    ) -> Option<Self> {
+        let win = windows.get_mut(window_id)?;
+        let press = win.hwnd.to_screen(position);
+        win.dirty = true;
+        Some(Self {
+            owner: window_id,
+            source: window_id,
+            tab,
+            grab,
+            start: position.x,
+            press,
+            phase: Phase::Pressed,
+            source_index: index,
+            source_placement: None,
+            poll_at: None,
+        })
+    }
+
+    pub(crate) fn is_dragging(&self) -> bool {
+        matches!(self.phase, Phase::Dragging)
+    }
+
+    fn is_in_move_loop(&self) -> bool {
+        matches!(self.phase, Phase::Entering { .. } | Phase::Moving { .. })
+    }
+
+    pub(crate) fn is_alive(&self, windows: &Windows) -> bool {
+        windows
+            .get(self.owner)
+            .is_some_and(|w| w.tabs.index_of(self.tab).is_some())
+    }
+
+    pub(crate) fn on_size_move_changed(
+        &mut self,
+        window_id: WindowId,
+        entering: bool,
+        windows: &mut Windows,
+        file_ops: &FileOps,
+        shell: &Shell,
+    ) -> bool {
+        if self.owner != window_id {
+            return false;
+        }
+        if entering {
+            if matches!(self.phase, Phase::Entering { .. }) {
+                self.phase = Phase::Moving { attaching: false };
+            }
+            false
+        } else if self.is_in_move_loop() {
+            self.finish_move_loop(windows, file_ops, shell)
+        } else {
+            false
+        }
+    }
+
+    pub(crate) fn on_mouse_move(
+        &mut self,
+        pressed_left: bool,
+        windows: &mut Windows,
+        file_ops: &FileOps,
+        shell: &Shell,
+    ) -> bool {
+        if !pressed_left {
+            return self.on_release(windows);
+        }
+        let Some(scale) = windows.get(self.owner).map(|w| w.win.window.scale_factor()) else {
+            return true;
+        };
+        let pt = cursor_screen_pos();
+        match self.phase {
+            Phase::Pressed => {
+                let distance = ((pt.x - self.press.x) as f32).hypot((pt.y - self.press.y) as f32);
+                if distance / scale <= DRAG_THRESHOLD {
+                    return false;
+                }
+                self.phase = Phase::Dragging;
+            }
+            Phase::Dragging => {}
+            Phase::Entering { .. } | Phase::Moving { .. } => return false,
+        }
+
+        let (alone, in_owner_strip) = windows.get(self.owner).map_or((true, false), |w| {
+            (w.tabs.len() == 1, w.strip_hit(pt, DETACH_MAGNETISM))
+        });
+        if !alone && in_owner_strip {
+            if let Some(win) = windows.get_mut(self.owner) {
+                win.drag_tab(self.tab, pt, self.grab.x, self.start);
+            }
+        } else if !alone && let Some(target_id) = strip_window(windows, file_ops, pt, None) {
+            self.attach(target_id, pt, windows, shell);
+        } else {
+            self.detach(alone, pt, windows, shell);
+        }
+        windows.mark_dirty(self.owner);
+        false
+    }
+
+    pub(crate) fn on_release(&mut self, windows: &mut Windows) -> bool {
+        if self.is_in_move_loop() {
+            return false;
+        }
+        if self.is_dragging() {
+            if let Some(win) = windows.get_mut(self.owner) {
+                win.release_tab();
+            }
+            if self.owner != self.source
+                && let Some(hwnd) = windows.hwnd(self.owner)
+            {
+                hwnd.set_foreground();
+            }
+        }
+        true
+    }
+
+    pub(crate) fn on_capture_lost(&mut self, window_id: WindowId, windows: &mut Windows) -> bool {
+        if self.owner == window_id && self.is_dragging() {
+            self.on_release(windows)
+        } else {
+            false
+        }
+    }
+
+    pub(crate) fn cancel(&mut self, windows: &mut Windows, shell: &Shell) {
+        self.poll_at = None;
+        release_mouse_capture();
+        if matches!(self.phase, Phase::Pressed) {
+            return;
+        }
+        let tab = self.tab;
+        let index = self.source_index;
+        if self.owner == self.source {
+            if self.is_dragging() {
+                if let Some(win) = windows.get_mut(self.source) {
+                    win.return_tab(tab, index, shell);
+                }
+            } else if let Some(placement) = self.source_placement
+                && let Some(hwnd) = windows.hwnd(self.source)
+            {
+                hwnd.restore_placement(placement);
+            }
+            return;
+        }
+
+        let Some(data) = windows
+            .get_mut(self.owner)
+            .and_then(|w| w.take_tab(tab, shell))
+        else {
+            return;
+        };
+
+        if let Some(src) = windows.get_mut(self.source) {
+            let src_hwnd = src.hwnd;
+            src.restore_tab(data, index, shell);
+            src_hwnd.set_foreground();
+        } else {
+            match windows.open_at(Some(data), None, None, shell) {
+                Ok((_, hwnd)) => {
+                    if let Some(placement) = self.source_placement {
+                        hwnd.restore_placement(placement);
+                    }
+                }
+                // No window for it: it goes at the end of the last one.
+                Err(err) => {
+                    if let Some(data) = err.tab
+                        && let Some(win) = windows.last_mut()
+                    {
+                        win.restore_tab(data, win.tabs.len(), shell);
+                    }
+                }
+            }
+        }
+    }
+
+    pub(crate) fn on_poll(
+        &mut self,
+        windows: &mut Windows,
+        file_ops: &FileOps,
+        shell: &Shell,
+    ) -> bool {
+        self.poll_at = Some(Instant::now() + MOVE_POLL);
+        let Some(hwnd) = windows.hwnd(self.owner) else {
+            return true;
+        };
+        let attaching = match self.phase {
+            Phase::Entering { .. } => false,
+            Phase::Moving { attaching } => attaching,
+            Phase::Pressed | Phase::Dragging => return false,
+        };
+        let pt = cursor_screen_pos();
+        if hwnd.in_move_loop() {
+            let attaching =
+                attaching || strip_window(windows, file_ops, pt, Some(self.owner)).is_some();
+            if attaching && !matches!(self.phase, Phase::Moving { attaching: true }) {
+                hwnd.cancel_mode();
+            }
+            self.phase = Phase::Moving { attaching };
+            return false;
+        }
+        if let Phase::Entering { since } = self.phase
+            && since.elapsed() < MOVE_LOOP_START_TIMEOUT
+        {
+            return false;
+        }
+        self.finish_move_loop(windows, file_ops, shell)
+    }
+
+    fn finish_move_loop(
+        &mut self,
+        windows: &mut Windows,
+        file_ops: &FileOps,
+        shell: &Shell,
+    ) -> bool {
+        self.poll_at = None;
+        let Some(hwnd) = windows.hwnd(self.owner) else {
+            return true;
+        };
+        let attaching = matches!(self.phase, Phase::Moving { attaching: true });
+        let pt = cursor_screen_pos();
+        let pressed = primary_mouse_button_down();
+        if let Some(target_id) = strip_window(windows, file_ops, pt, Some(self.owner)) {
+            self.attach(target_id, pt, windows, shell);
+            if !pressed {
+                return self.on_release(windows);
+            }
+            false
+        } else if pressed && attaching {
+            self.run_move_loop(pt, windows);
+            windows.mark_dirty(self.owner);
+            false
+        } else if pressed {
+            self.cancel(windows, shell);
+            true
+        } else {
+            windows.mark_dirty(self.owner);
+            hwnd.set_foreground();
+            true
+        }
+    }
+
+    fn attach(
+        &mut self,
+        target_id: WindowId,
+        pt: ScreenPoint,
+        windows: &mut Windows,
+        shell: &Shell,
+    ) {
+        let Some(target_hwnd) = windows.hwnd(target_id) else {
+            return;
+        };
+        let prev_owner = self.owner;
+        let Some(data) = windows
+            .get_mut(prev_owner)
+            .and_then(|w| w.take_tab(self.tab, shell))
+        else {
+            return;
+        };
+
+        if let Some(target) = windows.get_mut(target_id) {
+            target.insert_dragged_tab(data, pt, self.grab.x, shell);
+        }
+        self.owner = target_id;
+        self.phase = Phase::Dragging;
+        self.poll_at = None;
+        target_hwnd.set_capture();
+        windows.mark_dirty(target_id);
+        windows.mark_dirty(prev_owner);
+    }
+
+    fn detach(&mut self, alone: bool, pt: ScreenPoint, windows: &mut Windows, shell: &Shell) {
+        if !alone {
+            let source_win = self.owner;
+            let taken = windows.get_mut(source_win).and_then(|w| {
+                let sz = w.win.window.restored_size();
+                w.take_tab(self.tab, shell).map(|data| (data, sz))
+            });
+            let Some((data, sz)) = taken else {
+                return;
+            };
+            let (window, _) = match windows.open_at(Some(data), Some(sz), Some(pt), shell) {
+                Ok(created) => created,
+                Err(err) => {
+                    if let Some(data) = err.tab
+                        && let Some(win) = windows.get_mut(source_win)
+                    {
+                        win.restore_tab(data, self.source_index, shell);
+                    }
+                    return;
+                }
+            };
+            windows.mark_dirty(source_win);
+            self.owner = window;
+        } else if let Some(win) = windows.get_mut(self.owner) {
+            let hwnd = win.hwnd;
+            if self.owner == self.source && self.source_placement.is_none() {
+                self.source_placement = hwnd.saved_placement();
+            }
+            if hwnd.is_maximized() {
+                hwnd.restore();
+            }
+            win.release_tab();
+        } else {
+            return;
+        }
+        self.run_move_loop(pt, windows);
+    }
+
+    fn run_move_loop(&mut self, pt: ScreenPoint, windows: &Windows) {
+        let Some(win) = windows.get(self.owner) else {
+            return;
+        };
+        win.place_under(pt, self.grab);
+        win.hwnd.begin_system_move(pt);
+        self.phase = Phase::Entering {
+            since: Instant::now(),
+        };
+        self.poll_at = Some(Instant::now() + MOVE_POLL);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn detach_for_test(&mut self, windows: &mut Windows, shell: &Shell) {
+        self.phase = Phase::Dragging;
+        let pt = ScreenPoint {
+            x: self.press.x + 120,
+            y: self.press.y + 200,
+        };
+        self.detach(false, pt, windows, shell);
+        windows.mark_dirty(self.owner);
+    }
+}
+
+fn strip_window(
+    windows: &Windows,
+    file_ops: &FileOps,
+    pt: ScreenPoint,
+    exclude: Option<WindowId>,
+) -> Option<WindowId> {
+    let exclude_hwnd = exclude.and_then(|id| windows.hwnd(id));
+    let hwnd = top_visible_window_at(pt, exclude_hwnd)?;
+    windows.iter().find_map(|w| {
+        let accepts = w.hwnd == hwnd
+            && w.accepts_tab_drop()
+            && !file_ops.has_active_workflow_for(w.id)
+            && w.strip_hit(pt, DETACH_MAGNETISM);
+        accepts.then_some(w.id)
+    })
 }

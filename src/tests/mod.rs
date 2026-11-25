@@ -9,7 +9,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::Duration;
 
-use crate::{App, WindowLaunch};
+use crate::App;
 use crate::command::Command;
 use crate::document;
 use crate::geom::{Point, Rect, size};
@@ -19,7 +19,7 @@ use crate::platform::{
     WindowId,
 };
 use crate::ui::HitId;
-use crate::window::{EDITOR_PADDINGS, MainWindow};
+use crate::window::{EDITOR_PADDINGS, MainWindow, WindowLaunch};
 
 const EDITOR_PADDING_LEFT: f32 = EDITOR_PADDINGS.left;
 const EDITOR_PADDING_TOP: f32 = EDITOR_PADDINGS.top;
