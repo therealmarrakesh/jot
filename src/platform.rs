@@ -353,11 +353,8 @@ pub(crate) enum PlatformEvent {
 
 #[derive(Clone, Debug)]
 pub(crate) enum WindowEvent {
-    Resized {
-        physical_width: u32,
-        physical_height: u32,
-        scale: f32,
-    },
+    /// The client area changed size (the window's state already has the new size).
+    Resized,
     Moved,
     Activated(bool),
     PaintRequested,
@@ -607,9 +604,7 @@ fn queue(queue: &mut VecDeque<PlatformEvent>, event: PlatformEvent) {
     match (queue.back_mut(), event) {
         (Some(Wake), Wake) => {}
         (Some(Window(a, Moved)), Window(b, Moved)) if *a == b => {}
-        (Some(Window(a, last @ Resized { .. })), Window(b, next @ Resized { .. })) if *a == b => {
-            *last = next;
-        }
+        (Some(Window(a, Resized)), Window(b, Resized)) if *a == b => {}
         (Some(SettingsChanged(last)), SettingsChanged(next)) => *last = next,
         (_, event) => queue.push_back(event),
     }
@@ -1469,11 +1464,7 @@ fn on_message(
             );
             let resized = width > 0 && height > 0 && {
                 w.physical.set((width, height));
-                w.send(WindowEvent::Resized {
-                    physical_width: width,
-                    physical_height: height,
-                    scale: w.scale.get(),
-                })
+                w.send(WindowEvent::Resized)
             };
             handled(resized)
         }
@@ -1499,11 +1490,7 @@ fn on_message(
             };
             let (width, height) = client_size(hwnd);
             w.physical.set((width, height));
-            handled(w.send(WindowEvent::Resized {
-                physical_width: width,
-                physical_height: height,
-                scale: w.scale.get(),
-            }))
+            handled(w.send(WindowEvent::Resized))
         }
         WM_ACTIVATE => {
             let active = (wparam.0 & 0xFFFF) != 0;

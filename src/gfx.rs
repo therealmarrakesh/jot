@@ -289,20 +289,15 @@ impl Gpu {
     }
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-enum FrameOutcome {
-    Presented,
-    DeviceLost,
-    Failed,
-}
-
 struct Target {
     generation: u64,
+    /// The swap chain's size in pixels, and the scale it's drawn at.
+    size: (u32, u32),
+    scale: f32,
     swap_chain: IDXGISwapChain1,
     _comp_device: IDCompositionDevice,
     _comp_target: IDCompositionTarget,
     _comp_visual: IDCompositionVisual,
-    target_bitmap: Option<ID2D1Bitmap1>,
     canvas: Canvas,
 }
 
@@ -311,13 +306,12 @@ impl Target {
         devices: Direct2DDevices,
         generation: u64,
         hwnd: HWND,
-        width: u32,
-        height: u32,
+        size: (u32, u32),
         scale: f32,
     ) -> Result<Self> {
         let desc = DXGI_SWAP_CHAIN_DESC1 {
-            Width: width,
-            Height: height,
+            Width: size.0,
+            Height: size.1,
             Format: DXGI_FORMAT_B8G8R8A8_UNORM,
             Stereo: false.into(),
             SampleDesc: DXGI_SAMPLE_DESC {
@@ -351,20 +345,22 @@ impl Target {
         let canvas = Canvas::new(devices, scale)?;
         let mut target = Self {
             generation,
+            size,
+            scale,
             swap_chain,
             _comp_device: comp_device,
             _comp_target: comp_target,
             _comp_visual: comp_visual,
-            target_bitmap: None,
             canvas,
         };
-        target.attach_backbuffer(scale)?;
+        target.attach_backbuffer()?;
         Ok(target)
     }
 
-    fn attach_backbuffer(&mut self, scale: f32) -> Result<()> {
+    /// Draws into the swap chain's back buffer (the context's target keeps it alive).
+    fn attach_backbuffer(&mut self) -> Result<()> {
         let surface: IDXGISurface = unsafe { self.swap_chain.GetBuffer(0)? };
-        let dpi = 96.0 * scale;
+        let dpi = 96.0 * self.scale;
         let props = D2D1_BITMAP_PROPERTIES1 {
             pixelFormat: D2D1_PIXEL_FORMAT {
                 format: DXGI_FORMAT_B8G8R8A8_UNORM,
@@ -375,40 +371,30 @@ impl Target {
             bitmapOptions: D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
             ..Default::default()
         };
-        let bitmap = unsafe {
+        unsafe {
             let bitmap = self
                 .canvas
                 .context
                 .CreateBitmapFromDxgiSurface(&surface, Some(&props))?;
             self.canvas.context.SetDpi(dpi, dpi);
             self.canvas.context.SetTarget(&bitmap);
-            bitmap
-        };
-        self.target_bitmap = Some(bitmap);
+        }
         Ok(())
     }
 
-    fn resize(&mut self, width: u32, height: u32, scale: f32) -> std::result::Result<(), bool> {
+    fn resize(&mut self, size: (u32, u32), scale: f32) -> Result<()> {
         unsafe {
             self.canvas.context.SetTarget(None);
-        }
-        self.target_bitmap = None;
-        let resized = unsafe {
             self.swap_chain.ResizeBuffers(
                 SWAPCHAIN_BUFFERS,
-                width,
-                height,
+                size.0,
+                size.1,
                 DXGI_FORMAT_B8G8R8A8_UNORM,
                 DXGI_SWAP_CHAIN_FLAG(0),
-            )
-        };
-        if let Err(err) = resized.map_err(Error::from).and_then(|()| self.attach_backbuffer(scale)) {
-            let lost = err.hresult().is_some_and(|hr| is_device_lost_hr(HRESULT(hr)));
-            if lost {
-                crate::platform::debug_log(&format!("surface resize lost device: {err}"));
-            }
-            return Err(lost);
+            )?;
         }
+        (self.size, self.scale) = (size, scale);
+        self.attach_backbuffer()?;
         if (scale - self.canvas.scale_factor).abs() >= f32::EPSILON {
             self.canvas.shadow_cache.clear();
         }
@@ -416,11 +402,7 @@ impl Target {
         Ok(())
     }
 
-    fn begin_frame(&mut self, scale: f32, clear: Rgba) -> bool {
-        let mut attach_failed = false;
-        if self.target_bitmap.is_none() && self.attach_backbuffer(scale).is_err() {
-            attach_failed = true;
-        }
+    fn begin_frame(&mut self, clear: Rgba) {
         self.canvas.shadow_cache.advance_frame();
         self.canvas.transform = Matrix3x2::identity();
         unsafe {
@@ -428,142 +410,110 @@ impl Target {
             self.canvas.context.SetTransform(&self.canvas.transform);
             self.canvas.context.Clear(Some(&to_d2d_color(clear)));
         }
-        attach_failed
     }
 
-    fn end_frame(&mut self, force_lost: bool) -> FrameOutcome {
-        let end_res = unsafe { self.canvas.context.EndDraw(None, None) };
-        if force_lost {
-            return FrameOutcome::DeviceLost;
-        }
-        if let Err(err) = end_res {
-            let removed =
-                unsafe { self.canvas.devices.d3d_device.GetDeviceRemovedReason() }.is_err();
-            if is_device_lost_hr(err.code()) || removed {
-                return FrameOutcome::DeviceLost;
+    /// Finishes and presents the frame; whether the GPU device was lost.
+    fn end_frame(&mut self) -> bool {
+        let lost = |hr: HRESULT| {
+            is_device_lost_hr(hr)
+                || unsafe { self.canvas.devices.d3d_device.GetDeviceRemovedReason() }.is_err()
+        };
+        if let Err(err) = unsafe { self.canvas.context.EndDraw(None, None) } {
+            if lost(err.code()) {
+                return true;
             }
             crate::platform::debug_log(&format!("D2D end_frame failed: {err}"));
-            return FrameOutcome::Failed;
+            return false;
         }
         let hr = unsafe { self.swap_chain.Present(0, DXGI_PRESENT(0)) };
-        let removed =
-            hr.is_err() && unsafe { self.canvas.devices.d3d_device.GetDeviceRemovedReason() }.is_err();
-        if is_device_lost_hr(hr) || removed {
-            return FrameOutcome::DeviceLost;
+        if hr.is_err() && lost(hr) {
+            return true;
         }
         if let Err(err) = hr.ok() {
             crate::platform::debug_log(&format!("DXGI present failed: {err}"));
-            return FrameOutcome::Failed;
         }
-        FrameOutcome::Presented
+        false
     }
 }
 
-pub(crate) struct Surface {
+/// A window and the swap chain it's drawn into, at the window's size whenever it's drawn.
+pub(crate) struct WindowSurface {
     gpu: Rc<Gpu>,
-    hwnd: HWND,
-    width: u32,
-    height: u32,
-    scale: f32,
+    // Drops before `window`, so the swap chain and composition target go before DestroyWindow.
     target: Option<Target>,
+    pub(crate) window: NativeWindow,
     #[cfg(test)]
     force_device_lost: bool,
 }
 
-impl Surface {
-    pub(crate) fn for_window(gpu: Rc<Gpu>, window: &NativeWindow) -> Result<Self> {
-        let (pw, ph) = window.physical_size();
-        let width = pw.max(1);
-        let height = ph.max(1);
-        let scale_factor = window.scale_factor();
-        let hwnd = window.hwnd().raw();
-        let (generation, devices) = gpu.snapshot();
-        let target = Target::new(devices, generation, hwnd, width, height, scale_factor)?;
-        Ok(Self {
+impl WindowSurface {
+    pub(crate) fn new(gpu: Rc<Gpu>, window: NativeWindow) -> Result<Self> {
+        let mut surface = Self {
             gpu,
-            hwnd,
-            width,
-            height,
-            scale: scale_factor,
-            target: Some(target),
+            target: None,
+            window,
             #[cfg(test)]
             force_device_lost: false,
-        })
+        };
+        surface.target = Some(surface.build_target()?);
+        Ok(surface)
     }
 
-    pub(crate) fn resize(&mut self, physical_width: u32, physical_height: u32, scale_factor: f32) {
-        let width = physical_width.max(1);
-        let height = physical_height.max(1);
-        let same = width == self.width
-            && height == self.height
-            && (scale_factor - self.scale).abs() < f32::EPSILON;
-        self.width = width;
-        self.height = height;
-        self.scale = scale_factor;
-        if let Some(target) = &mut self.target {
-            if same && target.target_bitmap.is_some() {
-                return;
-            }
-            if let Err(true) = target.resize(width, height, scale_factor) {
-                self.target = None;
-            }
-        }
+    fn size(&self) -> ((u32, u32), f32) {
+        let (w, h) = self.window.physical_size();
+        ((w.max(1), h.max(1)), self.window.scale_factor())
     }
 
+    fn build_target(&self) -> Result<Target> {
+        let (size, scale) = self.size();
+        let (generation, devices) = self.gpu.snapshot();
+        Target::new(devices, generation, self.window.hwnd().raw(), size, scale)
+    }
+
+    /// Paints a frame cleared to `clear`; whether the GPU device was lost (it has been replaced,
+    /// and every surface needs drawing again).
     pub(crate) fn draw(&mut self, clear: Rgba, paint: impl FnOnce(&mut Canvas)) -> bool {
-        let current_gen = self.gpu.generation();
-        if self
-            .target
-            .as_ref()
-            .is_some_and(|t| t.generation != current_gen)
-        {
-            // Drop old swapchain and DComp target before creating the replacement.
+        let (size, scale) = self.size();
+        let generation = self.gpu.generation();
+        // A target on replaced devices, or one that can't follow the window's size, is rebuilt.
+        let stale = self.target.as_mut().is_some_and(|t| {
+            t.generation != generation
+                || ((t.size, t.scale) != (size, scale) && t.resize(size, scale).is_err())
+        });
+        if stale {
             self.target = None;
         }
         if self.target.is_none() {
-            let (generation, devices) = self.gpu.snapshot();
-            match Target::new(devices, generation, self.hwnd, self.width, self.height, self.scale) {
+            match self.build_target() {
                 Ok(target) => self.target = Some(target),
                 Err(err) => {
-                    crate::platform::debug_log(&format!("surface recreate failed: {err}"));
-                    return false;
+                    crate::platform::debug_log(&format!("surface build failed: {err}"));
+                    return self.recover(generation);
                 }
             }
         }
-        let Some(target) = &mut self.target else {
-            return false;
-        };
-        let used_gen = target.generation;
-        let attach_failed = target.begin_frame(self.scale, clear);
+        let target = self.target.as_mut().expect("a target");
+        target.begin_frame(clear);
         paint(&mut target.canvas);
         #[cfg(test)]
-        let force_lost = attach_failed || std::mem::take(&mut self.force_device_lost);
+        let forced = std::mem::take(&mut self.force_device_lost);
         #[cfg(not(test))]
-        let force_lost = attach_failed;
-        match target.end_frame(force_lost) {
-            FrameOutcome::Presented | FrameOutcome::Failed => false,
-            FrameOutcome::DeviceLost => {
-                // Drop old swapchain and DComp target before creating the replacement.
-                self.target = None;
-                match self.gpu.recover(used_gen) {
-                    Ok((new_gen, new_devices)) => {
-                        self.target = Target::new(
-                            new_devices,
-                            new_gen,
-                            self.hwnd,
-                            self.width,
-                            self.height,
-                            self.scale,
-                        )
-                        .ok();
-                    }
-                    Err(err) => {
-                        crate::platform::debug_log(&format!("GPU recovery failed: {err}"));
-                    }
-                }
-                true
-            }
+        let forced = false;
+        if target.end_frame() || forced {
+            let used = target.generation;
+            // The old swap chain and composition target go before the devices are replaced.
+            self.target = None;
+            return self.recover(used);
         }
+        false
+    }
+
+    /// Replaces the GPU devices, lost at `generation`; true, as every surface must draw again.
+    fn recover(&self, generation: u64) -> bool {
+        if let Err(err) = self.gpu.recover(generation) {
+            crate::platform::debug_log(&format!("GPU recovery failed: {err}"));
+        }
+        true
     }
 
     #[cfg(test)]
@@ -574,19 +524,6 @@ impl Surface {
     #[cfg(test)]
     pub(crate) fn mark_device_lost_for_test(&mut self) {
         self.force_device_lost = true;
-    }
-}
-
-pub(crate) struct WindowSurface {
-    // Surface drops before NativeWindow so swapchain/DComp target release before DestroyWindow.
-    pub(crate) surface: Surface,
-    pub(crate) window: NativeWindow,
-}
-
-impl WindowSurface {
-    pub(crate) fn new(gpu: Rc<Gpu>, window: NativeWindow) -> Result<Self> {
-        let surface = Surface::for_window(gpu, &window)?;
-        Ok(Self { surface, window })
     }
 }
 
@@ -1229,6 +1166,7 @@ pub(crate) struct ShapedRow {
     is_ascii: bool,
 }
 
+#[cfg(test)]
 impl Default for ShapedRow {
     fn default() -> Self {
         Self {
@@ -1431,15 +1369,11 @@ pub(crate) struct FontFace {
     format: IDWriteTextFormat,
     ascent: f32,
     descent: f32,
-    space_width: f32,
+    pub(crate) space_width: f32,
     advances: RefCell<Option<AdvanceTable>>,
 }
 
 impl FontFace {
-    pub(crate) fn space_width(&self) -> f32 {
-        self.space_width
-    }
-
     /// Runs `f` with this face's cached character advances.
     pub(crate) fn with_advances<R>(&self, f: impl FnOnce(&mut AdvanceTable) -> R) -> R {
         let mut slot = self.advances.borrow_mut();
@@ -1596,25 +1530,6 @@ impl TextSystem {
         let mut state = self.state.borrow_mut();
         state.labels.advance_frame();
         state.rows.advance_frame();
-    }
-
-    pub(crate) fn measure(&self, text: &str, style: &TextStyle) -> f32 {
-        if text.is_empty() {
-            return 0.0;
-        }
-        if text == " " {
-            return self.face(style).space_width();
-        }
-        self.shape_label(
-            SharedStr::from(text.to_owned()),
-            style,
-            LabelLayout {
-                line_height: style.size(),
-                wrap_width: None,
-                line_clamp: None,
-            },
-        )
-        .width
     }
 
     pub(crate) fn shape_row(&self, text: SharedStr, style: &TextStyle) -> ShapedRow {
@@ -1857,7 +1772,7 @@ fn encode_single_line_utf16(text: &str) -> Vec<u16> {
     out
 }
 
-pub(crate) fn utf8_to_utf16_offset(text: &str, utf8_offset: usize, is_ascii: bool) -> u32 {
+fn utf8_to_utf16_offset(text: &str, utf8_offset: usize, is_ascii: bool) -> u32 {
     if is_ascii {
         return utf8_offset.min(text.len()) as u32;
     }
@@ -1865,7 +1780,7 @@ pub(crate) fn utf8_to_utf16_offset(text: &str, utf8_offset: usize, is_ascii: boo
     text[..clamped].encode_utf16().count() as u32
 }
 
-pub(crate) fn utf16_to_utf8_offset(text: &str, utf16_offset: u32, is_ascii: bool) -> usize {
+fn utf16_to_utf8_offset(text: &str, utf16_offset: u32, is_ascii: bool) -> usize {
     if is_ascii {
         return (utf16_offset as usize).min(text.len());
     }

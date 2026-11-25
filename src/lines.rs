@@ -637,7 +637,7 @@ impl LineIndex {
             lines,
             visible: start..end,
             line_height,
-            space_width: face.space_width(),
+            space_width: face.space_width,
         };
         (layout, windowed)
     }
@@ -874,7 +874,7 @@ impl FrameLayout {
             lines: vec![ShownLine::one_row(0, 0.0, row)],
             visible: 0..text_len,
             line_height,
-            space_width: ts.face(style).space_width(),
+            space_width: ts.face(style).space_width,
         }
     }
 

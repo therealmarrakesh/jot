@@ -990,12 +990,11 @@ impl OverlaySurface {
         let Some(live) = &mut self.live else {
             return false;
         };
-        let Some((w, h, scale)) = live.window.sync_live_metrics() else {
+        let Some((_, _, scale)) = live.window.sync_live_metrics() else {
             return false;
         };
-        live.surface.resize(w, h, scale);
         let logical = live.window.logical_size();
-        live.surface.draw(transparent_black(), |canvas| {
+        live.draw(transparent_black(), |canvas| {
             let frame = Frame::layout(
                 build(logical),
                 AvailSize::definite(logical.width, logical.height),

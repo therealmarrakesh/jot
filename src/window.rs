@@ -199,7 +199,7 @@ impl MainWindow {
         // releases and moving the window repaint only if they change something.
         let repaint = matches!(
             event,
-            WindowEvent::Resized { .. }
+            WindowEvent::Resized
                 | WindowEvent::Activated(_)
                 | WindowEvent::MouseDown { .. }
                 | WindowEvent::MouseUp { .. }
@@ -209,17 +209,7 @@ impl MainWindow {
         );
         let mut handled = false;
         match event {
-            WindowEvent::Resized {
-                physical_width,
-                physical_height,
-                scale,
-            } => {
-                self.win
-                    .surface
-                    .resize(physical_width, physical_height, scale);
-                self.cancel_menu(cx.shell);
-            }
-            WindowEvent::Moved => self.cancel_menu(cx.shell),
+            WindowEvent::Resized | WindowEvent::Moved => self.cancel_menu(cx.shell),
             WindowEvent::Activated(active) => self.on_activated(active, cx.shell),
             WindowEvent::PaintRequested => self.dirty |= !self.has_painted,
             WindowEvent::MouseMove {
@@ -1234,7 +1224,7 @@ impl MainWindow {
         }
 
         let (tabs, find, dialogs) = (&self.tabs, &self.find, &self.dialogs);
-        let needs_retry = self.win.surface.draw(p.window_clear, |renderer| {
+        let needs_retry = self.win.draw(p.window_clear, |renderer| {
             frame.paint(renderer, &mut |token, rect, renderer| match token {
                 CustomDraw::Editor(slot) => {
                     if let Some(ed) = slot_editor(tabs, find, dialogs, slot) {

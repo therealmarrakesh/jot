@@ -177,7 +177,7 @@ impl App {
     /// the event to the window; whether it was used.
     fn on_window_event(&mut self, id: WindowId, event: WindowEvent) -> bool {
         match &event {
-            WindowEvent::Resized { .. } | WindowEvent::Moved => self.keytips.hide_owner(id),
+            WindowEvent::Resized | WindowEvent::Moved => self.keytips.hide_owner(id),
             WindowEvent::Activated(true) => self.windows.set_active(id),
             WindowEvent::Activated(false) => {
                 self.keytips.hide_owner(id);

@@ -20,16 +20,14 @@ fn overlay_window_resizes_from_1x1_and_renders() {
         right: 170,
         bottom: 50,
     });
-    let (w, h_px, scale) = ws
-        .window
+    ws.window
         .sync_live_metrics()
         .expect("overlay must sync resized client rect");
-    ws.surface.resize(w, h_px, scale);
     assert!(
         ws.window.logical_size().width > 10.0 && ws.window.logical_size().height > 10.0,
         "overlay must sync resized client rect before drawing"
     );
-    let needs_retry = ws.surface.draw(crate::geom::transparent_black(), |_| {});
+    let needs_retry = ws.draw(crate::geom::transparent_black(), |_| {});
     assert!(!needs_retry);
 }
 
@@ -39,7 +37,7 @@ fn device_loss_recreates_devices_and_renders_new_windows_cleanly() {
     let gen0 = h.read(|_, app| app.shell.gpu.generation());
     {
         let mut app = h.app.borrow_mut();
-        app.windows[0].win.surface.mark_device_lost_for_test();
+        app.windows[0].win.mark_device_lost_for_test();
         app.windows[0].dirty = true;
     }
     h.draw();
@@ -53,7 +51,7 @@ fn device_loss_recreates_devices_and_renders_new_windows_cleanly() {
     {
         let app = h.app.borrow();
         assert_eq!(app.windows.len(), 2);
-        assert!(app.windows[1].win.surface.is_ready());
+        assert!(app.windows[1].win.is_ready());
     }
 }
 

@@ -139,13 +139,6 @@ impl Error {
     pub(crate) fn new(msg: impl fmt::Display) -> Self {
         Self::Msg(msg.to_string())
     }
-
-    pub(crate) fn hresult(&self) -> Option<i32> {
-        match self {
-            Self::Win(e) => Some(e.code().0),
-            Self::Io(_) | Self::Msg(_) => None,
-        }
-    }
 }
 
 impl fmt::Display for Error {
@@ -204,7 +197,7 @@ mod tests {
     fn error_preserves_windows_hresult() {
         let hr = windows::core::HRESULT(0x8899_000Cu32 as i32);
         let err = Error::from(windows::core::Error::from_hresult(hr));
-        assert_eq!(err.hresult(), Some(hr.0));
+        assert!(matches!(&err, Error::Win(e) if e.code() == hr));
         assert!(format!("{err:?}").contains("8899000c"));
     }
 }

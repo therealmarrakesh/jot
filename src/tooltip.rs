@@ -413,7 +413,7 @@ pub(crate) fn layout_tip(
 ) -> KeyTip {
     let mut buf = [0u8; 4];
     let style = TextStyle::regular(FONT, FONT_SIZE);
-    let width = ts.measure(key.encode_utf8(&mut buf), &style).ceil();
+    let width = ts.face(&style).measure(key.encode_utf8(&mut buf)).ceil();
     let fill = size(width + 2. * PADDING, LINE_HEIGHT + 2. * PADDING);
     let (outer_w, outer_h) = (fill.width + 2. * MARGIN, fill.height + 2. * MARGIN);
     let (x, y) = match placement {
