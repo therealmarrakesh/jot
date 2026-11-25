@@ -22,7 +22,7 @@ fn menus_shortcuts_toggles_submenus_and_context_menu() {
     h.read(|w, _| assert!(w.menus.is_open()));
     h.click_menu_command(AppCommand::NewTab);
     h.read(|w, _| {
-        assert_eq!(w.tabs().len(), 2, "File -> New tab must add a tab");
+        assert_eq!(w.tabs.len(), 2, "File -> New tab must add a tab");
         assert!(!w.menus.is_open(), "menu must close after activation");
     });
 
@@ -37,7 +37,7 @@ fn menus_shortcuts_toggles_submenus_and_context_menu() {
     h.click_menu_command(AppCommand::ZoomIn);
     h.read(|w, _| {
         assert_eq!(
-            (w.zoom() * 100.).round() as u32,
+            (w.tabs.active().zoom * 100.).round() as u32,
             110,
             "View -> Zoom -> Zoom in must zoom to 110%"
         );
@@ -94,7 +94,7 @@ fn menus_shortcuts_toggles_submenus_and_context_menu() {
     h.read(|w, _| {
         assert!(!w.menus.is_open());
         assert_eq!(
-            w.active_editor().model().text().len(),
+            w.tabs.active().editor.model().text().len(),
             0,
             "context menu Delete command must erase selected text"
         );
@@ -111,11 +111,11 @@ fn find_replace_bar_clear_button_and_key_contexts() {
 
     h.type_text("alpha");
     h.press_key("enter");
-    h.read(|w, _| assert_eq!(w.active_editor().model().selection().range(), 0..5));
+    h.read(|w, _| assert_eq!(w.tabs.active().editor.model().selection().range(), 0..5));
     h.press_key("enter");
-    h.read(|w, _| assert_eq!(w.active_editor().model().selection().range(), 11..16));
+    h.read(|w, _| assert_eq!(w.tabs.active().editor.model().selection().range(), 11..16));
     h.press_key("shift-enter");
-    h.read(|w, _| assert_eq!(w.active_editor().model().selection().range(), 0..5));
+    h.read(|w, _| assert_eq!(w.tabs.active().editor.model().selection().range(), 0..5));
 
     assert!(
         h.hit_rect(HitId::FieldClear(EditorSlot::FindQuery))
@@ -142,13 +142,16 @@ fn find_replace_bar_clear_button_and_key_contexts() {
     h.click_hit(HitId::Editor(EditorSlot::FindReplace));
     h.type_text("OMEGA");
     h.read(|w, _| {
-        assert_eq!(w.active_editor().model().text().to_string(), "alpha beta alpha gamma");
+        assert_eq!(
+            w.tabs.active().editor.model().text().to_string(),
+            "alpha beta alpha gamma"
+        );
     });
     h.click_hit(HitId::Find(FindHit::Next));
     h.press_key("enter");
     h.read(|w, _| {
         assert_eq!(
-            w.active_editor().model().text().to_string(),
+            w.tabs.active().editor.model().text().to_string(),
             "alpha beta OMEGA gamma",
             "Enter in replacement field must replace current match"
         );
@@ -156,7 +159,7 @@ fn find_replace_bar_clear_button_and_key_contexts() {
     h.click_hit(HitId::Find(FindHit::ReplaceAll));
     h.read(|w, _| {
         assert_eq!(
-            w.active_editor().model().text().to_string(),
+            w.tabs.active().editor.model().text().to_string(),
             "OMEGA beta OMEGA gamma",
             "Replace all must replace remaining matches"
         );
@@ -168,7 +171,7 @@ fn find_replace_bar_clear_button_and_key_contexts() {
     h.read(|w, _| {
         let chain = w.ui.frame().hit_chain(beside_find);
         assert!(
-            chain.contains(&HitId::Editor(w.active_slot())),
+            chain.contains(&HitId::Editor(w.tabs.active_slot())),
             "invisible Find bar row wrapper must not occlude editor hits beside FindCard: {chain:?}"
         );
         assert_eq!(
@@ -180,7 +183,7 @@ fn find_replace_bar_clear_button_and_key_contexts() {
     h.type_text("!");
     h.read(|w, _| {
         assert_eq!(
-            w.active_editor().model().text().to_string(),
+            w.tabs.active().editor.model().text().to_string(),
             "OMEGA beta OMEGA gamma!",
             "clicking main editor beside Find card must focus main editor"
         );
@@ -207,7 +210,7 @@ fn go_to_dialog_navigation_and_out_of_range_flow() {
     h.press_key("enter");
     h.read(|w, _| {
         assert!(!w.dialogs.is_open());
-        let m = w.active_editor().model();
+        let m = w.tabs.active().editor.model();
         assert_eq!(m.text().offset_to_point(m.cursor()).row, 1);
     });
 
@@ -239,9 +242,9 @@ fn theme_zoom_editing_undo_scrollbar_and_caption_hit_tests() {
     h.read(|_, app| assert_eq!(app.shell.palette.dark, initial_dark));
 
     h.press_key("ctrl-=");
-    h.read(|w, _| assert_eq!((w.zoom() * 100.).round() as u32, 110));
+    h.read(|w, _| assert_eq!((w.tabs.active().zoom * 100.).round() as u32, 110));
     h.press_key("ctrl--");
-    h.read(|w, _| assert_eq!((w.zoom() * 100.).round() as u32, 100));
+    h.read(|w, _| assert_eq!((w.tabs.active().zoom * 100.).round() as u32, 100));
     let editor_center = h.hit_rect(HitId::EditorArea).unwrap().center();
     h.scroll_wheel(
         editor_center,
@@ -251,25 +254,30 @@ fn theme_zoom_editing_undo_scrollbar_and_caption_hit_tests() {
             ..Default::default()
         },
     );
-    h.read(|w, _| assert_eq!((w.zoom() * 100.).round() as u32, 110));
+    h.read(|w, _| assert_eq!((w.tabs.active().zoom * 100.).round() as u32, 110));
     h.press_key("ctrl-0");
-    h.read(|w, _| assert_eq!((w.zoom() * 100.).round() as u32, 100));
+    h.read(|w, _| assert_eq!((w.tabs.active().zoom * 100.).round() as u32, 100));
 
     h.type_text("hello world");
     h.press_key("ctrl-a");
-    h.read(|w, _| assert_eq!(w.active_editor().model().selection().range(), 0..11));
+    h.read(|w, _| assert_eq!(w.tabs.active().editor.model().selection().range(), 0..11));
     h.press_key("backspace");
-    h.read(|w, _| assert_eq!(w.active_editor().model().text().len(), 0));
+    h.read(|w, _| assert_eq!(w.tabs.active().editor.model().text().len(), 0));
     h.press_key("ctrl-z");
-    h.read(|w, _| assert_eq!(w.active_editor().model().text().to_string(), "hello world"));
+    h.read(|w, _| {
+        assert_eq!(
+            w.tabs.active().editor.model().text().to_string(),
+            "hello world"
+        )
+    });
     h.press_key("ctrl-y");
-    h.read(|w, _| assert_eq!(w.active_editor().model().text().len(), 0));
+    h.read(|w, _| assert_eq!(w.tabs.active().editor.model().text().len(), 0));
 
     let big: String = (0..120).map(|i| format!("Line {i}\n")).collect();
     h.type_text(&big);
     h.press_key("ctrl-home");
     h.scroll_wheel(editor_center, -6.0, Modifiers::default());
-    let after_wheel_y = h.read(|w, _| w.active_editor().scroll_offset().y);
+    let after_wheel_y = h.read(|w, _| w.tabs.active().editor.scroll_offset().y);
     assert!(
         after_wheel_y < 0.0,
         "scrolling down with mouse wheel must scroll editor viewport"
@@ -278,7 +286,7 @@ fn theme_zoom_editing_undo_scrollbar_and_caption_hit_tests() {
     let track_pt = point(ed_bounds.right() - 6.0, ed_bounds.bottom() - 40.0);
     h.click_point(track_pt, MouseButton::Left);
     h.read(|w, _| {
-        let ed = w.active_editor();
+        let ed = &w.tabs.active().editor;
         assert!(
             ed.scroll_offset().y < after_wheel_y,
             "clicking vertical scrollbar track must jump scroll offset further down"
@@ -299,7 +307,7 @@ fn theme_zoom_editing_undo_scrollbar_and_caption_hit_tests() {
     h.click_point_count(first_char, MouseButton::Left, 2);
     h.read(|w, _| {
         assert_eq!(
-            w.active_editor().model().selection().range(),
+            w.tabs.active().editor.model().selection().range(),
             0..5,
             "double-click must select word"
         );
@@ -307,7 +315,7 @@ fn theme_zoom_editing_undo_scrollbar_and_caption_hit_tests() {
     h.click_point_count(first_char, MouseButton::Left, 3);
     h.read(|w, _| {
         assert_eq!(
-            w.active_editor().model().selection().range(),
+            w.tabs.active().editor.model().selection().range(),
             0..16,
             "triple-click must select full line"
         );
@@ -322,7 +330,7 @@ fn theme_zoom_editing_undo_scrollbar_and_caption_hit_tests() {
     );
     h.drag_points(drag_start, drag_end);
     h.read(|w, _| {
-        let sel = w.active_editor().model().selection().range();
+        let sel = w.tabs.active().editor.model().selection().range();
         assert!(
             !sel.is_empty(),
             "dragging in editor must create a text selection"
@@ -363,7 +371,7 @@ fn status_bar_min_width_and_no_vertical_char_wrapping() {
         let cached = w
             .min_size
             .expect("min_size must populate on first draw");
-        (w.hwnd(), cached, w.scale_factor())
+        (w.hwnd, cached, w.win.window.scale_factor())
     });
     assert!(
         min_size.width >= 420.0,
@@ -530,9 +538,9 @@ fn window_anim_tracks_prune_unused_tracks_and_word_wrap_updates_tabs() {
 
     h.press_key("ctrl-n");
     h.read(|w, app| {
-        assert_eq!(w.tabs().len(), 2);
+        assert_eq!(w.tabs.len(), 2);
         assert!(app.shell.view.word_wrap);
-        for tab in w.tabs().iter() {
+        for tab in w.tabs.iter() {
             assert!(tab.data.editor.soft_wrap_enabled());
         }
     });
@@ -540,7 +548,7 @@ fn window_anim_tracks_prune_unused_tracks_and_word_wrap_updates_tabs() {
     h.click_menu_command(AppCommand::ToggleWordWrap);
     h.read(|w, app| {
         assert!(!app.shell.view.word_wrap);
-        for tab in w.tabs().iter() {
+        for tab in w.tabs.iter() {
             assert!(!tab.data.editor.soft_wrap_enabled());
         }
     });
@@ -576,7 +584,7 @@ fn keyboard_system_chords_altgr_menu_gate_popup_occlusion_and_fractional_borders
     h.read(|w, _| assert!(w.menus.is_open()));
     h.press_key("ctrl-w");
     h.read(|w, _| {
-        assert_eq!(w.tabs().len(), 2, "Ctrl+W must not fire behind an open menu");
+        assert_eq!(w.tabs.len(), 2, "Ctrl+W must not fire behind an open menu");
     });
     assert!(!h.send(WindowEvent::KeyDown(alt_f4)));
 

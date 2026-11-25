@@ -71,7 +71,7 @@ fn win32_client_clicks_and_capture_loss_via_wnd_proc() {
     let mut h = TestHarness::new();
     let dyn_handler: Rc<RefCell<dyn PlatformHandler>> = h.app.clone();
     Platform::with_test_handler(dyn_handler, || {
-        let (hwnd, scale) = h.read(|w, _| (w.hwnd(), w.scale_factor()));
+        let (hwnd, scale) = h.read(|w, _| (w.hwnd, w.win.window.scale_factor()));
         let pack_client = |pt: crate::geom::Point| -> LPARAM {
             let x = (pt.x * scale).round() as i32;
             let y = (pt.y * scale).round() as i32;
@@ -112,7 +112,7 @@ fn win32_client_clicks_and_capture_loss_via_wnd_proc() {
             let _ = SendMessageW(hwnd.raw(), WM_LBUTTONUP, Some(WPARAM(0)), Some(lp));
         }
         h.read(|w, _| {
-            assert_eq!(w.tabs().len(), 2, "Win32 click on NewTab must open a new tab");
+            assert_eq!(w.tabs.len(), 2, "Win32 click on NewTab must open a new tab");
         });
 
         let initial_dark = h.read(|_, app| app.shell.palette.dark);
@@ -128,7 +128,7 @@ fn win32_client_clicks_and_capture_loss_via_wnd_proc() {
         }
         h.read(|_, app| assert_eq!(app.shell.palette.dark, !initial_dark));
 
-        let second_id = h.read(|w, _| w.tabs()[1].data.id);
+        let second_id = h.read(|w, _| w.tabs[1].data.id);
         let tab_pt = h
             .hit_rect(HitId::Tab(TabHit::Item(second_id)))
             .expect("second tab rect")
@@ -139,7 +139,7 @@ fn win32_client_clicks_and_capture_loss_via_wnd_proc() {
             let _ = SendMessageW(hwnd.raw(), WM_MBUTTONDOWN, Some(WPARAM(0x10)), Some(tab_lp));
             let _ = SendMessageW(hwnd.raw(), WM_MBUTTONUP, Some(WPARAM(0)), Some(tab_lp));
         }
-        h.read(|w, _| assert_eq!(w.tabs().len(), 1, "Win32 middle-click must close tab"));
+        h.read(|w, _| assert_eq!(w.tabs.len(), 1, "Win32 middle-click must close tab"));
 
         let new_tab_pt = h
             .hit_rect(HitId::Tab(TabHit::New))
@@ -154,7 +154,7 @@ fn win32_client_clicks_and_capture_loss_via_wnd_proc() {
         }
         h.read(|w, _| {
             assert_eq!(
-                w.tabs().len(),
+                w.tabs.len(),
                 1,
                 "external WM_CAPTURECHANGED must cancel an in-progress click"
             );

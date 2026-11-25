@@ -48,10 +48,6 @@ pub(crate) struct Cx<'a> {
 }
 
 impl<'a> Cx<'a> {
-    pub(crate) fn ts(&self) -> &'a TextSystem {
-        &self.shell.text_system
-    }
-
     pub(crate) fn emit(&mut self, effect: Effect) {
         self.fx.push(effect);
     }

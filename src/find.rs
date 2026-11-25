@@ -72,6 +72,22 @@ pub(crate) enum FindKey {
     Command(AppCommand),
 }
 
+impl FindHit {
+    /// What clicking the find bar's button runs.
+    pub(crate) fn command(self) -> Option<AppCommand> {
+        Some(match self {
+            Self::Card => return None,
+            Self::ToggleReplace => AppCommand::ToggleReplace,
+            Self::Next => AppCommand::FindNext,
+            Self::Prev => AppCommand::FindPrevious,
+            Self::Options => AppCommand::FindOptions,
+            Self::Close => AppCommand::Cancel,
+            Self::Replace => AppCommand::ReplaceNext,
+            Self::ReplaceAll => AppCommand::ReplaceAll,
+        })
+    }
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub(crate) enum FindOutcome {
     EmptyQuery,

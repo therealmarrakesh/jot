@@ -165,40 +165,89 @@ impl App {
         }
     }
 
+    /// Runs `f` on a window, then the effects it emitted.
     fn with_window<R>(
         &mut self,
         window_id: WindowId,
         f: impl FnOnce(&mut MainWindow, &mut Cx<'_>) -> R,
     ) -> Option<R> {
-        self.with_window_inner(window_id, true, f)
-    }
-
-    fn with_window_quiet<R>(
-        &mut self,
-        window_id: WindowId,
-        f: impl FnOnce(&mut MainWindow, &mut Cx<'_>) -> R,
-    ) -> Option<R> {
-        self.with_window_inner(window_id, false, f)
-    }
-
-    fn with_window_inner<R>(
-        &mut self,
-        window_id: WindowId,
-        mark_dirty: bool,
-        f: impl FnOnce(&mut MainWindow, &mut Cx<'_>) -> R,
-    ) -> Option<R> {
         let win = self.windows.get_mut(window_id)?;
         let mut fx = Vec::new();
-        let out = {
-            let mut cx = self.shell.cx(&mut fx);
-            let r = f(win, &mut cx);
-            if mark_dirty {
-                win.dirty = true;
-            }
-            r
-        };
+        let out = f(win, &mut self.shell.cx(&mut fx));
         self.run_effects(fx);
         Some(out)
+    }
+
+    /// Does the app's part of a window event (tooltips, key tips, tab drags, files) and passes
+    /// the event to the window; whether it was used.
+    fn on_window_event(&mut self, id: WindowId, event: WindowEvent) -> bool {
+        match &event {
+            WindowEvent::Resized { .. } | WindowEvent::Moved => self.keytips.hide_owner(id),
+            WindowEvent::Activated(true) => self.windows.set_active(id),
+            WindowEvent::Activated(false) => {
+                self.keytips.hide_owner(id);
+                self.tooltips.window_deactivated(id);
+            }
+            WindowEvent::MouseMove { pressed_button, .. } => {
+                let left = *pressed_button == Some(MouseButton::Left);
+                self.drive_drag(|drag, windows, ops, shell, closed| {
+                    drag.on_mouse_move(left, windows, ops, shell, closed)
+                });
+            }
+            WindowEvent::MouseLeave => self.tooltips.on_mouse_leave(id),
+            WindowEvent::MouseDown { .. } => self.tooltips.on_mouse_down(id),
+            WindowEvent::MouseUp { button, .. } => {
+                self.tooltips.on_mouse_up();
+                if *button == MouseButton::Left {
+                    self.drive_drag(|drag, windows, _, _, _| drag.on_release(windows));
+                }
+            }
+            WindowEvent::KeyDown(key) => {
+                self.tooltips.on_key_down();
+                // Escape cancels a tab drag, unless a dialog or menu has the keyboard.
+                let window_wants_it = self
+                    .windows
+                    .get(id)
+                    .is_some_and(|w| matches!(w.mode(), InputMode::Dialog | InputMode::Popup));
+                if self.tab_drag.as_ref().is_some_and(TabDrag::is_dragging)
+                    && key.key == Key::Escape
+                    && key.modifiers.none()
+                    && !window_wants_it
+                {
+                    self.cancel_tab_drag();
+                    return true;
+                }
+            }
+            &WindowEvent::SizeMoveChanged(entering) => {
+                self.drive_drag(|drag, windows, ops, shell, closed| {
+                    drag.on_size_move_changed(id, entering, windows, ops, shell, closed)
+                });
+                return false;
+            }
+            WindowEvent::CloseRequested => {
+                self.run_file_ops(|ops, host, io| {
+                    ops.request(FileRequest::CloseWindow { window: id }, host, io);
+                });
+                return false;
+            }
+            _ => {}
+        }
+        if let WindowEvent::FilesDropped(paths) = event {
+            if self.windows.get(id).is_some() {
+                self.open_paths_in_window(id, paths);
+            }
+            return false;
+        }
+        let moved = matches!(event, WindowEvent::MouseMove { .. });
+        let capture_lost = matches!(event, WindowEvent::CaptureLost);
+        let handled = self.with_window(id, |w, cx| w.on_event(event, cx)) == Some(true);
+        if moved && let Some(ix) = self.windows.ix(id) {
+            self.evaluate_tooltip_for(ix);
+        }
+        if capture_lost {
+            self.drive_drag(|drag, windows, _, _, _| drag.on_capture_lost(id, windows));
+        }
+        handled
     }
 
     fn run_effects(&mut self, fx: Vec<Effect>) {
@@ -385,12 +434,12 @@ impl App {
 
     fn paint_window_ix(&mut self, ix: usize, now: Instant) -> bool {
         let needs_vsync = self.windows[ix].render_frame(now, &self.shell);
-        let wid = self.windows[ix].id();
+        let wid = self.windows[ix].id;
         if self.windows[ix].key_tips_active() || self.keytips.is_owner(wid) {
             let (anchor, tips) = self.windows[ix].key_tip_request(&self.shell);
             self.keytips.sync(anchor, tips, &self.shell.gpu);
         }
-        if self.windows[ix].has_pointer() {
+        if self.windows[ix].ui.pointer().is_some() {
             self.evaluate_tooltip_for(ix);
         }
         needs_vsync
@@ -434,140 +483,7 @@ impl PlatformHandler for App {
     fn on_event(&mut self, event: PlatformEvent) -> bool {
         let mut handled = false;
         match event {
-            PlatformEvent::Window(window_id, event) => match event {
-                WindowEvent::Resized {
-                    physical_width,
-                    physical_height,
-                    scale,
-                } => {
-                    self.with_window(window_id, |w, cx| {
-                        w.on_resized(physical_width, physical_height, scale, cx.shell);
-                    });
-                    self.keytips.hide_owner(window_id);
-                }
-                WindowEvent::Moved => {
-                    self.with_window_quiet(window_id, |w, cx| {
-                        w.cancel_menu(cx.shell);
-                    });
-                    self.keytips.hide_owner(window_id);
-                }
-                WindowEvent::Activated(active) => {
-                    if active {
-                        self.windows.set_active(window_id);
-                    } else {
-                        self.keytips.hide_owner(window_id);
-                        self.tooltips.window_deactivated(window_id);
-                    }
-                    self.with_window(window_id, |w, cx| w.on_activated(active, cx.shell));
-                }
-                WindowEvent::PaintRequested => {
-                    if let Some(w) = self.windows.get_mut(window_id) {
-                        w.on_paint_requested();
-                    }
-                }
-                WindowEvent::MouseMove {
-                    position,
-                    pressed_button,
-                } => {
-                    let left = pressed_button == Some(MouseButton::Left);
-                    self.drive_drag(|drag, windows, ops, shell, closed| {
-                        drag.on_mouse_move(left, windows, ops, shell, closed)
-                    });
-                    self.with_window_quiet(window_id, |w, cx| {
-                        w.on_mouse_move(position, pressed_button, cx);
-                    });
-                    if let Some(ix) = self.windows.ix(window_id) {
-                        self.evaluate_tooltip_for(ix);
-                    }
-                }
-                WindowEvent::MouseLeave => {
-                    self.with_window_quiet(window_id, |w, _| w.on_mouse_leave());
-                    self.tooltips.on_mouse_leave(window_id);
-                }
-                WindowEvent::MouseDown {
-                    button,
-                    position,
-                    modifiers,
-                    click_count,
-                } => {
-                    self.tooltips.on_mouse_down(window_id);
-                    self.with_window(window_id, |w, cx| {
-                        w.on_mouse_down(button, position, modifiers, click_count, cx);
-                    });
-                }
-                WindowEvent::MouseUp { button, position } => {
-                    self.tooltips.on_mouse_up();
-                    if button == MouseButton::Left {
-                        self.drive_drag(|drag, windows, _, _, _| drag.on_release(windows));
-                    }
-                    self.with_window(window_id, |w, cx| {
-                        w.on_mouse_up(button, position, cx);
-                    });
-                }
-                WindowEvent::ScrollWheel {
-                    position,
-                    delta_lines,
-                    page_scroll,
-                    modifiers,
-                } => {
-                    self.with_window_quiet(window_id, |w, _| {
-                        w.on_scroll_wheel(position, delta_lines, page_scroll, modifiers);
-                    });
-                }
-                WindowEvent::KeyDown(event) => {
-                    self.tooltips.on_key_down();
-                    if self.tab_drag.as_ref().is_some_and(TabDrag::is_dragging)
-                        && event.key == Key::Escape
-                        && event.modifiers.none()
-                        && !self.windows.get(window_id).is_some_and(|w| {
-                            matches!(w.mode(), InputMode::Dialog | InputMode::Popup)
-                        })
-                    {
-                        self.cancel_tab_drag();
-                        handled = true;
-                    } else if let Some(was_handled) =
-                        self.with_window(window_id, |w, cx| w.on_key_down(event, cx))
-                    {
-                        handled = was_handled;
-                    }
-                }
-                WindowEvent::KeyUp(event) => {
-                    if let Some(was_handled) =
-                        self.with_window_quiet(window_id, |w, cx| w.on_key_up(event, cx))
-                    {
-                        handled = was_handled;
-                    }
-                }
-                WindowEvent::CaptureLost => {
-                    self.with_window_quiet(window_id, |w, _| w.on_capture_lost());
-                    self.drive_drag(|drag, windows, _, _, _| {
-                        drag.on_capture_lost(window_id, windows)
-                    });
-                }
-                WindowEvent::TextInput(text) => {
-                    self.with_window(window_id, |w, cx| w.on_text_input(&text, cx));
-                }
-                WindowEvent::ImeComposition { text, cursor } => {
-                    self.with_window(window_id, |w, cx| {
-                        w.on_ime_composition(&text, cursor, cx);
-                    });
-                }
-                WindowEvent::FilesDropped(paths) => {
-                    if self.windows.get(window_id).is_some() {
-                        self.open_paths_in_window(window_id, paths);
-                    }
-                }
-                WindowEvent::SizeMoveChanged(entering) => {
-                    self.drive_drag(|drag, windows, ops, shell, closed| {
-                        drag.on_size_move_changed(window_id, entering, windows, ops, shell, closed)
-                    });
-                }
-                WindowEvent::CloseRequested => {
-                    self.run_file_ops(|ops, host, io| {
-                        ops.request(FileRequest::CloseWindow { window: window_id }, host, io);
-                    });
-                }
-            },
+            PlatformEvent::Window(id, event) => handled = self.on_window_event(id, event),
             PlatformEvent::SettingsChanged(settings) => {
                 self.shell.apply_settings(settings);
                 self.tooltips.hover_time = settings.mouse_hover_time;
@@ -720,36 +636,36 @@ impl Windows {
     }
 
     pub(crate) fn ix(&self, id: WindowId) -> Option<usize> {
-        self.list.iter().position(|w| w.id() == id)
+        self.list.iter().position(|w| w.id == id)
     }
 
     pub(crate) fn get(&self, id: WindowId) -> Option<&MainWindow> {
-        self.list.iter().find(|w| w.id() == id)
+        self.list.iter().find(|w| w.id == id)
     }
 
     pub(crate) fn get_mut(&mut self, id: WindowId) -> Option<&mut MainWindow> {
-        self.list.iter_mut().find(|w| w.id() == id)
+        self.list.iter_mut().find(|w| w.id == id)
     }
 
     pub(crate) fn hwnd(&self, id: WindowId) -> Option<WindowHandle> {
-        self.get(id).map(MainWindow::hwnd)
+        self.get(id).map(|w| w.hwnd)
     }
 
     pub(crate) fn ids(&self) -> Vec<WindowId> {
-        self.list.iter().map(MainWindow::id).collect()
+        self.list.iter().map(|w| w.id).collect()
     }
 
     pub(crate) fn owner_of(&self, tab: TabId) -> Option<(usize, usize)> {
         self.list
             .iter()
             .enumerate()
-            .find_map(|(wix, w)| w.tabs().index_of(tab).map(|tix| (wix, tix)))
+            .find_map(|(wix, w)| w.tabs.index_of(tab).map(|tix| (wix, tix)))
     }
 
     pub(crate) fn find_by_key(&self, key: &PathKey) -> Option<(WindowId, TabId)> {
         self.list.iter().find_map(|w| {
-            let tix = w.tabs().find_by_key(key)?;
-            Some((w.id(), w.tabs()[tix].data.id))
+            let tix = w.tabs.find_by_key(key)?;
+            Some((w.id, w.tabs[tix].data.id))
         })
     }
 
@@ -758,7 +674,7 @@ impl Windows {
             .and_then(|id| self.ix(id))
             .or_else(|| self.active.and_then(|id| self.ix(id)))
             .or_else(|| (!self.list.is_empty()).then_some(self.list.len() - 1))
-            .map(|ix| self.list[ix].id())
+            .map(|ix| self.list[ix].id)
     }
 
     pub(crate) fn mark_dirty(&mut self, id: WindowId) {
@@ -786,7 +702,7 @@ impl Windows {
     }
 
     pub(crate) fn any_dirty(&self) -> bool {
-        self.list.iter().any(|w| w.tabs().has_dirty())
+        self.list.iter().any(|w| w.tabs.has_dirty())
     }
 
     pub(crate) fn rescue_tab(
@@ -801,7 +717,7 @@ impl Windows {
         {
             win.restore_tab(tab, index, shell);
         } else if let Some(win) = self.list.last_mut() {
-            let ix = win.tabs().len();
+            let ix = win.tabs.len();
             win.restore_tab(tab, ix, shell);
         }
     }
@@ -814,13 +730,13 @@ impl Windows {
             .list
             .iter_mut()
             .filter(|w| w.pending_close)
-            .map(|w| (w.id(), w.drain_cancelled_prompts()))
+            .map(|w| (w.id, w.dialogs.drain_prompt_ids()))
             .collect();
         self.list.retain(|w| !w.pending_close);
         if let Some(active) = self.active
             && self.get(active).is_none()
         {
-            self.active = self.list.last().map(MainWindow::id);
+            self.active = self.list.last().map(|w| w.id);
         }
         closed
     }
@@ -831,7 +747,11 @@ impl Windows {
         target_point: Option<ScreenPoint>,
     ) -> MainWindowConfig {
         let display = target_point
-            .or_else(|| self.active.and_then(|id| self.get(id)).map(|w| w.hwnd().client_origin()))
+            .or_else(|| {
+                self.active
+                    .and_then(|id| self.get(id))
+                    .map(|w| w.hwnd.client_origin())
+            })
             .or_else(|| self.launch.use_cursor_display.then(cursor_screen_pos))
             .map(WindowsDisplay::from_point)
             .or_else(WindowsDisplay::primary);
@@ -930,10 +850,10 @@ impl DocHost for WindowsHost<'_> {
     fn tab_info(&self, tab: TabId) -> Option<TabSnapshot> {
         let (wix, tix) = self.windows.owner_of(tab)?;
         let w = &self.windows[wix];
-        let tabs = w.tabs();
+        let tabs = &w.tabs;
         let data = &tabs[tix].data;
         Some(TabSnapshot {
-            window: w.id(),
+            window: w.id,
             name: tabs.tab_name(tix),
             path: data.path().map(PathBuf::from),
             format: data.format,
@@ -945,14 +865,14 @@ impl DocHost for WindowsHost<'_> {
     fn window_dirty_tabs(&self, window: WindowId) -> Vec<TabId> {
         self.windows
             .get(window)
-            .map(|w| w.tabs().dirty_tabs())
+            .map(|w| w.tabs.dirty_tabs())
             .unwrap_or_default()
     }
 
     fn active_tab_path(&self, window: WindowId) -> Option<PathBuf> {
         self.windows
             .get(window)?
-            .tabs()
+            .tabs
             .active()
             .path()
             .map(PathBuf::from)
@@ -970,10 +890,10 @@ impl DocHost for WindowsHost<'_> {
         let Some(w) = self.windows.get_mut(window) else {
             return;
         };
-        let Some(tix) = w.tabs().index_of(tab) else {
+        let Some(tix) = w.tabs.index_of(tab) else {
             return;
         };
-        let hwnd = w.hwnd();
+        let hwnd = w.hwnd;
         w.activate_tab(tix, self.shell);
         if bring_to_front {
             hwnd.bring_to_front();
@@ -1082,7 +1002,7 @@ impl TabDrag {
     pub(crate) fn is_alive(&self, windows: &Windows) -> bool {
         windows
             .get(self.owner)
-            .is_some_and(|w| w.tabs().index_of(self.tab).is_some())
+            .is_some_and(|w| w.tabs.index_of(self.tab).is_some())
     }
 
     pub(crate) fn on_size_move_changed(
@@ -1120,7 +1040,7 @@ impl TabDrag {
         if !pressed_left {
             return self.on_release(windows);
         }
-        let Some(scale) = windows.get(self.owner).map(|w| w.scale_factor()) else {
+        let Some(scale) = windows.get(self.owner).map(|w| w.win.window.scale_factor()) else {
             return true;
         };
         let pt = cursor_screen_pos();
@@ -1136,15 +1056,12 @@ impl TabDrag {
             Phase::Entering { .. } | Phase::Moving { .. } => return false,
         }
 
-        let (alone, in_owner_strip) = windows
-            .get(self.owner)
-            .map_or((true, false), |w| {
-                (w.tabs().len() == 1, w.strip_hit(pt, DETACH_MAGNETISM))
-            });
+        let (alone, in_owner_strip) = windows.get(self.owner).map_or((true, false), |w| {
+            (w.tabs.len() == 1, w.strip_hit(pt, DETACH_MAGNETISM))
+        });
         if !alone && in_owner_strip {
             if let Some(win) = windows.get_mut(self.owner) {
-                let x = win.screen_to_local(pt).x;
-                win.drag_tab(self.tab, x, self.grab.x, self.start);
+                win.drag_tab(self.tab, pt, self.grab.x, self.start);
             }
         } else if !alone
             && let Some(target_id) = strip_window(windows, file_ops, pt, None)
@@ -1217,7 +1134,7 @@ impl TabDrag {
         closed.extend(windows.sweep_closed());
 
         if let Some(src) = windows.get_mut(self.source) {
-            let src_hwnd = src.hwnd();
+            let src_hwnd = src.hwnd;
             src.restore_tab(data, index, shell);
             src_hwnd.set_foreground();
         } else {
@@ -1323,8 +1240,7 @@ impl TabDrag {
         closed.extend(windows.sweep_closed());
 
         if let Some(target) = windows.get_mut(target_id) {
-            let x = target.screen_to_local(pt).x;
-            target.insert_dragged_tab(data, x, self.grab.x, shell);
+            target.insert_dragged_tab(data, pt, self.grab.x, shell);
         }
         self.owner = target_id;
         self.phase = Phase::Dragging;
@@ -1364,7 +1280,7 @@ impl TabDrag {
             windows.mark_dirty(source_win);
             self.owner = window;
         } else if let Some(win) = windows.get_mut(self.owner) {
-            let hwnd = win.hwnd();
+            let hwnd = win.hwnd;
             if self.owner == self.source && self.source_placement.is_none() {
                 self.source_placement = hwnd.saved_placement();
             }
@@ -1382,7 +1298,7 @@ impl TabDrag {
         let Some(win) = windows.get(self.owner) else {
             return;
         };
-        let hwnd = win.hwnd();
+        let hwnd = win.hwnd;
         place_window(hwnd, pt, win.strip_grab_offset(self.grab));
         hwnd.begin_system_move(pt);
         self.phase = Phase::Entering {
@@ -1417,11 +1333,11 @@ fn strip_window(
     let exclude_hwnd = exclude.and_then(|id| windows.hwnd(id));
     let hwnd = top_visible_window_at(pt, exclude_hwnd)?;
     windows.iter().find_map(|w| {
-        let accepts = w.hwnd() == hwnd
+        let accepts = w.hwnd == hwnd
             && w.accepts_tab_drop()
-            && !file_ops.has_active_workflow_for(w.id())
+            && !file_ops.has_active_workflow_for(w.id)
             && w.strip_hit(pt, DETACH_MAGNETISM);
-        accepts.then_some(w.id())
+        accepts.then_some(w.id)
     })
 }
 

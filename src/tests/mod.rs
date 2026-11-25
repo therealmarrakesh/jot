@@ -260,10 +260,8 @@ fn real_disk_save_routes_completion_to_migrated_tab() {
     let tab_id = {
         let mut app_guard = h.app.borrow_mut();
         let app = &mut *app_guard;
-        let data = crate::tabs::TabData::create(Some(loaded), true, EDITOR_PADDINGS);
-        let id = data.id;
-        app.windows[0].replace_tab(0, data, &app.shell);
-        id
+        app.windows[0].adopt_loaded_file(loaded, &app.shell);
+        app.windows[0].tabs.active_id()
     };
     h.draw();
     h.type_text(" migrated");
@@ -283,7 +281,7 @@ fn real_disk_save_routes_completion_to_migrated_tab() {
         let clean = {
             let app = h.app.borrow();
             let (wix, tix) = app.windows.owner_of(tab_id).expect("tab must exist in win2");
-            !app.windows[wix].tabs()[tix].data.is_dirty()
+            !app.windows[wix].tabs[tix].data.is_dirty()
         };
         if clean {
             break;
@@ -295,7 +293,7 @@ fn real_disk_save_routes_completion_to_migrated_tab() {
         let (wix, tix) = app.windows.owner_of(tab_id).expect("tab must exist in win2");
         assert_eq!(wix, 1);
         assert!(
-            !app.windows[wix].tabs()[tix].data.is_dirty(),
+            !app.windows[wix].tabs[tix].data.is_dirty(),
             "WriteDone must route by TabId to migrated tab"
         );
     }

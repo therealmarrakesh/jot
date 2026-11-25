@@ -15,17 +15,17 @@ fn tab_close_button_new_tab_hover_and_middle_click() {
     h.click_hit(HitId::Tab(TabHit::New));
     h.click_hit(HitId::Tab(TabHit::New));
     let ids: Vec<TabId> = h.read(|w, _| {
-        assert_eq!(w.tabs().len(), 3);
-        assert_eq!(w.tabs().active_index(), 2);
-        w.tabs().iter().map(|t| t.data.id).collect()
+        assert_eq!(w.tabs.len(), 3);
+        assert_eq!(w.tabs.active_index(), 2);
+        w.tabs.iter().map(|t| t.data.id).collect()
     });
 
     h.click_hit(HitId::Tab(TabHit::Item(ids[0])));
-    h.read(|w, _| assert_eq!(w.tabs().active_index(), 0));
+    h.read(|w, _| assert_eq!(w.tabs.active_index(), 0));
     h.click_hit(HitId::Tab(TabHit::Close(ids[0])));
     h.read(|w, app| {
-        assert_eq!(w.tabs().len(), 2, "clicking active tab 'x' must close tab");
-        assert!(w.tabs().index_of(ids[0]).is_none());
+        assert_eq!(w.tabs.len(), 2, "clicking active tab 'x' must close tab");
+        assert!(w.tabs.index_of(ids[0]).is_none());
         assert!(
             !app.is_tab_drag_active(),
             "tab close button must not start parent tab drag"
@@ -40,23 +40,23 @@ fn tab_close_button_new_tab_hover_and_middle_click() {
     h.click_hit(HitId::Tab(TabHit::Close(ids[2])));
     h.read(|w, _| {
         assert_eq!(
-            w.tabs().len(),
+            w.tabs.len(),
             1,
             "clicking hovered inactive tab 'x' must close tab"
         );
-        assert_eq!(w.tabs()[0].data.id, ids[1]);
+        assert_eq!(w.tabs[0].data.id, ids[1]);
     });
 
     h.click_hit(HitId::Tab(TabHit::New));
     let second_id = h.read(|w, _| {
-        assert_eq!(w.tabs().len(), 2);
-        w.tabs()[1].data.id
+        assert_eq!(w.tabs.len(), 2);
+        w.tabs[1].data.id
     });
     h.middle_click_hit(HitId::Tab(TabHit::Item(second_id)));
-    h.read(|w, _| assert_eq!(w.tabs().len(), 1, "middle-clicking tab must close it"));
+    h.read(|w, _| assert_eq!(w.tabs.len(), 1, "middle-clicking tab must close it"));
 
     h.type_text("unsaved text");
-    let last_id = h.read(|w, _| w.tabs()[0].data.id);
+    let last_id = h.read(|w, _| w.tabs[0].data.id);
     h.hover_hit(HitId::Tab(TabHit::Item(last_id)));
     h.click_hit(HitId::Tab(TabHit::Close(last_id)));
     h.read(|w, _| {
@@ -72,7 +72,7 @@ fn tab_close_button_new_tab_hover_and_middle_click() {
     );
 
     let mut h2 = TestHarness::new();
-    let sole_id = h2.read(|w, _| w.tabs()[0].data.id);
+    let sole_id = h2.read(|w, _| w.tabs[0].data.id);
     h2.click_hit(HitId::Tab(TabHit::Close(sole_id)));
     assert!(
         !h2.window_open(),
@@ -89,14 +89,17 @@ fn dirty_window_close_file_drop_and_multi_window() {
     h.send(WindowEvent::FilesDropped(vec![tmp.clone()]));
     for _ in 0..200 {
         h.draw();
-        if h.read(|w, _| w.active_editor().model().text() == "dropped content 123") {
+        if h.read(|w, _| w.tabs.active().editor.model().text() == "dropped content 123") {
             break;
         }
         std::thread::sleep(Duration::from_millis(10));
     }
     h.read(|w, _| {
-        assert_eq!(w.active_editor().model().text().to_string(), "dropped content 123");
-        assert!(w.tabs()[0].data.doc_path.is_some());
+        assert_eq!(
+            w.tabs.active().editor.model().text().to_string(),
+            "dropped content 123"
+        );
+        assert!(w.tabs[0].data.doc_path.is_some());
     });
     let _ = std::fs::remove_file(&tmp);
 
@@ -142,15 +145,15 @@ fn tab_drag_pop_out_and_reattach_does_not_panic() {
     let dyn_handler: Rc<RefCell<dyn PlatformHandler>> = h.app.clone();
     Platform::with_test_handler(dyn_handler, || {
         h.press_key("ctrl-n");
-        h.read(|w, _| assert_eq!(w.tabs().len(), 2));
+        h.read(|w, _| assert_eq!(w.tabs.len(), 2));
 
         let (hwnd1, scale, tab_rect, tab_id) = h.read(|w, _| {
-            let id = w.tabs()[1].data.id;
+            let id = w.tabs[1].data.id;
             let rect = w
                 .ui.frame()
                 .rect_of(HitId::Tab(TabHit::Item(id)))
                 .expect("tab 1 rect");
-            (w.hwnd(), w.scale_factor(), rect, id)
+            (w.hwnd, w.win.window.scale_factor(), rect, id)
         });
 
         let cx = (tab_rect.center().x * scale).round() as i32;
@@ -179,9 +182,9 @@ fn tab_drag_pop_out_and_reattach_does_not_panic() {
             }
             app.drive_frames();
             assert_eq!(app.windows.len(), 2, "popping out tab must create 2nd window");
-            assert_eq!(app.windows[0].tabs().len(), 1);
-            assert_eq!(app.windows[1].tabs().len(), 1);
-            app.windows[1].hwnd()
+            assert_eq!(app.windows[0].tabs.len(), 1);
+            assert_eq!(app.windows[1].tabs.len(), 1);
+            app.windows[1].hwnd
         };
 
         unsafe {
@@ -201,7 +204,7 @@ fn tab_drag_pop_out_and_reattach_does_not_panic() {
                 1,
                 "canceling detach must return tab to source"
             );
-            assert_eq!(app.windows[0].tabs().len(), 2);
+            assert_eq!(app.windows[0].tabs.len(), 2);
         }
 
         h.close_all();

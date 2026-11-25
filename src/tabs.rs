@@ -138,7 +138,6 @@ impl TabSet {
         EditorSlot::Tab(self.active_id())
     }
 
-    #[cfg(test)]
     pub(crate) fn iter(&self) -> std::slice::Iter<'_, Tab> {
         self.tabs.iter()
     }
