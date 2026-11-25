@@ -884,18 +884,17 @@ impl Menus {
     }
 
     /// The pointer moved onto `top`: rows under it take focus, submenus open (or close) after a
-    /// delay, and a different bar menu's title opens it.
+    /// delay, and a different bar menu's title opens it. A dirty outcome means the menu followed
+    /// the pointer.
     pub(crate) fn on_hover_change(
         &mut self,
         top: Option<HitId>,
         state: impl FnOnce() -> MenuState,
-        ui: &mut AppUi,
         show_delay: Duration,
     ) -> MenuOutcome {
         if let Some(HitId::Menu(MenuHit::Trigger(kind))) = top
             && self.open_kind().is_some_and(|open| open != kind)
         {
-            ui.last_input_was_keyboard = false;
             return self.open_bar_menu(kind, state(), false, false);
         }
         let Mode::Open { menu, .. } = &mut self.mode else {
@@ -928,7 +927,6 @@ impl Menus {
             menu.focus = Some(spot);
         }
         self.hovered = hovered;
-        ui.last_input_was_keyboard = false;
         self.submenu_at = pending.map(|target| (Instant::now() + show_delay, target));
         MenuOutcome::default().dirty()
     }
@@ -1737,7 +1735,6 @@ mod tests {
 
     #[test]
     fn alt_access_keys_submenu_hover_and_system_chords() {
-        let mut ui = AppUi::default();
         let mut bar = Menus::default();
         let ed_focus = Focus::Editor(EditorSlot::Tab(TabId::next()));
         let state = MenuState {
@@ -1766,7 +1763,7 @@ mod tests {
         // Hovering the Zoom row arms its submenu, which opens when due; Right enters it, Enter runs
         // Zoom in.
         let zoom = row_hit(&bar, 0, 0, 0);
-        let _ = bar.on_hover_change(zoom, || state, &mut ui, SHOW_DELAY);
+        let _ = bar.on_hover_change(zoom, || state, SHOW_DELAY);
         let (due, target) = bar
             .submenu_at
             .expect("hovering a submenu row arms its delay");
@@ -1791,21 +1788,18 @@ mod tests {
 
     #[test]
     fn context_menu_buttons_take_focus_and_the_flyout_returns_focus_to_its_field() {
-        let mut ui = AppUi::default();
         let mut bar = Menus::default();
         let state = MenuState {
             clipboard_has_text: true,
             ..Default::default()
         };
 
-        ui.last_input_was_keyboard = true;
         bar.open_context_menu(point(10., 10.), state);
         assert!(bar.is_open());
         // Hovering a button ends keyboard focus display. Cut and Copy are disabled, so Paste is
         // the first enabled button and Enter runs it.
         let paste = row_hit(&bar, 0, 0, 2);
-        let _ = bar.on_hover_change(paste, || state, &mut ui, SHOW_DELAY);
-        assert!(!ui.last_input_was_keyboard);
+        assert!(bar.on_hover_change(paste, || state, SHOW_DELAY).dirty);
         let run = bar.on_key_down(key(Key::Enter), Focus::MenuBar, state);
         assert_eq!(run.command, Some(EditCommand::Paste.into()));
         assert_eq!(run.focus, FocusRequest::RestoreEditor);

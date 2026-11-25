@@ -302,10 +302,10 @@ impl MainWindow {
         let mode = self.mode();
         if mode != InputMode::Dialog {
             let (tabs, shell) = (&self.tabs, cx.shell);
-            let delay = shell.settings.menu_show_delay;
-            let out =
-                self.menus
-                    .on_hover_change(top, || menu_state(tabs, shell), &mut self.ui, delay);
+            let state = || menu_state(tabs, shell);
+            let out = self.menus.on_hover_change(top, state, shell.settings.menu_show_delay);
+            // The menu followed the pointer, so focus no longer shows as from the keyboard.
+            self.ui.last_input_was_keyboard &= !out.dirty;
             self.apply_menu_outcome(out, cx);
         }
         if !self.pointer_in_strip(pos) {
