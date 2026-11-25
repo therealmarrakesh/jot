@@ -4,7 +4,7 @@ use std::time::Duration;
 use crate::editor::{Editor, FieldOptions};
 use crate::files::{Prompt, PromptId};
 use crate::platform::{CursorStyle, Key, KeyEvent};
-use crate::theme::{BODY_LINE, BODY_SIZE, BORDER, FIELD_CARET, OVERLAY_RADIUS, Palette, TEXT_FONT};
+use crate::theme::{BODY_LINE, BODY_SIZE, BORDER, OVERLAY_RADIUS, Palette, TEXT_FONT};
 use crate::types::SharedStr;
 use crate::ui::{
     AnimStatus, AppNode, AppUi, Curve, DialogHit, Easing, EditorSlot, Focus, HitId, TabId,
@@ -117,7 +117,6 @@ pub(crate) struct Dialogs {
 impl Dialogs {
     pub(crate) fn new() -> Self {
         let line = Editor::field(FieldOptions {
-            caret_height: FIELD_CARET,
             validate: Some(|t| t.chars().all(|c| c.is_ascii_digit())),
             ..Default::default()
         });

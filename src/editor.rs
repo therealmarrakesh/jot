@@ -11,7 +11,9 @@ use crate::text::{
 };
 use crate::theme::Palette;
 use crate::types::{SharedStr, take_due};
-use crate::ui::{AnimKey, AppNode, AppUi, Easing, EditorSlot, HitId, Node, box_, custom, row};
+use crate::ui::{
+    AnimKey, AppNode, AppUi, CustomDraw, Easing, EditorSlot, HitId, box_, custom, row,
+};
 
 const RIGHT_MARGIN: f32 = 10.0;
 
@@ -24,7 +26,6 @@ pub(crate) struct DocOptions {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct FieldOptions {
     pub(crate) placeholder: SharedStr,
-    pub(crate) caret_height: f32,
     pub(crate) validate: Option<ValidateFn>,
 }
 
@@ -121,8 +122,6 @@ pub(crate) struct Editor {
     reveal: Option<RevealRequest>,
     input_bounds: Rect,
     frame: Option<Frame>,
-    pub(crate) caret_height: f32,
-    pub(crate) caret_hidden: bool,
     placeholder: SharedStr,
 }
 
@@ -133,7 +132,7 @@ impl Editor {
             validate: None,
         });
         let doc = Some(Box::new(DocumentView::new(opts)));
-        Self::new(model.with_rope(rope), doc, 0.0, SharedStr::default())
+        Self::new(model.with_rope(rope), doc, SharedStr::default())
     }
 
     pub(crate) fn field(opts: FieldOptions) -> Self {
@@ -141,15 +140,10 @@ impl Editor {
             multi_line: false,
             validate: opts.validate,
         });
-        Self::new(model, None, opts.caret_height, opts.placeholder)
+        Self::new(model, None, opts.placeholder)
     }
 
-    fn new(
-        model: TextModel,
-        doc: Option<Box<DocumentView>>,
-        caret_height: f32,
-        placeholder: SharedStr,
-    ) -> Self {
+    fn new(model: TextModel, doc: Option<Box<DocumentView>>, placeholder: SharedStr) -> Self {
         Self {
             model,
             doc,
@@ -161,8 +155,6 @@ impl Editor {
             reveal: None,
             input_bounds: Rect::ZERO,
             frame: None,
-            caret_height,
-            caret_hidden: false,
             placeholder,
         }
     }
@@ -230,16 +222,6 @@ impl Editor {
         self.selecting
     }
 
-    pub(crate) fn scrollbar_drag_axis(&self) -> Option<Axis> {
-        self.doc.as_deref().and_then(|d| d.scrollbar.drag_axis())
-    }
-
-    pub(crate) fn scrollbar_interactive(&self, axis: Axis) -> bool {
-        self.doc
-            .as_deref()
-            .is_some_and(|d| d.scrollbar.is_interactive(axis))
-    }
-
     pub(crate) fn set_soft_wrap(&mut self, wrap: bool, ts: &TextSystem) {
         let Some(doc) = &mut self.doc else {
             return;
@@ -297,18 +279,16 @@ impl Editor {
         self.reset_pointer_selection_state();
     }
 
-    pub(crate) fn view<H, C>(&self, hit: H, editor_draw: C, line_height: f32) -> Node<H, C> {
-        self.view_with_scrollbars(hit, editor_draw, line_height, Vec::new())
-    }
-
-    pub(crate) fn view_with_scrollbars<H, C>(
+    /// The editor's node: a field's single row, or a document's padded text with its
+    /// `scrollbars` over it.
+    pub(crate) fn view(
         &self,
-        hit: H,
-        editor_draw: C,
+        slot: EditorSlot,
         line_height: f32,
-        scrollbars: Vec<Node<H, C>>,
-    ) -> Node<H, C> {
-        let cursor = crate::platform::CursorStyle::IBeam;
+        scrollbars: Vec<AppNode>,
+    ) -> AppNode {
+        let (hit, editor_draw) = (HitId::Editor(slot), CustomDraw::Editor(slot));
+        let cursor = CursorStyle::IBeam;
         if let Some(doc) = &self.doc {
             let text_leaf = custom(editor_draw)
                 .w_full()
@@ -337,7 +317,7 @@ impl Editor {
 }
 
 #[derive(Default)]
-pub(crate) struct BlinkState {
+struct BlinkState {
     active: bool,
     visible: bool,
     paused: bool,
@@ -348,11 +328,11 @@ pub(crate) struct BlinkState {
 }
 
 impl BlinkState {
-    pub(crate) fn visible(&self) -> bool {
+    fn visible(&self) -> bool {
         self.paused || self.visible
     }
 
-    pub(crate) fn stop(&mut self) {
+    fn stop(&mut self) {
         self.active = false;
         self.paused = false;
         self.visible = false;
@@ -360,7 +340,7 @@ impl BlinkState {
         self.next = None;
     }
 
-    pub(crate) fn start(&mut self, timing: (Option<Duration>, Option<Duration>)) {
+    fn start(&mut self, timing: (Option<Duration>, Option<Duration>)) {
         let now = Instant::now();
         self.timing = timing;
         self.active = true;
@@ -371,7 +351,7 @@ impl BlinkState {
     }
 
     /// Holds the caret visible for an interval (after typing or moving), then blinks again.
-    pub(crate) fn pause(&mut self) {
+    fn pause(&mut self) {
         if !self.active && !self.visible {
             return;
         }
@@ -412,17 +392,17 @@ impl BlinkState {
 }
 
 #[derive(Default)]
-pub(crate) struct AutoScroll {
+struct AutoScroll {
     delta: Option<f32>,
     next: Option<Instant>,
-    pub(crate) last_drag_pos: Option<Point>,
+    last_drag_pos: Option<Point>,
 }
 
 /// How often a drag-selection past the editor's edge scrolls.
 const AUTO_SCROLL_INTERVAL: Duration = Duration::from_millis(16);
 
 impl AutoScroll {
-    pub(crate) fn compute_delta(y: f32, bounds: Rect) -> Option<f32> {
+    fn compute_delta(y: f32, bounds: Rect) -> Option<f32> {
         const MIN_SPEED: f32 = 12.0;
         const MAX_SPEED: f32 = 64.0;
         const INNER_ZONE: f32 = 16.0;
@@ -442,13 +422,13 @@ impl AutoScroll {
         }
     }
 
-    pub(crate) fn stop(&mut self) {
+    fn stop(&mut self) {
         self.delta = None;
         self.next = None;
         self.last_drag_pos = None;
     }
 
-    pub(crate) fn update(&mut self, delta: Option<f32>) {
+    fn update(&mut self, delta: Option<f32>) {
         let was_active = self.delta.is_some();
         self.delta = delta;
         if delta.is_none() {
@@ -1026,17 +1006,16 @@ impl Editor {
             point(input_bounds.origin.x + self.scroll.x, input_bounds.origin.y),
             input_bounds.size,
         );
-        let caret_rect = self.compute_caret_rect(
-            content_bounds.origin,
-            head_pt,
+        let caret_rect = caret_rect(
+            content_bounds.origin + head_pt,
             layout.line_height,
+            params.style.caret_height,
             params.scale,
             params.caret_width_px,
         );
         let show_caret = params.focused
             && params.window_active
             && self.blink.visible()
-            && !self.caret_hidden
             && (self.model.selection().is_empty() || self.model.composition().is_some());
         let marked_range = (!is_empty_field)
             .then(|| self.model.composition().map(|c| c.start..c.end))
@@ -1218,29 +1197,13 @@ impl Editor {
         shaped_windowed && (self.scroll.x - prev_scroll_x).abs() > 1.0
     }
 
-    fn compute_caret_rect(
-        &self,
-        origin: Point,
-        head_pt: Point,
-        line_height: f32,
-        scale: f32,
-        caret_width_px: u32,
-    ) -> Rect {
-        let caret_h = if self.caret_height > 0.0 {
-            self.caret_height
-        } else {
-            0.85 * line_height
-        };
-        let caret_origin = snap_point(
-            point(
-                origin.x + head_pt.x,
-                origin.y + head_pt.y + (line_height - caret_h) * 0.5,
-            ),
-            scale,
-        );
-        let caret_w = (caret_width_px.max(1) as f32 / scale).max(1.0 / scale);
-        Rect::new(caret_origin, size(caret_w, caret_h))
-    }
+}
+
+/// The caret at `at` (the top of its line), `height` tall and centred on the line.
+fn caret_rect(at: Point, line_height: f32, height: f32, scale: f32, width_px: u32) -> Rect {
+    let origin = snap_point(point(at.x, at.y + (line_height - height) * 0.5), scale);
+    let width = (width_px.max(1) as f32 / scale).max(1.0 / scale);
+    Rect::new(origin, size(width, height))
 }
 
 const BOTTOM_MARGIN_ROWS: usize = 3;
@@ -1367,47 +1330,59 @@ impl Editor {
         true
     }
 
-    pub(crate) fn on_scrollbar_mouse_down(
-        &mut self,
-        axis: Axis,
-        hit_thumb: bool,
-        position: Point,
-        track_rect: Rect,
-    ) -> bool {
-        let offset = self.scroll_offset();
-        let next = self
-            .doc
-            .as_deref_mut()
-            .and_then(|d| d.scrollbar.on_mouse_down(axis, hit_thumb, position, track_rect, offset));
-        self.apply_scrollbar_scroll(next)
+    /// Where the scrollbar's track starts along `axis`: it's laid out over the padding beside
+    /// the text.
+    fn track_origin(&self, doc: &DocumentView, axis: Axis) -> f32 {
+        match axis {
+            Axis::Vertical => self.input_bounds.top() - doc.paddings.top,
+            Axis::Horizontal => self.input_bounds.left(),
+        }
     }
 
-    pub(crate) fn on_scrollbar_mouse_move(
-        &mut self,
-        position: Point,
-        dragging_left: bool,
-        track_rect: Option<Rect>,
-    ) -> Option<bool> {
+    /// A press on the scrollbar's thumb (starting a drag) or track (paging); whether the
+    /// scrollbar took it, which it doesn't while faded out.
+    pub(crate) fn press_scrollbar(&mut self, axis: Axis, thumb: bool, pos: Point) -> bool {
         let scroll = self.scroll_offset();
-        let doc = self.doc.as_deref_mut()?;
-        let (next, notify) =
-            doc.scrollbar
-                .on_mouse_move(position, dragging_left, track_rect, scroll)?;
+        let Some(doc) = self.doc.as_deref() else {
+            return false;
+        };
+        if !doc.scrollbar.is_interactive(axis) {
+            return false;
+        }
+        let origin = self.track_origin(doc, axis);
+        let doc = self.doc.as_deref_mut().expect("document view");
+        let next = doc
+            .scrollbar
+            .on_mouse_down(axis, thumb, pos, origin, scroll);
+        self.apply_scrollbar_scroll(next);
+        true
+    }
+
+    /// While the thumb is dragged, follows the pointer: whether to repaint now (`None` when no
+    /// drag is going on).
+    pub(crate) fn drag_scrollbar(&mut self, pos: Point, pressed: bool) -> Option<bool> {
+        let scroll = self.scroll_offset();
+        let doc = self.doc.as_deref()?;
+        let origin = self.track_origin(doc, doc.scrollbar.drag_axis()?);
+        let doc = self.doc.as_deref_mut().expect("document view");
+        let (next, notify) = doc.scrollbar.on_mouse_move(pos, pressed, origin, scroll)?;
         self.apply_scrollbar_scroll(next);
         Some(notify)
     }
 
-    pub(crate) fn on_scrollbar_mouse_up(
-        &mut self,
-        position: Point,
-        track_rect: Option<Rect>,
-    ) -> bool {
+    /// Ends a thumb drag at `pos`.
+    pub(crate) fn release_scrollbar(&mut self, pos: Point) {
         let scroll = self.scroll_offset();
-        let next = self
-            .doc
-            .as_deref_mut()
-            .and_then(|d| d.scrollbar.on_mouse_up(position, track_rect, scroll));
-        self.apply_scrollbar_scroll(next)
+        let Some(doc) = self.doc.as_deref() else {
+            return;
+        };
+        let Some(axis) = doc.scrollbar.drag_axis() else {
+            return;
+        };
+        let origin = self.track_origin(doc, axis);
+        let doc = self.doc.as_deref_mut().expect("document view");
+        let next = doc.scrollbar.on_mouse_up(pos, origin, scroll);
+        self.apply_scrollbar_scroll(next);
     }
 
     pub(crate) fn render_scrollbars(
@@ -1435,16 +1410,11 @@ impl Editor {
         delta_lines: Point,
         page_scroll: bool,
         modifiers: Modifiers,
-        default_line_height: f32,
     ) -> bool {
-        if modifiers.ctrl {
+        let Some(doc) = self.doc.as_deref().filter(|_| !modifiers.ctrl) else {
             return false;
-        }
-        let lh = self
-            .frame
-            .as_ref()
-            .map_or(default_line_height, |f| f.layout.line_height)
-            .max(1.0);
+        };
+        let lh = doc.last_line_height.max(1.0);
         let vp = self.input_bounds.size;
         let dx = if delta_lines.x != 0.0 {
             let space_w = self
@@ -1517,6 +1487,7 @@ pub(crate) struct EditorPaintStyle {
     pub(crate) text: TextStyle,
     pub(crate) line_height: f32,
     pub(crate) color: Rgba,
+    pub(crate) caret_height: f32,
 }
 
 #[derive(Copy, Clone)]
@@ -1594,15 +1565,15 @@ fn clamp_radius(radius: f32, width: f32, height: f32) -> f32 {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct TrackMetrics {
+struct TrackMetrics {
     margin: f32,
-    pub(crate) thumb_len: f32,
+    thumb_len: f32,
     travel: f32,
     max_scroll: f32,
 }
 
 impl TrackMetrics {
-    pub(crate) fn compute(viewport_span: f32, content_span: f32, corner_reserve: f32) -> Self {
+    fn compute(viewport_span: f32, content_span: f32, corner_reserve: f32) -> Self {
         let track_span = (viewport_span - corner_reserve).max(0.);
         let raw_thumb = (viewport_span / content_span * viewport_span)
             .max(MIN_THUMB_LENGTH)
@@ -1616,12 +1587,12 @@ impl TrackMetrics {
         }
     }
 
-    pub(crate) fn thumb_local(self, scroll_offset: f32) -> f32 {
+    fn thumb_local(self, scroll_offset: f32) -> f32 {
         let ratio = (-scroll_offset / self.max_scroll).clamp(0., 1.);
         self.margin + ratio * self.travel
     }
 
-    pub(crate) fn apply_drag(
+    fn apply_drag(
         self,
         axis: Axis,
         track_origin: f32,
@@ -1640,12 +1611,12 @@ impl TrackMetrics {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct ScrollbarViewport {
-    pub(crate) size: Size,
-    pub(crate) content_size: Size,
-    pub(crate) scroll_offset: Point,
-    pub(crate) horizontal_left: f32,
-    pub(crate) horizontal: bool,
+struct ScrollbarViewport {
+    size: Size,
+    content_size: Size,
+    scroll_offset: Point,
+    horizontal_left: f32,
+    horizontal: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1662,7 +1633,7 @@ struct ActiveAxis {
     interactive: bool,
 }
 
-pub(crate) struct ScrollbarState {
+struct ScrollbarState {
     drag: Option<Drag>,
     last_offset: Point,
     last_activity: Option<Instant>,
@@ -1694,11 +1665,11 @@ impl ScrollbarState {
         }
     }
 
-    pub(crate) fn drag_axis(&self) -> Option<Axis> {
+    fn drag_axis(&self) -> Option<Axis> {
         self.drag.map(|d| d.axis)
     }
 
-    pub(crate) fn is_interactive(&self, axis: Axis) -> bool {
+    fn is_interactive(&self, axis: Axis) -> bool {
         self.axes[axis_ix(axis)].is_some_and(|a| a.interactive)
     }
 
@@ -1715,7 +1686,7 @@ impl ScrollbarState {
         self.idle_at.into_iter().chain(self.drag_at).min()
     }
 
-    pub(crate) fn on_wheel(&mut self, offset: Point, now: Instant) -> bool {
+    fn on_wheel(&mut self, offset: Point, now: Instant) -> bool {
         if offset == self.last_offset {
             return false;
         }
@@ -1725,7 +1696,7 @@ impl ScrollbarState {
         true
     }
 
-    pub(crate) fn render(
+    fn render(
         &mut self,
         slot: EditorSlot,
         vp: ScrollbarViewport,
@@ -1901,19 +1872,18 @@ impl ScrollbarState {
         nodes
     }
 
-    pub(crate) fn on_mouse_down(
+    fn on_mouse_down(
         &mut self,
         axis: Axis,
         hit_thumb: bool,
         position: Point,
-        track_rect: Rect,
+        track_origin: f32,
         current_offset: Point,
     ) -> Option<Point> {
         let active = self.axes[axis_ix(axis)]?;
         if !active.interactive {
             return None;
         }
-        let track_origin = axis_val(track_rect.origin, axis);
         let pointer = axis_val(position, axis);
         let thumb_origin = track_origin + active.thumb_local;
         if hit_thumb {
@@ -1934,16 +1904,15 @@ impl ScrollbarState {
         }
     }
 
-    pub(crate) fn on_mouse_move(
+    fn on_mouse_move(
         &mut self,
         position: Point,
         dragging_primary: bool,
-        track_rect: Option<Rect>,
+        track_origin: f32,
         current_offset: Point,
     ) -> Option<(Option<Point>, bool)> {
         let drag = self.drag.filter(|_| dragging_primary)?;
         let active = self.axes[axis_ix(drag.axis)]?;
-        let track_origin = axis_val(track_rect?.origin, drag.axis);
         let now = Instant::now();
         let next = active
             .metrics
@@ -1963,22 +1932,23 @@ impl ScrollbarState {
         Some((moved.then_some(next), false))
     }
 
-    pub(crate) fn on_mouse_up(
+    fn on_mouse_up(
         &mut self,
         position: Point,
-        track_rect: Option<Rect>,
+        track_origin: f32,
         current_offset: Point,
     ) -> Option<Point> {
         let drag = self.drag.take()?;
         self.drag_at = None;
         self.last_activity = Some(Instant::now());
         let active = self.axes[axis_ix(drag.axis)]?;
-        let track_origin = axis_val(track_rect?.origin, drag.axis);
-        Some(
-            active
-                .metrics
-                .apply_drag(drag.axis, track_origin, position, drag.grab, current_offset),
-        )
+        Some(active.metrics.apply_drag(
+            drag.axis,
+            track_origin,
+            position,
+            drag.grab,
+            current_offset,
+        ))
     }
 }
 
@@ -2000,6 +1970,7 @@ mod tests {
             text: TextStyle::regular("Arial", 14.),
             line_height: 20.,
             color: palette.text_primary,
+            caret_height: 17.,
         };
         let params = EditorPaintParams {
             style: &style,
@@ -2032,7 +2003,7 @@ mod tests {
             let caret = ed.caret_bounds().unwrap();
             let before = ed.scroll_offset();
             let wheel = if soft_wrap { point(0., 1.) } else { point(-1., 0.) };
-            ed.on_scroll_wheel(wheel, false, Modifiers::default(), 20.);
+            ed.on_scroll_wheel(wheel, false, Modifiers::default());
             let moved = ed.scroll_offset() - before;
             assert!(moved != Point::ZERO, "wheel {wheel:?} didn't scroll");
             assert_eq!(ed.hit_test_point(caret.center() + moved).0, 1700);

@@ -8,7 +8,7 @@ use crate::editor::{Editor, FieldOptions};
 use crate::geom::{Point, Rect, Size, point, size};
 use crate::gfx::TextSystem;
 use crate::platform::{CursorStyle, Key, KeyEvent};
-use crate::theme::{BODY_SIZE, BORDER, FIELD_CARET, OVERLAY_RADIUS, Palette, TEXT_FONT};
+use crate::theme::{BODY_SIZE, BORDER, OVERLAY_RADIUS, Palette, TEXT_FONT};
 use crate::types::{SharedStr, take_due};
 use crate::ui::{
     Anchor, AnimStatus, AppNode, AppUi, Curve, Easing, EditorSlot, FindHit, Focus, HitId,
@@ -115,7 +115,6 @@ impl FindBar {
         let field = |placeholder: &'static str| {
             Editor::field(FieldOptions {
                 placeholder: placeholder.into(),
-                caret_height: FIELD_CARET,
                 validate: None,
             })
         };

@@ -6,7 +6,7 @@ use crate::theme::{
     Palette, TEXT_FONT, theme_shadow,
 };
 use crate::types::SharedStr;
-use crate::ui::{AppNode, AppUi, Brushes, CustomDraw, EditorSlot, HitId, Node, box_, row, text};
+use crate::ui::{AppNode, AppUi, Brushes, EditorSlot, HitId, Node, box_, row, text};
 
 const ACCENT_TOP_EDGE: f32 = 0x14 as f32 / 255.;
 const ACCENT_HOVER_OPACITY: f32 = 0.9;
@@ -205,7 +205,7 @@ pub(crate) fn text_field(
     let field_hit = HitId::Editor(slot);
     let clear_hit = HitId::FieldClear(slot);
     let empty = editor.model().text().len() == 0;
-    let editor_node = editor.view(field_hit, CustomDraw::Editor(slot), BODY_LINE + 2.);
+    let editor_node = editor.view(slot, BODY_LINE + 2., Vec::new());
     let (trailing, clear_right) = if search_icon {
         (
             2. * FIELD_GLYPH_WIDTH + FIELD_GLYPH_RIGHT,

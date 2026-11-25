@@ -27,7 +27,7 @@ use crate::tabs::{
     TAB_HEIGHT, TabData, TabSet, WHEEL_SHARE,
 };
 use crate::text::{Rope, RopeExt as _};
-use crate::theme::{BODY_LINE, BODY_SIZE, ICON_FONT, Palette, SMALL_FONT, TEXT_FONT};
+use crate::theme::{BODY_LINE, BODY_SIZE, FIELD_CARET, ICON_FONT, Palette, SMALL_FONT, TEXT_FONT};
 use crate::tooltip::{KeyTip, TooltipProbe};
 use crate::types::APP_NAME;
 use crate::ui::{
@@ -338,13 +338,7 @@ impl MainWindow {
         }
 
         let dragging = pressed == Some(MouseButton::Left);
-        if let Some(track) = self.dragged_track()
-            && let Some(notify) = self
-                .tabs
-                .active_mut()
-                .editor
-                .on_scrollbar_mouse_move(pos, dragging, track)
-        {
+        if let Some(notify) = self.tabs.active_mut().editor.drag_scrollbar(pos, dragging) {
             self.dirty |= notify;
             self.sync_cursor(pos);
             return;
@@ -384,6 +378,20 @@ impl MainWindow {
             return;
         }
         let top = chain.first().copied();
+        if button == MouseButton::Left
+            && let Some(HitId::ScrollThumb(slot, axis) | HitId::ScrollTrack(slot, axis)) = top
+            && slot == self.tabs.active_slot()
+        {
+            let thumb = matches!(top, Some(HitId::ScrollThumb(..)));
+            if self
+                .tabs
+                .active_mut()
+                .editor
+                .press_scrollbar(axis, thumb, pos)
+            {
+                return;
+            }
+        }
         if button == MouseButton::Left {
             match top {
                 Some(
@@ -414,19 +422,6 @@ impl MainWindow {
                     let step = SCROLL_STEP * if hit == TabHit::ScrollLeft { -1. } else { 1. };
                     if self.scroll_tabs(step) {
                         self.tabs.repeat = Some((Instant::now() + SCROLL_REPEAT_DELAY, step));
-                    }
-                    return;
-                }
-                Some(HitId::ScrollThumb(slot, axis) | HitId::ScrollTrack(slot, axis))
-                    if slot == self.tabs.active_slot()
-                        && self.tabs.active().editor.scrollbar_interactive(axis) =>
-                {
-                    let thumb = matches!(top, Some(HitId::ScrollThumb(..)));
-                    if let Some(track) = self.ui.frame().rect_of(HitId::ScrollTrack(slot, axis)) {
-                        self.tabs
-                            .active_mut()
-                            .editor
-                            .on_scrollbar_mouse_down(axis, thumb, pos, track);
                     }
                     return;
                 }
@@ -465,12 +460,7 @@ impl MainWindow {
             }
             return;
         }
-        if let Some(track) = self.dragged_track() {
-            self.tabs
-                .active_mut()
-                .editor
-                .on_scrollbar_mouse_up(pos, track);
-        }
+        self.tabs.active_mut().editor.release_scrollbar(pos);
         if let Some(ed) = self.focused_field() {
             ed.on_mouse_up(button);
         }
@@ -531,9 +521,8 @@ impl MainWindow {
             }
             return;
         }
-        let line_height = self.line_height();
         let ed = &mut self.tabs.active_mut().editor;
-        self.dirty |= ed.on_scroll_wheel(lines, page, modifiers, line_height);
+        self.dirty |= ed.on_scroll_wheel(lines, page, modifiers);
     }
 
     fn on_key_down(&mut self, ev: KeyEvent, cx: &mut Cx<'_>) -> bool {
@@ -1166,13 +1155,6 @@ impl MainWindow {
         self.editor_mut(slot)
     }
 
-    /// While the document's scrollbar is dragged: its track, as laid out.
-    fn dragged_track(&self) -> Option<Option<Rect>> {
-        let axis = self.tabs.active().editor.scrollbar_drag_axis()?;
-        let track = HitId::ScrollTrack(self.tabs.active_slot(), axis);
-        Some(self.ui.frame().rect_of(track))
-    }
-
     /// Keeps the focused caret steady while keys go to it.
     fn pause_blink(&mut self) {
         if let Some(slot) = self.focused_slot()
@@ -1256,11 +1238,13 @@ impl MainWindow {
             text: TextStyle::regular(EDITOR_FONT, EDITOR_FONT_SIZE * self.zoom()),
             line_height: self.line_height(),
             color: p.text_primary,
+            caret_height: (CARET_HEIGHT * self.zoom()).round(),
         };
         let field_style = EditorPaintStyle {
             text: TextStyle::regular(TEXT_FONT, BODY_SIZE),
             line_height: BODY_LINE + 2.,
             color: p.text_primary,
+            caret_height: FIELD_CARET,
         };
         let active_slot = self.tabs.active_slot();
         let editor_focused = self.focus == Focus::Editor(active_slot);
@@ -1277,10 +1261,7 @@ impl MainWindow {
 
         // Prepare the active document before building scrollbars so thumb metrics never lag a frame.
         let estimated_rect = self.estimated_editor_rect(logical, view.status_bar);
-        let caret_height = (CARET_HEIGHT * self.zoom()).round();
         let ed = &mut self.tabs.active_mut().editor;
-        ed.caret_height = caret_height;
-        ed.caret_hidden = caret_hidden;
         let mut editor_needs_redraw = ed.prepare(estimated_rect, active_params, ts);
 
         let title_bar = self.title_bar(&strip, window_active, p);
@@ -1477,12 +1458,7 @@ impl MainWindow {
         let min_height = self.editor_min_height();
         let ed = &mut self.tabs.active_mut().editor;
         let scrollbars = ed.render_scrollbars(slot, p, now, &mut self.ui);
-        let view = ed.view_with_scrollbars(
-            HitId::Editor(slot),
-            CustomDraw::Editor(slot),
-            line_height,
-            scrollbars,
-        );
+        let view = ed.view(slot, line_height, scrollbars);
         box_()
             .hit(HitId::EditorArea)
             .flex_1()
