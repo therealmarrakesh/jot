@@ -529,15 +529,17 @@ impl TabData {
             Some(loaded) => (Some(loaded.doc_path), loaded.text, loaded.format),
             None => (None, Rope::new(), Format::default()),
         };
+        let id = TabId::next();
         let editor = Editor::document(
             text,
             DocOptions {
+                tab: id,
                 soft_wrap: word_wrap,
                 paddings,
             },
         );
         Self {
-            id: TabId::next(),
+            id,
             editor,
             zoom: 1.,
             doc_path,

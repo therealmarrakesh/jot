@@ -1512,7 +1512,6 @@ pub(crate) enum HitId {
     EditorArea,
     Editor(EditorSlot),
     ScrollTrack(EditorSlot, Axis),
-    ScrollThumb(EditorSlot, Axis),
     FieldClear(EditorSlot),
 }
 

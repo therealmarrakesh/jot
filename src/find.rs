@@ -112,8 +112,9 @@ pub(crate) struct FindBar {
 
 impl FindBar {
     pub(crate) fn new() -> Self {
-        let field = |placeholder: &'static str| {
+        let field = |slot, placeholder: &'static str| {
             Editor::field(FieldOptions {
+                slot,
                 placeholder: placeholder.into(),
                 validate: None,
             })
@@ -123,8 +124,8 @@ impl FindBar {
             replace: false,
             match_case: false,
             wrap_around: true,
-            query: field("Find"),
-            replacement: field("Replace"),
+            query: field(EditorSlot::FindQuery, "Find"),
+            replacement: field(EditorSlot::FindReplace, "Replace"),
             notice: None,
             notice_until: None,
             matcher: None,
@@ -810,6 +811,7 @@ mod tests {
         let mut ed = Editor::document(
             Rope::from("foo bar foo baz"),
             DocOptions {
+                tab: crate::ui::TabId::next(),
                 soft_wrap: true,
                 paddings: Edges::ZERO,
             },

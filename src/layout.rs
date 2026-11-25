@@ -8,7 +8,7 @@ fn round_half_toward_zero(value: f32) -> f32 {
     (value.abs() - 0.5).ceil().copysign(value)
 }
 
-fn round_px(logical: f32, scale: f32) -> f32 {
+pub(crate) fn round_px(logical: f32, scale: f32) -> f32 {
     round_half_toward_zero(logical * scale)
 }
 

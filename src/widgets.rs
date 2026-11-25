@@ -205,7 +205,7 @@ pub(crate) fn text_field(
     let field_hit = HitId::Editor(slot);
     let clear_hit = HitId::FieldClear(slot);
     let empty = editor.model().text().len() == 0;
-    let editor_node = editor.view(slot, BODY_LINE + 2., Vec::new());
+    let editor_node = editor.view(BODY_LINE + 2.);
     let (trailing, clear_right) = if search_icon {
         (
             2. * FIELD_GLYPH_WIDTH + FIELD_GLYPH_RIGHT,

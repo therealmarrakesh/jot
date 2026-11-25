@@ -18,8 +18,7 @@ use crate::layout::AvailSize;
 use crate::menu::{FocusRequest, MENU_BAR_HEIGHT, MenuOutcome, MenuState, Menus};
 use crate::platform::{
     KeyEvent, Modifiers, MouseButton, WindowAppearance, WindowControlArea, WindowEvent,
-    WindowHandle, WindowId, clipboard_has_text, format_local_time_date, read_clipboard_text,
-    write_clipboard_text,
+    WindowHandle, WindowId, clipboard_has_text, format_local_time_date,
 };
 use crate::shell::{Cx, Effect, Shell};
 use crate::tabs::{
@@ -291,19 +290,15 @@ impl MainWindow {
 
     fn on_activated(&mut self, active: bool, shell: &Shell) {
         if active {
-            if let Some(slot) = self.focused_slot() {
-                self.start_blink(slot, shell);
+            if let Some(ed) = self.focused_slot().and_then(|slot| self.editor_mut(slot)) {
+                ed.focus(&shell.settings);
             }
             return;
         }
+        self.cancel_menu(shell);
         match self.focused_slot() {
             Some(slot) => self.blur(slot),
             None => self.hwnd.complete_ime_composition(),
-        }
-        self.cancel_menu(shell);
-        self.tabs.for_each_editor_mut(Editor::stop_blink);
-        for ed in self.fields_mut() {
-            ed.stop_blink();
         }
         self.win.window.set_text_caret(None, false);
     }
@@ -337,23 +332,20 @@ impl MainWindow {
             self.dirty |= self.tabs.thaw_if_frozen();
         }
 
+        self.dirty |= self.tabs.active().editor.hover_scrollbar(pos, &self.ui);
         let dragging = pressed == Some(MouseButton::Left);
         if let Some(notify) = self.tabs.active_mut().editor.drag_scrollbar(pos, dragging) {
             self.dirty |= notify;
             self.sync_cursor(pos);
             return;
         }
-        // A field being drag-selected keeps its selection going.
+        // Only the editor with the keyboard drag-selects.
         if self
-            .focused_field()
-            .is_some_and(|ed| ed.on_mouse_move(pos, dragging, true))
+            .focused_slot()
+            .and_then(|slot| self.editor_mut(slot))
+            .is_some_and(|ed| ed.on_mouse_move(pos, dragging))
         {
             self.dirty = true;
-        }
-        let focused = self.focus == Focus::Editor(self.tabs.active_slot());
-        let ed = &mut self.tabs.active_mut().editor;
-        if matches!(mode, InputMode::Normal | InputMode::MenuBar) || ed.is_selecting() {
-            self.dirty |= ed.on_mouse_move(pos, dragging, focused);
         }
         self.sync_cursor(pos);
     }
@@ -379,18 +371,11 @@ impl MainWindow {
         }
         let top = chain.first().copied();
         if button == MouseButton::Left
-            && let Some(HitId::ScrollThumb(slot, axis) | HitId::ScrollTrack(slot, axis)) = top
+            && let Some(HitId::ScrollTrack(slot, axis)) = top
             && slot == self.tabs.active_slot()
+            && self.tabs.active_mut().editor.press_scrollbar(axis, pos)
         {
-            let thumb = matches!(top, Some(HitId::ScrollThumb(..)));
-            if self
-                .tabs
-                .active_mut()
-                .editor
-                .press_scrollbar(axis, thumb, pos)
-            {
-                return;
-            }
+            return;
         }
         if button == MouseButton::Left {
             match top {
@@ -704,34 +689,10 @@ impl MainWindow {
         true
     }
 
-    /// Runs an editing command in the editor at `slot`, with the clipboard for cut, copy and
-    /// paste; whether it applied.
+    /// Runs an editing command in the editor at `slot`; whether it applied.
     fn run_edit_command(&mut self, slot: EditorSlot, cmd: EditCommand, shell: &Shell) -> bool {
-        let ts = &shell.text_system;
-        let Some(ed) = self.editor_mut(slot) else {
-            return false;
-        };
-        match cmd {
-            EditCommand::Copy => {
-                if let Some(text) = ed.selected_string() {
-                    write_clipboard_text(&text);
-                }
-            }
-            EditCommand::Cut => {
-                if let Some(text) = ed.prepare_cut()
-                    && write_clipboard_text(&text)
-                {
-                    ed.delete_selection(ts);
-                }
-            }
-            EditCommand::Paste => {
-                if let Some(raw) = read_clipboard_text().filter(|s| !s.is_empty()) {
-                    ed.paste(&raw, ts);
-                }
-            }
-            other => return ed.handle_command(other, ts),
-        }
-        true
+        self.editor_mut(slot)
+            .is_some_and(|ed| ed.handle_command(cmd, &shell.text_system))
     }
 
     fn has_text(&self) -> bool {
@@ -1117,14 +1078,23 @@ fn slot_editor<'a>(
     }
 }
 
+fn slot_editor_mut<'a>(
+    tabs: &'a mut TabSet,
+    find: &'a mut FindBar,
+    dialogs: &'a mut Dialogs,
+    slot: EditorSlot,
+) -> Option<&'a mut Editor> {
+    match slot {
+        EditorSlot::Tab(id) => tabs.editor_mut(id),
+        EditorSlot::FindQuery => Some(&mut find.query),
+        EditorSlot::FindReplace => Some(&mut find.replacement),
+        EditorSlot::GoToLine => Some(&mut dialogs.line),
+    }
+}
+
 impl MainWindow {
     fn editor_mut(&mut self, slot: EditorSlot) -> Option<&mut Editor> {
-        match slot {
-            EditorSlot::Tab(id) => self.tabs.editor_mut(id),
-            EditorSlot::FindQuery => Some(&mut self.find.query),
-            EditorSlot::FindReplace => Some(&mut self.find.replacement),
-            EditorSlot::GoToLine => Some(&mut self.dialogs.line),
-        }
+        slot_editor_mut(&mut self.tabs, &mut self.find, &mut self.dialogs, slot)
     }
 
     /// The single-line fields: find's query and replacement, and the go-to line.
@@ -1164,17 +1134,11 @@ impl MainWindow {
         }
     }
 
-    fn start_blink(&mut self, slot: EditorSlot, shell: &Shell) {
-        if let Some(ed) = self.editor_mut(slot) {
-            ed.start_blink(&shell.settings);
-        }
-    }
-
     /// Finishes any IME composition and takes the editor at `slot` out of focus.
     fn blur(&mut self, slot: EditorSlot) {
         self.hwnd.complete_ime_composition();
         if let Some(ed) = self.editor_mut(slot) {
-            ed.on_blur();
+            ed.blur();
         }
     }
 
@@ -1186,8 +1150,10 @@ impl MainWindow {
             self.focus = next;
             self.dirty = true;
         }
-        if let Focus::Editor(slot) = next {
-            self.start_blink(slot, shell);
+        if let Focus::Editor(slot) = next
+            && let Some(ed) = self.editor_mut(slot)
+        {
+            ed.focus(&shell.settings);
         }
     }
 
@@ -1234,40 +1200,10 @@ impl MainWindow {
         let strip = self.tabs.sample(strip_column, &mut self.ui);
         self.menus.sample(&mut self.ui);
 
-        let editor_style = EditorPaintStyle {
-            text: TextStyle::regular(EDITOR_FONT, EDITOR_FONT_SIZE * self.zoom()),
-            line_height: self.line_height(),
-            color: p.text_primary,
-            caret_height: (CARET_HEIGHT * self.zoom()).round(),
-        };
-        let field_style = EditorPaintStyle {
-            text: TextStyle::regular(TEXT_FONT, BODY_SIZE),
-            line_height: BODY_LINE + 2.,
-            color: p.text_primary,
-            caret_height: FIELD_CARET,
-        };
-        let active_slot = self.tabs.active_slot();
-        let editor_focused = self.focus == Focus::Editor(active_slot);
-        let caret_hidden = self.key_tips_active();
-        let active_params = EditorPaintParams {
-            style: &editor_style,
-            palette: p,
-            window_active,
-            focused: editor_focused,
-            show_selection: editor_focused || self.menus.is_open() || self.find.is_open(),
-            scale,
-            caret_width_px,
-        };
-
-        // Prepare the active document before building scrollbars so thumb metrics never lag a frame.
-        let estimated_rect = self.estimated_editor_rect(logical, view.status_bar);
-        let ed = &mut self.tabs.active_mut().editor;
-        let mut editor_needs_redraw = ed.prepare(estimated_rect, active_params, ts);
-
         let title_bar = self.title_bar(&strip, window_active, p);
         let menu_bar = self.menu_bar_row(p);
         let find_node = self.find.render(self.focused_slot(), p, &mut self.ui);
-        let editor_node = self.editor_area(find_node, now, p);
+        let editor_node = self.editor_area(find_node, p);
         let status_node = view.status_bar.then(|| self.status_bar(p));
         let menu_popup = self.menus.render_popup(p, &mut self.ui);
         let dialog_node = self.dialogs.render(self.focus, p, &mut self.ui);
@@ -1292,33 +1228,46 @@ impl MainWindow {
         self.win.window.set_control_areas(frame.control_areas());
         self.update_min_size(view.status_bar, &frame, p, ts);
 
-        // Lay out the fields, and the document again if it didn't land where estimated (its
-        // scrollbars, built from the estimate, then need another frame).
+        // Every editor lays out where it landed: the document in the editor font, the fields in
+        // the body font.
+        let document = EditorPaintStyle {
+            text: TextStyle::regular(EDITOR_FONT, EDITOR_FONT_SIZE * self.zoom()),
+            line_height: self.line_height(),
+            color: p.text_primary,
+            caret_height: (CARET_HEIGHT * self.zoom()).round(),
+        };
+        let field = EditorPaintStyle {
+            text: TextStyle::regular(TEXT_FONT, BODY_SIZE),
+            line_height: BODY_LINE + 2.,
+            color: p.text_primary,
+            caret_height: FIELD_CARET,
+        };
+        let active_slot = self.tabs.active_slot();
+        let mut editor_needs_redraw = false;
         for (token, rect) in frame.custom_rects() {
             let CustomDraw::Editor(slot) = token else {
                 continue;
             };
-            let document = slot == active_slot;
-            if document && rect == estimated_rect {
-                continue;
-            }
             let focused = self.focus == Focus::Editor(slot);
-            let params = if document {
-                active_params
+            let (style, show_selection) = if slot == active_slot {
+                let shown = focused || self.menus.is_open() || self.find.is_open();
+                (&document, shown)
             } else {
-                EditorPaintParams {
-                    style: &field_style,
-                    focused,
-                    show_selection: focused,
-                    ..active_params
-                }
+                (&field, focused)
             };
-            if let Some(ed) = self.editor_mut(slot) {
-                editor_needs_redraw |= ed.prepare(rect, params, ts);
+            let params = EditorPaintParams {
+                style,
+                palette: p,
+                window_active,
+                show_selection,
+                scale,
+                caret_width_px,
+                now,
+            };
+            let ed = slot_editor_mut(&mut self.tabs, &mut self.find, &mut self.dialogs, slot);
+            if let Some(ed) = ed {
+                editor_needs_redraw |= ed.prepare(rect, params, &mut self.ui, ts);
             }
-            editor_needs_redraw |= document
-                && ((rect.size.width - estimated_rect.size.width).abs() > 1.0
-                    || (rect.size.height - estimated_rect.size.height).abs() > 1.0);
         }
 
         let (tabs, find, dialogs) = (&self.tabs, &self.find, &self.dialogs);
@@ -1344,6 +1293,7 @@ impl MainWindow {
             });
         });
 
+        let caret_hidden = self.key_tips_active();
         let ime_caret = self
             .focused_slot()
             .and_then(|slot| slot_editor(&self.tabs, &self.find, &self.dialogs, slot))
@@ -1360,25 +1310,6 @@ impl MainWindow {
         let needs_vsync = ui_needs_vsync || editor_needs_redraw || needs_retry;
         self.dirty |= needs_vsync;
         needs_vsync
-    }
-
-    /// Where the document will be laid out, worked out from the chrome's fixed heights.
-    fn estimated_editor_rect(&self, logical: Size, status_bar: bool) -> Rect {
-        let top_chrome = STRIP_TOP + TAB_HEIGHT + MENU_BAR_HEIGHT + SEPARATOR_HEIGHT;
-        let bottom_chrome = if status_bar {
-            SEPARATOR_HEIGHT + STATUS_BAR_HEIGHT
-        } else {
-            0.
-        };
-        let area_h = (logical.height - top_chrome - bottom_chrome).max(self.editor_min_height());
-        let pad = EDITOR_PADDINGS;
-        Rect::new(
-            point(pad.left, top_chrome + pad.top),
-            size(
-                (logical.width - pad.left - pad.right).max(0.),
-                (area_h - pad.top - pad.bottom).max(0.),
-            ),
-        )
     }
 
     /// Keeps the window from shrinking past its chrome, the status bar's text and one line.
@@ -1451,18 +1382,14 @@ impl MainWindow {
             .child(separator(p))
     }
 
-    fn editor_area(&mut self, find: Option<AppNode>, now: Instant, p: Palette) -> AppNode {
-        let slot = self.tabs.active_slot();
+    fn editor_area(&self, find: Option<AppNode>, p: Palette) -> AppNode {
         let line_height = self.line_height();
         let font_size = EDITOR_FONT_SIZE * self.zoom();
-        let min_height = self.editor_min_height();
-        let ed = &mut self.tabs.active_mut().editor;
-        let scrollbars = ed.render_scrollbars(slot, p, now, &mut self.ui);
-        let view = ed.view(slot, line_height, scrollbars);
+        let view = self.tabs.active().editor.view(line_height);
         box_()
             .hit(HitId::EditorArea)
             .flex_1()
-            .min_h(min_height)
+            .min_h(self.editor_min_height())
             .bg(p.editor)
             .child(
                 box_().size_full().overflow_hidden().child(

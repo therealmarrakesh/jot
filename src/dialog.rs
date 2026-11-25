@@ -117,8 +117,9 @@ pub(crate) struct Dialogs {
 impl Dialogs {
     pub(crate) fn new() -> Self {
         let line = Editor::field(FieldOptions {
+            slot: EditorSlot::GoToLine,
+            placeholder: SharedStr::default(),
             validate: Some(|t| t.chars().all(|c| c.is_ascii_digit())),
-            ..Default::default()
         });
         Self {
             open: Vec::new(),
