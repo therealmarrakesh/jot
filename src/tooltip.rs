@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 use crate::geom::{Rect, ScreenPoint, ScreenRect, point, round_half_up, size};
 use crate::gfx::{Gpu, TextStyle, TextSystem};
 use crate::layout::AvailSize;
-use crate::platform::{Modifiers, WindowId, cursor_screen_pos, monitor_work_area_and_scale};
+use crate::platform::{Modifiers, WindowId, WindowsDisplay, cursor_screen_pos};
 use crate::theme::{CONTROL_RADIUS, Palette, SMALL_FONT, theme_shadow};
 use crate::types::SharedStr;
 use crate::ui::{
@@ -302,7 +302,8 @@ impl Tooltips {
 
     fn show(&mut self, snap: Snap, gpu: &Rc<Gpu>, ts: &TextSystem) {
         let entered = snap.entered;
-        let (work, scale) = monitor_work_area_and_scale(entered);
+        let display = WindowsDisplay::from_point(entered);
+        let (work, scale) = (display.work_area(), display.scale_factor());
         let measured = Frame::measure(
             tooltip_card(Palette::resolve(false, None, None), snap.text.clone()),
             AvailSize::MAX,

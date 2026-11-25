@@ -1,5 +1,5 @@
 use crate::geom::point;
-use crate::platform::{MouseButton, PlatformEvent, PlatformHandler};
+use crate::platform::{MouseButton, WindowEvent};
 use crate::ui::HitId;
 
 use super::{EDITOR_PADDING_LEFT, EDITOR_PADDING_TOP, TestHarness};
@@ -17,8 +17,7 @@ fn editor_invariants_grapheme_ime_word_anchor_up_collapse_and_insert_keys() {
     h.click_point_count(p0, MouseButton::Left, 2);
     h.press_key("ctrl-a");
     h.press_key("backspace");
-    h.app.borrow_mut().on_event(PlatformEvent::MouseMove {
-        window_id: h.window_id,
+    h.send(WindowEvent::MouseMove {
         position: point(p0.x + 40.0, p0.y),
         pressed_button: Some(MouseButton::Left),
     });
@@ -53,10 +52,7 @@ fn editor_invariants_grapheme_ime_word_anchor_up_collapse_and_insert_keys() {
         assert_eq!(m.cursor(), 0, "Up on selection must collapse to selection start");
     });
 
-    h.app
-        .borrow_mut()
-        .on_event(PlatformEvent::ImeComposition {
-            window_id: h.window_id,
+    h.send(WindowEvent::ImeComposition {
             text: "にほん".into(),
             cursor: 3,
         });

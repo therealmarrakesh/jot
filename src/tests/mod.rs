@@ -15,7 +15,8 @@ use crate::document;
 use crate::geom::{Point, Rect, size};
 use crate::gfx::{Gpu, TextSystem};
 use crate::platform::{
-    Key, KeyEvent, Modifiers, MouseButton, Platform, PlatformEvent, PlatformHandler, WindowId,
+    Key, KeyEvent, Modifiers, MouseButton, Platform, PlatformEvent, PlatformHandler, WindowEvent,
+    WindowId,
 };
 use crate::ui::HitId;
 use crate::window::{EDITOR_PADDINGS, MainWindow};
@@ -90,10 +91,17 @@ impl TestHarness {
     fn draw(&mut self) {
         for _ in 0..2 {
             let mut app = self.app.borrow_mut();
-            app.on_wake();
+            app.on_event(PlatformEvent::Wake);
             app.windows.mark_dirty(self.window_id);
             app.drive_frames();
         }
+    }
+
+    /// Tells the app something happened to the test window; whether the app used it.
+    fn send(&self, event: WindowEvent) -> bool {
+        self.app
+            .borrow_mut()
+            .on_event(PlatformEvent::Window(self.window_id, event))
     }
 
     fn window_open(&self) -> bool {
@@ -130,8 +138,7 @@ impl TestHarness {
     }
 
     fn move_mouse(&mut self, pos: Point) {
-        self.app.borrow_mut().on_event(PlatformEvent::MouseMove {
-            window_id: self.window_id,
+        self.send(WindowEvent::MouseMove {
             position: pos,
             pressed_button: None,
         });
@@ -140,16 +147,14 @@ impl TestHarness {
 
     fn click_point_count(&mut self, pos: Point, button: MouseButton, click_count: usize) {
         self.move_mouse(pos);
-        self.app.borrow_mut().on_event(PlatformEvent::MouseDown {
-            window_id: self.window_id,
+        self.send(WindowEvent::MouseDown {
             button,
             position: pos,
             modifiers: Modifiers::default(),
             click_count,
         });
         self.draw();
-        self.app.borrow_mut().on_event(PlatformEvent::MouseUp {
-            window_id: self.window_id,
+        self.send(WindowEvent::MouseUp {
             button,
             position: pos,
         });
@@ -162,22 +167,19 @@ impl TestHarness {
 
     fn drag_points(&mut self, from: Point, to: Point) {
         self.move_mouse(from);
-        self.app.borrow_mut().on_event(PlatformEvent::MouseDown {
-            window_id: self.window_id,
+        self.send(WindowEvent::MouseDown {
             button: MouseButton::Left,
             position: from,
             modifiers: Modifiers::default(),
             click_count: 1,
         });
         self.draw();
-        self.app.borrow_mut().on_event(PlatformEvent::MouseMove {
-            window_id: self.window_id,
+        self.send(WindowEvent::MouseMove {
             position: to,
             pressed_button: Some(MouseButton::Left),
         });
         self.draw();
-        self.app.borrow_mut().on_event(PlatformEvent::MouseUp {
-            window_id: self.window_id,
+        self.send(WindowEvent::MouseUp {
             button: MouseButton::Left,
             position: to,
         });
@@ -211,28 +213,18 @@ impl TestHarness {
 
     fn press_key(&mut self, spec: &str) {
         let event = parse_key(spec);
-        self.app.borrow_mut().on_event(PlatformEvent::KeyDown {
-            window_id: self.window_id,
-            event,
-        });
-        self.app.borrow_mut().on_event(PlatformEvent::KeyUp {
-            window_id: self.window_id,
-            event,
-        });
+        self.send(WindowEvent::KeyDown(event));
+        self.send(WindowEvent::KeyUp(event));
         self.draw();
     }
 
     fn type_text(&mut self, s: &str) {
-        self.app.borrow_mut().on_event(PlatformEvent::TextInput {
-            window_id: self.window_id,
-            text: s.to_string(),
-        });
+        self.send(WindowEvent::TextInput(s.to_string()));
         self.draw();
     }
 
     fn scroll_wheel(&mut self, pos: Point, lines_y: f32, modifiers: Modifiers) {
-        self.app.borrow_mut().on_event(PlatformEvent::ScrollWheel {
-            window_id: self.window_id,
+        self.send(WindowEvent::ScrollWheel {
             position: pos,
             delta_lines: crate::geom::point(0.0, lines_y),
             page_scroll: false,

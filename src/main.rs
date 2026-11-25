@@ -39,8 +39,8 @@ use crate::geom::{Point, Rect, ScreenPoint, Size, point, size};
 use crate::gfx::{Gpu, TextSystem, WindowSurface};
 use crate::platform::{
     Arbitration, Key, MainWindowConfig, MouseButton, NativeWindow, Platform, PlatformEvent,
-    PlatformHandler, WindowAppearance, WindowHandle, WindowId, WindowPlacement, WindowsDisplay,
-    arbitrate_instance, cursor_screen_pos, debug_log, install_panic_hook,
+    PlatformHandler, WindowAppearance, WindowEvent, WindowHandle, WindowId, WindowPlacement,
+    WindowsDisplay, arbitrate_instance, cursor_screen_pos, debug_log, install_panic_hook,
     primary_mouse_button_down, release_mouse_capture, show_error_dialog, top_visible_window_at,
 };
 use crate::shell::{Cx, Effect, Shell};
@@ -434,178 +434,165 @@ impl PlatformHandler for App {
     fn on_event(&mut self, event: PlatformEvent) -> bool {
         let mut handled = false;
         match event {
-            PlatformEvent::Resized {
-                window_id,
-                physical_width,
-                physical_height,
-                scale,
-            } => {
-                self.with_window(window_id, |w, cx| {
-                    w.on_resized(physical_width, physical_height, scale, cx.shell);
-                });
-                self.keytips.hide_owner(window_id);
-            }
-            PlatformEvent::Moved { window_id } => {
-                self.with_window_quiet(window_id, |w, cx| {
-                    w.cancel_menu(cx.shell);
-                });
-                self.keytips.hide_owner(window_id);
-            }
-            PlatformEvent::Activated { window_id, active } => {
-                if active {
-                    self.windows.set_active(window_id);
-                } else {
+            PlatformEvent::Window(window_id, event) => match event {
+                WindowEvent::Resized {
+                    physical_width,
+                    physical_height,
+                    scale,
+                } => {
+                    self.with_window(window_id, |w, cx| {
+                        w.on_resized(physical_width, physical_height, scale, cx.shell);
+                    });
                     self.keytips.hide_owner(window_id);
-                    self.tooltips.window_deactivated(window_id);
                 }
-                self.with_window(window_id, |w, cx| w.on_activated(active, cx.shell));
-            }
-            PlatformEvent::PaintRequested { window_id } => {
-                if let Some(w) = self.windows.get_mut(window_id) {
-                    w.on_paint_requested();
+                WindowEvent::Moved => {
+                    self.with_window_quiet(window_id, |w, cx| {
+                        w.cancel_menu(cx.shell);
+                    });
+                    self.keytips.hide_owner(window_id);
                 }
-            }
+                WindowEvent::Activated(active) => {
+                    if active {
+                        self.windows.set_active(window_id);
+                    } else {
+                        self.keytips.hide_owner(window_id);
+                        self.tooltips.window_deactivated(window_id);
+                    }
+                    self.with_window(window_id, |w, cx| w.on_activated(active, cx.shell));
+                }
+                WindowEvent::PaintRequested => {
+                    if let Some(w) = self.windows.get_mut(window_id) {
+                        w.on_paint_requested();
+                    }
+                }
+                WindowEvent::MouseMove {
+                    position,
+                    pressed_button,
+                } => {
+                    let left = pressed_button == Some(MouseButton::Left);
+                    self.drive_drag(|drag, windows, ops, shell, closed| {
+                        drag.on_mouse_move(left, windows, ops, shell, closed)
+                    });
+                    self.with_window_quiet(window_id, |w, cx| {
+                        w.on_mouse_move(position, pressed_button, cx);
+                    });
+                    if let Some(ix) = self.windows.ix(window_id) {
+                        self.evaluate_tooltip_for(ix);
+                    }
+                }
+                WindowEvent::MouseLeave => {
+                    self.with_window_quiet(window_id, |w, _| w.on_mouse_leave());
+                    self.tooltips.on_mouse_leave(window_id);
+                }
+                WindowEvent::MouseDown {
+                    button,
+                    position,
+                    modifiers,
+                    click_count,
+                } => {
+                    self.tooltips.on_mouse_down(window_id);
+                    self.with_window(window_id, |w, cx| {
+                        w.on_mouse_down(button, position, modifiers, click_count, cx);
+                    });
+                }
+                WindowEvent::MouseUp { button, position } => {
+                    self.tooltips.on_mouse_up();
+                    if button == MouseButton::Left {
+                        self.drive_drag(|drag, windows, _, _, _| drag.on_release(windows));
+                    }
+                    self.with_window(window_id, |w, cx| {
+                        w.on_mouse_up(button, position, cx);
+                    });
+                }
+                WindowEvent::ScrollWheel {
+                    position,
+                    delta_lines,
+                    page_scroll,
+                    modifiers,
+                } => {
+                    self.with_window_quiet(window_id, |w, _| {
+                        w.on_scroll_wheel(position, delta_lines, page_scroll, modifiers);
+                    });
+                }
+                WindowEvent::KeyDown(event) => {
+                    self.tooltips.on_key_down();
+                    if self.tab_drag.as_ref().is_some_and(TabDrag::is_dragging)
+                        && event.key == Key::Escape
+                        && event.modifiers.none()
+                        && !self.windows.get(window_id).is_some_and(|w| {
+                            matches!(w.mode(), InputMode::Dialog | InputMode::Popup)
+                        })
+                    {
+                        self.cancel_tab_drag();
+                        handled = true;
+                    } else if let Some(was_handled) =
+                        self.with_window(window_id, |w, cx| w.on_key_down(event, cx))
+                    {
+                        handled = was_handled;
+                    }
+                }
+                WindowEvent::KeyUp(event) => {
+                    if let Some(was_handled) =
+                        self.with_window_quiet(window_id, |w, cx| w.on_key_up(event, cx))
+                    {
+                        handled = was_handled;
+                    }
+                }
+                WindowEvent::CaptureLost => {
+                    self.with_window_quiet(window_id, |w, _| w.on_capture_lost());
+                    self.drive_drag(|drag, windows, _, _, _| {
+                        drag.on_capture_lost(window_id, windows)
+                    });
+                }
+                WindowEvent::TextInput(text) => {
+                    self.with_window(window_id, |w, cx| w.on_text_input(&text, cx));
+                }
+                WindowEvent::ImeComposition { text, cursor } => {
+                    self.with_window(window_id, |w, cx| {
+                        w.on_ime_composition(&text, cursor, cx);
+                    });
+                }
+                WindowEvent::FilesDropped(paths) => {
+                    if self.windows.get(window_id).is_some() {
+                        self.open_paths_in_window(window_id, paths);
+                    }
+                }
+                WindowEvent::SizeMoveChanged(entering) => {
+                    self.drive_drag(|drag, windows, ops, shell, closed| {
+                        drag.on_size_move_changed(window_id, entering, windows, ops, shell, closed)
+                    });
+                }
+                WindowEvent::CloseRequested => {
+                    self.run_file_ops(|ops, host, io| {
+                        ops.request(FileRequest::CloseWindow { window: window_id }, host, io);
+                    });
+                }
+            },
             PlatformEvent::SettingsChanged(settings) => {
                 self.shell.apply_settings(settings);
                 self.tooltips.hover_time = settings.mouse_hover_time;
                 self.windows.apply_theme(self.shell.appearance());
             }
-            PlatformEvent::MouseMove {
-                window_id,
-                position,
-                pressed_button,
-            } => {
-                let left = pressed_button == Some(MouseButton::Left);
-                self.drive_drag(|drag, windows, ops, shell, closed| {
-                    drag.on_mouse_move(left, windows, ops, shell, closed)
-                });
-                self.with_window_quiet(window_id, |w, cx| {
-                    w.on_mouse_move(position, pressed_button, cx);
-                });
-                if let Some(ix) = self.windows.ix(window_id) {
-                    self.evaluate_tooltip_for(ix);
-                }
-            }
-            PlatformEvent::MouseLeave { window_id } => {
-                self.with_window_quiet(window_id, |w, _| w.on_mouse_leave());
-                self.tooltips.on_mouse_leave(window_id);
-            }
-            PlatformEvent::MouseDown {
-                window_id,
-                button,
-                position,
-                modifiers,
-                click_count,
-            } => {
-                self.tooltips.on_mouse_down(window_id);
-                self.with_window(window_id, |w, cx| {
-                    w.on_mouse_down(button, position, modifiers, click_count, cx);
-                });
-            }
-            PlatformEvent::MouseUp {
-                window_id,
-                button,
-                position,
-            } => {
-                self.tooltips.on_mouse_up();
-                if button == MouseButton::Left {
-                    self.drive_drag(|drag, windows, _, _, _| drag.on_release(windows));
-                }
-                self.with_window(window_id, |w, cx| {
-                    w.on_mouse_up(button, position, cx);
-                });
-            }
-            PlatformEvent::ScrollWheel {
-                window_id,
-                position,
-                delta_lines,
-                page_scroll,
-                modifiers,
-            } => {
-                self.with_window_quiet(window_id, |w, _| {
-                    w.on_scroll_wheel(position, delta_lines, page_scroll, modifiers);
-                });
-            }
-            PlatformEvent::KeyDown { window_id, event } => {
-                self.tooltips.on_key_down();
-                if self.tab_drag.as_ref().is_some_and(TabDrag::is_dragging)
-                    && event.key == Key::Escape
-                    && event.modifiers.none()
-                    && !self
-                        .windows
-                        .get(window_id)
-                        .is_some_and(|w| matches!(w.mode(), InputMode::Dialog | InputMode::Popup))
-                {
-                    self.cancel_tab_drag();
-                    handled = true;
-                } else if let Some(was_handled) =
-                    self.with_window(window_id, |w, cx| w.on_key_down(event, cx))
-                {
-                    handled = was_handled;
-                }
-            }
-            PlatformEvent::KeyUp { window_id, event } => {
-                if let Some(was_handled) =
-                    self.with_window_quiet(window_id, |w, cx| w.on_key_up(event, cx))
-                {
-                    handled = was_handled;
-                }
-            }
-            PlatformEvent::CaptureLost { window_id } => {
-                self.with_window_quiet(window_id, |w, _| w.on_capture_lost());
-                self.drive_drag(|drag, windows, _, _, _| drag.on_capture_lost(window_id, windows));
-            }
-            PlatformEvent::ModifiersChanged { modifiers } => {
+            PlatformEvent::ModifiersChanged(modifiers) => {
                 self.tooltips.on_modifiers_changed(modifiers);
             }
-            PlatformEvent::TextInput { window_id, text } => {
-                self.with_window(window_id, |w, cx| w.on_text_input(&text, cx));
-            }
-            PlatformEvent::ImeComposition {
-                window_id,
-                text,
-                cursor,
-            } => {
-                self.with_window(window_id, |w, cx| {
-                    w.on_ime_composition(&text, cursor, cx);
-                });
-            }
-            PlatformEvent::FilesDropped { window_id, paths } => {
-                if self.windows.get(window_id).is_some() {
-                    self.open_paths_in_window(window_id, paths);
-                }
-            }
-            PlatformEvent::Launch { paths } => {
+            PlatformEvent::Launch(paths) => {
                 let _ = self.launch(paths, true);
             }
-            PlatformEvent::SizeMoveChanged {
-                window_id,
-                entering,
-            } => {
-                self.drive_drag(|drag, windows, ops, shell, closed| {
-                    drag.on_size_move_changed(window_id, entering, windows, ops, shell, closed)
-                });
-            }
-            PlatformEvent::CloseRequested { window_id } => {
-                self.run_file_ops(|ops, host, io| {
-                    ops.request(FileRequest::CloseWindow { window: window_id }, host, io);
-                });
-            }
-            PlatformEvent::SessionEnding { ending } => {
+            PlatformEvent::SessionEnding(ending) => {
                 if ending {
                     self.file_ops.writes.wait(Duration::from_secs(5));
+                }
+            }
+            PlatformEvent::Wake => {
+                while let Some(event) = self.file_events.next() {
+                    self.run_file_ops(|ops, host, io| ops.on_event(event, host, io));
+                    self.sweep_closed_windows();
                 }
             }
         }
         self.sweep_closed_windows();
         handled
-    }
-
-    fn on_wake(&mut self) {
-        while let Some(event) = self.file_events.next() {
-            self.run_file_ops(|ops, host, io| ops.on_event(event, host, io));
-            self.sweep_closed_windows();
-        }
     }
 
     fn drive_frames(&mut self) {
@@ -846,7 +833,7 @@ impl Windows {
         let display = target_point
             .or_else(|| self.active.and_then(|id| self.get(id)).map(|w| w.hwnd().client_origin()))
             .or_else(|| self.launch.use_cursor_display.then(cursor_screen_pos))
-            .and_then(WindowsDisplay::from_point)
+            .map(WindowsDisplay::from_point)
             .or_else(WindowsDisplay::primary);
         let visible = display.map(|d| d.visible_bounds());
         let screen = visible.map_or(size(WINDOW_WIDTH, WINDOW_HEIGHT), |v| v.size);

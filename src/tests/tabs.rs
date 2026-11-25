@@ -3,7 +3,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use crate::geom::point;
-use crate::platform::{Platform, PlatformEvent, PlatformHandler};
+use crate::platform::{Platform, PlatformHandler, WindowEvent};
 use crate::ui::{DialogHit, HitId, TabHit, TabId};
 
 use super::TestHarness;
@@ -86,10 +86,7 @@ fn dirty_window_close_file_drop_and_multi_window() {
 
     let tmp = std::env::temp_dir().join(format!("jot-drop-test-{}.txt", std::process::id()));
     std::fs::write(&tmp, "dropped content 123").unwrap();
-    h.app.borrow_mut().on_event(PlatformEvent::FilesDropped {
-        window_id: h.window_id,
-        paths: vec![tmp.clone()],
-    });
+    h.send(WindowEvent::FilesDropped(vec![tmp.clone()]));
     for _ in 0..200 {
         h.draw();
         if h.read(|w, _| w.active_editor().model().text() == "dropped content 123") {
@@ -113,11 +110,7 @@ fn dirty_window_close_file_drop_and_multi_window() {
     }
 
     h.type_text("!");
-    h.app
-        .borrow_mut()
-        .on_event(PlatformEvent::CloseRequested {
-            window_id: h.window_id,
-        });
+    h.send(WindowEvent::CloseRequested);
     h.draw();
     assert!(
         h.window_open(),
@@ -127,11 +120,7 @@ fn dirty_window_close_file_drop_and_multi_window() {
     h.click_hit(HitId::Dialog(DialogHit::Button(2)));
     assert!(h.window_open(), "Cancel must keep window open");
 
-    h.app
-        .borrow_mut()
-        .on_event(PlatformEvent::CloseRequested {
-            window_id: h.window_id,
-        });
+    h.send(WindowEvent::CloseRequested);
     h.draw();
     h.click_hit(HitId::Dialog(DialogHit::Button(1)));
     assert!(!h.window_open(), "Don't save must close the window");

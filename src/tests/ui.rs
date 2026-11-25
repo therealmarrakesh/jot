@@ -4,8 +4,7 @@ use crate::text::RopeExt as _;
 use crate::geom::point;
 use crate::layout::{AvailSize, Space, snap_border_edges};
 use crate::platform::{
-    Key, KeyEvent, Modifiers, MouseButton, PlatformEvent, PlatformHandler, WindowControlArea,
-    hit_test_control_areas,
+    Key, KeyEvent, Modifiers, MouseButton, WindowControlArea, WindowEvent, hit_test_control_areas,
 };
 use crate::theme::{SMALL_FONT, TEXT_FONT};
 use crate::ui::{
@@ -542,21 +541,12 @@ fn keyboard_system_chords_altgr_menu_gate_popup_occlusion_and_fractional_borders
             ..Default::default()
         },
     };
-    assert!(!h.app.borrow_mut().on_event(PlatformEvent::KeyDown {
-        window_id: h.window_id,
-        event: alt_f4,
-    }));
-    assert!(!h.app.borrow_mut().on_event(PlatformEvent::KeyDown {
-        window_id: h.window_id,
-        event: alt_space,
-    }));
+    assert!(!h.send(WindowEvent::KeyDown(alt_f4)));
+    assert!(!h.send(WindowEvent::KeyDown(alt_space)));
 
     h.press_key("alt");
     h.read(|w, _| assert!(w.key_tips_active()));
-    assert!(!h.app.borrow_mut().on_event(PlatformEvent::KeyDown {
-        window_id: h.window_id,
-        event: alt_f4,
-    }));
+    assert!(!h.send(WindowEvent::KeyDown(alt_f4)));
 
     h.click_hit(HitId::Menu(MenuHit::Trigger(MenuKind::File)));
     h.read(|w, _| assert!(w.menus.is_open()));
@@ -564,10 +554,7 @@ fn keyboard_system_chords_altgr_menu_gate_popup_occlusion_and_fractional_borders
     h.read(|w, _| {
         assert_eq!(w.tabs().len(), 2, "Ctrl+W must not fire behind an open menu");
     });
-    assert!(!h.app.borrow_mut().on_event(PlatformEvent::KeyDown {
-        window_id: h.window_id,
-        event: alt_f4,
-    }));
+    assert!(!h.send(WindowEvent::KeyDown(alt_f4)));
 
     let altgr_s = KeyEvent {
         key: Key::Char('s'),
@@ -585,10 +572,7 @@ fn keyboard_system_chords_altgr_menu_gate_popup_occlusion_and_fractional_borders
 
     h.press_key("ctrl-g");
     h.read(|w, _| assert!(w.dialogs.is_open()));
-    assert!(!h.app.borrow_mut().on_event(PlatformEvent::KeyDown {
-        window_id: h.window_id,
-        event: alt_f4,
-    }));
+    assert!(!h.send(WindowEvent::KeyDown(alt_f4)));
     let close_pt = h.hit_rect(HitId::Caption(CaptionHit::Close)).unwrap().center();
     h.read(|w, _| {
         assert_eq!(
