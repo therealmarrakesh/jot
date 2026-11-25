@@ -1,3 +1,6 @@
+//! The commands keys and menus run, and the keymap: which chord runs what, and which chords the
+//! menus and tooltips show.
+
 use crate::editor::{EditCommand, Motion};
 use crate::platform::{Key, KeyEvent, Modifiers};
 use crate::types::SharedStr;
@@ -56,6 +59,7 @@ impl From<EditCommand> for Command {
     }
 }
 
+// Which modifiers a chord takes: these exactly, or any state of the ANY ones.
 const NONE: u8 = 0;
 const CTRL: u8 = 1 << 0;
 const ALT: u8 = 1 << 1;
@@ -63,31 +67,8 @@ const SHIFT: u8 = 1 << 2;
 const ANY_SHIFT: u8 = 1 << 3;
 const ANY_ALT: u8 = 1 << 4;
 const ANY_CTRL: u8 = 1 << 5;
-
-struct Binding {
-    mods: u8,
-    key: Key,
-    command: Command,
-    show_label: bool,
-}
-
-const fn bind(mods: u8, key: Key, command: Command) -> Binding {
-    Binding {
-        mods,
-        key,
-        command,
-        show_label: false,
-    }
-}
-
-const fn shown(mods: u8, key: Key, command: Command) -> Binding {
-    Binding {
-        mods,
-        key,
-        command,
-        show_label: true,
-    }
-}
+/// The chord is the one menus and tooltips show for its command.
+const SHOWN: u8 = 1 << 6;
 
 use AppCommand as A;
 use Command::{App, Edit};
@@ -109,88 +90,89 @@ const fn sel(motion: Motion) -> Command {
     })
 }
 
-const KEYMAP: &[Binding] = &[
+/// Chord, key and command; the first chord that matches a key wins.
+const KEYMAP: &[(u8, Key, Command)] = &[
     // App shortcuts
-    bind(NONE, K::Escape, App(A::Cancel)),
-    shown(CTRL, K::Char('n'), App(A::NewTab)),
-    shown(CTRL | SHIFT, K::Char('n'), App(A::NewWindow)),
-    shown(CTRL, K::Char('o'), App(A::Open)),
-    shown(CTRL, K::Char('s'), App(A::Save)),
-    shown(CTRL | SHIFT, K::Char('s'), App(A::SaveAs)),
-    shown(CTRL | ALT, K::Char('s'), App(A::SaveAll)),
-    shown(CTRL, K::Char('w'), App(A::CloseTab)),
-    shown(CTRL | SHIFT, K::Char('w'), App(A::CloseWindow)),
-    bind(CTRL, K::Tab, App(A::NextTab)),
-    bind(CTRL, K::PageDown, App(A::NextTab)),
-    bind(CTRL | SHIFT, K::Tab, App(A::PrevTab)),
-    bind(CTRL, K::PageUp, App(A::PrevTab)),
-    bind(CTRL, K::Char('1'), App(A::SelectTab(0))),
-    bind(CTRL, K::Char('2'), App(A::SelectTab(1))),
-    bind(CTRL, K::Char('3'), App(A::SelectTab(2))),
-    bind(CTRL, K::Char('4'), App(A::SelectTab(3))),
-    bind(CTRL, K::Char('5'), App(A::SelectTab(4))),
-    bind(CTRL, K::Char('6'), App(A::SelectTab(5))),
-    bind(CTRL, K::Char('7'), App(A::SelectTab(6))),
-    bind(CTRL, K::Char('8'), App(A::SelectTab(7))),
-    bind(CTRL, K::Char('9'), App(A::SelectLastTab)),
-    shown(CTRL, K::Char('f'), App(A::Find)),
-    shown(NONE, K::F(3), App(A::FindNext)),
-    shown(SHIFT, K::F(3), App(A::FindPrevious)),
-    shown(CTRL, K::Char('h'), App(A::Replace)),
-    shown(CTRL, K::Char('g'), App(A::GoTo)),
-    shown(NONE, K::F(5), App(A::TimeDate)),
-    bind(SHIFT, K::F(10), App(A::ShowContextMenu)),
-    bind(NONE, K::Menu, App(A::ShowContextMenu)),
-    shown(CTRL | ANY_SHIFT, K::Char('='), App(A::ZoomIn)),
-    bind(CTRL | ANY_SHIFT, K::Char('+'), App(A::ZoomIn)),
-    shown(CTRL, K::Char('-'), App(A::ZoomOut)),
-    shown(CTRL, K::Char('0'), App(A::ResetZoom)),
+    (NONE, K::Escape, App(A::Cancel)),
+    (CTRL | SHOWN, K::Char('n'), App(A::NewTab)),
+    (CTRL | SHIFT | SHOWN, K::Char('n'), App(A::NewWindow)),
+    (CTRL | SHOWN, K::Char('o'), App(A::Open)),
+    (CTRL | SHOWN, K::Char('s'), App(A::Save)),
+    (CTRL | SHIFT | SHOWN, K::Char('s'), App(A::SaveAs)),
+    (CTRL | ALT | SHOWN, K::Char('s'), App(A::SaveAll)),
+    (CTRL | SHOWN, K::Char('w'), App(A::CloseTab)),
+    (CTRL | SHIFT | SHOWN, K::Char('w'), App(A::CloseWindow)),
+    (CTRL, K::Tab, App(A::NextTab)),
+    (CTRL, K::PageDown, App(A::NextTab)),
+    (CTRL | SHIFT, K::Tab, App(A::PrevTab)),
+    (CTRL, K::PageUp, App(A::PrevTab)),
+    (CTRL, K::Char('1'), App(A::SelectTab(0))),
+    (CTRL, K::Char('2'), App(A::SelectTab(1))),
+    (CTRL, K::Char('3'), App(A::SelectTab(2))),
+    (CTRL, K::Char('4'), App(A::SelectTab(3))),
+    (CTRL, K::Char('5'), App(A::SelectTab(4))),
+    (CTRL, K::Char('6'), App(A::SelectTab(5))),
+    (CTRL, K::Char('7'), App(A::SelectTab(6))),
+    (CTRL, K::Char('8'), App(A::SelectTab(7))),
+    (CTRL, K::Char('9'), App(A::SelectLastTab)),
+    (CTRL | SHOWN, K::Char('f'), App(A::Find)),
+    (SHOWN, K::F(3), App(A::FindNext)),
+    (SHIFT | SHOWN, K::F(3), App(A::FindPrevious)),
+    (CTRL | SHOWN, K::Char('h'), App(A::Replace)),
+    (CTRL | SHOWN, K::Char('g'), App(A::GoTo)),
+    (SHOWN, K::F(5), App(A::TimeDate)),
+    (SHIFT, K::F(10), App(A::ShowContextMenu)),
+    (NONE, K::Menu, App(A::ShowContextMenu)),
+    (CTRL | ANY_SHIFT | SHOWN, K::Char('='), App(A::ZoomIn)),
+    (CTRL | ANY_SHIFT, K::Char('+'), App(A::ZoomIn)),
+    (CTRL | SHOWN, K::Char('-'), App(A::ZoomOut)),
+    (CTRL | SHOWN, K::Char('0'), App(A::ResetZoom)),
     // Edit shortcuts
-    bind(ANY_SHIFT, K::Backspace, Edit(E::Backspace)),
-    shown(NONE, K::Delete, Edit(E::Delete)),
-    bind(SHIFT, K::Delete, Edit(E::Cut)),
-    bind(CTRL, K::Insert, Edit(E::Copy)),
-    bind(SHIFT, K::Insert, Edit(E::Paste)),
-    bind(CTRL, K::Backspace, Edit(E::DeletePrevWord)),
-    bind(CTRL, K::Delete, Edit(E::DeleteNextWord)),
-    bind(ANY_CTRL, K::Enter, Edit(E::Enter)),
-    bind(SHIFT, K::Enter, Edit(E::Enter)),
-    bind(NONE, K::Escape, Edit(E::Escape)),
-    bind(NONE, K::Up, mv(M::Up)),
-    bind(NONE, K::Down, mv(M::Down)),
-    bind(NONE, K::Left, mv(M::Left)),
-    bind(NONE, K::Right, mv(M::Right)),
-    bind(NONE, K::PageUp, mv(M::PageUp)),
-    bind(NONE, K::PageDown, mv(M::PageDown)),
-    bind(SHIFT, K::PageUp, sel(M::PageUp)),
-    bind(SHIFT, K::PageDown, sel(M::PageDown)),
-    bind(NONE, K::Tab, Edit(E::IndentInline)),
-    bind(SHIFT, K::Tab, Edit(E::Outdent)),
-    bind(CTRL, K::Char(']'), Edit(E::Indent)),
-    bind(CTRL, K::Char('['), Edit(E::Outdent)),
-    bind(SHIFT | ANY_ALT, K::Left, sel(M::Left)),
-    bind(SHIFT | ANY_ALT, K::Right, sel(M::Right)),
-    bind(SHIFT, K::Up, sel(M::Up)),
-    bind(SHIFT, K::Down, sel(M::Down)),
-    bind(NONE, K::Home, mv(M::LineStart)),
-    bind(NONE, K::End, mv(M::LineEnd)),
-    bind(CTRL, K::Home, mv(M::DocStart)),
-    bind(CTRL, K::End, mv(M::DocEnd)),
-    bind(CTRL | SHIFT, K::Home, sel(M::DocStart)),
-    bind(CTRL | SHIFT, K::End, sel(M::DocEnd)),
-    bind(SHIFT, K::Home, sel(M::LineStart)),
-    bind(SHIFT, K::End, sel(M::LineEnd)),
-    bind(CTRL | SHIFT, K::Left, sel(M::PrevWord)),
-    bind(CTRL | SHIFT, K::Right, sel(M::NextWord)),
-    bind(CTRL, K::Left, mv(M::PrevWord)),
-    bind(CTRL, K::Right, mv(M::NextWord)),
-    shown(CTRL, K::Char('a'), Edit(E::SelectAll)),
-    shown(CTRL, K::Char('c'), Edit(E::Copy)),
-    shown(CTRL, K::Char('x'), Edit(E::Cut)),
-    shown(CTRL, K::Char('v'), Edit(E::Paste)),
-    shown(CTRL, K::Char('z'), Edit(E::Undo)),
-    shown(CTRL, K::Char('y'), Edit(E::Redo)),
-    bind(CTRL | SHIFT, K::Char('z'), Edit(E::Redo)),
+    (ANY_SHIFT, K::Backspace, Edit(E::Backspace)),
+    (SHOWN, K::Delete, Edit(E::Delete)),
+    (SHIFT, K::Delete, Edit(E::Cut)),
+    (CTRL, K::Insert, Edit(E::Copy)),
+    (SHIFT, K::Insert, Edit(E::Paste)),
+    (CTRL, K::Backspace, Edit(E::DeletePrevWord)),
+    (CTRL, K::Delete, Edit(E::DeleteNextWord)),
+    (ANY_CTRL, K::Enter, Edit(E::Enter)),
+    (SHIFT, K::Enter, Edit(E::Enter)),
+    (NONE, K::Escape, Edit(E::Escape)),
+    (NONE, K::Up, mv(M::Up)),
+    (NONE, K::Down, mv(M::Down)),
+    (NONE, K::Left, mv(M::Left)),
+    (NONE, K::Right, mv(M::Right)),
+    (NONE, K::PageUp, mv(M::PageUp)),
+    (NONE, K::PageDown, mv(M::PageDown)),
+    (SHIFT, K::PageUp, sel(M::PageUp)),
+    (SHIFT, K::PageDown, sel(M::PageDown)),
+    (NONE, K::Tab, Edit(E::IndentInline)),
+    (SHIFT, K::Tab, Edit(E::Outdent)),
+    (CTRL, K::Char(']'), Edit(E::Indent)),
+    (CTRL, K::Char('['), Edit(E::Outdent)),
+    (SHIFT | ANY_ALT, K::Left, sel(M::Left)),
+    (SHIFT | ANY_ALT, K::Right, sel(M::Right)),
+    (SHIFT, K::Up, sel(M::Up)),
+    (SHIFT, K::Down, sel(M::Down)),
+    (NONE, K::Home, mv(M::LineStart)),
+    (NONE, K::End, mv(M::LineEnd)),
+    (CTRL, K::Home, mv(M::DocStart)),
+    (CTRL, K::End, mv(M::DocEnd)),
+    (CTRL | SHIFT, K::Home, sel(M::DocStart)),
+    (CTRL | SHIFT, K::End, sel(M::DocEnd)),
+    (SHIFT, K::Home, sel(M::LineStart)),
+    (SHIFT, K::End, sel(M::LineEnd)),
+    (CTRL | SHIFT, K::Left, sel(M::PrevWord)),
+    (CTRL | SHIFT, K::Right, sel(M::NextWord)),
+    (CTRL, K::Left, mv(M::PrevWord)),
+    (CTRL, K::Right, mv(M::NextWord)),
+    (CTRL | SHOWN, K::Char('a'), Edit(E::SelectAll)),
+    (CTRL | SHOWN, K::Char('c'), Edit(E::Copy)),
+    (CTRL | SHOWN, K::Char('x'), Edit(E::Cut)),
+    (CTRL | SHOWN, K::Char('v'), Edit(E::Paste)),
+    (CTRL | SHOWN, K::Char('z'), Edit(E::Undo)),
+    (CTRL | SHOWN, K::Char('y'), Edit(E::Redo)),
+    (CTRL | SHIFT, K::Char('z'), Edit(E::Redo)),
 ];
 
 fn mods_match(spec: u8, m: Modifiers) -> bool {
@@ -206,8 +188,8 @@ fn shortcut<T>(ev: KeyEvent, pick: impl Fn(Command) -> Option<T>) -> Option<T> {
     }
     KEYMAP
         .iter()
-        .filter(|b| b.key == ev.key && mods_match(b.mods, ev.modifiers))
-        .find_map(|b| pick(b.command))
+        .filter(|&&(mods, key, _)| key == ev.key && mods_match(mods, ev.modifiers))
+        .find_map(|&(_, _, command)| pick(command))
 }
 
 pub(crate) fn app_shortcut(ev: KeyEvent) -> Option<AppCommand> {
@@ -243,8 +225,8 @@ fn format_chord(mods: u8, key: Key) -> SharedStr {
 pub(crate) fn shortcut_label(command: Command) -> Option<SharedStr> {
     KEYMAP
         .iter()
-        .find(|b| b.show_label && b.command == command)
-        .map(|b| format_chord(b.mods, b.key))
+        .find(|&&(mods, _, c)| mods & SHOWN != 0 && c == command)
+        .map(|&(mods, key, _)| format_chord(mods, key))
 }
 
 pub(crate) fn shortcut_tooltip(title: &str, command: Command) -> SharedStr {
