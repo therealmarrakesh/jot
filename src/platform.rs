@@ -327,7 +327,8 @@ pub(crate) enum PlatformEvent {
     ModifiersChanged(Modifiers),
     /// Another launch handed over the files it was asked to open.
     Launch(Vec<PathBuf>),
-    SessionEnding(bool),
+    /// Windows is shutting down or logging off: the last moment to finish writing files.
+    SessionEnding,
     /// Something asked to wake the loop: finished background work, or a deadline.
     Wake,
 }
@@ -988,7 +989,12 @@ impl NativeWindow {
         window.state.scale.set(window_scale(hwnd));
         window.state.physical.set(client_size(hwnd));
         if config.show {
-            window.show(config.focus);
+            let cmd = if config.focus {
+                SW_SHOW
+            } else {
+                SW_SHOWNOACTIVATE
+            };
+            let _ = unsafe { ShowWindow(hwnd, cmd) };
         }
         Ok(window)
     }
@@ -1049,10 +1055,6 @@ impl NativeWindow {
             }),
         });
         Self { id, hwnd, state }
-    }
-
-    pub(crate) fn show(&self, focus: bool) {
-        let _ = unsafe { ShowWindow(self.hwnd, if focus { SW_SHOW } else { SW_SHOWNOACTIVATE }) };
     }
 
     pub(crate) fn set_title(&self, title: &str) {
@@ -1518,13 +1520,11 @@ fn on_message(
                 Some(LRESULT(1))
             }
         },
-        WM_ENDSESSION => {
-            let ending = wparam.0 != 0;
-            if !ending {
-                let _ = unsafe { ShutdownBlockReasonDestroy(hwnd) };
-            }
-            handled(deliver(Some(PlatformEvent::SessionEnding(ending))))
+        // The session ends, or after all goes on.
+        WM_ENDSESSION if wparam.0 == 0 => {
+            handled(unsafe { ShutdownBlockReasonDestroy(hwnd) }.is_ok())
         }
+        WM_ENDSESSION => handled(deliver(Some(PlatformEvent::SessionEnding))),
         WM_DROPFILES => {
             let paths = dropped_paths(HDROP(wparam.0 as *mut _));
             handled(!paths.is_empty() && w.send(WindowEvent::FilesDropped(paths)))

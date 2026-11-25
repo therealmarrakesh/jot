@@ -454,11 +454,7 @@ impl PlatformHandler for App {
             PlatformEvent::Launch(paths) => {
                 let _ = self.launch(paths, true);
             }
-            PlatformEvent::SessionEnding(ending) => {
-                if ending {
-                    self.file_ops.writes.wait(Duration::from_secs(5));
-                }
-            }
+            PlatformEvent::SessionEnding => self.file_ops.writes.wait(Duration::from_secs(5)),
             PlatformEvent::Wake => {
                 while let Some(event) = self.file_events.next() {
                     self.run_file_ops(|ops, host, io| ops.on_event(event, host, io));
