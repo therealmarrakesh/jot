@@ -267,7 +267,7 @@ impl Editor {
     pub(crate) fn blur(&mut self) {
         self.focused = false;
         self.model.break_coalescing();
-        self.blink.stop();
+        self.blink = BlinkState::default();
         self.reset_pointer_selection_state();
     }
 
@@ -303,77 +303,59 @@ impl Editor {
     }
 }
 
+/// The caret's blinking, on while the editor has the keyboard: it holds steady while keys come
+/// in, and ends visible after the system's timeout.
 #[derive(Default)]
 struct BlinkState {
-    active: bool,
+    /// While on: the system's blink interval and timeout, and when blinking last (re)started.
+    on: Option<(Option<Duration>, Option<Duration>, Instant)>,
     visible: bool,
-    paused: bool,
-    started_at: Option<Instant>,
-    /// The system's blink interval and how long blinking lasts, captured by `start`.
-    timing: (Option<Duration>, Option<Duration>),
     next: Option<Instant>,
 }
 
 impl BlinkState {
-    fn visible(&self) -> bool {
-        self.paused || self.visible
-    }
-
-    fn stop(&mut self) {
-        self.active = false;
-        self.paused = false;
-        self.visible = false;
-        self.started_at = None;
-        self.next = None;
-    }
-
-    fn start(&mut self, timing: (Option<Duration>, Option<Duration>)) {
+    fn start(&mut self, (interval, timeout): (Option<Duration>, Option<Duration>)) {
         let now = Instant::now();
-        self.timing = timing;
-        self.active = true;
-        self.paused = false;
-        self.visible = false;
-        self.started_at = Some(now);
+        *self = Self {
+            on: Some((interval, timeout, now)),
+            visible: false,
+            next: None,
+        };
         self.step(now);
     }
 
     /// Holds the caret visible for an interval (after typing or moving), then blinks again.
     fn pause(&mut self) {
-        if !self.active && !self.visible {
-            return;
+        if let Some((interval, _, since)) = &mut self.on {
+            let now = Instant::now();
+            *since = now;
+            self.visible = true;
+            self.next = interval.map(|interval| now + interval);
         }
-        let now = Instant::now();
-        self.paused = true;
-        self.visible = true;
-        self.started_at = Some(now);
-        self.next = self.timing.0.map(|interval| now + interval);
     }
 
     /// Blinks if it's due; whether the caret changed.
     fn tick(&mut self, now: Instant) -> bool {
-        if !take_due(&mut self.next, now) || !self.active {
-            return false;
+        let due = take_due(&mut self.next, now);
+        if due {
+            self.step(now);
         }
-        self.paused = false;
-        self.step(now);
-        true
+        due
     }
 
+    /// Shows or hides the caret and schedules the next blink, or leaves it shown once blinking
+    /// has timed out (or the system doesn't blink).
     fn step(&mut self, now: Instant) {
-        let (interval, timeout) = self.timing;
-        let timed_out = timeout.is_some_and(|timeout| {
-            self.started_at
-                .is_some_and(|start| now.saturating_duration_since(start) >= timeout)
-        });
+        let Some((interval, timeout, since)) = self.on else {
+            return;
+        };
+        let timed_out = timeout.is_some_and(|t| now.saturating_duration_since(since) >= t);
         match interval {
             Some(interval) if !timed_out => {
                 self.visible = !self.visible;
                 self.next = Some(now + interval);
             }
-            _ => {
-                self.visible = true;
-                self.next = None;
-            }
+            _ => (self.visible, self.next) = (true, None),
         }
     }
 }
@@ -970,7 +952,7 @@ impl Editor {
         );
         let show_caret = self.focused
             && params.window_active
-            && self.blink.visible()
+            && self.blink.visible
             && (self.model.selection().is_empty() || self.model.composition().is_some());
         let marked_range = (!is_empty_field)
             .then(|| self.model.composition().map(|c| c.start..c.end))
@@ -2128,28 +2110,28 @@ mod tests {
         let mut blink = BlinkState::default();
         blink.start((Some(interval), Some(Duration::from_secs(5))));
         let due = blink.next.expect("blinking schedules the first toggle");
-        let shown = blink.visible();
+        let shown = blink.visible;
         assert!(!blink.tick(due - Duration::from_millis(1)));
         assert!(blink.tick(due));
-        assert_ne!(blink.visible(), shown);
+        assert_ne!(blink.visible, shown);
         assert_eq!(blink.next, Some(due + interval));
 
         blink.pause();
-        assert!(blink.visible(), "typing holds the caret visible");
+        assert!(blink.visible, "typing holds the caret visible");
         let resume = blink.next.expect("a pause resumes after an interval");
         assert!(blink.tick(resume));
-        assert!(!blink.paused);
+        assert!(!blink.visible, "it blinks again after the pause");
 
-        let late = blink.started_at.unwrap() + Duration::from_secs(6);
+        let late = blink.on.unwrap().2 + Duration::from_secs(6);
         blink.next = Some(late);
         assert!(blink.tick(late));
         assert!(
-            blink.visible() && blink.next.is_none(),
+            blink.visible && blink.next.is_none(),
             "blinking ends visible after the timeout"
         );
 
         blink.start((Some(interval), None));
-        blink.stop();
+        blink = BlinkState::default();
         assert!(blink.next.is_none() && !blink.tick(Instant::now() + interval));
     }
 
