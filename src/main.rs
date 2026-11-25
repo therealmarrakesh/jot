@@ -32,9 +32,7 @@ use std::time::{Duration, Instant};
 
 use crate::document::{DocPath, Format, PathKey};
 use crate::text::Rope;
-use crate::files::{
-    DocHost, FileEvents, FileIo, FileOps, FileRequest, Prompt, PromptId, TabSnapshot,
-};
+use crate::files::{DocHost, FileEvents, FileIo, FileOps, FileRequest, Prompt, TabSnapshot};
 use crate::geom::{Point, Rect, ScreenPoint, Size, point, size};
 use crate::gfx::{Gpu, TextSystem, WindowSurface};
 use crate::platform::{
@@ -46,7 +44,7 @@ use crate::platform::{
 use crate::shell::{Cx, Effect, Shell};
 use crate::tabs::TabData;
 use crate::tooltip::{KeyTips, Tooltips};
-use crate::types::{APP_NAME, take_due};
+use crate::types::APP_NAME;
 use crate::ui::TabId;
 use crate::window::{InputMode, MainWindow, WINDOW_HEIGHT, WINDOW_MAX_SCREEN_SHARE, WINDOW_WIDTH};
 
@@ -130,8 +128,6 @@ impl App {
         launch: WindowLaunch,
     ) -> Self {
         let shell = Shell::new(gpu, text_system);
-        let mut tooltips = Tooltips::default();
-        tooltips.hover_time = shell.settings.mouse_hover_time;
         let file_events = FileEvents::new(platform.waker());
         Self {
             windows: Windows::new(launch),
@@ -139,7 +135,7 @@ impl App {
             file_ops: FileOps::default(),
             file_events,
             keytips: KeyTips::default(),
-            tooltips,
+            tooltips: Tooltips::default(),
             quit: false,
             shell,
             platform,
@@ -185,16 +181,15 @@ impl App {
             }
             WindowEvent::MouseMove { pressed_button, .. } => {
                 let left = *pressed_button == Some(MouseButton::Left);
-                self.drive_drag(|drag, windows, ops, shell, closed| {
-                    drag.on_mouse_move(left, windows, ops, shell, closed)
+                self.drive_drag(|drag, windows, ops, shell| {
+                    drag.on_mouse_move(left, windows, ops, shell)
                 });
             }
             WindowEvent::MouseLeave => self.tooltips.on_mouse_leave(id),
             WindowEvent::MouseDown { .. } => self.tooltips.on_mouse_down(id),
             WindowEvent::MouseUp { button, .. } => {
-                self.tooltips.on_mouse_up();
                 if *button == MouseButton::Left {
-                    self.drive_drag(|drag, windows, _, _, _| drag.on_release(windows));
+                    self.drive_drag(|drag, windows, _, _| drag.on_release(windows));
                 }
             }
             WindowEvent::KeyDown(key) => {
@@ -214,8 +209,8 @@ impl App {
                 }
             }
             &WindowEvent::SizeMoveChanged(entering) => {
-                self.drive_drag(|drag, windows, ops, shell, closed| {
-                    drag.on_size_move_changed(id, entering, windows, ops, shell, closed)
+                self.drive_drag(|drag, windows, ops, shell| {
+                    drag.on_size_move_changed(id, entering, windows, ops, shell)
                 });
                 return false;
             }
@@ -240,7 +235,7 @@ impl App {
             self.evaluate_tooltip_for(ix);
         }
         if capture_lost {
-            self.drive_drag(|drag, windows, _, _, _| drag.on_capture_lost(id, windows));
+            self.drive_drag(|drag, windows, _, _| drag.on_capture_lost(id, windows));
         }
         handled
     }
@@ -308,44 +303,23 @@ impl App {
         }
     }
 
-    fn drive_drag(
-        &mut self,
-        f: impl FnOnce(
-            &mut TabDrag,
-            &mut Windows,
-            &FileOps,
-            &Shell,
-            &mut Vec<(WindowId, Vec<crate::files::PromptId>)>,
-        ) -> bool,
-    ) {
-        let Some(drag) = &mut self.tab_drag else {
-            return;
-        };
-        let mut closed = Vec::new();
-        let ended = f(
-            drag,
-            &mut self.windows,
-            &self.file_ops,
-            &self.shell,
-            &mut closed,
-        );
-        if ended {
+    /// Runs `f` on the tab drag, if one is going on, and ends the drag if `f` says to.
+    fn drive_drag(&mut self, f: impl FnOnce(&mut TabDrag, &mut Windows, &FileOps, &Shell) -> bool) {
+        let (windows, ops, shell) = (&mut self.windows, &self.file_ops, &self.shell);
+        if self
+            .tab_drag
+            .as_mut()
+            .is_some_and(|d| f(d, windows, ops, shell))
+        {
             self.end_tab_drag();
         }
-        self.notify_closed(closed);
     }
 
     fn cancel_tab_drag(&mut self) {
-        let Some(mut drag) = self.tab_drag.take() else {
-            return;
-        };
-        let mut closed = Vec::new();
-        drag.cancel(&mut self.windows, &self.shell, &mut closed);
-        self.windows.mark_dirty(drag.owner);
-        if drag.source != drag.owner {
-            self.windows.mark_dirty(drag.source);
+        if let Some(drag) = &mut self.tab_drag {
+            drag.cancel(&mut self.windows, &self.shell);
         }
-        self.notify_closed(closed);
+        self.end_tab_drag();
     }
 
     pub(crate) fn open_window(
@@ -420,17 +394,13 @@ impl App {
 
     fn evaluate_tooltip_for(&mut self, ix: usize) {
         let probe = self.windows[ix].tooltip_probe();
-        self.tooltips
-            .evaluate(probe, &self.shell.gpu, &self.shell.text_system);
+        self.tooltips.evaluate(probe, &self.shell);
     }
 
     fn paint_window_ix(&mut self, ix: usize, now: Instant) -> bool {
         let needs_vsync = self.windows[ix].render_frame(now, &self.shell);
-        let wid = self.windows[ix].id;
-        if self.windows[ix].key_tips_active() || self.keytips.is_owner(wid) {
-            let (anchor, tips) = self.windows[ix].key_tip_request(&self.shell);
-            self.keytips.sync(anchor, tips, &self.shell.gpu);
-        }
+        let (anchor, tips) = self.windows[ix].key_tip_request(&self.shell);
+        self.keytips.sync(anchor, tips, &self.shell);
         if self.windows[ix].ui.pointer().is_some() {
             self.evaluate_tooltip_for(ix);
         }
@@ -452,17 +422,15 @@ impl App {
         position: crate::geom::Point,
     ) {
         self.tab_drag = TabDrag::start(window, tab, index, grab, position, &mut self.windows);
-        self.drive_drag(|drag, windows, _, shell, closed| {
-            drag.detach_for_test(windows, shell, closed);
+        self.drive_drag(|drag, windows, _, shell| {
+            drag.detach_for_test(windows, shell);
             false
         });
     }
 
     #[cfg(test)]
     pub(crate) fn tab_drag_poll_for_test(&mut self) {
-        self.drive_drag(|drag, windows, ops, shell, closed| {
-            drag.on_poll(windows, ops, shell, closed)
-        });
+        self.drive_drag(TabDrag::on_poll);
     }
 
     #[cfg(test)]
@@ -478,7 +446,6 @@ impl PlatformHandler for App {
             PlatformEvent::Window(id, event) => handled = self.on_window_event(id, event),
             PlatformEvent::SettingsChanged(settings) => {
                 self.shell.apply_settings(settings);
-                self.tooltips.hover_time = settings.mouse_hover_time;
                 self.windows.apply_theme(self.shell.appearance());
             }
             PlatformEvent::ModifiersChanged(modifiers) => {
@@ -513,21 +480,19 @@ impl PlatformHandler for App {
             self.windows[ix].tick(now);
         }
         if let Some((target, _)) = self.tooltips.opening.filter(|&(_, at)| at <= now) {
-            self.tooltips.opening = None;
             let probe = self
                 .windows
                 .get(target.window)
                 .map(MainWindow::tooltip_probe);
-            self.tooltips
-                .on_show_timer(target, probe, &self.shell.gpu, &self.shell.text_system);
+            self.tooltips.on_show_timer(target, probe, &self.shell);
         }
-        if let Some(drag) = &mut self.tab_drag
-            && take_due(&mut drag.poll_at, now)
+        if self
+            .tab_drag
+            .as_ref()
+            .and_then(|d| d.poll_at)
+            .is_some_and(|at| at <= now)
         {
-            drag.poll_at = Some(now + MOVE_POLL);
-            self.drive_drag(|drag, windows, ops, shell, closed| {
-                drag.on_poll(windows, ops, shell, closed)
-            });
+            self.drive_drag(TabDrag::on_poll);
             self.sweep_closed_windows();
         }
         let gen_before = self.shell.gpu.generation();
@@ -542,15 +507,8 @@ impl PlatformHandler for App {
         if painted_any {
             self.shell.text_system.finish_frame();
         }
-        any_vsync |= self
-            .keytips
-            .paint(self.shell.palette, &self.shell.text_system);
-        any_vsync |= self.tooltips.paint(
-            self.shell.palette,
-            self.shell.settings.reduce_motion,
-            now,
-            &self.shell.text_system,
-        );
+        any_vsync |= self.keytips.paint(&self.shell);
+        any_vsync |= self.tooltips.paint(now, &self.shell);
         if self.shell.gpu.generation() != gen_before {
             self.windows.mark_all_dirty();
             any_vsync = true;
@@ -695,23 +653,6 @@ impl Windows {
 
     pub(crate) fn any_dirty(&self) -> bool {
         self.list.iter().any(|w| w.tabs.has_dirty())
-    }
-
-    pub(crate) fn rescue_tab(
-        &mut self,
-        preferred: Option<WindowId>,
-        index: usize,
-        tab: TabData,
-        shell: &Shell,
-    ) {
-        if let Some(id) = preferred
-            && let Some(win) = self.get_mut(id)
-        {
-            win.restore_tab(tab, index, shell);
-        } else if let Some(win) = self.list.last_mut() {
-            let ix = win.tabs.len();
-            win.restore_tab(tab, ix, shell);
-        }
     }
 
     pub(crate) fn sweep_closed(&mut self) -> Vec<(WindowId, Vec<crate::files::PromptId>)> {
@@ -932,8 +873,6 @@ impl DocHost for WindowsHost<'_> {
     }
 }
 
-type ClosedWindow = (WindowId, Vec<PromptId>);
-
 const DRAG_THRESHOLD: f32 = 10.;
 const DETACH_MAGNETISM: f32 = 15.;
 const MOVE_POLL: Duration = Duration::from_millis(16);
@@ -1008,7 +947,6 @@ impl TabDrag {
         windows: &mut Windows,
         file_ops: &FileOps,
         shell: &Shell,
-        closed: &mut Vec<ClosedWindow>,
     ) -> bool {
         if self.owner != window_id {
             return false;
@@ -1019,7 +957,7 @@ impl TabDrag {
             }
             false
         } else if self.is_in_move_loop() {
-            self.finish_move_loop(windows, file_ops, shell, closed)
+            self.finish_move_loop(windows, file_ops, shell)
         } else {
             false
         }
@@ -1031,7 +969,6 @@ impl TabDrag {
         windows: &mut Windows,
         file_ops: &FileOps,
         shell: &Shell,
-        closed: &mut Vec<ClosedWindow>,
     ) -> bool {
         if !pressed_left {
             return self.on_release(windows);
@@ -1062,9 +999,9 @@ impl TabDrag {
         } else if !alone
             && let Some(target_id) = strip_window(windows, file_ops, pt, None)
         {
-            self.attach(target_id, pt, windows, shell, closed);
+            self.attach(target_id, pt, windows, shell);
         } else {
-            self.detach(alone, pt, windows, shell, closed);
+            self.detach(alone, pt, windows, shell);
         }
         windows.mark_dirty(self.owner);
         false
@@ -1095,12 +1032,7 @@ impl TabDrag {
         }
     }
 
-    pub(crate) fn cancel(
-        &mut self,
-        windows: &mut Windows,
-        shell: &Shell,
-        closed: &mut Vec<ClosedWindow>,
-    ) {
+    pub(crate) fn cancel(&mut self, windows: &mut Windows, shell: &Shell) {
         self.poll_at = None;
         release_mouse_capture();
         if matches!(self.phase, Phase::Pressed) {
@@ -1127,7 +1059,6 @@ impl TabDrag {
         else {
             return;
         };
-        closed.extend(windows.sweep_closed());
 
         if let Some(src) = windows.get_mut(self.source) {
             let src_hwnd = src.hwnd;
@@ -1140,9 +1071,12 @@ impl TabDrag {
                         hwnd.restore_placement(placement);
                     }
                 }
+                // No window for it: it goes at the end of the last one.
                 Err(err) => {
-                    if let Some(tab_data) = err.tab {
-                        windows.rescue_tab(None, 0, tab_data, shell);
+                    if let Some(data) = err.tab
+                        && let Some(win) = windows.last_mut()
+                    {
+                        win.restore_tab(data, win.tabs.len(), shell);
                     }
                 }
             }
@@ -1154,8 +1088,8 @@ impl TabDrag {
         windows: &mut Windows,
         file_ops: &FileOps,
         shell: &Shell,
-        closed: &mut Vec<ClosedWindow>,
     ) -> bool {
+        self.poll_at = Some(Instant::now() + MOVE_POLL);
         let Some(hwnd) = windows.hwnd(self.owner) else {
             return true;
         };
@@ -1178,7 +1112,7 @@ impl TabDrag {
         {
             return false;
         }
-        self.finish_move_loop(windows, file_ops, shell, closed)
+        self.finish_move_loop(windows, file_ops, shell)
     }
 
     fn finish_move_loop(
@@ -1186,7 +1120,6 @@ impl TabDrag {
         windows: &mut Windows,
         file_ops: &FileOps,
         shell: &Shell,
-        closed: &mut Vec<ClosedWindow>,
     ) -> bool {
         self.poll_at = None;
         let Some(hwnd) = windows.hwnd(self.owner) else {
@@ -1196,7 +1129,7 @@ impl TabDrag {
         let pt = cursor_screen_pos();
         let pressed = primary_mouse_button_down();
         if let Some(target_id) = strip_window(windows, file_ops, pt, Some(self.owner)) {
-            self.attach(target_id, pt, windows, shell, closed);
+            self.attach(target_id, pt, windows, shell);
             if !pressed {
                 return self.on_release(windows);
             }
@@ -1206,7 +1139,7 @@ impl TabDrag {
             windows.mark_dirty(self.owner);
             false
         } else if pressed {
-            self.cancel(windows, shell, closed);
+            self.cancel(windows, shell);
             true
         } else {
             windows.mark_dirty(self.owner);
@@ -1221,7 +1154,6 @@ impl TabDrag {
         pt: ScreenPoint,
         windows: &mut Windows,
         shell: &Shell,
-        closed: &mut Vec<ClosedWindow>,
     ) {
         let Some(target_hwnd) = windows.hwnd(target_id) else {
             return;
@@ -1233,7 +1165,6 @@ impl TabDrag {
         else {
             return;
         };
-        closed.extend(windows.sweep_closed());
 
         if let Some(target) = windows.get_mut(target_id) {
             target.insert_dragged_tab(data, pt, self.grab.x, shell);
@@ -1246,14 +1177,7 @@ impl TabDrag {
         windows.mark_dirty(prev_owner);
     }
 
-    fn detach(
-        &mut self,
-        alone: bool,
-        pt: ScreenPoint,
-        windows: &mut Windows,
-        shell: &Shell,
-        closed: &mut Vec<ClosedWindow>,
-    ) {
+    fn detach(&mut self, alone: bool, pt: ScreenPoint, windows: &mut Windows, shell: &Shell) {
         if !alone {
             let source_win = self.owner;
             let taken = windows.get_mut(source_win).and_then(|w| {
@@ -1263,12 +1187,13 @@ impl TabDrag {
             let Some((data, sz)) = taken else {
                 return;
             };
-            closed.extend(windows.sweep_closed());
             let (window, _) = match windows.open_at(Some(data), Some(sz), Some(pt), shell) {
                 Ok(created) => created,
                 Err(err) => {
-                    if let Some(tab_data) = err.tab {
-                        windows.rescue_tab(Some(source_win), self.source_index, tab_data, shell);
+                    if let Some(data) = err.tab
+                        && let Some(win) = windows.get_mut(source_win)
+                    {
+                        win.restore_tab(data, self.source_index, shell);
                     }
                     return;
                 }
@@ -1303,18 +1228,13 @@ impl TabDrag {
     }
 
     #[cfg(test)]
-    pub(crate) fn detach_for_test(
-        &mut self,
-        windows: &mut Windows,
-        shell: &Shell,
-        closed: &mut Vec<ClosedWindow>,
-    ) {
+    pub(crate) fn detach_for_test(&mut self, windows: &mut Windows, shell: &Shell) {
         self.phase = Phase::Dragging;
         let pt = ScreenPoint {
             x: self.press.x + 120,
             y: self.press.y + 200,
         };
-        self.detach(false, pt, windows, shell, closed);
+        self.detach(false, pt, windows, shell);
         windows.mark_dirty(self.owner);
     }
 }

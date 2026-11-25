@@ -6,6 +6,7 @@ use crate::gfx::{Gpu, TextStyle, TextSystem};
 use crate::layout::AvailSize;
 use crate::platform::{Modifiers, WindowId, WindowsDisplay, cursor_screen_pos};
 use crate::theme::{CONTROL_RADIUS, Palette, SMALL_FONT};
+use crate::shell::Shell;
 use crate::types::SharedStr;
 use crate::ui::{
     AnimTracks, AppFrame, Curve, Easing, Frame, HitId, Node, OverlayAnchor,
@@ -125,23 +126,18 @@ pub(crate) struct Tooltips {
     text: SharedStr,
     dirty: bool,
     state: State,
-    pressed: bool,
     shown: Option<Shown>,
     closed_at: Option<Instant>,
     control_only: bool,
     /// The tooltip waiting to show, and when it shows.
     pub(crate) opening: Option<(TooltipTarget, Instant)>,
-    pub(crate) hover_time: Duration,
+    /// The system's hover time, as of the last look at the pointer.
+    hover_time: Duration,
 }
 
 impl Tooltips {
     pub(crate) fn on_mouse_down(&mut self, window: WindowId) {
-        self.pressed = true;
         self.apply_report(Report::Suppress(window));
-    }
-
-    pub(crate) fn on_mouse_up(&mut self) {
-        self.pressed = false;
     }
 
     pub(crate) fn on_key_down(&mut self) {
@@ -171,7 +167,8 @@ impl Tooltips {
         self.apply_report(Report::NoneIn(window));
     }
 
-    pub(crate) fn evaluate(&mut self, probe: TooltipProbe<'_>, gpu: &Rc<Gpu>, ts: &TextSystem) {
+    pub(crate) fn evaluate(&mut self, probe: TooltipProbe<'_>, shell: &Shell) {
+        self.hover_time = shell.settings.mouse_hover_time;
         let TooltipProbe {
             anchor: OverlayAnchor {
                 window,
@@ -181,9 +178,6 @@ impl Tooltips {
             pointer,
             frame,
         } = probe;
-        if let Some(ptr) = pointer {
-            self.pressed = ptr.pressed;
-        }
         let gone = self
             .state
             .key()
@@ -197,7 +191,7 @@ impl Tooltips {
             });
         let observed = match pointer {
             None => Some(Report::NoneIn(window)),
-            Some(_) if self.pressed => None,
+            Some(ptr) if ptr.pressed => None,
             Some(ptr) => Some(match frame.tooltip_at(ptr.pos) {
                 Some((hit, tip, rect)) => Report::Owner(Snap {
                     key: TooltipTarget { window, hit },
@@ -215,19 +209,18 @@ impl Tooltips {
         if let Some(obs) = observed {
             self.transition(obs);
         }
-        self.sync(gpu, ts);
+        self.sync(shell);
     }
 
     pub(crate) fn on_show_timer(
         &mut self,
         target: TooltipTarget,
         probe: Option<TooltipProbe<'_>>,
-        gpu: &Rc<Gpu>,
-        ts: &TextSystem,
+        shell: &Shell,
     ) {
         match probe {
             Some(probe) => {
-                self.evaluate(probe, gpu, ts);
+                self.evaluate(probe, shell);
             }
             None => {
                 if let Some(key) = self.state.key().filter(|k| k.window == target.window) {
@@ -236,7 +229,7 @@ impl Tooltips {
             }
         }
         self.transition(Report::Timer(target));
-        self.sync(gpu, ts);
+        self.sync(shell);
     }
 
     fn transition(&mut self, report: Report) {
@@ -279,7 +272,7 @@ impl Tooltips {
         }
     }
 
-    fn sync(&mut self, gpu: &Rc<Gpu>, ts: &TextSystem) {
+    fn sync(&mut self, shell: &Shell) {
         self.sync_hide_and_timer();
         let showing = match &self.state {
             State::Showing { snap } => Some(snap.clone()),
@@ -288,7 +281,7 @@ impl Tooltips {
         if let Some(snap) = showing
             && self.shown.is_none()
         {
-            self.show(snap, gpu, ts);
+            self.show(snap, &shell.gpu, &shell.text_system);
         }
     }
 
@@ -335,16 +328,12 @@ impl Tooltips {
         self.overlay.show(gpu, rect);
     }
 
-    pub(crate) fn paint(
-        &mut self,
-        p: Palette,
-        reduce_motion: bool,
-        now: Instant,
-        ts: &TextSystem,
-    ) -> bool {
+    pub(crate) fn paint(&mut self, now: Instant, shell: &Shell) -> bool {
         if !self.dirty {
             return false;
         }
+        let (p, ts) = (shell.palette, &shell.text_system);
+        let reduce_motion = shell.settings.reduce_motion;
         self.dirty = false;
         let visible = self.shown.is_some();
         let text = self.text.clone();
@@ -442,10 +431,6 @@ pub(crate) struct KeyTips {
 }
 
 impl KeyTips {
-    pub(crate) fn is_owner(&self, owner: WindowId) -> bool {
-        self.owner == Some(owner)
-    }
-
     pub(crate) fn hide(&mut self) {
         self.owner = None;
         self.rect = ScreenRect::default();
@@ -460,7 +445,7 @@ impl KeyTips {
         }
     }
 
-    pub(crate) fn sync(&mut self, anchor: OverlayAnchor, mut tips: Vec<KeyTip>, gpu: &Rc<Gpu>) {
+    pub(crate) fn sync(&mut self, anchor: OverlayAnchor, mut tips: Vec<KeyTip>, shell: &Shell) {
         let Some(union) = tips.iter().map(|t| t.bounds).reduce(Rect::union) else {
             self.hide_owner(anchor.window);
             return;
@@ -476,10 +461,11 @@ impl KeyTips {
         self.owner = Some(anchor.window);
         self.rect = rect;
         self.dirty = true;
-        self.overlay.show(gpu, rect);
+        self.overlay.show(&shell.gpu, rect);
     }
 
-    pub(crate) fn paint(&mut self, p: Palette, ts: &TextSystem) -> bool {
+    pub(crate) fn paint(&mut self, shell: &Shell) -> bool {
+        let (p, ts) = (shell.palette, &shell.text_system);
         if !self.dirty {
             return false;
         }
