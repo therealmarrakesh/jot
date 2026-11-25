@@ -1785,7 +1785,7 @@ fn dropped_paths(hdrop: HDROP) -> Vec<PathBuf> {
 }
 
 /// A window's handle, for the operations the app runs on its own and other windows.
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub(crate) struct WindowHandle(isize);
 
 /// A window's saved position, size and state (restored, maximized, minimized).
@@ -1795,10 +1795,6 @@ pub(crate) struct WindowPlacement(WINDOWPLACEMENT);
 impl WindowHandle {
     pub(crate) fn raw(self) -> HWND {
         HWND(self.0 as *mut _)
-    }
-
-    pub(crate) fn is_null(self) -> bool {
-        self.0 == 0
     }
 
     pub(crate) fn client_origin(self) -> ScreenPoint {
@@ -1861,9 +1857,6 @@ impl WindowHandle {
 
     /// Restores the window if it's minimized and brings it to the front.
     pub(crate) fn bring_to_front(self) {
-        if self.is_null() {
-            return;
-        }
         if unsafe { IsIconic(self.raw()) }.as_bool() {
             self.restore();
         }
@@ -1947,9 +1940,6 @@ impl WindowHandle {
 
     /// Commits any text being composed in the window's IME.
     pub(crate) fn complete_ime_composition(self) {
-        if self.is_null() {
-            return;
-        }
         let himc = unsafe { ImmGetContext(self.raw()) };
         if !himc.is_invalid() {
             unsafe {
@@ -2458,10 +2448,10 @@ fn high_contrast_colors() -> Option<HighContrastColors> {
 
 const ENCODING_COMBO_ID: u32 = 1001;
 
-#[derive(Clone, Debug, Default)]
+/// The open dialog, which picks one or more files.
+#[derive(Clone, Debug)]
 pub(crate) struct OpenDialogOptions {
-    pub(crate) multiple: bool,
-    pub(crate) directory: Option<PathBuf>,
+    pub(crate) directory: PathBuf,
     pub(crate) file_types: Vec<(SharedStr, SharedStr)>,
 }
 
@@ -2475,12 +2465,12 @@ pub(crate) struct SaveChoice {
 
 #[derive(Clone, Debug)]
 pub(crate) struct SaveDialogOptions {
-    pub(crate) title: Option<SharedStr>,
+    pub(crate) title: SharedStr,
     pub(crate) directory: PathBuf,
-    pub(crate) file_name: Option<String>,
+    pub(crate) file_name: String,
     pub(crate) file_types: Vec<(SharedStr, SharedStr)>,
-    pub(crate) default_extension: Option<SharedStr>,
-    pub(crate) choice: Option<SaveChoice>,
+    pub(crate) default_extension: SharedStr,
+    pub(crate) choice: SaveChoice,
 }
 
 /// The chosen path and drop-down item, or `None` if cancelled.
@@ -2514,32 +2504,32 @@ fn shell_item_path(item: &IShellItem) -> Result<PathBuf> {
 fn show_dialog(
     dialog: &IFileDialog,
     owner: WindowHandle,
-    directory: Option<&Path>,
+    directory: &Path,
     file_types: &[(SharedStr, SharedStr)],
 ) -> Result<bool> {
-    if let Some(dir) = directory.filter(|d| !d.as_os_str().is_empty())
+    if !directory.as_os_str().is_empty()
         && let Ok(folder) = unsafe {
-            SHCreateItemFromParsingName::<_, _, IShellItem>(&HSTRING::from(dir.as_os_str()), None)
+            SHCreateItemFromParsingName::<_, _, IShellItem>(
+                &HSTRING::from(directory.as_os_str()),
+                None,
+            )
         }
     {
         let _ = unsafe { dialog.SetFolder(&folder) };
     }
-    if !file_types.is_empty() {
-        let wide: Vec<(HSTRING, HSTRING)> = file_types
-            .iter()
-            .map(|(label, spec)| (HSTRING::from(label.as_str()), HSTRING::from(spec.as_str())))
-            .collect();
-        let specs: Vec<COMDLG_FILTERSPEC> = wide
-            .iter()
-            .map(|(label, spec)| COMDLG_FILTERSPEC {
-                pszName: PCWSTR(label.as_ptr()),
-                pszSpec: PCWSTR(spec.as_ptr()),
-            })
-            .collect();
-        unsafe { dialog.SetFileTypes(&specs)? };
-    }
-    let parent = (!owner.is_null()).then(|| owner.raw());
-    match unsafe { dialog.Show(parent) } {
+    let wide: Vec<(HSTRING, HSTRING)> = file_types
+        .iter()
+        .map(|(label, spec)| (HSTRING::from(label.as_str()), HSTRING::from(spec.as_str())))
+        .collect();
+    let specs: Vec<COMDLG_FILTERSPEC> = wide
+        .iter()
+        .map(|(label, spec)| COMDLG_FILTERSPEC {
+            pszName: PCWSTR(label.as_ptr()),
+            pszSpec: PCWSTR(spec.as_ptr()),
+        })
+        .collect();
+    unsafe { dialog.SetFileTypes(&specs)? };
+    match unsafe { dialog.Show(Some(owner.raw())) } {
         Ok(()) => Ok(true),
         Err(err) if err.code() == ERROR_CANCELLED.to_hresult() => Ok(false),
         Err(err) => Err(err.into()),
@@ -2554,17 +2544,9 @@ pub(crate) fn run_open_dialog(
     unsafe {
         let dialog: IFileOpenDialog =
             CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER)?;
-        let mut flags = dialog.GetOptions()? | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST;
-        if options.multiple {
-            flags |= FOS_ALLOWMULTISELECT;
-        }
-        dialog.SetOptions(flags)?;
-        if !show_dialog(
-            &dialog,
-            owner,
-            options.directory.as_deref(),
-            &options.file_types,
-        )? {
+        let flags = FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST | FOS_ALLOWMULTISELECT;
+        dialog.SetOptions(dialog.GetOptions()? | flags)?;
+        if !show_dialog(&dialog, owner, &options.directory, &options.file_types)? {
             return Ok(None);
         }
         let items = dialog.GetResults()?;
@@ -2581,39 +2563,30 @@ pub(crate) fn run_save_dialog(owner: WindowHandle, options: SaveDialogOptions) -
         dialog.SetOptions(
             dialog.GetOptions()? | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST | FOS_OVERWRITEPROMPT,
         )?;
-        if let Some(title) = &options.title {
-            dialog.SetTitle(&HSTRING::from(title.as_str()))?;
-        }
-        if let Some(name) = &options.file_name {
-            dialog.SetFileName(&HSTRING::from(name.as_str()))?;
-        }
-        if let Some(ext) = &options.default_extension {
-            dialog.SetDefaultExtension(&HSTRING::from(ext.as_str()))?;
-        }
-        let customize = options.choice.as_ref().and_then(|choice| {
-            let custom = dialog.cast::<IFileDialogCustomize>().ok()?;
-            let _ = custom.StartVisualGroup(
-                ENCODING_COMBO_ID + 100,
-                &HSTRING::from(choice.label.as_str()),
-            );
-            let _ = custom.AddComboBox(ENCODING_COMBO_ID);
-            for (ix, item) in choice.items.iter().enumerate() {
-                let _ = custom.AddControlItem(
-                    ENCODING_COMBO_ID,
-                    ix as u32,
-                    &HSTRING::from(item.as_str()),
+        dialog.SetTitle(&HSTRING::from(options.title.as_str()))?;
+        dialog.SetFileName(&HSTRING::from(options.file_name.as_str()))?;
+        dialog.SetDefaultExtension(&HSTRING::from(options.default_extension.as_str()))?;
+        let choice = &options.choice;
+        let customize = dialog
+            .cast::<IFileDialogCustomize>()
+            .ok()
+            .inspect(|custom| {
+                let _ = custom.StartVisualGroup(
+                    ENCODING_COMBO_ID + 100,
+                    &HSTRING::from(choice.label.as_str()),
                 );
-            }
-            let _ = custom.SetSelectedControlItem(ENCODING_COMBO_ID, choice.selected as u32);
-            let _ = custom.EndVisualGroup();
-            Some(custom)
-        });
-        if !show_dialog(
-            &dialog,
-            owner,
-            Some(&options.directory),
-            &options.file_types,
-        )? {
+                let _ = custom.AddComboBox(ENCODING_COMBO_ID);
+                for (ix, item) in choice.items.iter().enumerate() {
+                    let _ = custom.AddControlItem(
+                        ENCODING_COMBO_ID,
+                        ix as u32,
+                        &HSTRING::from(item.as_str()),
+                    );
+                }
+                let _ = custom.SetSelectedControlItem(ENCODING_COMBO_ID, choice.selected as u32);
+                let _ = custom.EndVisualGroup();
+            });
+        if !show_dialog(&dialog, owner, &options.directory, &options.file_types)? {
             return Ok(None);
         }
         let path = shell_item_path(&dialog.GetResult()?)?;

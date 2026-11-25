@@ -933,8 +933,7 @@ fn spawn_file_io(
                 return;
             };
             let options = OpenDialogOptions {
-                multiple: true,
-                directory: Some(default_directory(current.as_deref())),
+                directory: default_directory(current.as_deref()),
                 file_types: file_types(),
             };
             events.spawn(
@@ -988,12 +987,12 @@ fn spawn_file_io(
             let current = current.as_ref().map(DocPath::as_path);
             let suggested = file_name(current).unwrap_or_else(|| UNTITLED_FILE_NAME.into());
             let options = SaveDialogOptions {
-                title: Some(SAVE_AS_TITLE.into()),
+                title: SAVE_AS_TITLE.into(),
                 directory: default_directory(current),
-                file_name: Some(suggested),
+                file_name: suggested,
                 file_types: file_types(),
-                default_extension: Some(TEXT_EXTENSION.into()),
-                choice: Some(SaveChoice {
+                default_extension: TEXT_EXTENSION.into(),
+                choice: SaveChoice {
                     label: ENCODING_LABEL.into(),
                     items: Encoding::SAVE_ORDER
                         .map(|encoding| SharedStr::Static(encoding.label()))
@@ -1002,7 +1001,7 @@ fn spawn_file_io(
                         .iter()
                         .position(|&encoding| encoding == format.encoding)
                         .unwrap_or_default(),
-                }),
+                },
             };
             events.spawn(
                 "jot-save-dialog",
