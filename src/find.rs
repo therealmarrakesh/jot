@@ -105,7 +105,7 @@ pub(crate) struct FindBar {
     pub(crate) replacement: Editor,
     notice: Option<SharedStr>,
     /// When the notice goes away.
-    pub(crate) notice_until: Option<Instant>,
+    notice_until: Option<Instant>,
     matcher: Option<Matcher>,
     buffer: String,
 }
@@ -180,6 +180,31 @@ impl FindBar {
         }
         self.notice = Some(notice.into());
         self.notice_until = Some(Instant::now() + NOTICE_DURATION);
+    }
+
+    pub(crate) fn deadline(&self) -> Option<Instant> {
+        self.notice_until
+    }
+
+    /// Flips one of the bar's options: `ToggleReplace`, `ToggleMatchCase` or `ToggleWrapAround`.
+    pub(crate) fn toggle(&mut self, option: AppCommand) {
+        let flag = match option {
+            AppCommand::ToggleReplace => &mut self.replace,
+            AppCommand::ToggleMatchCase => &mut self.match_case,
+            AppCommand::ToggleWrapAround => &mut self.wrap_around,
+            _ => return,
+        };
+        *flag = !*flag;
+    }
+
+    /// The field focus goes to in the bar, given where it is: the replacement field if that's
+    /// showing and has it, else the query.
+    pub(crate) fn field_for(&self, focus: Focus) -> EditorSlot {
+        if self.replace && focus == Focus::Editor(EditorSlot::FindReplace) {
+            EditorSlot::FindReplace
+        } else {
+            EditorSlot::FindQuery
+        }
     }
 
     /// Dismisses the notice once it's due; whether that changed anything.

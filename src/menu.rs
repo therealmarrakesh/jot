@@ -630,7 +630,7 @@ pub(crate) struct Menus {
     /// The spot under the pointer (and, in a submenu, the row that opened it).
     hovered: Option<(Spot, usize)>,
     /// When hovering opens (or, with `None`, closes) a submenu.
-    pub(crate) submenu_at: Option<(Instant, Option<usize>)>,
+    submenu_at: Option<(Instant, Option<usize>)>,
 }
 
 impl Menus {
@@ -929,6 +929,10 @@ impl Menus {
         ui.last_input_was_keyboard = false;
         self.submenu_at = pending.map(|target| (Instant::now() + show_delay, target));
         MenuOutcome::default().dirty()
+    }
+
+    pub(crate) fn deadline(&self) -> Option<Instant> {
+        self.submenu_at.map(|(at, _)| at)
     }
 
     /// Opens or closes the hovered submenu once its delay is up; whether anything changed.

@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use crate::editor::{Editor, FieldOptions};
 use crate::files::{Prompt, PromptId};
+use crate::gfx::TextSystem;
 use crate::platform::{CursorStyle, Key, KeyEvent};
 use crate::theme::{BODY_LINE, BODY_SIZE, BORDER, OVERLAY_RADIUS, Palette, TEXT_FONT};
 use crate::types::SharedStr;
@@ -158,6 +159,23 @@ impl Dialogs {
             opacity: 0.,
         });
         initial_focus
+    }
+
+    /// Shows the go-to dialog, its field holding `line` (or what was typed before) selected;
+    /// where focus goes.
+    pub(crate) fn show_go_to(&mut self, line: Option<usize>, ts: &TextSystem) -> Focus {
+        let focus = self.show_now(DialogKind::GoTo);
+        if let Some(line) = line {
+            self.line.set_value(&line.to_string(), ts);
+        }
+        self.line.select_all();
+        focus
+    }
+
+    /// The line (from zero) the go-to field asks for, if the document's `lines` have it.
+    pub(crate) fn go_to_target(&self, lines: usize) -> Option<usize> {
+        let line = self.line.model().text().to_string().parse::<usize>().ok()?;
+        (1..=lines).contains(&line).then(|| line - 1)
     }
 
     pub(crate) fn dismiss(&mut self) -> Option<Focus> {

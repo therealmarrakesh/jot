@@ -104,7 +104,7 @@ fn window_ticks_its_deadlines() {
     h.type_text("gamma");
     h.press_key("enter");
     let due = h
-        .read(|w, _| w.find.notice_until)
+        .read(|w, _| w.find.deadline())
         .expect("a failed search shows a notice");
     assert!(h.read(|w, _| w.deadline()).is_some_and(|next| next <= due));
 
@@ -112,7 +112,7 @@ fn window_ticks_its_deadlines() {
     let w = &mut app.windows[0];
     w.dirty = false;
     w.tick(due - std::time::Duration::from_millis(1));
-    assert!(w.find.notice_until.is_some());
+    assert!(w.find.deadline().is_some());
     w.tick(due);
-    assert!(w.dirty && w.find.notice_until.is_none());
+    assert!(w.dirty && w.find.deadline().is_none());
 }

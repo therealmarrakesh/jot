@@ -6,7 +6,7 @@ use crate::command::{AppCommand, shortcut_tooltip};
 use crate::document::{self, DocPath, Format, PathKey};
 use crate::editor::{DocOptions, Editor};
 use crate::text::Rope;
-use crate::geom::{Edges, size, transparent_black};
+use crate::geom::{Edges, Point, size, transparent_black};
 use crate::platform::CursorStyle;
 use crate::theme::{OVERLAY_RADIUS, Palette, SMALL_FONT};
 use crate::types::SharedStr;
@@ -30,10 +30,10 @@ const NEW_TAB_GAP: f32 = 5.;
 const NEW_TAB_GAP_SCROLLING: f32 = 3.;
 pub(crate) const STRIP_END_RESERVE: f32 = NEW_TAB_GAP_SCROLLING + BUTTON_WIDTH;
 pub(crate) const MIN_STRIP_WIDTH: f32 = 2. * LIST_PAD + STRIP_END_RESERVE;
-pub(crate) const SCROLL_STEP: f32 = 50.;
-pub(crate) const SCROLL_REPEAT_DELAY: Duration = Duration::from_millis(250);
-pub(crate) const SCROLL_REPEAT_INTERVAL: Duration = Duration::from_millis(100);
-pub(crate) const WHEEL_SHARE: f32 = 0.15;
+const SCROLL_STEP: f32 = 50.;
+const SCROLL_REPEAT_DELAY: Duration = Duration::from_millis(250);
+const SCROLL_REPEAT_INTERVAL: Duration = Duration::from_millis(100);
+const WHEEL_SHARE: f32 = 0.15;
 const CLOSE_GLYPH: &str = "\u{E711}";
 const REORDER_THRESHOLD: f32 = 16.;
 
@@ -78,7 +78,7 @@ pub(crate) struct TabSet {
     drag: Option<Drag>,
     lifted: Option<TabId>,
     /// While a scroll arrow is held: when it next scrolls, and by how much.
-    pub(crate) repeat: Option<(Instant, f32)>,
+    repeat: Option<(Instant, f32)>,
 }
 
 impl Index<usize> for TabSet {
@@ -226,7 +226,7 @@ impl TabSet {
         if self.buttons { SCROLL_AREA } else { 0. }
     }
 
-    pub(crate) fn scroll_viewport(&self) -> f32 {
+    fn scroll_viewport(&self) -> f32 {
         self.column - 2. * self.scroll_area()
     }
 
@@ -276,7 +276,7 @@ impl TabSet {
         self.scroll = target.clamp(0., self.max_scroll()).round();
     }
 
-    pub(crate) fn scroll_by(&mut self, delta: f32) -> bool {
+    fn scroll_by(&mut self, delta: f32) -> bool {
         let before = self.scroll;
         self.scroll_to(before + delta);
         self.scroll != before
@@ -473,14 +473,6 @@ impl TabSet {
         true
     }
 
-    pub(crate) fn overflow(&self) -> bool {
-        self.overflow
-    }
-
-    pub(crate) fn is_frozen(&self) -> bool {
-        self.frozen.is_some()
-    }
-
     pub(crate) fn thaw_if_frozen(&mut self) -> bool {
         if self.frozen.take().is_some() {
             self.layout();
@@ -488,6 +480,44 @@ impl TabSet {
         } else {
             false
         }
+    }
+
+    /// A press on a scroll arrow scrolls a step, and keeps scrolling while it's held.
+    pub(crate) fn press_arrow(&mut self, right: bool, now: Instant) {
+        let step = if right { SCROLL_STEP } else { -SCROLL_STEP };
+        if self.scroll_by(step) {
+            self.repeat = Some((now + SCROLL_REPEAT_DELAY, step));
+        }
+    }
+
+    /// The arrow is no longer held, or the pointer left it.
+    pub(crate) fn release_arrow(&mut self) {
+        self.repeat = None;
+    }
+
+    /// A wheel turn over the strip scrolls it, if it overflows; whether it did.
+    pub(crate) fn wheel(&mut self, lines: Point) -> bool {
+        if !self.overflow {
+            return false;
+        }
+        let notches = if lines.y != 0. { lines.y } else { lines.x };
+        self.scroll_by(-notches * WHEEL_SHARE * self.scroll_viewport());
+        true
+    }
+
+    /// Scrolls again while an arrow is held; whether it was due.
+    pub(crate) fn tick(&mut self, now: Instant) -> bool {
+        let Some((_, step)) = self.repeat.filter(|&(at, _)| at <= now) else {
+            return false;
+        };
+        self.repeat = self
+            .scroll_by(step)
+            .then_some((now + SCROLL_REPEAT_INTERVAL, step));
+        true
+    }
+
+    pub(crate) fn deadline(&self) -> Option<Instant> {
+        self.repeat.map(|(at, _)| at)
     }
 }
 

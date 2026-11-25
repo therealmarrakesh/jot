@@ -1298,9 +1298,8 @@ impl TabDrag {
         let Some(win) = windows.get(self.owner) else {
             return;
         };
-        let hwnd = win.hwnd;
-        place_window(hwnd, pt, win.strip_grab_offset(self.grab));
-        hwnd.begin_system_move(pt);
+        win.place_under(pt, self.grab);
+        win.hwnd.begin_system_move(pt);
         self.phase = Phase::Entering {
             since: Instant::now(),
         };
@@ -1339,9 +1338,4 @@ fn strip_window(
             && w.strip_hit(pt, DETACH_MAGNETISM);
         accepts.then_some(w.id)
     })
-}
-
-fn place_window(hwnd: WindowHandle, pt: ScreenPoint, offset: Point) {
-    let (at, frame) = (hwnd.to_screen(offset), hwnd.window_rect());
-    hwnd.move_noactivate(pt.x - (at.x - frame.left), pt.y - (at.y - frame.top));
 }

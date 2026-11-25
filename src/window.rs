@@ -21,10 +21,7 @@ use crate::platform::{
     WindowHandle, WindowId, clipboard_has_text, format_local_time_date,
 };
 use crate::shell::{Cx, Effect, Shell};
-use crate::tabs::{
-    self, Removal, SCROLL_REPEAT_DELAY, SCROLL_REPEAT_INTERVAL, SCROLL_STEP, StripFrame,
-    TAB_HEIGHT, TabData, TabSet, WHEEL_SHARE,
-};
+use crate::tabs::{self, Removal, StripFrame, TAB_HEIGHT, TabData, TabSet};
 use crate::text::{Rope, RopeExt as _};
 use crate::theme::{BODY_LINE, BODY_SIZE, FIELD_CARET, ICON_FONT, Palette, SMALL_FONT, TEXT_FONT};
 use crate::tooltip::{KeyTip, TooltipProbe};
@@ -136,13 +133,7 @@ impl MainWindow {
         }
         changed |= self.menus.tick(now);
         changed |= self.find.tick(now);
-        if let Some((at, step)) = self.tabs.repeat
-            && at <= now
-        {
-            self.tabs.repeat = self
-                .scroll_tabs(step)
-                .then_some((now + SCROLL_REPEAT_INTERVAL, step));
-        }
+        changed |= self.tabs.tick(now);
         self.dirty |= changed;
     }
 
@@ -150,11 +141,10 @@ impl MainWindow {
     pub(crate) fn deadline(&self) -> Option<Instant> {
         let tabs = self.tabs.iter().map(|tab| &tab.data.editor);
         let editors = tabs.chain(self.fields()).filter_map(Editor::deadline);
-        let submenu = self.menus.submenu_at.map(|(at, _)| at);
         editors
-            .chain(self.tabs.repeat.map(|(at, _)| at))
-            .chain(submenu)
-            .chain(self.find.notice_until)
+            .chain(self.tabs.deadline())
+            .chain(self.menus.deadline())
+            .chain(self.find.deadline())
             .min()
     }
 
@@ -238,7 +228,7 @@ impl MainWindow {
             } => self.on_mouse_move(position, pressed_button, cx),
             WindowEvent::MouseLeave => {
                 self.dirty |= self.ui.on_mouse_leave();
-                self.tabs.repeat = None;
+                self.tabs.release_arrow();
                 self.dirty |= self.tabs.thaw_if_frozen();
             }
             WindowEvent::MouseDown {
@@ -267,7 +257,7 @@ impl MainWindow {
             }
             WindowEvent::CaptureLost => {
                 self.middle_pressed_tab = None;
-                self.tabs.repeat = None;
+                self.tabs.release_arrow();
                 self.dirty |= self.ui.on_capture_lost();
             }
             WindowEvent::TextInput(text) => {
@@ -317,7 +307,7 @@ impl MainWindow {
             top,
             Some(HitId::Tab(TabHit::ScrollLeft | TabHit::ScrollRight))
         ) {
-            self.tabs.repeat = None;
+            self.tabs.release_arrow();
         }
         let mode = self.mode();
         if mode != InputMode::Dialog {
@@ -328,7 +318,7 @@ impl MainWindow {
                     .on_hover_change(top, || menu_state(tabs, shell), &mut self.ui, delay);
             self.apply_menu_outcome(out, cx);
         }
-        if self.tabs.is_frozen() && !self.pointer_in_strip(pos) {
+        if !self.pointer_in_strip(pos) {
             self.dirty |= self.tabs.thaw_if_frozen();
         }
 
@@ -404,10 +394,8 @@ impl MainWindow {
                     return;
                 }
                 Some(HitId::Tab(hit @ (TabHit::ScrollLeft | TabHit::ScrollRight))) => {
-                    let step = SCROLL_STEP * if hit == TabHit::ScrollLeft { -1. } else { 1. };
-                    if self.scroll_tabs(step) {
-                        self.tabs.repeat = Some((Instant::now() + SCROLL_REPEAT_DELAY, step));
-                    }
+                    self.tabs
+                        .press_arrow(hit == TabHit::ScrollRight, Instant::now());
                     return;
                 }
                 _ => {}
@@ -430,7 +418,7 @@ impl MainWindow {
         let (clicked, chain) = self.ui.on_mouse_up(pos, button);
         let top = chain.first().copied();
         let over = tab_at(chain);
-        self.tabs.repeat = None;
+        self.tabs.release_arrow();
         // A press that opened a menu, released on one of its rows, runs the row.
         let menu_release =
             (button == MouseButton::Left && clicked.is_none() && self.mode() == InputMode::Popup)
@@ -495,9 +483,8 @@ impl MainWindow {
             return;
         }
         let chain = self.ui.frame().hit_chain(pos);
-        if self.tabs.overflow() && chain.contains(&HitId::Tab(TabHit::List)) {
-            let notches = if lines.y != 0. { lines.y } else { lines.x };
-            self.scroll_tabs(-notches * WHEEL_SHARE * self.tabs.scroll_viewport());
+        if chain.contains(&HitId::Tab(TabHit::List)) && self.tabs.wheel(lines) {
+            self.dirty = true;
             return;
         }
         if modifiers.ctrl && chain.contains(&HitId::EditorArea) {
@@ -668,16 +655,10 @@ impl MainWindow {
                     self.refocus_find(cx.shell);
                 }
             }
-            AppCommand::ToggleReplace => {
-                self.find.replace = !self.find.replace;
-                self.refocus_find(cx.shell);
-            }
-            AppCommand::ToggleMatchCase => {
-                self.find.match_case = !self.find.match_case;
-                self.refocus_find(cx.shell);
-            }
-            AppCommand::ToggleWrapAround => {
-                self.find.wrap_around = !self.find.wrap_around;
+            AppCommand::ToggleReplace
+            | AppCommand::ToggleMatchCase
+            | AppCommand::ToggleWrapAround => {
+                self.find.toggle(cmd);
                 self.refocus_find(cx.shell);
             }
             AppCommand::FindOptions => {
@@ -740,13 +721,7 @@ impl MainWindow {
     /// Puts focus back in the find bar after one of its options changed.
     fn refocus_find(&mut self, shell: &Shell) {
         if self.find.is_open() {
-            let replacing =
-                self.find.replace && self.focus == Focus::Editor(EditorSlot::FindReplace);
-            let slot = if replacing {
-                EditorSlot::FindReplace
-            } else {
-                EditorSlot::FindQuery
-            };
+            let slot = self.find.field_for(self.focus);
             self.set_focus(Focus::Editor(slot), shell);
         }
     }
@@ -789,14 +764,9 @@ impl MainWindow {
 
     /// Shows the go-to dialog, its field holding `line` (or what was typed before).
     fn show_go_to(&mut self, line: Option<usize>, shell: &Shell) {
-        self.show_dialog_now(DialogKind::GoTo, shell);
-        if let Some(line) = line {
-            self.dialogs
-                .line
-                .set_value(&line.to_string(), &shell.text_system);
-        }
-        self.dialogs.line.select_all();
-        self.set_focus(Focus::Editor(EditorSlot::GoToLine), shell);
+        self.cancel_menu(shell);
+        let next = self.dialogs.show_go_to(line, &shell.text_system);
+        self.set_focus(next, shell);
     }
 
     /// The open dialog's button `button` (or, with `None`, Escape) was chosen.
@@ -806,14 +776,13 @@ impl MainWindow {
         };
         match kind {
             DialogKind::GoTo if button == Some(0) => {
-                let value = self.dialogs.line.model().text().to_string();
                 let lines = self.tabs.active().editor.model().text().lines_len();
-                match value.parse::<usize>() {
-                    Ok(line) if (1..=lines).contains(&line) => {
+                match self.dialogs.go_to_target(lines) {
+                    Some(line) => {
                         self.close_dialog(cx.shell);
-                        self.tabs.active_mut().editor.go_to_line(line - 1);
+                        self.tabs.active_mut().editor.go_to_line(line);
                     }
-                    _ => self.show_dialog_now(DialogKind::LineOutOfRange, cx.shell),
+                    None => self.show_dialog_now(DialogKind::LineOutOfRange, cx.shell),
                 }
             }
             DialogKind::GoTo => self.close_dialog(cx.shell),
@@ -900,11 +869,6 @@ impl MainWindow {
         if !matches!(self.mode(), InputMode::Dialog | InputMode::Popup) {
             self.focus_active_editor(shell);
         }
-    }
-
-    fn scroll_tabs(&mut self, delta: f32) -> bool {
-        self.dirty = true;
-        self.tabs.scroll_by(delta)
     }
 
     /// Activates tab `ix`, if there is one and it isn't the active one.
@@ -1048,9 +1012,12 @@ impl MainWindow {
         (left..right).contains(&pos.x) && (top - magnetism..bottom + magnetism).contains(&pos.y)
     }
 
-    /// Where, in the window, a tab grabbed at `grab` sits when it's the first in the strip.
-    pub(crate) fn strip_grab_offset(&self, grab: Point) -> Point {
-        point(HEADER_WIDTH + tabs::LIST_PAD + grab.x, STRIP_TOP + grab.y)
+    /// Moves the window so a tab grabbed at `grab`, as the strip's first, sits under `pt`.
+    pub(crate) fn place_under(&self, pt: ScreenPoint, grab: Point) {
+        let offset = point(HEADER_WIDTH + tabs::LIST_PAD + grab.x, STRIP_TOP + grab.y);
+        let (at, frame) = (self.hwnd.to_screen(offset), self.hwnd.window_rect());
+        self.hwnd
+            .move_noactivate(pt.x - (at.x - frame.left), pt.y - (at.y - frame.top));
     }
 }
 
