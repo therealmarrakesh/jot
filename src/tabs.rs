@@ -1,13 +1,13 @@
 use std::ops::Index;
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::command::{AppCommand, shortcut_tooltip};
 use crate::document::{self, DocPath, Format, PathKey};
 use crate::editor::{DocOptions, Editor};
 use crate::text::Rope;
 use crate::geom::{Edges, size, transparent_black};
-use crate::platform::{CursorStyle, TimerHandle};
+use crate::platform::CursorStyle;
 use crate::theme::{OVERLAY_RADIUS, Palette, SMALL_FONT};
 use crate::types::SharedStr;
 use crate::ui::{
@@ -77,7 +77,8 @@ pub(crate) struct TabSet {
     ghosts: Vec<Ghost>,
     drag: Option<Drag>,
     lifted: Option<TabId>,
-    pub(crate) repeat: Option<TimerHandle>,
+    /// While a scroll arrow is held: when it next scrolls, and by how much.
+    pub(crate) repeat: Option<(Instant, f32)>,
 }
 
 impl Index<usize> for TabSet {

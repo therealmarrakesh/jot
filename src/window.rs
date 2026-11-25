@@ -15,7 +15,7 @@ use crate::platform::{
     KeyEvent, Modifiers, MouseButton, WindowAppearance, WindowControlArea, WindowHandle, WindowId,
     clipboard_has_text, format_local_time_date, read_clipboard_text, write_clipboard_text,
 };
-use crate::shell::{Cx, Effect, Shell, SlotTimers, WindowTimer};
+use crate::shell::{Cx, Effect, Shell};
 use crate::tabs::{
     self, self as tab_strip, Removal, SCROLL_REPEAT_DELAY, SCROLL_REPEAT_INTERVAL, SCROLL_STEP,
     StripFrame, TAB_HEIGHT, TabData, TabSet, WHEEL_SHARE,
@@ -303,26 +303,23 @@ impl MainWindow {
                     .and_then(Editor::prepare_cut);
                 if let Some(text) = text
                     && write_clipboard_text(&text)
+                    && let Some(ed) = self.editor_by_slot_mut(slot)
                 {
-                    self.with_editor(slot, shell, |ed, timers| {
-                        ed.delete_selection(&shell.text_system, timers);
-                    });
+                    ed.delete_selection(&shell.text_system);
                 }
                 true
             }
             EditCommand::Paste => {
-                if let Some(raw) = read_clipboard_text().filter(|s| !s.is_empty()) {
-                    self.with_editor(slot, shell, |ed, timers| {
-                        ed.paste(&raw, &shell.text_system, timers);
-                    });
+                if let Some(raw) = read_clipboard_text().filter(|s| !s.is_empty())
+                    && let Some(ed) = self.editor_by_slot_mut(slot)
+                {
+                    ed.paste(&raw, &shell.text_system);
                 }
                 true
             }
             other => self
-                .with_editor(slot, shell, |ed, timers| {
-                    ed.handle_command(other, &shell.text_system, timers)
-                })
-                .unwrap_or(false),
+                .editor_by_slot_mut(slot)
+                .is_some_and(|ed| ed.handle_command(other, &shell.text_system)),
         }
     }
 
@@ -353,20 +350,10 @@ impl MainWindow {
         self.dirty = true;
     }
 
-    fn with_editor<R>(
-        &mut self,
-        slot: EditorSlot,
-        shell: &Shell,
-        f: impl FnOnce(&mut Editor, &mut SlotTimers<'_>) -> R,
-    ) -> Option<R> {
-        let wid = self.id();
-        let ed = self.editor_by_slot_mut(slot)?;
-        let mut timers = shell.window_timers(wid).for_editor(slot);
-        Some(f(ed, &mut timers))
-    }
-
     fn start_editor_blink(&mut self, slot: EditorSlot, shell: &Shell) {
-        self.with_editor(slot, shell, |ed, timers| ed.start_blink(timers));
+        if let Some(ed) = self.editor_by_slot_mut(slot) {
+            ed.start_blink(&shell.settings);
+        }
     }
 
     fn stop_all_editor_blinks(&mut self) {
@@ -408,29 +395,42 @@ impl MainWindow {
         }
     }
 
-    pub(crate) fn on_timer(&mut self, timer: WindowTimer, shell: &Shell) {
-        match timer {
-            WindowTimer::Editor { slot, kind } => {
-                self.dirty |= self
-                    .with_editor(slot, shell, |ed, timers| ed.on_timer(kind, timers))
-                    .unwrap_or(false);
-            }
-            WindowTimer::TabScrollRepeat(step) => {
-                if !self.scroll_tabs(step) {
-                    self.tabs.repeat = None;
-                }
-            }
-            WindowTimer::Submenu(target) => {
-                if self.menus.on_submenu_timer(target) {
-                    self.dirty = true;
-                }
-            }
-            WindowTimer::FindNotice => {
-                if self.find.on_notice_dismiss() {
-                    self.dirty = true;
-                }
-            }
+    /// Acts on whatever is due at `now` (caret blinks, scrollbar fades, submenu and notice
+    /// delays, held scroll arrows), marking the window dirty if anything changed.
+    pub(crate) fn tick(&mut self, now: Instant) {
+        let mut changed = false;
+        self.tabs.for_each_editor_mut(|ed| changed |= ed.tick(now));
+        for ed in [
+            &mut self.find.query,
+            &mut self.find.replacement,
+            &mut self.dialogs.line,
+        ] {
+            changed |= ed.tick(now);
         }
+        changed |= self.menus.tick(now);
+        changed |= self.find.tick(now);
+        if let Some((at, step)) = self.tabs.repeat
+            && at <= now
+        {
+            self.tabs.repeat = self
+                .scroll_tabs(step)
+                .then_some((now + SCROLL_REPEAT_INTERVAL, step));
+        }
+        self.dirty |= changed;
+    }
+
+    /// When the window next needs a `tick`.
+    pub(crate) fn deadline(&self) -> Option<Instant> {
+        let tabs = (0..self.tabs.len()).map(|ix| &self.tabs[ix].data.editor);
+        let fields = [&self.find.query, &self.find.replacement, &self.dialogs.line];
+        let editors = tabs.chain(fields).filter_map(Editor::deadline);
+        let repeat = self.tabs.repeat.map(|(at, _)| at);
+        let submenu = self.menus.submenu_at.map(|(at, _)| at);
+        editors
+            .chain(repeat)
+            .chain(submenu)
+            .chain(self.find.notice_until)
+            .min()
     }
 }
 
@@ -844,10 +844,7 @@ impl MainWindow {
     }
 
     fn find_step(&mut self, forward: bool, shell: &Shell) {
-        let timers = shell.window_timers(self.id());
-        let out = self
-            .find
-            .step(&mut self.tabs.active_mut().editor, forward, timers);
+        let out = self.find.step(&mut self.tabs.active_mut().editor, forward);
         if matches!(out, FindOutcome::EmptyQuery) {
             self.open_find(false, shell);
             return;
@@ -859,22 +856,15 @@ impl MainWindow {
     }
 
     fn replace_next(&mut self, shell: &Shell) {
-        let timers = shell.window_timers(self.id());
-        self.find.replace_next(
-            &mut self.tabs.active_mut().editor,
-            &shell.text_system,
-            timers,
-        );
+        self.find
+            .replace_next(&mut self.tabs.active_mut().editor, &shell.text_system);
         self.dirty = true;
     }
 
     fn replace_all(&mut self, shell: &Shell) {
-        let timers = shell.window_timers(self.id());
-        let out = self.find.replace_all(
-            &mut self.tabs.active_mut().editor,
-            &shell.text_system,
-            timers,
-        );
+        let out = self
+            .find
+            .replace_all(&mut self.tabs.active_mut().editor, &shell.text_system);
         if matches!(out, FindOutcome::Replaced(_)) {
             self.refocus_find(shell);
         } else {
@@ -944,12 +934,12 @@ impl MainWindow {
         }
         let mode = self.mode();
         if mode != InputMode::Dialog {
-            let timers = cx.timers(self.id());
             let tabs = &self.tabs;
             let shell = cx.shell;
+            let delay = shell.settings.menu_show_delay;
             let menu_out =
                 self.menus
-                    .on_hover_change(top, || menu_state(tabs, shell), &mut self.ui, timers);
+                    .on_hover_change(top, || menu_state(tabs, shell), &mut self.ui, delay);
             let _ = self.apply_menu_outcome(menu_out, cx);
         }
 
@@ -967,9 +957,10 @@ impl MainWindow {
         let active_slot = self.active_slot();
         if let Some(axis) = self.active_editor().scrollbar_drag_axis() {
             let track_rect = self.ui.frame().rect_of(HitId::ScrollTrack(active_slot, axis));
-            if let Some(Some(notify)) = self.with_editor(active_slot, cx.shell, |ed, timers| {
-                ed.on_scrollbar_mouse_move(pos, dragging_left, track_rect, timers)
-            }) {
+            if let Some(notify) = self
+                .editor_by_slot_mut(active_slot)
+                .and_then(|ed| ed.on_scrollbar_mouse_move(pos, dragging_left, track_rect))
+            {
                 self.dirty |= notify;
                 self.sync_cursor(pos);
                 return;
@@ -978,10 +969,8 @@ impl MainWindow {
         if let Some(slot) = self.focused_editor_slot()
             && slot != active_slot
             && self
-                .with_editor(slot, cx.shell, |ed, timers| {
-                    ed.on_mouse_move(pos, dragging_left, true, timers)
-                })
-                .unwrap_or(false)
+                .editor_by_slot_mut(slot)
+                .is_some_and(|ed| ed.on_mouse_move(pos, dragging_left, true))
         {
             self.dirty = true;
         }
@@ -990,10 +979,8 @@ impl MainWindow {
             || self.active_editor().is_selecting()
         {
             self.dirty |= self
-                .with_editor(active_slot, cx.shell, |ed, timers| {
-                    ed.on_mouse_move(pos, dragging_left, active_focused, timers)
-                })
-                .unwrap_or(false);
+                .editor_by_slot_mut(active_slot)
+                .is_some_and(|ed| ed.on_mouse_move(pos, dragging_left, active_focused));
         }
 
         self.sync_cursor(pos);
@@ -1088,11 +1075,7 @@ impl MainWindow {
                 Some(HitId::Tab(hit @ (TabHit::ScrollLeft | TabHit::ScrollRight))) => {
                     let step = if hit == TabHit::ScrollLeft { -SCROLL_STEP } else { SCROLL_STEP };
                     if self.scroll_tabs(step) {
-                        self.tabs.repeat = Some(cx.timers(self.id()).every(
-                            SCROLL_REPEAT_DELAY,
-                            SCROLL_REPEAT_INTERVAL,
-                            WindowTimer::TabScrollRepeat(step),
-                        ));
+                        self.tabs.repeat = Some((Instant::now() + SCROLL_REPEAT_DELAY, step));
                     }
                     return;
                 }
@@ -1116,9 +1099,9 @@ impl MainWindow {
         if let Some(slot) = editor_hit {
             self.win.window.hwnd().complete_ime_composition();
             self.set_focus(Focus::Editor(slot), cx.shell);
-            self.with_editor(slot, cx.shell, |ed, timers| {
-                ed.on_mouse_down(button, pos, modifiers, click_count, timers);
-            });
+            if let Some(ed) = self.editor_by_slot_mut(slot) {
+                ed.on_mouse_down(button, pos, modifiers, click_count);
+            }
         }
     }
 
@@ -1167,16 +1150,13 @@ impl MainWindow {
         }
         if let Some(slot) = self.focused_editor_slot()
             && slot != active_slot
+            && let Some(ed) = self.editor_by_slot_mut(slot)
         {
-            self.with_editor(slot, cx.shell, |ed, timers| {
-                ed.on_mouse_up(button, timers);
-            });
+            ed.on_mouse_up(button);
         }
         let open_ctx = self
-            .with_editor(active_slot, cx.shell, |ed, timers| {
-                ed.on_mouse_up(button, timers)
-            })
-            .flatten();
+            .editor_by_slot_mut(active_slot)
+            .and_then(|ed| ed.on_mouse_up(button));
         if let Some(anchor) = open_ctx {
             let state = menu_state(&self.tabs, cx.shell);
             let out = self.menus.open_context_menu(anchor, state);
@@ -1277,8 +1257,10 @@ impl MainWindow {
         self.ui.last_input_was_keyboard = true;
 
         if self.mode() == InputMode::Dialog {
-            if let Some(slot) = self.focused_editor_slot() {
-                self.with_editor(slot, cx.shell, |ed, timers| ed.pause_blink(timers));
+            if let Some(slot) = self.focused_editor_slot()
+                && let Some(ed) = self.editor_by_slot_mut(slot)
+            {
+                ed.pause_blink();
             }
             return match self.dialogs.on_key(ev, self.focus) {
                 DialogKey::PassThrough => false,
@@ -1311,8 +1293,10 @@ impl MainWindow {
             return handled;
         }
 
-        if let Some(slot) = self.focused_editor_slot() {
-            self.with_editor(slot, cx.shell, |ed, timers| ed.pause_blink(timers));
+        if let Some(slot) = self.focused_editor_slot()
+            && let Some(ed) = self.editor_by_slot_mut(slot)
+        {
+            ed.pause_blink();
         }
 
         match self.find.on_key(ev, self.focus) {
@@ -1365,12 +1349,11 @@ impl MainWindow {
     }
 
     pub(crate) fn on_text_input(&mut self, text: &str, cx: &mut Cx<'_>) {
-        let Some(slot) = self.text_input_slot() else {
-            return;
-        };
-        self.with_editor(slot, cx.shell, |ed, timers| {
-            ed.handle_text_input(text, cx.ts(), timers);
-        });
+        if let Some(slot) = self.text_input_slot()
+            && let Some(ed) = self.editor_by_slot_mut(slot)
+        {
+            ed.handle_text_input(text, cx.ts());
+        }
     }
 
     pub(crate) fn on_ime_composition(&mut self, text: &str, cursor: usize, cx: &mut Cx<'_>) {
@@ -1574,13 +1557,11 @@ impl MainWindow {
         let p = shell.palette;
         let slot = self.active_slot();
         let lh = self.line_height();
-        let wid = self.id();
-        let mut timers = shell.window_timers(wid).for_editor(slot);
-        let scrollbars = self
-            .tabs
-            .active_mut()
-            .editor
-            .render_scrollbars(slot, p, now, &mut self.ui, &mut timers);
+        let scrollbars =
+            self.tabs
+                .active_mut()
+                .editor
+                .render_scrollbars(slot, p, now, &mut self.ui);
         let editor_view = self.tabs.active().editor.view_with_scrollbars(
             HitId::Editor(slot),
             CustomDraw::Editor(slot),

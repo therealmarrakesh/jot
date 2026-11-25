@@ -82,3 +82,25 @@ fn editor_invariants_grapheme_ime_word_anchor_up_collapse_and_insert_keys() {
     });
 }
 
+/// The window reports its earliest deadline and acts on it when ticked: here, a failed search's
+/// notice goes away when it comes due.
+#[test]
+fn window_ticks_its_deadlines() {
+    let mut h = TestHarness::new();
+    h.type_text("alpha beta");
+    h.press_key("ctrl-f");
+    h.type_text("gamma");
+    h.press_key("enter");
+    let due = h
+        .read(|w, _| w.find.notice_until)
+        .expect("a failed search shows a notice");
+    assert!(h.read(|w, _| w.deadline()).is_some_and(|next| next <= due));
+
+    let mut app = h.app.borrow_mut();
+    let w = &mut app.windows[0];
+    w.dirty = false;
+    w.tick(due - std::time::Duration::from_millis(1));
+    assert!(w.find.notice_until.is_some());
+    w.tick(due);
+    assert!(w.dirty && w.find.notice_until.is_none());
+}

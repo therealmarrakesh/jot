@@ -1,11 +1,10 @@
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::command::{AppCommand, Command, shortcut_label};
 use crate::editor::EditCommand;
 use crate::geom::{Edges, Point, Rect, Size, point, transparent_black};
 use crate::gfx::TextSystem;
-use crate::platform::{CursorStyle, Key, KeyEvent, TimerHandle};
-use crate::shell::{WindowTimer, WindowTimers};
+use crate::platform::{CursorStyle, Key, KeyEvent};
 use crate::theme::{
     CONTROL_RADIUS, ICON_FONT, OVERLAY_RADIUS, Palette, SMALL_FONT, TEXT_FONT, theme_shadow,
 };
@@ -97,7 +96,8 @@ pub(crate) struct Menus {
     leaving: Option<Box<OpenMenu>>,
     alt_armed: bool,
     hovered_target: Option<HoveredTarget>,
-    submenu_timer: Option<TimerHandle>,
+    /// When hovering opens (or, with `None`, closes) a submenu.
+    pub(crate) submenu_at: Option<(Instant, Option<usize>)>,
 }
 
 impl Menus {
@@ -187,7 +187,7 @@ impl Menus {
     pub(crate) fn close(&mut self) -> MenuOutcome {
         self.alt_armed = false;
         self.hovered_target = None;
-        self.submenu_timer = None;
+        self.submenu_at = None;
         let focus = match std::mem::replace(&mut self.mode, MenuMode::Idle) {
             MenuMode::Open { mut menu, .. } => {
                 let focus = menu.kind.return_focus();
@@ -270,7 +270,7 @@ impl Menus {
 
     fn show(&mut self, menu: OpenMenu, tips: bool) -> MenuOutcome {
         self.hovered_target = None;
-        self.submenu_timer = None;
+        self.submenu_at = None;
         self.leaving = None;
         self.mode = MenuMode::Open {
             menu: Box::new(menu),
@@ -284,7 +284,7 @@ impl Menus {
         top: Option<HitId>,
         state: impl FnOnce() -> MenuState,
         ui: &mut AppUi,
-        timers: WindowTimers<'_>,
+        show_delay: Duration,
     ) -> MenuOutcome {
         if let Some(HitId::Menu(MenuHit::Trigger(kind))) = top
             && self.open_kind().is_some_and(|open| open != kind)
@@ -311,7 +311,7 @@ impl Menus {
         }
         let Some(target) = hovered else {
             self.hovered_target = None;
-            self.submenu_timer = None;
+            self.submenu_at = None;
             return MenuOutcome::default();
         };
 
@@ -353,13 +353,16 @@ impl Menus {
         }
         self.hovered_target = hovered;
         ui.last_input_was_keyboard = false;
-        self.submenu_timer = timer_target.map(|t| {
-            timers.after(timers.menu_show_delay(), WindowTimer::Submenu(t))
-        });
+        self.submenu_at = timer_target.map(|t| (Instant::now() + show_delay, t));
         MenuOutcome::default().dirty()
     }
 
-    pub(crate) fn on_submenu_timer(&mut self, target: Option<usize>) -> bool {
+    /// Opens or closes the hovered submenu once its delay is up; whether anything changed.
+    pub(crate) fn tick(&mut self, now: Instant) -> bool {
+        let Some((_, target)) = self.submenu_at.filter(|&(at, _)| at <= now) else {
+            return false;
+        };
+        self.submenu_at = None;
         match target {
             Some(ix) => self.open_submenu(ix, false),
             None => self.close_submenu(),
@@ -407,7 +410,7 @@ impl Menus {
     }
 
     fn open_submenu(&mut self, ix: usize, focus_first: bool) -> bool {
-        self.submenu_timer = None;
+        self.submenu_at = None;
         let MenuMode::Open { menu, .. } = &mut self.mode else {
             return false;
         };
@@ -434,7 +437,7 @@ impl Menus {
     }
 
     fn close_submenu(&mut self) -> bool {
-        self.submenu_timer = None;
+        self.submenu_at = None;
         match &mut self.mode {
             MenuMode::Open { menu, .. } => menu.close_submenu(),
             MenuMode::Idle | MenuMode::Bar { .. } => false,
@@ -711,7 +714,7 @@ impl Menus {
                 menu.motion.transition.close();
                 self.leaving = Some(menu);
                 self.hovered_target = None;
-                self.submenu_timer = None;
+                self.submenu_at = None;
                 self.mode = MenuMode::Bar { cursor, tips };
                 MenuOutcome::handled().dirty().focus(FocusRequest::MenuBar)
             }
@@ -1881,13 +1884,12 @@ fn render_row_face(
 
 #[cfg(test)]
 mod tests {
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     use crate::editor::EditCommand;
     use crate::geom::point;
     use crate::ui::TabId;
-    use crate::platform::{Jobs, Modifiers};
-    use crate::shell::AppEvent;
+    use crate::platform::Modifiers;
 
     use super::*;
 
@@ -1897,6 +1899,8 @@ mod tests {
             modifiers: Modifiers::default(),
         }
     }
+
+    const SHOW_DELAY: Duration = Duration::from_millis(400);
 
     fn alt_key(k: Key) -> KeyEvent {
         KeyEvent {
@@ -1910,8 +1914,6 @@ mod tests {
 
     #[test]
     fn alt_access_keys_submenu_hover_and_system_chords() {
-        let jobs = Jobs::new();
-        let timers = WindowTimers::for_test(&jobs);
         let mut ui = AppUi::default();
         let mut bar = Menus::default();
         let ed_focus = Focus::Editor(EditorSlot::Tab(TabId::next()));
@@ -1943,16 +1945,15 @@ mod tests {
             Some(HitId::Menu(MenuHit::Item { serial: 1, ix: 0 })),
             || state,
             &mut ui,
-            timers,
+            SHOW_DELAY,
         );
-        assert!(matches!(
-            jobs.pop_at(Instant::now() + Duration::from_secs(5)),
-            Some(AppEvent::Window {
-                timer: WindowTimer::Submenu(Some(0)),
-                ..
-            })
-        ));
-        assert!(bar.on_submenu_timer(Some(0)));
+        let (due, target) = bar
+            .submenu_at
+            .expect("hovering a submenu row arms its delay");
+        assert_eq!(target, Some(0));
+        assert!(!bar.tick(due - Duration::from_millis(1)));
+        assert!(bar.tick(due));
+        assert!(bar.submenu_at.is_none());
         let enter_sub = bar.on_key_down(key(Key::Right), Focus::MenuBar, || state);
         assert!(enter_sub.handled);
         let act = bar.on_key_down(key(Key::Enter), Focus::MenuBar, || state);
@@ -1968,8 +1969,6 @@ mod tests {
 
     #[test]
     fn context_menu_uses_snapshot_and_flyout_restores_slot_focus() {
-        let jobs = Jobs::new();
-        let timers = WindowTimers::for_test(&jobs);
         let mut ui = AppUi::default();
         let mut bar = Menus::default();
         let state = MenuState {
@@ -1987,7 +1986,7 @@ mod tests {
             Some(HitId::Menu(MenuHit::Command { serial: 1, ix: 2 })),
             || state,
             &mut ui,
-            timers,
+            SHOW_DELAY,
         );
         assert!(!ui.last_input_was_keyboard);
         // Cut(0) and Copy(1) disabled; Paste(2) enabled -> focused command must be 2.

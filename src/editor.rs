@@ -4,13 +4,13 @@ use std::time::{Duration, Instant};
 use crate::geom::{Axis, Edges, Point, Rect, Rgba, Size, point, size};
 use crate::gfx::{Canvas, TextStyle, TextSystem, fill};
 use crate::lines::{FrameLayout, LineIndex, Viewport};
-use crate::platform::{CursorStyle, Modifiers, MouseButton, TimerHandle};
+use crate::platform::{CursorStyle, Modifiers, MouseButton, SystemSettings};
 use crate::text::{
     Bias, EditPolicy, LineChange, Rope, RopeExt as _, TextModel, ValidateFn,
     next_grapheme_boundary, next_word_end, prev_grapheme_boundary, prev_word_start,
 };
 use crate::theme::Palette;
-use crate::types::SharedStr;
+use crate::types::{SharedStr, take_due};
 use crate::ui::{AnimKey, AppNode, AppUi, Easing, EditorSlot, HitId, Node, box_, custom, row};
 
 const RIGHT_MARGIN: f32 = 10.0;
@@ -48,48 +48,6 @@ struct Scroll {
     y: f64,
     content_w: f32,
     content_h: f64,
-}
-
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub(crate) enum EditorTimer {
-    Blink,
-    AutoScroll,
-    ScrollbarIdle,
-    ScrollbarDrag,
-}
-
-pub(crate) trait EditorTimers {
-    fn after(&mut self, delay: Duration, kind: EditorTimer) -> Option<TimerHandle>;
-    fn every(
-        &mut self,
-        delay: Duration,
-        interval: Duration,
-        kind: EditorTimer,
-    ) -> Option<TimerHandle>;
-    fn blink_timing(&self) -> (Option<Duration>, Option<Duration>);
-}
-
-#[cfg(test)]
-pub(crate) struct NoopTimers;
-
-#[cfg(test)]
-impl EditorTimers for NoopTimers {
-    fn after(&mut self, _delay: Duration, _kind: EditorTimer) -> Option<TimerHandle> {
-        None
-    }
-
-    fn every(
-        &mut self,
-        _delay: Duration,
-        _interval: Duration,
-        _kind: EditorTimer,
-    ) -> Option<TimerHandle> {
-        None
-    }
-
-    fn blink_timing(&self) -> (Option<Duration>, Option<Duration>) {
-        (None, None)
-    }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
@@ -319,12 +277,13 @@ impl Editor {
         self.model.mark_saved_version(version);
     }
 
-    pub(crate) fn start_blink(&mut self, timers: &mut dyn EditorTimers) {
-        self.blink.start(timers);
+    pub(crate) fn start_blink(&mut self, settings: &SystemSettings) {
+        self.blink
+            .start((settings.caret_blink_interval, settings.caret_blink_timeout));
     }
 
-    pub(crate) fn pause_blink(&mut self, timers: &mut dyn EditorTimers) {
-        self.blink.pause(timers);
+    pub(crate) fn pause_blink(&mut self) {
+        self.blink.pause();
     }
 
     pub(crate) fn stop_blink(&mut self) {
@@ -383,7 +342,9 @@ pub(crate) struct BlinkState {
     visible: bool,
     paused: bool,
     started_at: Option<Instant>,
-    timer: Option<TimerHandle>,
+    /// The system's blink interval and how long blinking lasts, captured by `start`.
+    timing: (Option<Duration>, Option<Duration>),
+    next: Option<Instant>,
 }
 
 impl BlinkState {
@@ -396,71 +357,69 @@ impl BlinkState {
         self.paused = false;
         self.visible = false;
         self.started_at = None;
-        self.timer = None;
+        self.next = None;
     }
 
-    pub(crate) fn start(&mut self, timers: &mut dyn EditorTimers) {
+    pub(crate) fn start(&mut self, timing: (Option<Duration>, Option<Duration>)) {
+        let now = Instant::now();
+        self.timing = timing;
         self.active = true;
         self.paused = false;
         self.visible = false;
-        self.started_at = Some(Instant::now());
-        self.step(timers);
+        self.started_at = Some(now);
+        self.step(now);
     }
 
-    pub(crate) fn pause(&mut self, timers: &mut dyn EditorTimers) {
+    /// Holds the caret visible for an interval (after typing or moving), then blinks again.
+    pub(crate) fn pause(&mut self) {
         if !self.active && !self.visible {
             return;
         }
+        let now = Instant::now();
         self.paused = true;
         self.visible = true;
-        self.started_at = Some(Instant::now());
-        let Some(delay) = timers.blink_timing().0 else {
-            self.timer = None;
-            return;
-        };
-        self.timer = timers.after(delay, EditorTimer::Blink);
+        self.started_at = Some(now);
+        self.next = self.timing.0.map(|interval| now + interval);
     }
 
-    pub(crate) fn on_timer(&mut self, timers: &mut dyn EditorTimers) -> bool {
-        if !self.active {
+    /// Blinks if it's due; whether the caret changed.
+    fn tick(&mut self, now: Instant) -> bool {
+        if !take_due(&mut self.next, now) || !self.active {
             return false;
         }
         self.paused = false;
-        self.step(timers);
+        self.step(now);
         true
     }
 
-    fn step(&mut self, timers: &mut dyn EditorTimers) {
-        if self.paused {
-            self.visible = true;
-            return;
+    fn step(&mut self, now: Instant) {
+        let (interval, timeout) = self.timing;
+        let timed_out = timeout.is_some_and(|timeout| {
+            self.started_at
+                .is_some_and(|start| now.saturating_duration_since(start) >= timeout)
+        });
+        match interval {
+            Some(interval) if !timed_out => {
+                self.visible = !self.visible;
+                self.next = Some(now + interval);
+            }
+            _ => {
+                self.visible = true;
+                self.next = None;
+            }
         }
-        let (interval, timeout) = timers.blink_timing();
-        let Some(interval) = interval else {
-            self.visible = true;
-            self.timer = None;
-            return;
-        };
-        if let Some(timeout) = timeout
-            && self
-                .started_at
-                .is_some_and(|start| start.elapsed() >= timeout)
-        {
-            self.visible = true;
-            self.timer = None;
-            return;
-        }
-        self.visible = !self.visible;
-        self.timer = timers.after(interval, EditorTimer::Blink);
     }
 }
 
 #[derive(Default)]
 pub(crate) struct AutoScroll {
     delta: Option<f32>,
-    timer: Option<TimerHandle>,
+    next: Option<Instant>,
     pub(crate) last_drag_pos: Option<Point>,
 }
+
+/// How often a drag-selection past the editor's edge scrolls.
+const AUTO_SCROLL_INTERVAL: Duration = Duration::from_millis(16);
 
 impl AutoScroll {
     pub(crate) fn compute_delta(y: f32, bounds: Rect) -> Option<f32> {
@@ -485,20 +444,17 @@ impl AutoScroll {
 
     pub(crate) fn stop(&mut self) {
         self.delta = None;
-        self.timer = None;
+        self.next = None;
         self.last_drag_pos = None;
     }
 
-    pub(crate) fn update(&mut self, delta: Option<f32>, timers: &mut dyn EditorTimers) {
+    pub(crate) fn update(&mut self, delta: Option<f32>) {
         let was_active = self.delta.is_some();
         self.delta = delta;
         if delta.is_none() {
-            self.timer = None;
-            return;
-        }
-        if !was_active {
-            let interval = Duration::from_millis(16);
-            self.timer = timers.every(interval, interval, EditorTimer::AutoScroll);
+            self.next = None;
+        } else if !was_active {
+            self.next = Some(Instant::now() + AUTO_SCROLL_INTERVAL);
         }
     }
 }
@@ -525,7 +481,6 @@ impl Editor {
         position: Point,
         modifiers: Modifiers,
         click_count: usize,
-        timers: &mut dyn EditorTimers,
     ) {
         self.model.commit_composition();
         self.model.break_coalescing();
@@ -542,7 +497,7 @@ impl Editor {
         }
         if button == MouseButton::Right {
             if !self.model.selection().contains(offset) {
-                self.move_to_with_affinity(offset, None, aff, false, Some(timers));
+                self.move_to_with_affinity(offset, aff);
             }
             if let Some(doc) = &mut self.doc {
                 doc.pending_context_menu = Some((position, offset));
@@ -553,7 +508,7 @@ impl Editor {
             self.select_to_with_affinity(offset, aff);
             self.request_reveal(self.model.cursor(), aff, None, false);
         } else {
-            self.move_to_with_affinity(offset, None, aff, false, Some(timers));
+            self.move_to_with_affinity(offset, aff);
         }
     }
 
@@ -562,7 +517,6 @@ impl Editor {
         position: Point,
         dragging_left: bool,
         focused: bool,
-        timers: &mut dyn EditorTimers,
     ) -> bool {
         if dragging_left
             && self.selecting
@@ -575,7 +529,7 @@ impl Editor {
             if let Some(doc) = &mut self.doc {
                 doc.auto_scroll.last_drag_pos = Some(position);
                 let delta = AutoScroll::compute_delta(position.y, self.input_bounds);
-                doc.auto_scroll.update(delta.map(|d| -d), timers);
+                doc.auto_scroll.update(delta.map(|d| -d));
             }
             self.request_reveal(self.model.cursor(), aff, None, false);
             return true;
@@ -583,18 +537,14 @@ impl Editor {
         false
     }
 
-    pub(crate) fn on_mouse_up(
-        &mut self,
-        button: MouseButton,
-        timers: &mut dyn EditorTimers,
-    ) -> Option<Point> {
+    pub(crate) fn on_mouse_up(&mut self, button: MouseButton) -> Option<Point> {
         let mut open_context_menu = None;
         if button == MouseButton::Right
             && let Some(doc) = &mut self.doc
             && let Some((pos, offset)) = doc.pending_context_menu.take()
         {
             if !self.model.selection().contains(offset) {
-                self.move_to_with_affinity(offset, None, false, false, Some(timers));
+                self.move_to_with_affinity(offset, false);
             }
             open_context_menu = Some(pos);
         }
@@ -604,13 +554,8 @@ impl Editor {
 }
 
 impl Editor {
-    fn commit_edit(
-        &mut self,
-        change: Option<LineChange>,
-        ts: &TextSystem,
-        timers: &mut dyn EditorTimers,
-    ) {
-        self.pause_blink(timers);
+    fn commit_edit(&mut self, change: Option<LineChange>, ts: &TextSystem) {
+        self.pause_blink();
         self.apply_change(change, ts);
     }
 
@@ -623,12 +568,12 @@ impl Editor {
         self.selected_string()
     }
 
-    pub(crate) fn delete_selection(&mut self, ts: &TextSystem, timers: &mut dyn EditorTimers) {
+    pub(crate) fn delete_selection(&mut self, ts: &TextSystem) {
         let change = self.model.replace_selection("");
-        self.commit_edit(change, ts, timers);
+        self.commit_edit(change, ts);
     }
 
-    pub(crate) fn paste(&mut self, raw: &str, ts: &TextSystem, timers: &mut dyn EditorTimers) {
+    pub(crate) fn paste(&mut self, raw: &str, ts: &TextSystem) {
         let text = if self.model.is_multi_line() {
             raw
         } else {
@@ -636,40 +581,35 @@ impl Editor {
         };
         if !text.is_empty() {
             let change = self.model.replace_selection(text);
-            self.commit_edit(change, ts, timers);
+            self.commit_edit(change, ts);
         }
     }
 
-    pub(crate) fn handle_command(
-        &mut self,
-        command: EditCommand,
-        ts: &TextSystem,
-        timers: &mut dyn EditorTimers,
-    ) -> bool {
+    pub(crate) fn handle_command(&mut self, command: EditCommand, ts: &TextSystem) -> bool {
         match command {
             EditCommand::Backspace => {
                 let Some(change) = self.model.delete_backward() else {
                     return false;
                 };
-                self.commit_edit(Some(change), ts, timers);
+                self.commit_edit(Some(change), ts);
             }
             EditCommand::Delete => {
                 let change = self.model.delete_forward();
-                self.commit_edit(change, ts, timers);
+                self.commit_edit(change, ts);
             }
             EditCommand::DeletePrevWord => {
                 let change = self.model.delete_prev_word();
-                self.commit_edit(change, ts, timers);
+                self.commit_edit(change, ts);
             }
             EditCommand::DeleteNextWord => {
                 let change = self.model.delete_next_word();
-                self.commit_edit(change, ts, timers);
+                self.commit_edit(change, ts);
             }
             EditCommand::Enter => {
                 let Some(change) = self.model.enter() else {
                     return false;
                 };
-                self.commit_edit(Some(change), ts, timers);
+                self.commit_edit(Some(change), ts);
             }
             EditCommand::Escape => {
                 let Some(change) = self.model.cancel_composition() else {
@@ -680,12 +620,12 @@ impl Editor {
             EditCommand::Copy | EditCommand::Cut | EditCommand::Paste => return false,
             EditCommand::Undo => {
                 if let Some(change) = self.model.undo() {
-                    self.commit_edit(Some(change), ts, timers);
+                    self.commit_edit(Some(change), ts);
                 }
             }
             EditCommand::Redo => {
                 if let Some(change) = self.model.redo() {
-                    self.commit_edit(Some(change), ts, timers);
+                    self.commit_edit(Some(change), ts);
                 }
             }
             EditCommand::IndentInline | EditCommand::Indent | EditCommand::Outdent
@@ -695,28 +635,23 @@ impl Editor {
             }
             EditCommand::IndentInline | EditCommand::Indent => {
                 let change = self.model.indent(matches!(command, EditCommand::Indent));
-                self.commit_edit(change, ts, timers);
+                self.commit_edit(change, ts);
             }
             EditCommand::Outdent => {
                 let change = self.model.outdent();
-                self.commit_edit(change, ts, timers);
+                self.commit_edit(change, ts);
             }
             EditCommand::SelectAll => self.select_all(),
             EditCommand::Move { motion, extend } => {
-                return self.move_caret(motion, extend, timers);
+                return self.move_caret(motion, extend);
             }
         }
         true
     }
 
-    pub(crate) fn handle_text_input(
-        &mut self,
-        text: &str,
-        ts: &TextSystem,
-        timers: &mut dyn EditorTimers,
-    ) {
+    pub(crate) fn handle_text_input(&mut self, text: &str, ts: &TextSystem) {
         let change = self.model.insert_text(text);
-        self.commit_edit(change, ts, timers);
+        self.commit_edit(change, ts);
     }
 
     pub(crate) fn handle_ime_composition(&mut self, text: &str, cursor_utf16: usize, ts: &TextSystem) {
@@ -820,20 +755,11 @@ impl Editor {
         Some((pos.x, pt.column))
     }
 
-    fn move_to_with_affinity(
-        &mut self,
-        offset: usize,
-        direction: Option<MoveDirection>,
-        end_affinity: bool,
-        with_margin: bool,
-        timers: Option<&mut dyn EditorTimers>,
-    ) {
+    fn move_to_with_affinity(&mut self, offset: usize, end_affinity: bool) {
         self.goal = None;
         self.model.place_caret(offset, end_affinity);
-        self.request_reveal(self.model.cursor(), end_affinity, direction, with_margin);
-        if let Some(timers) = timers {
-            self.pause_blink(timers);
-        }
+        self.request_reveal(self.model.cursor(), end_affinity, None, false);
+        self.pause_blink();
     }
 
     fn page_rows(&self, doc: &DocumentView) -> isize {
@@ -896,12 +822,7 @@ impl Editor {
         (self.model.snap_boundary(target_offset, Bias::Left), target_affinity)
     }
 
-    fn move_caret(
-        &mut self,
-        motion: Motion,
-        extend: bool,
-        timers: &mut dyn EditorTimers,
-    ) -> bool {
+    fn move_caret(&mut self, motion: Motion, extend: bool) -> bool {
         let is_vertical = matches!(
             motion,
             Motion::Up | Motion::Down | Motion::PageUp | Motion::PageDown
@@ -1010,14 +931,14 @@ impl Editor {
 
         self.goal = next_goal;
         if extend {
-            self.pause_blink(timers);
+            self.pause_blink();
             self.model.break_coalescing();
             self.model.extend_selection(target, target_aff, None);
             self.request_reveal(self.model.cursor(), target_aff, None, true);
         } else {
             self.model.place_caret(target, target_aff);
             self.request_reveal(self.model.cursor(), target_aff, direction, true);
-            self.pause_blink(timers);
+            self.pause_blink();
         }
         true
     }
@@ -1466,17 +1387,12 @@ impl Editor {
         position: Point,
         dragging_left: bool,
         track_rect: Option<Rect>,
-        timers: &mut dyn EditorTimers,
     ) -> Option<bool> {
         let scroll = self.scroll_offset();
         let doc = self.doc.as_deref_mut()?;
-        let (next, notify) = doc.scrollbar.on_mouse_move(
-            position,
-            dragging_left,
-            track_rect,
-            scroll,
-            |delay| timers.after(delay, EditorTimer::ScrollbarDrag),
-        )?;
+        let (next, notify) =
+            doc.scrollbar
+                .on_mouse_move(position, dragging_left, track_rect, scroll)?;
         self.apply_scrollbar_scroll(next);
         Some(notify)
     }
@@ -1500,7 +1416,6 @@ impl Editor {
         p: Palette,
         now: Instant,
         ui: &mut AppUi,
-        timers: &mut dyn EditorTimers,
     ) -> Vec<AppNode> {
         let input_size = self.input_bounds.size;
         if input_size.width <= 0. || input_size.height <= 0. {
@@ -1512,9 +1427,7 @@ impl Editor {
             return Vec::new();
         };
         let vp = scrollbar_viewport(input_size, content_size, scroll, doc.paddings, doc.soft_wrap);
-        doc.scrollbar.render(slot, vp, p, now, ui, |delay| {
-            timers.after(delay, EditorTimer::ScrollbarIdle)
-        })
+        doc.scrollbar.render(slot, vp, p, now, ui)
     }
 
     pub(crate) fn on_scroll_wheel(
@@ -1561,32 +1474,41 @@ impl Editor {
         moved
     }
 
-    pub(crate) fn on_timer(&mut self, kind: EditorTimer, timers: &mut dyn EditorTimers) -> bool {
+    /// Acts on whatever is due at `now`: blinking, auto-scrolling, scrollbar fading. Returns
+    /// whether the editor needs repainting.
+    pub(crate) fn tick(&mut self, now: Instant) -> bool {
+        let mut changed = self.blink.tick(now);
         let Some(doc) = &mut self.doc else {
-            return matches!(kind, EditorTimer::Blink) && self.blink.on_timer(timers);
+            return changed;
         };
-        match kind {
-            EditorTimer::Blink => self.blink.on_timer(timers),
-            EditorTimer::AutoScroll => {
-                let Some(delta) = doc.auto_scroll.delta else {
-                    doc.auto_scroll.stop();
-                    return false;
-                };
-                let drag_pos = doc.auto_scroll.last_drag_pos;
-                self.reveal = None;
-                self.clamp_and_set_scroll_f64(self.scroll.x, self.scroll.y + f64::from(delta));
-                if let Some(pos) = drag_pos {
-                    let (offset, aff) = self.hit_test_point(pos);
-                    self.select_to_with_affinity(offset, aff);
-                }
-                true
+        changed |= doc.scrollbar.tick(now);
+        if take_due(&mut doc.auto_scroll.next, now) {
+            let Some(delta) = doc.auto_scroll.delta else {
+                doc.auto_scroll.stop();
+                return changed;
+            };
+            doc.auto_scroll.next = Some(now + AUTO_SCROLL_INTERVAL);
+            let drag_pos = doc.auto_scroll.last_drag_pos;
+            self.reveal = None;
+            self.clamp_and_set_scroll_f64(self.scroll.x, self.scroll.y + f64::from(delta));
+            if let Some(pos) = drag_pos {
+                let (offset, aff) = self.hit_test_point(pos);
+                self.select_to_with_affinity(offset, aff);
             }
-            EditorTimer::ScrollbarIdle => {
-                doc.scrollbar.on_idle_timer_fired();
-                true
-            }
-            EditorTimer::ScrollbarDrag => doc.scrollbar.on_drag_timer_fired(Instant::now()),
+            changed = true;
         }
+        changed
+    }
+
+    /// When the editor next needs a `tick`.
+    pub(crate) fn deadline(&self) -> Option<Instant> {
+        let doc = self.doc.as_deref();
+        let auto_scroll = doc.and_then(|doc| doc.auto_scroll.next);
+        let scrollbar = doc.and_then(|doc| doc.scrollbar.deadline());
+        [self.blink.next, auto_scroll, scrollbar]
+            .into_iter()
+            .flatten()
+            .min()
     }
 }
 
@@ -1746,8 +1668,9 @@ pub(crate) struct ScrollbarState {
     last_activity: Option<Instant>,
     was_hovered: bool,
     last_drag_notify: Instant,
-    drag_timer: Option<TimerHandle>,
-    idle_timer: Option<TimerHandle>,
+    /// When a throttled drag next notifies, and when the bar next starts fading.
+    drag_at: Option<Instant>,
+    idle_at: Option<Instant>,
     axes: [Option<ActiveAxis>; 2],
 }
 
@@ -1765,8 +1688,8 @@ impl ScrollbarState {
             last_activity: None,
             was_hovered: false,
             last_drag_notify: now,
-            drag_timer: None,
-            idle_timer: None,
+            drag_at: None,
+            idle_at: None,
             axes: [None, None],
         }
     }
@@ -1779,16 +1702,17 @@ impl ScrollbarState {
         self.axes[axis_ix(axis)].is_some_and(|a| a.interactive)
     }
 
-    pub(crate) fn on_idle_timer_fired(&mut self) {
-        self.idle_timer = None;
+    fn tick(&mut self, now: Instant) -> bool {
+        let idle = take_due(&mut self.idle_at, now);
+        let drag = take_due(&mut self.drag_at, now);
+        if drag {
+            self.last_drag_notify = now;
+        }
+        idle || drag
     }
 
-    pub(crate) fn on_drag_timer_fired(&mut self, now: Instant) -> bool {
-        if self.drag_timer.take().is_none() {
-            return false;
-        }
-        self.last_drag_notify = now;
-        true
+    fn deadline(&self) -> Option<Instant> {
+        self.idle_at.into_iter().chain(self.drag_at).min()
     }
 
     pub(crate) fn on_wheel(&mut self, offset: Point, now: Instant) -> bool {
@@ -1797,7 +1721,7 @@ impl ScrollbarState {
         }
         self.last_offset = offset;
         self.last_activity = Some(now);
-        self.idle_timer = None;
+        self.idle_at = None;
         true
     }
 
@@ -1808,13 +1732,12 @@ impl ScrollbarState {
         p: Palette,
         now: Instant,
         ui: &mut AppUi,
-        schedule_idle: impl FnOnce(Duration) -> Option<TimerHandle>,
     ) -> Vec<AppNode> {
         let scroll_offset = vp.scroll_offset;
         if scroll_offset != self.last_offset {
             self.last_offset = scroll_offset;
             self.last_activity = Some(now);
-            self.idle_timer = None;
+            self.idle_at = None;
         }
 
         let is_axis_hovered = |axis: Axis, ui: &AppUi| {
@@ -1825,7 +1748,7 @@ impl ScrollbarState {
             is_axis_hovered(Axis::Vertical, ui) || is_axis_hovered(Axis::Horizontal, ui);
         if hovered || (self.was_hovered && !hovered) {
             self.last_activity = Some(now);
-            self.idle_timer = None;
+            self.idle_at = None;
         }
         self.was_hovered = hovered;
 
@@ -1837,13 +1760,11 @@ impl ScrollbarState {
 
         if !hovered
             && self.drag.is_none()
-            && self.idle_timer.is_none()
+            && self.idle_at.is_none()
             && let Some(last) = self.last_activity
+            && now.saturating_duration_since(last) < IDLE_HOLD
         {
-            let elapsed = now.saturating_duration_since(last);
-            if elapsed < IDLE_HOLD {
-                self.idle_timer = schedule_idle(IDLE_HOLD - elapsed);
-            }
+            self.idle_at = Some(last + IDLE_HOLD);
         }
 
         let vertical_needed = vp.size.height > 0. && vp.content_size.height > vp.size.height;
@@ -2019,7 +1940,6 @@ impl ScrollbarState {
         dragging_primary: bool,
         track_rect: Option<Rect>,
         current_offset: Point,
-        schedule_drag: impl FnOnce(Duration) -> Option<TimerHandle>,
     ) -> Option<(Option<Point>, bool)> {
         let drag = self.drag.filter(|_| dragging_primary)?;
         let active = self.axes[axis_ix(drag.axis)]?;
@@ -2033,11 +1953,11 @@ impl ScrollbarState {
             let elapsed = now.saturating_duration_since(self.last_drag_notify);
             if elapsed >= DRAG_NOTIFY_INTERVAL {
                 self.last_drag_notify = now;
-                self.drag_timer = None;
+                self.drag_at = None;
                 return Some((Some(next), true));
             }
-            if self.drag_timer.is_none() {
-                self.drag_timer = schedule_drag(DRAG_NOTIFY_INTERVAL - elapsed);
+            if self.drag_at.is_none() {
+                self.drag_at = Some(self.last_drag_notify + DRAG_NOTIFY_INTERVAL);
             }
         }
         Some((moved.then_some(next), false))
@@ -2050,7 +1970,7 @@ impl ScrollbarState {
         current_offset: Point,
     ) -> Option<Point> {
         let drag = self.drag.take()?;
-        self.drag_timer = None;
+        self.drag_at = None;
         self.last_activity = Some(Instant::now());
         let active = self.axes[axis_ix(drag.axis)]?;
         let track_origin = axis_val(track_rect?.origin, drag.axis);
@@ -2141,7 +2061,6 @@ mod tests {
     #[test]
     fn editor_direct_typing_undo_redo_and_word_navigation() {
         let ts = TextSystem::new().unwrap();
-        let mut timers = NoopTimers;
         let mut ed = Editor::document(
             Rope::new(),
             DocOptions {
@@ -2150,16 +2069,16 @@ mod tests {
             },
         );
 
-        ed.handle_text_input("hello", &ts, &mut timers);
-        ed.handle_text_input(" world", &ts, &mut timers);
+        ed.handle_text_input("hello", &ts);
+        ed.handle_text_input(" world", &ts);
         assert_eq!(ed.model().text().to_string(), "hello world");
         assert!(!ed.model().is_clean());
 
-        assert!(ed.handle_command(EditCommand::Undo, &ts, &mut timers));
+        assert!(ed.handle_command(EditCommand::Undo, &ts));
         assert_eq!(ed.model().text().to_string(), "");
         assert!(ed.model().is_clean());
 
-        assert!(ed.handle_command(EditCommand::Redo, &ts, &mut timers));
+        assert!(ed.handle_command(EditCommand::Redo, &ts));
         assert_eq!(ed.model().text().to_string(), "hello world");
 
         assert!(ed.handle_command(
@@ -2168,7 +2087,6 @@ mod tests {
                 extend: false,
             },
             &ts,
-            &mut timers,
         ));
         assert_eq!(ed.model().cursor(), 6);
         assert!(ed.handle_command(
@@ -2177,7 +2095,6 @@ mod tests {
                 extend: true,
             },
             &ts,
-            &mut timers,
         ));
         assert_eq!(ed.model().text().slice(ed.model().selection().range()).to_string(), "world");
 
@@ -2185,9 +2102,9 @@ mod tests {
         assert_eq!(copied.as_deref(), Some("world"));
         let cut = ed.prepare_cut();
         assert_eq!(cut.as_deref(), Some("world"));
-        ed.delete_selection(&ts, &mut timers);
+        ed.delete_selection(&ts);
         assert_eq!(ed.model().text().to_string(), "hello ");
-        ed.paste("world", &ts, &mut timers);
+        ed.paste("world", &ts);
         assert_eq!(ed.model().text().to_string(), "hello world");
     }
 
@@ -2228,6 +2145,66 @@ mod tests {
     }
 
     #[test]
+    fn caret_blinks_at_its_deadlines_pauses_and_stops() {
+        let interval = Duration::from_millis(500);
+        let mut blink = BlinkState::default();
+        blink.start((Some(interval), Some(Duration::from_secs(5))));
+        let due = blink.next.expect("blinking schedules the first toggle");
+        let shown = blink.visible();
+        assert!(!blink.tick(due - Duration::from_millis(1)));
+        assert!(blink.tick(due));
+        assert_ne!(blink.visible(), shown);
+        assert_eq!(blink.next, Some(due + interval));
+
+        blink.pause();
+        assert!(blink.visible(), "typing holds the caret visible");
+        let resume = blink.next.expect("a pause resumes after an interval");
+        assert!(blink.tick(resume));
+        assert!(!blink.paused);
+
+        let late = blink.started_at.unwrap() + Duration::from_secs(6);
+        blink.next = Some(late);
+        assert!(blink.tick(late));
+        assert!(
+            blink.visible() && blink.next.is_none(),
+            "blinking ends visible after the timeout"
+        );
+
+        blink.start((Some(interval), None));
+        blink.stop();
+        assert!(blink.next.is_none() && !blink.tick(Instant::now() + interval));
+    }
+
+    #[test]
+    fn auto_scroll_repeats_while_dragging_past_the_edge() {
+        let text = Rope::from("line\n".repeat(200).as_str());
+        let mut ed = Editor::document(
+            text,
+            DocOptions {
+                soft_wrap: false,
+                paddings: Edges::ZERO,
+            },
+        );
+        ed.doc
+            .as_deref_mut()
+            .unwrap()
+            .auto_scroll
+            .update(Some(30.0));
+        let due = ed
+            .deadline()
+            .expect("dragging past the edge schedules scrolling");
+        assert!(!ed.tick(due - Duration::from_millis(1)));
+        assert!(ed.tick(due));
+        assert_eq!(
+            ed.deadline(),
+            Some(due + AUTO_SCROLL_INTERVAL),
+            "and it repeats"
+        );
+        ed.doc.as_deref_mut().unwrap().auto_scroll.update(None);
+        assert_eq!(ed.deadline(), None, "leaving the edge stops it");
+    }
+
+    #[test]
     fn scene_scrollbar_renders_fades_and_snaps_on_reduce_motion() {
         let t0 = Instant::now();
         let mut sb = ScrollbarState::new_at(t0);
@@ -2244,25 +2221,26 @@ mod tests {
 
         sb.on_wheel(point(0., -40.), t0);
         ui.begin_frame(t0, false);
-        let nodes = sb.render(slot, vp, p, t0, &mut ui, |_| None);
+        let nodes = sb.render(slot, vp, p, t0, &mut ui);
         assert_eq!(nodes.len(), 1);
         assert!(sb.is_interactive(Axis::Vertical));
+        assert_eq!(
+            sb.deadline(),
+            Some(t0 + IDLE_HOLD),
+            "scrolling arms the fade"
+        );
         assert!(ui.finish_frame(crate::ui::AppFrame::default()));
 
         ui.begin_frame(t0 + FADE_IN_DURATION, false);
-        let _ = sb.render(
-            slot,
-            vp,
-            p,
-            t0 + FADE_IN_DURATION,
-            &mut ui,
-            |_| None,
-        );
+        let _ = sb.render(slot, vp, p, t0 + FADE_IN_DURATION, &mut ui);
         assert!(!ui.finish_frame(crate::ui::AppFrame::default()));
 
+        assert!(!sb.tick(t0 + IDLE_HOLD - Duration::from_millis(1)));
+        assert!(sb.tick(t0 + IDLE_HOLD), "the fade comes due after the hold");
+        assert_eq!(sb.deadline(), None);
         let after_idle = t0 + IDLE_HOLD + Duration::from_millis(10);
         ui.begin_frame(after_idle, true);
-        let _ = sb.render(slot, vp, p, after_idle, &mut ui, |_| None);
+        let _ = sb.render(slot, vp, p, after_idle, &mut ui);
         assert!(!sb.is_interactive(Axis::Vertical));
     }
 }

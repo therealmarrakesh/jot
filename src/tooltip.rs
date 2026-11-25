@@ -4,10 +4,7 @@ use std::time::{Duration, Instant};
 use crate::geom::{Rect, ScreenPoint, ScreenRect, point, round_half_up, size};
 use crate::gfx::{Gpu, TextStyle, TextSystem};
 use crate::layout::AvailSize;
-use crate::platform::{
-    Jobs, Modifiers, TimerHandle, WindowId, cursor_screen_pos, monitor_work_area_and_scale,
-};
-use crate::shell::AppEvent;
+use crate::platform::{Modifiers, WindowId, cursor_screen_pos, monitor_work_area_and_scale};
 use crate::theme::{CONTROL_RADIUS, Palette, SMALL_FONT, theme_shadow};
 use crate::types::SharedStr;
 use crate::ui::{
@@ -132,14 +129,15 @@ pub(crate) struct Tooltips {
     shown: Option<Shown>,
     closed_at: Option<Instant>,
     control_only: bool,
-    opening: Option<(TooltipTarget, TimerHandle)>,
+    /// The tooltip waiting to show, and when it shows.
+    pub(crate) opening: Option<(TooltipTarget, Instant)>,
     pub(crate) hover_time: Duration,
 }
 
 impl Tooltips {
-    pub(crate) fn on_mouse_down(&mut self, window: WindowId, jobs: &Jobs<AppEvent>) {
+    pub(crate) fn on_mouse_down(&mut self, window: WindowId) {
         self.pressed = true;
-        self.apply_report(Report::Suppress(window), jobs);
+        self.apply_report(Report::Suppress(window));
     }
 
     pub(crate) fn on_mouse_up(&mut self) {
@@ -150,36 +148,30 @@ impl Tooltips {
         self.control_only = false;
     }
 
-    pub(crate) fn on_modifiers_changed(&mut self, mods: Modifiers, jobs: &Jobs<AppEvent>) {
+    pub(crate) fn on_modifiers_changed(&mut self, mods: Modifiers) {
         let only_ctrl = mods.ctrl_only();
         let released = mods.none();
         let was = std::mem::replace(&mut self.control_only, only_ctrl);
         if released && was {
-            self.apply_report(Report::Dismiss, jobs);
+            self.apply_report(Report::Dismiss);
         }
     }
 
-    pub(crate) fn window_deactivated(&mut self, window: WindowId, jobs: &Jobs<AppEvent>) {
-        self.apply_report(Report::Suppress(window), jobs);
+    pub(crate) fn window_deactivated(&mut self, window: WindowId) {
+        self.apply_report(Report::Suppress(window));
     }
 
-    pub(crate) fn window_closed(&mut self, window: WindowId, jobs: &Jobs<AppEvent>) {
+    pub(crate) fn window_closed(&mut self, window: WindowId) {
         if let Some(key) = self.state.key().filter(|k| k.window == window) {
-            self.apply_report(Report::Gone(key), jobs);
+            self.apply_report(Report::Gone(key));
         }
     }
 
-    pub(crate) fn on_mouse_leave(&mut self, window: WindowId, jobs: &Jobs<AppEvent>) {
-        self.apply_report(Report::NoneIn(window), jobs);
+    pub(crate) fn on_mouse_leave(&mut self, window: WindowId) {
+        self.apply_report(Report::NoneIn(window));
     }
 
-    pub(crate) fn evaluate(
-        &mut self,
-        probe: TooltipProbe<'_>,
-        gpu: &Rc<Gpu>,
-        ts: &TextSystem,
-        jobs: &Jobs<AppEvent>,
-    ) {
+    pub(crate) fn evaluate(&mut self, probe: TooltipProbe<'_>, gpu: &Rc<Gpu>, ts: &TextSystem) {
         let TooltipProbe {
             anchor: OverlayAnchor {
                 window,
@@ -223,7 +215,7 @@ impl Tooltips {
         if let Some(obs) = observed {
             self.transition(obs);
         }
-        self.sync(gpu, ts, jobs);
+        self.sync(gpu, ts);
     }
 
     pub(crate) fn on_show_timer(
@@ -232,11 +224,10 @@ impl Tooltips {
         probe: Option<TooltipProbe<'_>>,
         gpu: &Rc<Gpu>,
         ts: &TextSystem,
-        jobs: &Jobs<AppEvent>,
     ) {
         match probe {
             Some(probe) => {
-                self.evaluate(probe, gpu, ts, jobs);
+                self.evaluate(probe, gpu, ts);
             }
             None => {
                 if let Some(key) = self.state.key().filter(|k| k.window == target.window) {
@@ -245,7 +236,7 @@ impl Tooltips {
             }
         }
         self.transition(Report::Timer(target));
-        self.sync(gpu, ts, jobs);
+        self.sync(gpu, ts);
     }
 
     fn transition(&mut self, report: Report) {
@@ -253,12 +244,12 @@ impl Tooltips {
         self.state = transition_state(prev, report);
     }
 
-    fn apply_report(&mut self, report: Report, jobs: &Jobs<AppEvent>) {
+    fn apply_report(&mut self, report: Report) {
         self.transition(report);
-        self.sync_hide_and_timer(jobs);
+        self.sync_hide_and_timer();
     }
 
-    fn sync_hide_and_timer(&mut self, jobs: &Jobs<AppEvent>) {
+    fn sync_hide_and_timer(&mut self) {
         let showing = match &self.state {
             State::Showing { snap } => Some(snap.key),
             _ => None,
@@ -282,21 +273,14 @@ impl Tooltips {
                     .is_some_and(|closed| closed.elapsed() < RESHOW_WINDOW);
                 let factor = if reshow { RESHOW_DELAY_FACTOR } else { SHOW_DELAY_FACTOR };
                 let delay = self.hover_time.mul_f32(factor);
-                let timer = jobs.after(
-                    delay,
-                    AppEvent::TooltipShowTimer {
-                        window: key.window,
-                        hit: key.hit,
-                    },
-                );
-                self.opening = Some((key, timer));
+                self.opening = Some((key, Instant::now() + delay));
             }
             None => self.opening = None,
         }
     }
 
-    fn sync(&mut self, gpu: &Rc<Gpu>, ts: &TextSystem, jobs: &Jobs<AppEvent>) {
-        self.sync_hide_and_timer(jobs);
+    fn sync(&mut self, gpu: &Rc<Gpu>, ts: &TextSystem) {
+        self.sync_hide_and_timer();
         let showing = match &self.state {
             State::Showing { snap } => Some(snap.clone()),
             _ => None,

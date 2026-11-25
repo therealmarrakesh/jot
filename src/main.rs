@@ -33,21 +33,21 @@ use std::time::{Duration, Instant};
 use crate::document::{DocPath, Format, PathKey};
 use crate::text::Rope;
 use crate::files::{
-    DocHost, FileIo, FileOps, FileRequest, Prompt, PromptId, TabSnapshot, spawn_file_io,
+    DocHost, FileEvents, FileIo, FileOps, FileRequest, Prompt, PromptId, TabSnapshot, spawn_file_io,
 };
 use crate::geom::{Point, Rect, ScreenPoint, Size, point, size};
 use crate::gfx::{Gpu, TextSystem, WindowSurface};
 use crate::platform::{
     Arbitration, Key, MainWindowConfig, MouseButton, NativeWindow, Platform, PlatformEvent,
-    PlatformHandler, TimerHandle, WindowAppearance, WindowHandle, WindowId, WindowPlacement,
-    WindowsDisplay, arbitrate_instance, cursor_screen_pos, debug_log, install_panic_hook,
+    PlatformHandler, WindowAppearance, WindowHandle, WindowId, WindowPlacement, WindowsDisplay,
+    arbitrate_instance, cursor_screen_pos, debug_log, install_panic_hook,
     primary_mouse_button_down, release_mouse_capture, show_error_dialog, top_visible_window_at,
 };
-use crate::shell::{AppEvent, Cx, Effect, Shell, WindowTimer};
+use crate::shell::{Cx, Effect, Shell};
 use crate::tabs::TabData;
-use crate::tooltip::{KeyTips, TooltipTarget, Tooltips};
-use crate::types::APP_NAME;
-use crate::ui::{EditorSlot, TabId};
+use crate::tooltip::{KeyTips, Tooltips};
+use crate::types::{APP_NAME, take_due};
+use crate::ui::TabId;
 use crate::window::{InputMode, MainWindow, WINDOW_HEIGHT, WINDOW_MAX_SCREEN_SHARE, WINDOW_WIDTH};
 
 const NOTICES_FLAG: &str = "--notices";
@@ -109,6 +109,7 @@ pub(crate) struct App {
     pub(crate) windows: Windows,
     tab_drag: Option<TabDrag>,
     pub(crate) file_ops: FileOps,
+    file_events: FileEvents,
     keytips: KeyTips,
     tooltips: Tooltips,
     quit: bool,
@@ -131,10 +132,12 @@ impl App {
         let shell = Shell::new(&platform, gpu, text_system);
         let mut tooltips = Tooltips::default();
         tooltips.hover_time = shell.settings.mouse_hover_time;
+        let file_events = FileEvents::new(platform.waker());
         Self {
             windows: Windows::new(launch),
             tab_drag: None,
             file_ops: FileOps::default(),
+            file_events,
             keytips: KeyTips::default(),
             tooltips,
             quit: false,
@@ -158,13 +161,7 @@ impl App {
                 FileIo::SaveDialog { owner, .. } => self.windows.hwnd(*owner),
                 FileIo::LoadFiles { .. } | FileIo::WriteFile { .. } => None,
             };
-            spawn_file_io(
-                cmd,
-                owner_hwnd,
-                &self.file_ops.writes,
-                &self.shell.jobs,
-                AppEvent::File,
-            );
+            spawn_file_io(cmd, owner_hwnd, &self.file_ops.writes, &self.file_events);
         }
     }
 
@@ -262,7 +259,7 @@ impl App {
     fn notify_closed(&mut self, closed: Vec<(WindowId, Vec<crate::files::PromptId>)>) {
         for (wid, prompts) in closed {
             self.keytips.hide_owner(wid);
-            self.tooltips.window_closed(wid, &self.shell.jobs);
+            self.tooltips.window_closed(wid);
             self.file_ops.on_window_closed(wid, &prompts);
         }
     }
@@ -382,12 +379,8 @@ impl App {
 
     fn evaluate_tooltip_for(&mut self, ix: usize) {
         let probe = self.windows[ix].tooltip_probe();
-        self.tooltips.evaluate(
-            probe,
-            &self.shell.gpu,
-            &self.shell.text_system,
-            &self.shell.jobs,
-        );
+        self.tooltips
+            .evaluate(probe, &self.shell.gpu, &self.shell.text_system);
     }
 
     fn paint_window_ix(&mut self, ix: usize, now: Instant) -> bool {
@@ -463,8 +456,7 @@ impl PlatformHandler for App {
                     self.windows.set_active(window_id);
                 } else {
                     self.keytips.hide_owner(window_id);
-                    self.tooltips
-                        .window_deactivated(window_id, &self.shell.jobs);
+                    self.tooltips.window_deactivated(window_id);
                 }
                 self.with_window(window_id, |w, cx| w.on_activated(active, cx.shell));
             }
@@ -496,7 +488,7 @@ impl PlatformHandler for App {
             }
             PlatformEvent::MouseLeave { window_id } => {
                 self.with_window_quiet(window_id, |w, _| w.on_mouse_leave());
-                self.tooltips.on_mouse_leave(window_id, &self.shell.jobs);
+                self.tooltips.on_mouse_leave(window_id);
             }
             PlatformEvent::MouseDown {
                 window_id,
@@ -505,7 +497,7 @@ impl PlatformHandler for App {
                 modifiers,
                 click_count,
             } => {
-                self.tooltips.on_mouse_down(window_id, &self.shell.jobs);
+                self.tooltips.on_mouse_down(window_id);
                 self.with_window(window_id, |w, cx| {
                     w.on_mouse_down(button, position, modifiers, click_count, cx);
                 });
@@ -564,8 +556,7 @@ impl PlatformHandler for App {
                 self.drive_drag(|drag, windows, _, _, _| drag.on_capture_lost(window_id, windows));
             }
             PlatformEvent::ModifiersChanged { modifiers } => {
-                self.tooltips
-                    .on_modifiers_changed(modifiers, &self.shell.jobs);
+                self.tooltips.on_modifiers_changed(modifiers);
             }
             PlatformEvent::TextInput { window_id, text } => {
                 self.with_window(window_id, |w, cx| w.on_text_input(&text, cx));
@@ -611,41 +602,8 @@ impl PlatformHandler for App {
     }
 
     fn on_wake(&mut self) {
-        while let Some(ev) = self.shell.jobs.pop() {
-            match ev {
-                AppEvent::Window { window, timer } => {
-                    let target = match timer {
-                        WindowTimer::Editor {
-                            slot: EditorSlot::Tab(id),
-                            ..
-                        } => self
-                            .windows
-                            .owner_of(id)
-                            .map(|(ix, _)| self.windows[ix].id())
-                            .unwrap_or(window),
-                        _ => window,
-                    };
-                    self.with_window_quiet(target, |w, cx| w.on_timer(timer, cx.shell));
-                }
-                AppEvent::TooltipShowTimer { window, hit } => {
-                    let probe = self.windows.get(window).map(MainWindow::tooltip_probe);
-                    self.tooltips.on_show_timer(
-                        TooltipTarget { window, hit },
-                        probe,
-                        &self.shell.gpu,
-                        &self.shell.text_system,
-                        &self.shell.jobs,
-                    );
-                }
-                AppEvent::TabDragPoll => {
-                    self.drive_drag(|drag, windows, ops, shell, closed| {
-                        drag.on_poll(windows, ops, shell, closed)
-                    });
-                }
-                AppEvent::File(fe) => {
-                    self.run_file_ops(|ops, host, io| ops.on_event(fe, host, io));
-                }
-            }
+        while let Some(event) = self.file_events.next() {
+            self.run_file_ops(|ops, host, io| ops.on_event(event, host, io));
             self.sweep_closed_windows();
         }
     }
@@ -656,6 +614,27 @@ impl PlatformHandler for App {
             return;
         }
         let now = Instant::now();
+        for ix in 0..self.windows.len() {
+            self.windows[ix].tick(now);
+        }
+        if let Some((target, _)) = self.tooltips.opening.filter(|&(_, at)| at <= now) {
+            self.tooltips.opening = None;
+            let probe = self
+                .windows
+                .get(target.window)
+                .map(MainWindow::tooltip_probe);
+            self.tooltips
+                .on_show_timer(target, probe, &self.shell.gpu, &self.shell.text_system);
+        }
+        if let Some(drag) = &mut self.tab_drag
+            && take_due(&mut drag.poll_at, now)
+        {
+            drag.poll_at = Some(now + MOVE_POLL);
+            self.drive_drag(|drag, windows, ops, shell, closed| {
+                drag.on_poll(windows, ops, shell, closed)
+            });
+            self.sweep_closed_windows();
+        }
         let gen_before = self.shell.gpu.generation();
         let mut any_vsync = false;
         let mut painted_any = false;
@@ -684,6 +663,11 @@ impl PlatformHandler for App {
         if any_vsync {
             self.platform.request_frame_tick();
         }
+        let windows = (0..self.windows.len()).filter_map(|ix| self.windows[ix].deadline());
+        let tooltip = self.tooltips.opening.map(|(_, at)| at);
+        let drag = self.tab_drag.as_ref().and_then(|drag| drag.poll_at);
+        self.platform
+            .wake_at(windows.chain(tooltip).chain(drag).min());
     }
 }
 
@@ -1070,7 +1054,8 @@ pub(crate) struct TabDrag {
     phase: Phase,
     source_index: usize,
     source_placement: Option<WindowPlacement>,
-    poll_timer: Option<TimerHandle>,
+    /// While Windows moves the dragged tab's window: when to check on the move next.
+    poll_at: Option<Instant>,
 }
 
 impl TabDrag {
@@ -1095,7 +1080,7 @@ impl TabDrag {
             phase: Phase::Pressed,
             source_index: index,
             source_placement: None,
-            poll_timer: None,
+            poll_at: None,
         })
     }
 
@@ -1216,7 +1201,7 @@ impl TabDrag {
         shell: &Shell,
         closed: &mut Vec<ClosedWindow>,
     ) {
-        self.poll_timer = None;
+        self.poll_at = None;
         release_mouse_capture();
         if matches!(self.phase, Phase::Pressed) {
             return;
@@ -1303,7 +1288,7 @@ impl TabDrag {
         shell: &Shell,
         closed: &mut Vec<ClosedWindow>,
     ) -> bool {
-        self.poll_timer = None;
+        self.poll_at = None;
         let Some(hwnd) = windows.hwnd(self.owner) else {
             return true;
         };
@@ -1317,7 +1302,7 @@ impl TabDrag {
             }
             false
         } else if pressed && attaching {
-            self.run_move_loop(pt, windows, shell);
+            self.run_move_loop(pt, windows);
             windows.mark_dirty(self.owner);
             false
         } else if pressed {
@@ -1356,7 +1341,7 @@ impl TabDrag {
         }
         self.owner = target_id;
         self.phase = Phase::Dragging;
-        self.poll_timer = None;
+        self.poll_at = None;
         target_hwnd.set_capture();
         windows.mark_dirty(target_id);
         windows.mark_dirty(prev_owner);
@@ -1403,10 +1388,10 @@ impl TabDrag {
         } else {
             return;
         }
-        self.run_move_loop(pt, windows, shell);
+        self.run_move_loop(pt, windows);
     }
 
-    fn run_move_loop(&mut self, pt: ScreenPoint, windows: &Windows, shell: &Shell) {
+    fn run_move_loop(&mut self, pt: ScreenPoint, windows: &Windows) {
         let Some(win) = windows.get(self.owner) else {
             return;
         };
@@ -1416,11 +1401,7 @@ impl TabDrag {
         self.phase = Phase::Entering {
             since: Instant::now(),
         };
-        self.poll_timer = Some(
-            shell
-                .jobs
-                .every(MOVE_POLL, MOVE_POLL, || AppEvent::TabDragPoll),
-        );
+        self.poll_at = Some(Instant::now() + MOVE_POLL);
     }
 
     #[cfg(test)]

@@ -1,7 +1,9 @@
 use std::collections::{HashSet, VecDeque};
 use std::io;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::document::{
@@ -10,8 +12,8 @@ use crate::document::{
 };
 use crate::text::Rope;
 use crate::platform::{
-    Jobs, OpenDialogOptions, SaveChoice, SaveDialogOptions, SaveDialogResult, WindowHandle,
-    WindowId, run_open_dialog, run_save_dialog,
+    OpenDialogOptions, SaveChoice, SaveDialogOptions, SaveDialogResult, Waker, WindowHandle,
+    WindowId, panic_message, run_open_dialog, run_save_dialog,
 };
 use crate::types::{APP_NAME, Error, SharedStr};
 use crate::ui::TabId;
@@ -828,12 +830,64 @@ impl Drop for WriteFlightGuard {
     }
 }
 
-pub(crate) fn spawn_file_io<E: Send + 'static>(
+/// Where file work finishes: worker threads queue their events here, and each one wakes the loop.
+#[derive(Clone)]
+pub(crate) struct FileEvents(Arc<Mutex<VecDeque<FileEvent>>>, Waker);
+
+impl FileEvents {
+    pub(crate) fn new(waker: Waker) -> Self {
+        Self(Arc::default(), waker)
+    }
+
+    fn send(&self, event: FileEvent) {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push_back(event);
+        self.1.wake();
+    }
+
+    /// The next finished piece of file work, if any.
+    pub(crate) fn next(&self) -> Option<FileEvent> {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .pop_front()
+    }
+
+    /// Runs `work` on a thread named `name` and sends `finish`'s event for its result: the
+    /// panic message if it panicked, or the error if the thread couldn't start.
+    fn spawn<T: Send + 'static>(
+        &self,
+        name: &str,
+        work: impl FnOnce() -> T + Send + 'static,
+        finish: impl FnOnce(Result<T, String>) -> FileEvent + Send + 'static,
+    ) {
+        let finish = Arc::new(Mutex::new(Some(finish)));
+        let (events, finished) = (self.clone(), finish.clone());
+        let started = thread::Builder::new().name(name.into()).spawn(move || {
+            let outcome = catch_unwind(AssertUnwindSafe(work)).map_err(|p| panic_message(&*p));
+            if let Some(finish) = finished
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .take()
+            {
+                events.send(finish(outcome));
+            }
+        });
+        if let Err(err) = started
+            && let Some(finish) = finish.lock().unwrap_or_else(PoisonError::into_inner).take()
+        {
+            self.send(finish(Err(format!("Failed to start worker thread: {err}"))));
+        }
+    }
+}
+
+pub(crate) fn spawn_file_io(
     io: FileIo,
     owner: Option<WindowHandle>,
     tracker: &WriteTracker,
-    jobs: &Jobs<E>,
-    wrap: fn(FileEvent) -> E,
+    events: &FileEvents,
 ) {
     let file_types = || {
         [TEXT_FILE_TYPE, ALL_FILE_TYPE]
@@ -843,10 +897,10 @@ pub(crate) fn spawn_file_io<E: Send + 'static>(
     match io {
         FileIo::OpenDialog { window, current } => {
             let Some(owner) = owner else {
-                jobs.post(wrap(FileEvent::OpenDialogDone {
+                events.send(FileEvent::OpenDialogDone {
                     window,
                     result: Ok(None),
-                }));
+                });
                 return;
             };
             let options = OpenDialogOptions {
@@ -854,20 +908,18 @@ pub(crate) fn spawn_file_io<E: Send + 'static>(
                 directory: Some(default_directory(current.as_deref())),
                 file_types: file_types(),
             };
-            jobs.spawn(
+            events.spawn(
                 "jot-open-dialog",
                 move || run_open_dialog(owner, options),
-                move |res| {
-                    wrap(FileEvent::OpenDialogDone {
-                        window,
-                        result: res.unwrap_or_else(|msg| Err(Error::new(msg))),
-                    })
+                move |res| FileEvent::OpenDialogDone {
+                    window,
+                    result: res.unwrap_or_else(|msg| Err(Error::new(msg))),
                 },
             );
         }
         FileIo::LoadFiles { window, paths } => {
             let fallback = paths.clone();
-            jobs.spawn(
+            events.spawn(
                 "jot-load-files",
                 move || {
                     paths
@@ -887,7 +939,7 @@ pub(crate) fn spawn_file_io<E: Send + 'static>(
                             })
                             .collect()
                     });
-                    wrap(FileEvent::FilesLoaded { window, results })
+                    FileEvent::FilesLoaded { window, results }
                 },
             );
         }
@@ -898,10 +950,10 @@ pub(crate) fn spawn_file_io<E: Send + 'static>(
             ..
         } => {
             let Some(owner) = owner else {
-                jobs.post(wrap(FileEvent::SaveDialogDone {
+                events.send(FileEvent::SaveDialogDone {
                     wf,
                     result: Ok(None),
-                }));
+                });
                 return;
             };
             let suggested =
@@ -923,14 +975,12 @@ pub(crate) fn spawn_file_io<E: Send + 'static>(
                         .unwrap_or_default(),
                 }),
             };
-            jobs.spawn(
+            events.spawn(
                 "jot-save-dialog",
                 move || run_save_dialog(owner, options),
-                move |res| {
-                    wrap(FileEvent::SaveDialogDone {
-                        wf,
-                        result: res.unwrap_or_else(|msg| Err(Error::new(msg))),
-                    })
+                move |res| FileEvent::SaveDialogDone {
+                    wf,
+                    result: res.unwrap_or_else(|msg| Err(Error::new(msg))),
                 },
             );
         }
@@ -940,7 +990,7 @@ pub(crate) fn spawn_file_io<E: Send + 'static>(
             force_lossy,
         } => {
             let guard = tracker.enter();
-            jobs.spawn(
+            events.spawn(
                 "jot-write-file",
                 move || {
                     let _guard = guard;
@@ -967,7 +1017,7 @@ pub(crate) fn spawn_file_io<E: Send + 'static>(
                     let outcome = res.unwrap_or_else(|msg| {
                         WriteOutcome::Error(SaveError::Io(io::Error::other(msg)))
                     });
-                    wrap(FileEvent::WriteDone { wf, outcome })
+                    FileEvent::WriteDone { wf, outcome }
                 },
             );
         }
@@ -1081,6 +1131,38 @@ fn lossy_ansi_prompt(id: PromptId, tab: TabId, path: &Path) -> Prompt {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn worker_results_arrive_and_a_panicking_worker_reports_an_error() {
+        let platform = crate::platform::Platform::new(None).unwrap();
+        let events = FileEvents::new(platform.waker());
+        let window = WindowId::next();
+        let finish = move |res: Result<crate::types::Result<Option<Vec<PathBuf>>>, String>| {
+            FileEvent::OpenDialogDone {
+                window,
+                result: res.unwrap_or_else(|m| Err(Error::new(m))),
+            }
+        };
+        events.spawn("test-ok", || Ok(None), finish);
+        events.spawn("test-panic", || panic!("boom"), finish);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut outcomes = Vec::new();
+        while outcomes.len() < 2 && Instant::now() < deadline {
+            match events.next() {
+                Some(FileEvent::OpenDialogDone { result, .. }) => {
+                    outcomes.push(result.map_err(|e| e.to_string()))
+                }
+                Some(_) => panic!("unexpected event"),
+                None => thread::sleep(Duration::from_millis(5)),
+            }
+        }
+        assert!(outcomes.iter().any(|o| matches!(o, Ok(None))));
+        assert!(
+            outcomes
+                .iter()
+                .any(|o| o.as_ref().is_err_and(|e| e.contains("boom")))
+        );
+    }
 
     struct FakeTab {
         id: TabId,

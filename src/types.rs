@@ -4,8 +4,19 @@ use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::ops::Deref;
 use std::sync::Arc;
+use std::time::Instant;
 
 pub(crate) const APP_NAME: &str = "Jot";
+
+/// Whether `deadline` has passed by `now`, clearing it if so. Timed behaviour keeps deadlines
+/// like this; the app ticks what's due and wakes for the earliest one left.
+pub(crate) fn take_due(deadline: &mut Option<Instant>, now: Instant) -> bool {
+    let due = deadline.is_some_and(|at| at <= now);
+    if due {
+        *deadline = None;
+    }
+    due
+}
 
 #[derive(Clone)]
 pub(crate) enum SharedStr {
