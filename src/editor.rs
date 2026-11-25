@@ -1982,6 +1982,61 @@ mod tests {
         }
     }
 
+    /// Unwrapped, typing past the right edge scrolls the view along with the caret, and going
+    /// back to the line's start scrolls it home.
+    #[test]
+    fn typing_past_the_right_edge_scrolls_the_caret_into_view() {
+        let ts = TextSystem::new().unwrap();
+        let palette = Palette::resolve(false, None, None);
+        let style = EditorPaintStyle {
+            text: TextStyle::regular("Arial", 14.),
+            line_height: 20.,
+            color: palette.text_primary,
+            caret_height: 17.,
+        };
+        let params = EditorPaintParams {
+            style: &style,
+            palette,
+            window_active: true,
+            show_selection: true,
+            scale: 1.0,
+            caret_width_px: 1,
+            now: Instant::now(),
+        };
+        let mut ui = AppUi::default();
+        ui.begin_frame(Instant::now(), true);
+        let bounds = Rect::new(point(10., 20.), size(200., 100.));
+        let opts = DocOptions {
+            tab: TabId::next(),
+            soft_wrap: false,
+            paddings: Edges::ZERO,
+        };
+        let mut ed = Editor::document(Rope::from("first\n"), opts);
+        ed.prepare(bounds, params, &mut ui, &ts);
+        for i in 0..120 {
+            ed.handle_text_input(if i % 5 == 4 { " " } else { "w" }, &ts);
+            ed.prepare(bounds, params, &mut ui, &ts);
+            let caret = ed.caret_bounds().unwrap();
+            assert!(
+                bounds.contains(caret.center()),
+                "caret {caret:?} off screen after {i}"
+            );
+        }
+        assert!(
+            ed.scroll_offset().x < -200.,
+            "scrolled {:?}",
+            ed.scroll_offset()
+        );
+        let home = EditCommand::Move {
+            motion: Motion::LineStart,
+            extend: false,
+        };
+        assert!(ed.handle_command(home, &ts));
+        ed.prepare(bounds, params, &mut ui, &ts);
+        assert_eq!(ed.scroll_offset().x, 0.);
+        assert!(bounds.contains(ed.caret_bounds().unwrap().center()));
+    }
+
     #[test]
     fn editor_direct_typing_undo_redo_and_word_navigation() {
         let ts = TextSystem::new().unwrap();
