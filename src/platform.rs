@@ -1102,15 +1102,21 @@ impl NativeWindow {
         size(w as f32 / scale, h as f32 / scale)
     }
 
-    /// The size the window has when not maximized.
+    /// The client area's size when the window isn't maximized.
     pub(crate) fn restored_size(&self) -> Size {
         let hwnd = self.hwnd();
-        let current = self.logical_size();
-        if hwnd.is_maximized() {
-            hwnd.restored_logical_size().unwrap_or(current)
-        } else {
-            current
-        }
+        let Some(placement) = hwnd.saved_placement().filter(|_| hwnd.is_maximized()) else {
+            return self.logical_size();
+        };
+        // The normal position is the whole window: the frame comes off the sides and bottom.
+        let rc = placement.0.rcNormalPosition;
+        let (bx, by) = frame_thickness(window_dpi(self.hwnd));
+        let (w, h) = (
+            (rc.right - rc.left - 2 * bx).max(1),
+            (rc.bottom - rc.top - by).max(1),
+        );
+        let scale = window_scale(self.hwnd);
+        size(w as f32 / scale, h as f32 / scale)
     }
 
     pub(crate) fn is_active(&self) -> bool {
@@ -1894,17 +1900,6 @@ impl WindowHandle {
 
     pub(crate) fn restore_placement(self, placement: WindowPlacement) {
         let _ = unsafe { SetWindowPlacement(self.raw(), &placement.0) };
-    }
-
-    /// The window's size when not maximized or minimized.
-    fn restored_logical_size(self) -> Option<Size> {
-        let rc = self.saved_placement()?.0.rcNormalPosition;
-        let scale = self.dpi_scale();
-        let (w, h) = (
-            (rc.right - rc.left).max(1) as f32,
-            (rc.bottom - rc.top).max(1) as f32,
-        );
-        Some(size(w / scale, h / scale))
     }
 
     /// Commits any text being composed in the window's IME.
@@ -2857,6 +2852,28 @@ mod tests {
             false
         }
         fn drive_frames(&mut self) {}
+    }
+
+    /// A maximized window's restored size is its client area as it was, not the whole window,
+    /// so a tab dragged out of it opens at the size it had.
+    #[test]
+    fn a_maximized_windows_restored_size_is_its_client_area() {
+        let _platform = Platform::new(None).expect("Platform::new failed");
+        let win = hidden_window();
+        let before = win.restored_size();
+        let _ = unsafe {
+            ShowWindow(
+                win.hwnd().raw(),
+                windows::Win32::UI::WindowsAndMessaging::SW_MAXIMIZE,
+            )
+        };
+        assert!(win.hwnd().is_maximized());
+        let after = win.restored_size();
+        let px = 1.0 / window_scale(win.hwnd().raw());
+        assert!(
+            (after.width - before.width).abs() <= px && (after.height - before.height).abs() <= px,
+            "restored {after:?}, was {before:?}"
+        );
     }
 
     #[test]
