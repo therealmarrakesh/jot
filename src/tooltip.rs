@@ -1,3 +1,7 @@
+//! The overlays above the windows, each in a window of its own: tooltips, which show after
+//! the pointer rests on their owner (above it, or below without room) and fade, and the Alt-key
+//! tips over the menus.
+
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -13,67 +17,6 @@ use crate::types::SharedStr;
 use crate::ui::{AnimTracks, AppFrame, AppNode, Curve, Easing, HitId, PointerState, box_, text};
 use crate::widgets::card;
 
-#[derive(Copy, Clone, Debug, PartialEq)]
-pub(crate) struct OverlayAnchor {
-    pub(crate) window: WindowId,
-    pub(crate) origin: ScreenPoint,
-    pub(crate) scale: f32,
-}
-
-#[derive(Default)]
-pub(crate) struct OverlaySurface {
-    live: Option<WindowSurface>,
-    create_failed: bool,
-}
-
-impl OverlaySurface {
-    pub(crate) fn show(&mut self, gpu: &Rc<Gpu>, rect: ScreenRect) {
-        if self.live.is_none() {
-            if self.create_failed {
-                return;
-            }
-            match NativeWindow::create_overlay()
-                .and_then(|window| WindowSurface::new(gpu.clone(), window))
-            {
-                Ok(live) => self.live = Some(live),
-                Err(err) => {
-                    self.create_failed = true;
-                    crate::platform::debug_log(&format!("overlay create failed: {err}"));
-                    return;
-                }
-            }
-        }
-        if let Some(live) = &self.live {
-            live.window.place_overlay(rect);
-        }
-    }
-
-    pub(crate) fn hide(&self) {
-        if let Some(live) = &self.live {
-            live.window.hwnd().hide();
-        }
-    }
-
-    fn paint_scene(&mut self, ts: &TextSystem, build: impl FnOnce(Size) -> AppNode) -> bool {
-        let Some(live) = &mut self.live else {
-            return false;
-        };
-        if live.window.physical_size().0 == 0 || live.window.physical_size().1 == 0 {
-            return false;
-        }
-        let (scale, logical) = (live.window.scale_factor(), live.window.logical_size());
-        live.draw(transparent_black(), |canvas| {
-            let frame = AppFrame::layout(
-                build(logical),
-                AvailSize::definite(logical.width, logical.height),
-                scale,
-                ts,
-            );
-            frame.paint(canvas, &mut |_, _, _| {});
-        })
-    }
-}
-
 const PADDING_X: f32 = 9.;
 const PADDING_TOP: f32 = 6.;
 const PADDING_BOTTOM: f32 = 8.;
@@ -85,10 +28,77 @@ const SHADOW_SIDE: f32 = ELEVATION;
 const SHADOW_TOP: f32 = ELEVATION / 2.;
 const SHADOW_BOTTOM: f32 = ELEVATION * 1.5;
 const POINTER_OFFSET: f32 = 20.;
+
 const SHOW_DELAY_FACTOR: f32 = 2.;
 const RESHOW_DELAY_FACTOR: f32 = 1.5;
+/// How soon after one closes another shows sooner.
 const RESHOW_WINDOW: Duration = Duration::from_millis(200);
 const FADE_CURVE: Curve = Curve::new(Duration::from_millis(167), Easing::EaseOutCubic);
+
+const KEY_TIP_PADDING: f32 = 4.;
+const KEY_TIP_MARGIN: f32 = 1.;
+const KEY_TIP_FONT: &str = "Segoe UI";
+
+// ---- 1. The overlay surface -----------------------------------------------------------------
+
+/// Where a window's overlays are placed from: its client area's top left on screen, and scale.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub(crate) struct OverlayAnchor {
+    pub(crate) window: WindowId,
+    pub(crate) origin: ScreenPoint,
+    pub(crate) scale: f32,
+}
+
+/// An overlay's window, made the first time it shows (and not tried again if that fails).
+#[derive(Default)]
+struct OverlaySurface {
+    live: Option<WindowSurface>,
+    create_failed: bool,
+}
+
+impl OverlaySurface {
+    fn show(&mut self, gpu: &Rc<Gpu>, rect: ScreenRect) {
+        if self.live.is_none() && !self.create_failed {
+            let created = NativeWindow::create_overlay()
+                .and_then(|window| WindowSurface::new(gpu.clone(), window));
+            match created {
+                Ok(live) => self.live = Some(live),
+                Err(err) => {
+                    self.create_failed = true;
+                    crate::platform::debug_log(&format!("overlay create failed: {err}"));
+                }
+            }
+        }
+        if let Some(live) = &self.live {
+            live.window.place_overlay(rect);
+        }
+    }
+
+    fn hide(&self) {
+        if let Some(live) = &self.live {
+            live.window.hwnd().hide();
+        }
+    }
+
+    /// Lays out and paints what `build` makes; whether to paint again (the device was lost).
+    fn paint_scene(&mut self, ts: &TextSystem, build: impl FnOnce(Size) -> AppNode) -> bool {
+        let Some(live) = &mut self.live else {
+            return false;
+        };
+        let (w, h) = live.window.physical_size();
+        if w == 0 || h == 0 {
+            return false;
+        }
+        let (scale, logical) = (live.window.scale_factor(), live.window.logical_size());
+        live.draw(transparent_black(), |canvas| {
+            let available = AvailSize::definite(logical.width, logical.height);
+            let frame = AppFrame::layout(build(logical), available, scale, ts);
+            frame.paint(canvas, &mut |_, _, _| {});
+        })
+    }
+}
+
+// ---- 2. Tooltips ----------------------------------------------------------------------------
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub(crate) struct TooltipTarget {
@@ -102,6 +112,7 @@ pub(crate) struct TooltipProbe<'a> {
     pub(crate) frame: &'a AppFrame,
 }
 
+/// A tooltip seen under the pointer: its text, owner's rect on screen, and where it entered.
 #[derive(Clone)]
 struct Snap {
     key: TooltipTarget,
@@ -110,6 +121,7 @@ struct Snap {
     entered: ScreenPoint,
 }
 
+/// Where the tooltip is: none, waiting, showing, or put away until the pointer moves on.
 #[derive(Default)]
 enum State {
     #[default]
@@ -135,6 +147,7 @@ impl State {
     }
 }
 
+/// What happened: the pointer is over an owner, or none, or it's gone; a press, Ctrl, a timer.
 enum Report {
     Owner(Snap),
     NoneIn(WindowId),
@@ -146,6 +159,7 @@ enum Report {
 
 fn transition_state(state: State, report: Report) -> State {
     match (state, report) {
+        // Still waiting on the same one, its text and rect brought up to date.
         (State::Waiting { snap }, Report::Owner(seen)) if snap.key == seen.key => State::Waiting {
             snap: Snap {
                 text: seen.text,
@@ -167,16 +181,30 @@ fn transition_state(state: State, report: Report) -> State {
         (State::Waiting { snap } | State::Showing { snap }, Report::Dismiss) => {
             State::Suppressed { key: snap.key }
         }
-        (State::Waiting { snap }, Report::Timer(key)) if snap.key == key => {
-            State::Showing { snap }
-        }
+        (State::Waiting { snap }, Report::Timer(key)) if snap.key == key => State::Showing { snap },
         (state, _) => state,
     }
 }
 
-struct Shown {
-    key: TooltipTarget,
-    owner: ScreenRect,
+/// A tooltip `size` with its shadow, centred over `entered` above it (or below), on `work`.
+fn place(entered: ScreenPoint, work: ScreenRect, scale: f32, size: Size) -> ScreenRect {
+    let phys = |v: f32| (v * scale).round() as i32;
+    let (w, h) = (phys(size.width), phys(size.height));
+    let gap = phys(POINTER_OFFSET);
+    let left = (entered.x - w / 2).clamp(work.left, (work.right - w).max(work.left));
+    let above = entered.y - gap - h;
+    let top = if above < work.top {
+        entered.y + gap
+    } else {
+        above
+    };
+    let side = phys(SHADOW_SIDE);
+    ScreenRect {
+        left: left - side,
+        top: top - phys(SHADOW_TOP),
+        right: left + w + side,
+        bottom: top + h + phys(SHADOW_BOTTOM),
+    }
 }
 
 #[derive(Default)]
@@ -186,8 +214,9 @@ pub(crate) struct Tooltips {
     text: SharedStr,
     dirty: bool,
     state: State,
-    shown: Option<Shown>,
+    shown: Option<(TooltipTarget, ScreenRect)>,
     closed_at: Option<Instant>,
+    /// Only Ctrl is held: releasing it puts the tooltip away.
     control_only: bool,
     /// The tooltip waiting to show, and when it shows.
     pub(crate) opening: Option<(TooltipTarget, Instant)>,
@@ -205,10 +234,8 @@ impl Tooltips {
     }
 
     pub(crate) fn on_modifiers_changed(&mut self, mods: Modifiers) {
-        let only_ctrl = mods.ctrl_only();
-        let released = mods.none();
-        let was = std::mem::replace(&mut self.control_only, only_ctrl);
-        if released && was {
+        let was = std::mem::replace(&mut self.control_only, mods.ctrl_only());
+        if was && mods.none() {
             self.apply_report(Report::Dismiss);
         }
     }
@@ -227,30 +254,28 @@ impl Tooltips {
         self.apply_report(Report::NoneIn(window));
     }
 
+    /// Looks at what's under a window's pointer, and whether the tooltip's owner went or moved.
     pub(crate) fn evaluate(&mut self, probe: TooltipProbe<'_>, shell: &Shell) {
         self.hover_time = shell.settings.mouse_hover_time;
         let TooltipProbe {
-            anchor: OverlayAnchor {
-                window,
-                origin,
-                scale,
-            },
+            anchor:
+                OverlayAnchor {
+                    window,
+                    origin,
+                    scale,
+                },
             pointer,
             frame,
         } = probe;
-        let gone = self
-            .state
-            .key()
-            .filter(|k| k.window == window)
-            .filter(|k| {
-                frame.rect_of(k.hit).is_none_or(|r| {
-                    self.shown.as_ref().is_some_and(|shown| {
-                        shown.key == *k && shown.owner != r.to_screen(scale, origin)
-                    })
-                })
-            });
+        let gone = self.state.key().filter(|k| k.window == window).filter(|k| {
+            frame.rect_of(k.hit).is_none_or(|r| {
+                let moved = |&(shown, owner): &(TooltipTarget, ScreenRect)| {
+                    shown == *k && owner != r.to_screen(scale, origin)
+                };
+                self.shown.as_ref().is_some_and(moved)
+            })
+        });
         let observed = match pointer {
-            None => Some(Report::NoneIn(window)),
             Some(ptr) if ptr.pressed => None,
             Some(ptr) => Some(match frame.tooltip_at(ptr.pos) {
                 Some((hit, tip, rect)) => Report::Owner(Snap {
@@ -261,17 +286,18 @@ impl Tooltips {
                 }),
                 None => Report::NoneIn(window),
             }),
+            None => Some(Report::NoneIn(window)),
         };
-
         if let Some(key) = gone {
             self.transition(Report::Gone(key));
         }
-        if let Some(obs) = observed {
-            self.transition(obs);
+        if let Some(observed) = observed {
+            self.transition(observed);
         }
         self.sync(shell);
     }
 
+    /// The waiting tooltip's time came: it shows if the pointer is still on its owner.
     pub(crate) fn on_show_timer(
         &mut self,
         target: TooltipTarget,
@@ -279,9 +305,7 @@ impl Tooltips {
         shell: &Shell,
     ) {
         match probe {
-            Some(probe) => {
-                self.evaluate(probe, shell);
-            }
+            Some(probe) => self.evaluate(probe, shell),
             None => {
                 if let Some(key) = self.state.key().filter(|k| k.window == target.window) {
                     self.transition(Report::Gone(key));
@@ -293,8 +317,7 @@ impl Tooltips {
     }
 
     fn transition(&mut self, report: Report) {
-        let prev = std::mem::take(&mut self.state);
-        self.state = transition_state(prev, report);
+        self.state = transition_state(std::mem::take(&mut self.state), report);
     }
 
     fn apply_report(&mut self, report: Report) {
@@ -302,90 +325,62 @@ impl Tooltips {
         self.sync_hide_and_timer();
     }
 
+    /// Takes down a tooltip no longer showing, and times the waiting one (sooner after a close).
     fn sync_hide_and_timer(&mut self) {
-        let showing = match &self.state {
-            State::Showing { snap } => Some(snap.key),
-            _ => None,
+        let (showing, waiting) = match &self.state {
+            State::Showing { snap } => (Some(snap.key), None),
+            State::Waiting { snap } => (None, Some(snap.key)),
+            State::Idle | State::Suppressed { .. } => (None, None),
         };
-        if self
-            .shown
-            .as_ref()
-            .is_some_and(|shown| showing != Some(shown.key))
-        {
-            self.hide();
+        if self.shown.is_some_and(|(key, _)| showing != Some(key)) {
+            self.shown = None;
+            self.closed_at = Some(Instant::now());
+            self.dirty = true;
         }
-        let waiting = match &self.state {
-            State::Waiting { snap } => Some(snap.key),
-            _ => None,
-        };
-        match waiting {
-            Some(key) if self.opening.as_ref().is_some_and(|(k, _)| *k == key) => {}
+        self.opening = match waiting {
+            Some(key) if self.opening.is_some_and(|(k, _)| k == key) => self.opening,
             Some(key) => {
                 let reshow = self
                     .closed_at
-                    .is_some_and(|closed| closed.elapsed() < RESHOW_WINDOW);
-                let factor = if reshow { RESHOW_DELAY_FACTOR } else { SHOW_DELAY_FACTOR };
-                let delay = self.hover_time.mul_f32(factor);
-                self.opening = Some((key, Instant::now() + delay));
+                    .is_some_and(|at| at.elapsed() < RESHOW_WINDOW);
+                let factor = if reshow {
+                    RESHOW_DELAY_FACTOR
+                } else {
+                    SHOW_DELAY_FACTOR
+                };
+                Some((key, Instant::now() + self.hover_time.mul_f32(factor)))
             }
-            None => self.opening = None,
-        }
+            None => None,
+        };
     }
 
     fn sync(&mut self, shell: &Shell) {
         self.sync_hide_and_timer();
-        let showing = match &self.state {
-            State::Showing { snap } => Some(snap.clone()),
-            _ => None,
+        let State::Showing { snap } = &self.state else {
+            return;
         };
-        if let Some(snap) = showing
-            && self.shown.is_none()
-        {
-            self.show(snap, &shell.gpu, &shell.text_system);
-        }
-    }
-
-    fn hide(&mut self) {
-        if self.shown.take().is_none() {
+        if self.shown.is_some() {
             return;
         }
-        self.closed_at = Some(Instant::now());
-        self.dirty = true;
-    }
-
-    fn show(&mut self, snap: Snap, gpu: &Rc<Gpu>, ts: &TextSystem) {
-        let entered = snap.entered;
-        let display = WindowsDisplay::from_point(entered);
-        let (work, scale) = (display.work_area(), display.scale_factor());
+        let display = WindowsDisplay::from_point(snap.entered);
+        let light = Palette::resolve(false, None, None);
+        let card = tooltip_card(light, snap.text.clone());
         let measured = AppFrame::measure(
-            tooltip_card(Palette::resolve(false, None, None), snap.text.clone()),
+            card,
             AvailSize::MAX,
-            scale,
-            ts,
+            display.scale_factor(),
+            &shell.text_system,
         );
-        let phys = |v: f32| (v * scale).round() as i32;
-        let (w, h) = (phys(measured.width), phys(measured.height));
-        let gap = phys(POINTER_OFFSET);
-        let left = (entered.x - w / 2).clamp(work.left, (work.right - w).max(work.left));
-        let mut top = entered.y - gap - h;
-        if top < work.top {
-            top = entered.y + gap;
-        }
-        let (side, above, below) = (phys(SHADOW_SIDE), phys(SHADOW_TOP), phys(SHADOW_BOTTOM));
-        let rect = ScreenRect {
-            left: left - side,
-            top: top - above,
-            right: left + w + side,
-            bottom: top + h + below,
-        };
-
-        self.text = snap.text;
+        let rect = place(
+            snap.entered,
+            display.work_area(),
+            display.scale_factor(),
+            measured,
+        );
+        self.text = snap.text.clone();
+        self.shown = Some((snap.key, snap.owner));
         self.dirty = true;
-        self.shown = Some(Shown {
-            key: snap.key,
-            owner: snap.owner,
-        });
-        self.overlay.show(gpu, rect);
+        self.overlay.show(&shell.gpu, rect);
     }
 
     pub(crate) fn paint(&mut self, now: Instant, shell: &Shell) -> bool {
@@ -394,7 +389,6 @@ impl Tooltips {
         }
         let (p, ts) = (shell.palette, &shell.text_system);
         let reduce_motion = shell.settings.reduce_motion;
-        self.dirty = false;
         let visible = self.shown.is_some();
         let text = self.text.clone();
         let fade = &mut self.fade;
@@ -403,13 +397,12 @@ impl Tooltips {
             fade.begin_frame(now, reduce_motion);
             let opacity = fade.progress((), visible, FADE_CURVE).value;
             animating = fade.end_frame();
-            box_().size_full().opacity(opacity).child(
-                box_()
-                    .absolute()
-                    .left(SHADOW_SIDE)
-                    .top(SHADOW_TOP)
-                    .child(tooltip_card(p, text)),
-            )
+            let card = box_()
+                .absolute()
+                .left(SHADOW_SIDE)
+                .top(SHADOW_TOP)
+                .child(tooltip_card(p, text));
+            box_().size_full().opacity(opacity).child(card)
         });
         if !visible && !animating && !needs_retry {
             self.overlay.hide();
@@ -420,27 +413,31 @@ impl Tooltips {
 }
 
 fn tooltip_card(p: Palette, content: SharedStr) -> AppNode {
+    let label = box_()
+        .px(PADDING_X)
+        .pt(PADDING_TOP)
+        .pb(PADDING_BOTTOM)
+        .font_family(SMALL_FONT)
+        .text_size(FONT_SIZE)
+        .line_height(LINE_HEIGHT)
+        .text_color(p.text_primary)
+        .child(text(content));
     let face = box_()
         .overflow_hidden()
         .child(box_().absolute().inset_0().bg(p.acrylic_luminosity))
-        .child(
-            box_()
-                .px(PADDING_X)
-                .pt(PADDING_TOP)
-                .pb(PADDING_BOTTOM)
-                .font_family(SMALL_FONT)
-                .text_size(FONT_SIZE)
-                .line_height(LINE_HEIGHT)
-                .text_color(p.text_primary)
-                .child(text(content)),
-        );
-    let (stroke, fill) = (p.flyout_stroke, p.acrylic_fallback);
-    card(p, stroke, fill, CONTROL_RADIUS, ELEVATION * 2., face).max_w(MAX_WIDTH)
+        .child(label);
+    card(
+        p,
+        p.flyout_stroke,
+        p.acrylic_fallback,
+        CONTROL_RADIUS,
+        ELEVATION * 2.,
+        face,
+    )
+    .max_w(MAX_WIDTH)
 }
 
-const PADDING: f32 = 4.;
-const MARGIN: f32 = 1.;
-const FONT: &str = "Segoe UI";
+// ---- 3. Key tips ----------------------------------------------------------------------------
 
 #[derive(Clone, Copy)]
 pub(crate) enum Placement {
@@ -454,17 +451,16 @@ pub(crate) struct KeyTip {
     pub(crate) bounds: Rect,
 }
 
-pub(crate) fn layout_tip(
-    ts: &TextSystem,
-    key: char,
-    anchor: Rect,
-    placement: Placement,
-) -> KeyTip {
+pub(crate) fn layout_tip(ts: &TextSystem, key: char, anchor: Rect, placement: Placement) -> KeyTip {
     let mut buf = [0u8; 4];
-    let style = TextStyle::regular(FONT, FONT_SIZE);
+    let style = TextStyle::regular(KEY_TIP_FONT, FONT_SIZE);
     let width = ts.face(&style).measure(key.encode_utf8(&mut buf)).ceil();
-    let fill = size(width + 2. * PADDING, LINE_HEIGHT + 2. * PADDING);
-    let (outer_w, outer_h) = (fill.width + 2. * MARGIN, fill.height + 2. * MARGIN);
+    let pad = 2. * KEY_TIP_PADDING;
+    let fill = size(width + pad, LINE_HEIGHT + pad);
+    let (outer_w, outer_h) = (
+        fill.width + 2. * KEY_TIP_MARGIN,
+        fill.height + 2. * KEY_TIP_MARGIN,
+    );
     let (x, y) = match placement {
         Placement::Below => (
             round_half_up(anchor.center().x - outer_w / 2.),
@@ -475,17 +471,20 @@ pub(crate) fn layout_tip(
             round_half_up(anchor.top() + (anchor.size.height - outer_h) / 2.),
         ),
     };
+    let origin = point(x + KEY_TIP_MARGIN, y + KEY_TIP_MARGIN);
     KeyTip {
         key,
-        bounds: Rect::new(point(x + MARGIN, y + MARGIN), fill),
+        bounds: Rect::new(origin, fill),
     }
 }
 
+/// The key tips showing over one window, in one overlay spanning them all.
 #[derive(Default)]
 pub(crate) struct KeyTips {
     overlay: OverlaySurface,
     owner: Option<WindowId>,
     rect: ScreenRect,
+    /// Each tip, from the overlay's top left.
     tips: Vec<KeyTip>,
     dirty: bool,
 }
@@ -505,6 +504,7 @@ impl KeyTips {
         }
     }
 
+    /// Shows `tips` over `anchor`'s window (hiding them if none), redrawing only on a change.
     pub(crate) fn sync(&mut self, anchor: OverlayAnchor, mut tips: Vec<KeyTip>, shell: &Shell) {
         let Some(union) = tips.iter().map(|t| t.bounds).reduce(Rect::union) else {
             self.hide_owner(anchor.window);
@@ -517,46 +517,37 @@ impl KeyTips {
         if self.owner == Some(anchor.window) && self.rect == rect && self.tips == tips {
             return;
         }
-        self.tips = tips;
-        self.owner = Some(anchor.window);
-        self.rect = rect;
-        self.dirty = true;
+        (self.tips, self.owner, self.rect, self.dirty) = (tips, Some(anchor.window), rect, true);
         self.overlay.show(&shell.gpu, rect);
     }
 
     pub(crate) fn paint(&mut self, shell: &Shell) -> bool {
-        let (p, ts) = (shell.palette, &shell.text_system);
-        if !self.dirty {
+        if !std::mem::take(&mut self.dirty) || self.owner.is_none() || self.tips.is_empty() {
             return false;
         }
-        self.dirty = false;
-        if self.owner.is_none() || self.tips.is_empty() {
-            return false;
-        }
-        let tips = &self.tips;
-        self.dirty = self.overlay.paint_scene(ts, |_| render_tips(tips, p));
+        let (p, tips) = (shell.palette, &self.tips);
+        self.dirty = self.overlay.paint_scene(&shell.text_system, |_| {
+            let tip = |tip: &KeyTip| {
+                box_()
+                    .absolute()
+                    .left(tip.bounds.origin.x)
+                    .top(tip.bounds.origin.y)
+                    .w(tip.bounds.size.width)
+                    .h(tip.bounds.size.height)
+                    .bg(p.keytip_fill)
+                    .pl(KEY_TIP_PADDING)
+                    .pt(KEY_TIP_PADDING)
+                    .font_family(KEY_TIP_FONT)
+                    .text_size(FONT_SIZE)
+                    .line_height(LINE_HEIGHT)
+                    .text_color(p.keytip_text)
+                    .nowrap()
+                    .child(text(tip.key.to_string()))
+            };
+            box_().size_full().children(tips.iter().map(tip))
+        });
         self.dirty
     }
-}
-
-fn render_tips(tips: &[KeyTip], p: Palette) -> AppNode {
-    box_().size_full().children(tips.iter().map(|tip| {
-        box_()
-            .absolute()
-            .left(tip.bounds.origin.x)
-            .top(tip.bounds.origin.y)
-            .w(tip.bounds.size.width)
-            .h(tip.bounds.size.height)
-            .bg(p.keytip_fill)
-            .pl(PADDING)
-            .pt(PADDING)
-            .font_family(FONT)
-            .text_size(FONT_SIZE)
-            .line_height(LINE_HEIGHT)
-            .text_color(p.keytip_text)
-            .nowrap()
-            .child(text(tip.key.to_string()))
-    }))
 }
 
 #[cfg(test)]
