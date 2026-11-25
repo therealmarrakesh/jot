@@ -2,7 +2,7 @@
 
 use std::any::Any;
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::ffi::{OsString, c_void};
 use std::io;
 use std::os::windows::{
@@ -68,7 +68,7 @@ use windows::Win32::{
         Shutdown::{ShutdownBlockReasonCreate, ShutdownBlockReasonDestroy},
         SystemInformation::GetLocalTime,
         Threading::{
-            CreateMutexW, GetCurrentProcess, OpenProcess, OpenProcessToken,
+            CreateMutexW, GetCurrentProcess, GetCurrentThreadId, OpenProcess, OpenProcessToken,
             PROCESS_QUERY_LIMITED_INFORMATION,
         },
     },
@@ -106,36 +106,39 @@ use windows::Win32::{
         WindowsAndMessaging::{
             AllowSetForegroundWindow, CS_DBLCLKS, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT,
             CreateCaret, CreateWindowExW, DefWindowProcW, DestroyCaret, DestroyWindow,
-            DispatchMessageW, EnumWindows, FindWindowExW, GUI_INMOVESIZE, GUITHREADINFO,
-            GWL_EXSTYLE, GetCaretBlinkTime, GetClientRect, GetCursorPos, GetGUIThreadInfo,
-            GetMessageTime, GetMessageW, GetSystemMetrics, GetWindowLongW, GetWindowPlacement,
-            GetWindowRect, GetWindowThreadProcessId, HTCAPTION, HTCLIENT, HTCLOSE, HTMAXBUTTON,
-            HTMINBUTTON, HTTOP, HTTOPLEFT, HTTOPRIGHT, HWND_MESSAGE, HWND_TOPMOST, IDC_ARROW,
-            IDC_IBEAM, IsIconic, IsWindowVisible, IsZoomed, KillTimer, LWA_ALPHA, LoadCursorW,
-            LoadIconW, MB_ICONERROR, MB_OK, MINMAXINFO, MSG, MessageBoxW, NCCALCSIZE_PARAMS,
-            PostMessageW, PostQuitMessage, RegisterClassW, SC_CLOSE, SC_MAXIMIZE, SC_MINIMIZE,
-            SC_MOVE, SC_RESTORE, SM_CXDOUBLECLK, SM_CXFRAME, SM_CXPADDEDBORDER, SM_CYDOUBLECLK,
-            SM_CYFRAME, SM_SWAPBUTTON, SMTO_ABORTIFHUNG, SMTO_BLOCK, SPI_GETCARETWIDTH,
-            SPI_GETCLIENTAREAANIMATION, SPI_GETHIGHCONTRAST, SPI_GETMENUSHOWDELAY,
-            SPI_GETMOUSEHOVERTIME, SPI_GETWHEELSCROLLCHARS, SPI_GETWHEELSCROLLLINES, SW_HIDE,
-            SW_RESTORE, SW_SHOW, SW_SHOWNOACTIVATE, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOSIZE,
-            SWP_NOZORDER, SYSTEM_PARAMETERS_INFO_ACTION, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
+            DispatchMessageW, EnumThreadWindows, EnumWindows, FindWindowExW, GUI_INMOVESIZE,
+            GUITHREADINFO, GWL_EXSTYLE, GWLP_USERDATA, GetCaretBlinkTime, GetClientRect,
+            GetCursorPos, GetGUIThreadInfo, GetMessageTime, GetMessageW, GetSystemMetrics,
+            GetWindowLongPtrW, GetWindowLongW, GetWindowPlacement, GetWindowRect,
+            GetWindowTextLengthW, GetWindowThreadProcessId, HTCAPTION, HTCLIENT, HTCLOSE,
+            HTMAXBUTTON, HTMINBUTTON, HTTOP, HTTOPLEFT, HTTOPRIGHT, HWND_MESSAGE, HWND_TOPMOST,
+            IDC_ARROW, IDC_IBEAM, IsIconic, IsWindowVisible, IsZoomed, KillTimer, LWA_ALPHA,
+            LoadCursorW, LoadIconW, MB_ICONERROR, MB_OK, MINMAXINFO, MSG, MessageBoxW,
+            NCCALCSIZE_PARAMS, PostMessageW, PostQuitMessage, RegisterClassW, SC_CLOSE,
+            SC_MAXIMIZE, SC_MINIMIZE, SC_MOVE, SC_RESTORE, SM_CXDOUBLECLK, SM_CXFRAME,
+            SM_CXPADDEDBORDER, SM_CYDOUBLECLK, SM_CYFRAME, SM_SWAPBUTTON, SMTO_ABORTIFHUNG,
+            SMTO_BLOCK, SPI_GETCARETWIDTH, SPI_GETCLIENTAREAANIMATION, SPI_GETHIGHCONTRAST,
+            SPI_GETMENUSHOWDELAY, SPI_GETMOUSEHOVERTIME, SPI_GETWHEELSCROLLCHARS,
+            SPI_GETWHEELSCROLLLINES, SW_HIDE, SW_RESTORE, SW_SHOW, SW_SHOWNOACTIVATE,
+            SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER,
+            SYSTEM_PARAMETERS_INFO_ACTION, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
             SendMessageTimeoutW, SetCaretPos, SetCursor, SetForegroundWindow,
-            SetLayeredWindowAttributes, SetTimer, SetWindowPlacement, SetWindowPos, SetWindowTextW,
-            ShowWindow, SystemParametersInfoW, TranslateMessage, USER_DEFAULT_SCREEN_DPI,
-            USER_TIMER_MAXIMUM, USER_TIMER_MINIMUM, WINDOW_EX_STYLE, WINDOW_STYLE, WINDOWPLACEMENT,
-            WM_ACTIVATE, WM_APP, WM_CANCELMODE, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_COPYDATA,
-            WM_DPICHANGED, WM_DROPFILES, WM_ENDSESSION, WM_ENTERMENULOOP, WM_ENTERSIZEMOVE,
-            WM_ERASEBKGND, WM_EXITMENULOOP, WM_EXITSIZEMOVE, WM_GETMINMAXINFO, WM_IME_COMPOSITION,
-            WM_IME_ENDCOMPOSITION, WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDBLCLK,
-            WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL,
-            WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_MOVE, WM_NCCALCSIZE, WM_NCHITTEST, WM_NCLBUTTONDBLCLK,
-            WM_NCLBUTTONDOWN, WM_NCLBUTTONUP, WM_NCMOUSELEAVE, WM_NCMOUSEMOVE, WM_PAINT,
-            WM_QUERYENDSESSION, WM_RBUTTONDBLCLK, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR,
-            WM_SETTINGCHANGE, WM_SIZE, WM_SYSCHAR, WM_SYSCOMMAND, WM_SYSKEYDOWN, WM_SYSKEYUP,
-            WM_THEMECHANGED, WM_TIMER, WNDCLASSW, WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
-            WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT,
-            WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU, WS_THICKFRAME, WindowFromPoint,
+            SetLayeredWindowAttributes, SetTimer, SetWindowLongPtrW, SetWindowPlacement,
+            SetWindowPos, SetWindowTextW, ShowWindow, SystemParametersInfoW, TranslateMessage,
+            USER_DEFAULT_SCREEN_DPI, USER_TIMER_MAXIMUM, USER_TIMER_MINIMUM, WINDOW_EX_STYLE,
+            WINDOW_STYLE, WINDOWPLACEMENT, WM_ACTIVATE, WM_APP, WM_CANCELMODE, WM_CAPTURECHANGED,
+            WM_CHAR, WM_CLOSE, WM_COPYDATA, WM_DPICHANGED, WM_DROPFILES, WM_ENDSESSION,
+            WM_ENTERMENULOOP, WM_ENTERSIZEMOVE, WM_ERASEBKGND, WM_EXITMENULOOP, WM_EXITSIZEMOVE,
+            WM_GETMINMAXINFO, WM_IME_COMPOSITION, WM_IME_ENDCOMPOSITION, WM_IME_STARTCOMPOSITION,
+            WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN,
+            WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_MOVE, WM_NCCALCSIZE,
+            WM_NCHITTEST, WM_NCLBUTTONDBLCLK, WM_NCLBUTTONDOWN, WM_NCLBUTTONUP, WM_NCMOUSELEAVE,
+            WM_NCMOUSEMOVE, WM_PAINT, WM_QUERYENDSESSION, WM_RBUTTONDBLCLK, WM_RBUTTONDOWN,
+            WM_RBUTTONUP, WM_SETCURSOR, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCHAR, WM_SYSCOMMAND,
+            WM_SYSKEYDOWN, WM_SYSKEYUP, WM_THEMECHANGED, WM_TIMER, WNDCLASSW, WS_EX_APPWINDOW,
+            WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW,
+            WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU,
+            WS_THICKFRAME, WindowFromPoint,
         },
     },
 };
@@ -558,9 +561,6 @@ const WAKE_CLASS_NAME: PCWSTR = w!("JotWakeWindow");
 struct PumpState {
     handler: Option<Rc<RefCell<dyn PlatformHandler>>>,
     wake_pending: bool,
-    handoff_accepting: bool,
-    settings: Option<SystemSettings>,
-    windows: HashMap<isize, Rc<WindowShared>>,
     pending_events: VecDeque<PlatformEvent>,
     shutdown_block: Option<&'static str>,
 }
@@ -569,21 +569,13 @@ thread_local! {
     static PUMP: RefCell<PumpState> = RefCell::new(PumpState::default());
 }
 
+/// The state of a window `NativeWindow` created, kept in the window's user data.
 fn lookup_window(hwnd: HWND) -> Option<Rc<WindowShared>> {
-    PUMP.with(|p| p.borrow().windows.get(&(hwnd.0 as isize)).cloned())
-}
-
-fn cached_settings() -> SystemSettings {
-    if let Some(s) = PUMP.with(|p| p.borrow().settings) {
-        return s;
-    }
-    let fresh = SystemSettings::query();
-    set_cached_settings(fresh);
-    fresh
-}
-
-fn set_cached_settings(settings: SystemSettings) {
-    PUMP.with(|p| p.borrow_mut().settings = Some(settings));
+    let state = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *const WindowShared;
+    (!state.is_null()).then(|| unsafe {
+        Rc::increment_strong_count(state);
+        Rc::from_raw(state)
+    })
 }
 
 fn mark_wake_pending() {
@@ -794,7 +786,6 @@ impl Platform {
             )?
         };
 
-        set_cached_settings(SystemSettings::query());
         let vsync = VsyncPacer::spawn(wake_hwnd.0 as isize)?;
 
         let platform = Self {
@@ -804,34 +795,25 @@ impl Platform {
             _instance_lock: instance_lock,
         };
         if let Some(lock) = &platform._instance_lock {
-            PUMP.with(|p| p.borrow_mut().handoff_accepting = true);
             let wide = HSTRING::from(lock.window_title.as_str());
             let _ = unsafe { SetWindowTextW(platform.wake_hwnd, &wide) };
         }
         Ok(platform)
     }
 
-    pub(crate) fn settings(&self) -> SystemSettings {
-        cached_settings()
-    }
-
     pub(crate) fn set_block_shutdown(&self, reason: Option<&'static str>) {
-        let hwnds = PUMP.with(|p| {
-            let mut state = p.borrow_mut();
-            let prev = std::mem::replace(&mut state.shutdown_block, reason);
-            if prev.is_some() && reason.is_none() {
-                state.windows.keys().copied().collect::<Vec<_>>()
-            } else {
-                Vec::new()
+        let prev = PUMP.with(|p| std::mem::replace(&mut p.borrow_mut().shutdown_block, reason));
+        if prev.is_some() && reason.is_none() {
+            unsafe extern "system" fn clear(hwnd: HWND, _: LPARAM) -> BOOL {
+                let _ = unsafe { ShutdownBlockReasonDestroy(hwnd) };
+                BOOL(1)
             }
-        });
-        for raw in hwnds {
-            let _ = unsafe { ShutdownBlockReasonDestroy(HWND(raw as *mut _)) };
+            let _ = unsafe { EnumThreadWindows(GetCurrentThreadId(), Some(clear), LPARAM(0)) };
         }
     }
 
+    /// Stops taking files from other launches: they find the wake window by its title.
     fn disable_handoff(&self) {
-        PUMP.with(|p| p.borrow_mut().handoff_accepting = false);
         let _ = unsafe { SetWindowTextW(self.wake_hwnd, w!("")) };
     }
 
@@ -952,7 +934,7 @@ fn wake_wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> 
             LRESULT(0)
         }
         WM_COPYDATA => {
-            if !PUMP.with(|p| p.borrow().handoff_accepting) {
+            if unsafe { GetWindowTextLengthW(hwnd) } == 0 {
                 return LRESULT(0);
             }
             let cds = unsafe { &*(lparam.0 as *const COPYDATASTRUCT) };
@@ -1155,7 +1137,7 @@ impl NativeWindow {
 
         let init_scale = query_scale(hwnd);
         let shared = WindowShared::new(id, init_scale, (1, 1), config.show && config.focus);
-        PUMP.with(|p| p.borrow_mut().windows.insert(hwnd.0 as isize, shared.clone()));
+        unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, Rc::into_raw(shared.clone()) as isize) };
 
         configure_backdrop(hwnd);
         configure_dark_mode(hwnd, appearance);
@@ -1279,10 +1261,6 @@ impl NativeWindow {
         self.shared.chrome.borrow_mut().control_areas = areas;
     }
 
-    pub(crate) fn is_maximized(&self) -> bool {
-        unsafe { IsZoomed(self.hwnd) }.as_bool()
-    }
-
     pub(crate) fn hwnd(&self) -> WindowHandle {
         WindowHandle::from_raw(self.hwnd)
     }
@@ -1355,9 +1333,12 @@ impl NativeWindow {
             return;
         }
         self.destroyed = true;
-        let in_size_move = PUMP.with(|p| p.borrow_mut().windows.remove(&(self.hwnd.0 as isize)))
-            .is_some_and(|s| s.in_size_move.get());
-        if in_size_move {
+        let state =
+            unsafe { SetWindowLongPtrW(self.hwnd, GWLP_USERDATA, 0) } as *const WindowShared;
+        if !state.is_null() {
+            drop(unsafe { Rc::from_raw(state) });
+        }
+        if self.shared.in_size_move.get() {
             let _ = unsafe { KillTimer(Some(self.hwnd), SIZE_MOVE_TIMER_ID) };
         }
         let _ = unsafe { DestroyWindow(self.hwnd) };
@@ -1370,9 +1351,13 @@ impl Drop for NativeWindow {
     }
 }
 
+/// The scale factor for `dpi` (never below 1).
+fn scale_for_dpi(dpi: u32) -> f32 {
+    dpi.max(USER_DEFAULT_SCREEN_DPI) as f32 / USER_DEFAULT_SCREEN_DPI as f32
+}
+
 fn query_scale(hwnd: HWND) -> f32 {
-    let dpi = unsafe { GetDpiForWindow(hwnd) }.max(USER_DEFAULT_SCREEN_DPI);
-    dpi as f32 / USER_DEFAULT_SCREEN_DPI as f32
+    scale_for_dpi(unsafe { GetDpiForWindow(hwnd) })
 }
 
 fn query_physical_size(hwnd: HWND) -> (u32, u32) {
@@ -1660,7 +1645,7 @@ fn window_wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
                 && let Some(min_size) = s.chrome.borrow().min_size
             {
                 let dpi = unsafe { GetDpiForWindow(hwnd) }.max(USER_DEFAULT_SCREEN_DPI);
-                let scale = dpi as f32 / USER_DEFAULT_SCREEN_DPI as f32;
+                let scale = scale_for_dpi(dpi);
                 let (bx, by) = frame_thickness_for_dpi(dpi);
                 let mmi = unsafe { &mut *(lparam.0 as *mut MINMAXINFO) };
                 mmi.ptMinTrackSize.x = (min_size.width * scale).ceil() as i32 + bx * 2;
@@ -1888,7 +1873,12 @@ fn window_wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
             let horizontal = msg == WM_MOUSEHWHEEL || modifiers.shift;
             let raw_delta = ((wparam.0 >> 16) & 0xFFFF) as i16 as f32;
             let notches = raw_delta / 120.0;
-            let raw_amount = cached_settings().wheel_scroll_amount(horizontal);
+            let setting = if horizontal {
+                SPI_GETWHEELSCROLLCHARS
+            } else {
+                SPI_GETWHEELSCROLLLINES
+            };
+            let raw_amount = system_parameters_u32(setting.0).unwrap_or(DEFAULT_WHEEL_STEP);
             // WHEEL_PAGESCROLL is u32::MAX.
             let page_scroll = !horizontal && raw_amount == u32::MAX;
             let amount = if page_scroll { 1.0 } else { raw_amount.max(1) as f32 };
@@ -2040,9 +2030,7 @@ fn window_wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
         }
 
         WM_DPICHANGED => {
-            let new_dpi = (wparam.0 & 0xFFFF) as u32;
-            let scale =
-                new_dpi.max(USER_DEFAULT_SCREEN_DPI) as f32 / USER_DEFAULT_SCREEN_DPI as f32;
+            let scale = scale_for_dpi((wparam.0 & 0xFFFF) as u32);
             // Update scale before SetWindowPos so nested WM_SIZE sees the new DPI.
             if let Some(s) = lookup_window(hwnd) {
                 let (pw, ph) = s.metrics.get().physical;
@@ -2087,9 +2075,7 @@ fn window_wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
             if lookup_window(hwnd).is_some()
                 && (msg == WM_THEMECHANGED || is_relevant_setting_change(lparam))
             {
-                let fresh = SystemSettings::query();
-                set_cached_settings(fresh);
-                dispatch(PlatformEvent::SettingsChanged(fresh));
+                dispatch(PlatformEvent::SettingsChanged(SystemSettings::query()));
             }
             LRESULT(0)
         }
@@ -2351,14 +2337,9 @@ fn try_claim_mutex(name: &str) -> std::result::Result<Option<Owned<HANDLE>>, ()>
     Ok((err != ERROR_ALREADY_EXISTS).then_some(guard))
 }
 
-fn send_handoff(
-    identity: &ProcessIdentity,
-    class_name: PCWSTR,
-    window_title: &str,
-    paths: &[PathBuf],
-) -> bool {
+fn send_handoff(identity: &ProcessIdentity, window_title: &str, paths: &[PathBuf]) -> bool {
     let title = HSTRING::from(window_title);
-    let Ok(target) = (unsafe { FindWindowExW(Some(HWND_MESSAGE), None, class_name, &title) })
+    let Ok(target) = (unsafe { FindWindowExW(Some(HWND_MESSAGE), None, WAKE_CLASS_NAME, &title) })
     else {
         return false;
     };
@@ -2422,7 +2403,7 @@ fn arbitrate_for(identity: &ProcessIdentity, key: &str, paths: &[PathBuf]) -> Ar
                 }));
             }
             Ok(None) => {
-                if send_handoff(identity, WAKE_CLASS_NAME, &window_title, paths) {
+                if send_handoff(identity, &window_title, paths) {
                     return Arbitration::HandedOff;
                 }
                 std::thread::sleep(Duration::from_millis(25));
@@ -2433,8 +2414,8 @@ fn arbitrate_for(identity: &ProcessIdentity, key: &str, paths: &[PathBuf]) -> Ar
     Arbitration::Primary(None)
 }
 
-const DEFAULT_WHEEL_LINES: u32 = 3;
-const DEFAULT_WHEEL_CHARS: u32 = 3;
+/// Lines (or characters, sideways) per wheel notch when the system doesn't say.
+const DEFAULT_WHEEL_STEP: u32 = 3;
 const DEFAULT_HOVER_TIME_MS: u32 = 400;
 const DEFAULT_MENU_SHOW_DELAY_MS: u32 = 400;
 
@@ -2463,8 +2444,6 @@ pub(crate) struct SystemSettings {
     pub(crate) caret_width_px: u32,
     pub(crate) mouse_hover_time: Duration,
     pub(crate) menu_show_delay: Duration,
-    pub(crate) wheel_scroll_lines: u32,
-    pub(crate) wheel_scroll_chars: u32,
 }
 
 #[cfg(test)]
@@ -2481,8 +2460,6 @@ impl Default for SystemSettings {
             caret_width_px: 1,
             mouse_hover_time: Duration::from_millis(u64::from(DEFAULT_HOVER_TIME_MS)),
             menu_show_delay: Duration::from_millis(u64::from(DEFAULT_MENU_SHOW_DELAY_MS)),
-            wheel_scroll_lines: DEFAULT_WHEEL_LINES,
-            wheel_scroll_chars: DEFAULT_WHEEL_CHARS,
         }
     }
 }
@@ -2512,10 +2489,6 @@ impl SystemSettings {
                 .clamp(1, 20),
             mouse_hover_time: Duration::from_millis(u64::from(hover_ms)),
             menu_show_delay: Duration::from_millis(u64::from(menu_ms)),
-            wheel_scroll_lines: system_parameters_u32(SPI_GETWHEELSCROLLLINES.0)
-                .unwrap_or(DEFAULT_WHEEL_LINES),
-            wheel_scroll_chars: system_parameters_u32(SPI_GETWHEELSCROLLCHARS.0)
-                .unwrap_or(DEFAULT_WHEEL_CHARS),
         }
     }
 
@@ -2524,14 +2497,6 @@ impl SystemSettings {
             self.accent_dark
         } else {
             self.accent_light
-        }
-    }
-
-    pub(crate) fn wheel_scroll_amount(self, horizontal: bool) -> u32 {
-        if horizontal {
-            self.wheel_scroll_chars
-        } else {
-            self.wheel_scroll_lines
         }
     }
 }
@@ -2700,10 +2665,7 @@ impl WindowHandle {
     }
 
     pub(crate) fn dpi_scale(self) -> f32 {
-        match unsafe { GetDpiForWindow(self.raw()) } {
-            0 => 1.,
-            dpi => dpi as f32 / USER_DEFAULT_SCREEN_DPI as f32,
-        }
+        query_scale(self.raw())
     }
 
     pub(crate) fn window_rect(self) -> ScreenRect {
@@ -2823,7 +2785,7 @@ impl WindowHandle {
         let rc = placement.0.rcNormalPosition;
         let w = (rc.right - rc.left).max(1) as f32;
         let h = (rc.bottom - rc.top).max(1) as f32;
-        let scale = self.dpi_scale().max(0.5);
+        let scale = self.dpi_scale();
         Some(crate::geom::size(w / scale, h / scale))
     }
 
@@ -2866,8 +2828,7 @@ pub(crate) fn monitor_work_area_and_scale(point: ScreenPoint) -> (ScreenRect, f3
     let _ = unsafe { GetMonitorInfoW(monitor, &mut info) };
     let (mut dpi_x, mut dpi_y) = (USER_DEFAULT_SCREEN_DPI, USER_DEFAULT_SCREEN_DPI);
     let _ = unsafe { GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y) };
-    let scale = dpi_x as f32 / USER_DEFAULT_SCREEN_DPI as f32;
-    (info.rcWork.into(), scale)
+    (info.rcWork.into(), scale_for_dpi(dpi_x))
 }
 
 pub(crate) fn top_visible_window_at(
@@ -2968,7 +2929,7 @@ impl WindowsDisplay {
         let mut dpi_y = USER_DEFAULT_SCREEN_DPI;
         let _ =
             unsafe { GetDpiForMonitor(self.monitor, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y) };
-        (dpi_x.max(USER_DEFAULT_SCREEN_DPI) as f32) / (USER_DEFAULT_SCREEN_DPI as f32)
+        scale_for_dpi(dpi_x)
     }
 
     pub(crate) fn visible_bounds(&self) -> Rect {
@@ -3561,6 +3522,49 @@ mod tests {
     }
 
     #[test]
+    fn wheel_notches_scroll_by_the_system_lines_per_notch() {
+        #[derive(Default)]
+        struct WheelProbe(Vec<(Point, bool)>);
+
+        impl PlatformHandler for WheelProbe {
+            fn on_event(&mut self, event: PlatformEvent) -> bool {
+                if let PlatformEvent::ScrollWheel {
+                    delta_lines,
+                    page_scroll,
+                    ..
+                } = event
+                {
+                    self.0.push((delta_lines, page_scroll));
+                }
+                false
+            }
+            fn on_wake(&mut self) {}
+            fn drive_frames(&mut self) {}
+        }
+
+        let _platform = Platform::new(None).expect("Platform::new failed");
+        let cfg = MainWindowConfig {
+            show: false,
+            focus: false,
+            ..Default::default()
+        };
+        let win = NativeWindow::create_main(&cfg, WindowAppearance::Light).expect("window");
+        let hwnd = win.hwnd().raw();
+        let probe = Rc::new(RefCell::new(WheelProbe::default()));
+        Platform::with_test_handler(probe.clone(), || unsafe {
+            let notch_down = WPARAM(((-120i16) as u16 as usize) << 16);
+            let _ = SendMessageW(hwnd, WM_MOUSEWHEEL, Some(notch_down), Some(LPARAM(0)));
+        });
+        let lines = system_parameters_u32(SPI_GETWHEELSCROLLLINES.0).unwrap_or(DEFAULT_WHEEL_STEP);
+        let expected = if lines == u32::MAX {
+            (point(0.0, -1.0), true)
+        } else {
+            (point(0.0, -(lines.max(1) as f32)), false)
+        };
+        assert_eq!(probe.borrow().0, vec![expected]);
+    }
+
+    #[test]
     fn real_win32_message_loop_wakes_timers_and_quits_cleanly() {
         struct LoopProbe {
             platform: Platform,
@@ -3779,7 +3783,7 @@ mod tests {
         post_ctrl(false);
         stop_rx.recv_timeout(Duration::from_secs(2)).unwrap();
         assert!(
-            !send_handoff(&identity, WAKE_CLASS_NAME, &window_title, &[]),
+            !send_handoff(&identity, &window_title, &[]),
             "stopped server must reject late handoffs"
         );
 

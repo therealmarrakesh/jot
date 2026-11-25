@@ -129,7 +129,7 @@ impl App {
         text_system: TextSystem,
         launch: WindowLaunch,
     ) -> Self {
-        let shell = Shell::new(&platform, gpu, text_system);
+        let shell = Shell::new(gpu, text_system);
         let mut tooltips = Tooltips::default();
         tooltips.hover_time = shell.settings.mouse_hover_time;
         let file_events = FileEvents::new(platform.waker());

@@ -3,7 +3,7 @@ use std::rc::Rc;
 use crate::files::{FileRequest, PromptAnswer, PromptId};
 use crate::geom::Point;
 use crate::gfx::{Gpu, TextSystem};
-use crate::platform::{Platform, SystemSettings, WindowAppearance, WindowId};
+use crate::platform::{SystemSettings, WindowAppearance, WindowId};
 use crate::theme::Palette;
 use crate::ui::TabId;
 
@@ -68,8 +68,8 @@ pub(crate) struct Shell {
 }
 
 impl Shell {
-    pub(crate) fn new(platform: &Rc<Platform>, gpu: Rc<Gpu>, text_system: TextSystem) -> Self {
-        let settings = platform.settings();
+    pub(crate) fn new(gpu: Rc<Gpu>, text_system: TextSystem) -> Self {
+        let settings = SystemSettings::query();
         let mut shell = Self {
             text_system,
             appearance_override: None,

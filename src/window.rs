@@ -129,7 +129,7 @@ impl MainWindow {
     }
 
     pub(crate) fn restored_logical_size(&self) -> Size {
-        if self.win.window.is_maximized() {
+        if self.win.window.hwnd().is_maximized() {
             self.win
                 .window
                 .hwnd()
@@ -1792,7 +1792,7 @@ impl MainWindow {
         let logical = self.win.window.logical_size();
         let scale = self.win.window.scale_factor();
         let window_active = self.win.window.is_active();
-        let maximized = self.win.window.is_maximized();
+        let maximized = self.win.window.hwnd().is_maximized();
         let status_metrics = view.status_bar.then(|| self.status_metrics());
 
         self.ui.begin_frame(now, reduce_motion);
