@@ -1,3 +1,10 @@
+//! Find and replace: the bar over the document, with its query and replacement fields, and the
+//! search behind it.
+//!
+//! The bar grows in from its corner and shrinks away; a notice under it says when a search
+//! wrapped or found nothing. Searching reads the document a block at a time (overlapping so a
+//! match across blocks isn't missed), matching exactly or with simple case folding.
+
 use std::ops::Range;
 use std::time::{Duration, Instant};
 
@@ -16,6 +23,7 @@ use crate::ui::{
 };
 use crate::widgets::{button, card, icon_button, text_field};
 
+// How the bar grows in and shrinks away.
 const EXPAND_CURVE: Curve = Curve::new(
     Duration::from_millis(300),
     Easing::CubicBezier {
@@ -34,12 +42,15 @@ const CONTRACT_CURVE: Curve = Curve::new(
         y2: 0.5,
     },
 );
-const CARD_Z: f32 = 32.;
-const NOTICE_Z: f32 = 16.;
 const COLLAPSED_SIZE: f32 = 20.;
 const EXPAND_START_SCALE: f32 = 0.01;
 const NOTICE_DURATION: Duration = Duration::from_secs(3);
+/// The longest selection that seeds the query.
 const MAX_SEED_QUERY_CHARS: usize = 256;
+
+// The card and its notice.
+const CARD_Z: f32 = 32.;
+const NOTICE_Z: f32 = 16.;
 const CARD_WIDTH: f32 = 860.;
 const CARD_TOP: f32 = 12.;
 const CARD_SHADOW_CLIP_TOP: f32 = 6.;
@@ -65,6 +76,9 @@ const ARROW_UP_GLYPH: &str = "\u{E74A}";
 const OPTIONS_GLYPH: &str = "\u{E9E9}";
 const CLOSE_GLYPH: &str = "\u{E8BB}";
 
+// ---- 1. The bar -----------------------------------------------------------------------------
+
+/// What a key in the bar does: nothing here, move focus, or run a command.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub(crate) enum FindKey {
     PassThrough,
@@ -106,6 +120,7 @@ pub(crate) struct FindBar {
     notice: Option<SharedStr>,
     /// When the notice goes away.
     notice_until: Option<Instant>,
+    /// The matcher for the last query searched, and the text it searches a block at a time.
     matcher: Option<Matcher>,
     buffer: String,
 }
@@ -137,53 +152,48 @@ impl FindBar {
         self.transition.is_open()
     }
 
+    /// Opens the bar (with the replace row or without), its query seeded with the selection if
+    /// that's one short line, and selected.
+    pub(crate) fn open(&mut self, replace: bool, selected: &str, ts: &TextSystem) {
+        let short = selected.chars().take(MAX_SEED_QUERY_CHARS + 1).count() <= MAX_SEED_QUERY_CHARS;
+        if !selected.is_empty() && !selected.contains('\n') && short {
+            self.query.set_value(selected, ts);
+        }
+        self.transition.open();
+        self.replace = replace;
+        self.query.select_all();
+    }
+
+    /// Starts closing the bar; whether it was open.
+    pub(crate) fn close(&mut self) -> bool {
+        let closed = self.transition.close();
+        if closed {
+            self.clear_notice();
+        }
+        closed
+    }
+
+    /// Tab moves between the fields while replace shows; Enter searches down, Shift+Enter up,
+    /// and in the replacement field replaces.
     pub(crate) fn on_key(&self, ev: KeyEvent, focus: Focus) -> FindKey {
-        if ev.modifiers.ctrl || ev.modifiers.alt || ev.modifiers.win {
+        let m = ev.modifiers;
+        if m.ctrl || m.alt || m.win {
             return FindKey::PassThrough;
         }
-        if ev.key == Key::Tab && self.replace {
-            return match focus {
-                Focus::Editor(EditorSlot::FindQuery) => {
-                    FindKey::Focus(Focus::Editor(EditorSlot::FindReplace))
-                }
-                Focus::Editor(EditorSlot::FindReplace) => {
-                    FindKey::Focus(Focus::Editor(EditorSlot::FindQuery))
-                }
-                _ => FindKey::PassThrough,
-            };
+        let (query, replacement) = (
+            Focus::Editor(EditorSlot::FindQuery),
+            Focus::Editor(EditorSlot::FindReplace),
+        );
+        match (ev.key, focus) {
+            (Key::Tab, f) if self.replace && f == query => FindKey::Focus(replacement),
+            (Key::Tab, f) if self.replace && f == replacement => FindKey::Focus(query),
+            (Key::Enter, f) if f == query && !m.shift => FindKey::Command(AppCommand::FindNext),
+            (Key::Enter, f) if f == query => FindKey::Command(AppCommand::FindPrevious),
+            (Key::Enter, f) if f == replacement && !m.shift => {
+                FindKey::Command(AppCommand::ReplaceNext)
+            }
+            _ => FindKey::PassThrough,
         }
-        if ev.key == Key::Enter {
-            return match (focus, ev.modifiers.shift) {
-                (Focus::Editor(EditorSlot::FindQuery), false) => {
-                    FindKey::Command(AppCommand::FindNext)
-                }
-                (Focus::Editor(EditorSlot::FindQuery), true) => {
-                    FindKey::Command(AppCommand::FindPrevious)
-                }
-                (Focus::Editor(EditorSlot::FindReplace), false) => {
-                    FindKey::Command(AppCommand::ReplaceNext)
-                }
-                _ => FindKey::PassThrough,
-            };
-        }
-        FindKey::PassThrough
-    }
-
-    pub(crate) fn clear_notice(&mut self) {
-        self.notice = None;
-        self.notice_until = None;
-    }
-
-    fn show_notice(&mut self, notice: impl Into<SharedStr>) {
-        if !self.is_open() {
-            return;
-        }
-        self.notice = Some(notice.into());
-        self.notice_until = Some(Instant::now() + NOTICE_DURATION);
-    }
-
-    pub(crate) fn deadline(&self) -> Option<Instant> {
-        self.notice_until
     }
 
     /// Flips one of the bar's options: `ToggleReplace`, `ToggleMatchCase` or `ToggleWrapAround`.
@@ -207,120 +217,108 @@ impl FindBar {
         }
     }
 
+    pub(crate) fn clear_notice(&mut self) {
+        self.notice = None;
+        self.notice_until = None;
+    }
+
+    /// Shows `notice` under the bar for a while, if the bar is open.
+    fn show_notice(&mut self, notice: impl Into<SharedStr>) {
+        if self.is_open() {
+            self.notice = Some(notice.into());
+            self.notice_until = Some(Instant::now() + NOTICE_DURATION);
+        }
+    }
+
     /// Dismisses the notice once it's due; whether that changed anything.
     pub(crate) fn tick(&mut self, now: Instant) -> bool {
         take_due(&mut self.notice_until, now) && self.notice.take().is_some()
     }
 
-    pub(crate) fn open(&mut self, replace: bool, selected: &str, ts: &TextSystem) {
-        if !selected.is_empty()
-            && !selected.contains('\n')
-            && selected.chars().take(MAX_SEED_QUERY_CHARS + 1).count() <= MAX_SEED_QUERY_CHARS
-        {
-            self.query.set_value(selected, ts);
-        }
-        self.transition.open();
-        self.replace = replace;
-        self.query.select_all();
+    pub(crate) fn deadline(&self) -> Option<Instant> {
+        self.notice_until
     }
+}
 
-    pub(crate) fn close(&mut self) -> bool {
-        if !self.transition.close() {
-            return false;
-        }
-        self.clear_notice();
-        true
-    }
+// ---- 2. Searching and replacing -------------------------------------------------------------
 
+impl FindBar {
+    /// The query, with the matcher brought up to date for it; `None` while it's empty.
     fn prepare(&mut self) -> Option<String> {
         let query = self.query.model().text().to_string();
-        if query.is_empty() {
-            return None;
-        }
-        let stale = self
-            .matcher
-            .as_ref()
-            .is_none_or(|m| m.query != query || m.match_case != self.match_case);
-        if stale {
+        let current = self.matcher.as_ref();
+        if current.is_none_or(|m| m.query != query || m.match_case != self.match_case) {
             self.matcher = Matcher::new(&query, self.match_case);
         }
         self.matcher.as_ref().map(|_| query)
     }
 
+    /// Selects the next match down or up from the selection (wrapping, if that's on), noting a
+    /// wrap or a miss under the bar.
     pub(crate) fn step(&mut self, editor: &mut Editor, forward: bool) -> FindOutcome {
         let Some(query) = self.prepare() else {
             return FindOutcome::EmptyQuery;
         };
-        let text = editor.model().text().clone();
-        let selection = editor.model().selection().range();
-        let wrap = self.wrap_around;
-        let found = self
-            .matcher
-            .as_ref()
-            .and_then(|m| m.search(&text, selection, forward, wrap, &mut self.buffer));
-        match found {
-            Some((range, wrapped)) => {
-                editor.set_selected_range(range);
-                if wrapped {
-                    let msg = if forward {
-                        "Found next from the top"
-                    } else {
-                        "Found previous from the bottom"
-                    };
-                    self.show_notice(msg);
-                } else {
-                    self.clear_notice();
-                }
-                FindOutcome::Found { wrapped }
-            }
-            None => {
-                self.show_notice(not_found(&query));
-                FindOutcome::NotFound
-            }
+        let (text, selection) = (editor.model().text(), editor.model().selection().range());
+        let matcher = self.matcher.as_ref().expect("prepared");
+        let found = matcher.search(text, selection, forward, self.wrap_around, &mut self.buffer);
+        let Some((range, wrapped)) = found else {
+            self.show_notice(format!("Cannot find \"{query}\""));
+            return FindOutcome::NotFound;
+        };
+        editor.set_selected_range(range);
+        match (wrapped, forward) {
+            (false, _) => self.clear_notice(),
+            (true, true) => self.show_notice("Found next from the top"),
+            (true, false) => self.show_notice("Found previous from the bottom"),
         }
+        FindOutcome::Found { wrapped }
     }
 
+    /// Replaces the selection if it's a match, then finds the next one.
     pub(crate) fn replace_next(&mut self, editor: &mut Editor, ts: &TextSystem) -> FindOutcome {
         if self.prepare().is_none() {
             return FindOutcome::EmptyQuery;
         }
-        let sel_len = editor.model().selection().range().len();
-        let is_match = self.matcher.as_ref().is_some_and(|m| {
-            sel_len > 0
-                && sel_len <= m.max_match_bytes()
-                && m.is_match(&editor.model().text().slice(editor.model().selection().range()).to_string())
-        });
+        let matcher = self.matcher.as_ref().expect("prepared");
+        let model = editor.model();
+        let selection = model.selection().range();
+        let is_match = !selection.is_empty()
+            && selection.len() <= matcher.max_match_bytes()
+            && matcher.is_match(&model.text().slice(selection).to_string());
         if is_match {
             let replacement = self.replacement.model().text().to_string();
             editor.replace(&replacement, ts);
         }
-        let out = self.step(editor, true);
+        let found = self.step(editor, true);
         if is_match {
             FindOutcome::Replaced(1)
         } else {
-            out
+            found
         }
     }
 
+    /// Replaces every match, as one edit.
     pub(crate) fn replace_all(&mut self, editor: &mut Editor, ts: &TextSystem) -> FindOutcome {
         let Some(query) = self.prepare() else {
             return FindOutcome::EmptyQuery;
         };
-        let text = editor.model().text().clone();
-        let ranges = match self.matcher.as_ref() {
-            Some(m) => m.all(&text, &mut self.buffer),
-            None => return FindOutcome::EmptyQuery,
-        };
+        let matcher = self.matcher.as_ref().expect("prepared");
+        let ranges = matcher.all(editor.model().text(), &mut self.buffer);
         if ranges.is_empty() {
-            self.show_notice(not_found(&query));
+            self.show_notice(format!("Cannot find \"{query}\""));
             return FindOutcome::NotFound;
         }
-        let count = ranges.len();
         let replacement = self.replacement.model().text().to_string();
         editor.replace_all(&ranges, &replacement, ts);
-        FindOutcome::Replaced(count)
+        FindOutcome::Replaced(ranges.len())
     }
+}
 
+// ---- 3. Drawing -----------------------------------------------------------------------------
+
+impl FindBar {
+    /// How far the bar has grown in or shrunk away, or `None` once it's gone.
     fn sample(&mut self, ui: &mut AppUi) -> Option<Transform> {
         if !self.transition.is_visible() {
             return None;
@@ -340,6 +338,7 @@ impl FindBar {
         })
     }
 
+    /// The bar, centred at the top of the document with room for its shadow, and its notice.
     pub(crate) fn render(
         &mut self,
         focused_slot: Option<EditorSlot>,
@@ -347,43 +346,36 @@ impl FindBar {
         ui: &mut AppUi,
     ) -> Option<AppNode> {
         let transform = self.sample(ui)?;
-        let notice_node = self
-            .notice
-            .clone()
-            .filter(|_| self.transition.is_open())
-            .map(|msg| render_notice(p, msg));
+        let notice = self.notice.clone().filter(|_| self.transition.is_open());
         let card = self
             .render_card(p, focused_slot, ui)
             .transform(transform)
             .when(self.transition.is_closing(), AppNode::inert);
-
+        let lane = row()
+            .absolute()
+            .top(CARD_TOP - CARD_SHADOW_CLIP_TOP)
+            .left(0.)
+            .right(0.)
+            .px(CARD_SIDE_MARGIN)
+            .pt(CARD_SHADOW_CLIP_TOP)
+            .pb(CARD_SHADOW_CLIP_BOTTOM)
+            .overflow_hidden()
+            .justify_center()
+            .child(card);
+        let notice = notice.map(|msg| render_notice(p, msg));
         Some(
             box_()
                 .absolute()
                 .inset_0()
-                .child(
-                    row()
-                        .absolute()
-                        .top(CARD_TOP - CARD_SHADOW_CLIP_TOP)
-                        .left(0.)
-                        .right(0.)
-                        .px(CARD_SIDE_MARGIN)
-                        .pt(CARD_SHADOW_CLIP_TOP)
-                        .pb(CARD_SHADOW_CLIP_BOTTOM)
-                        .overflow_hidden()
-                        .justify_center()
-                        .child(card),
-                )
-                .when_some(notice_node, AppNode::child),
+                .child(lane)
+                .when_some(notice, AppNode::child),
         )
     }
 
-    fn render_card(&self, p: Palette, focused_slot: Option<EditorSlot>, ui: &mut AppUi) -> AppNode {
-        let query_row = self.render_query_row(p, focused_slot, ui);
-        let replace_row = self
-            .replace
-            .then(|| self.render_replace_row(p, focused_slot, ui));
-
+    /// The card: the query row and, with replace on, the replacement row.
+    fn render_card(&self, p: Palette, focused: Option<EditorSlot>, ui: &mut AppUi) -> AppNode {
+        let query_row = self.query_row(p, focused, ui);
+        let replace_row = self.replace.then(|| self.replace_row(p, focused, ui));
         let face = box_()
             .hit(HitId::Find(FindHit::Card))
             .cursor(CursorStyle::Arrow)
@@ -397,118 +389,82 @@ impl FindBar {
             .max_w_full()
     }
 
-    fn render_query_row(
-        &self,
-        p: Palette,
-        focused_slot: Option<EditorSlot>,
-        ui: &mut AppUi,
-    ) -> AppNode {
+    /// The replace toggle, the query field, the search buttons, options and close.
+    fn query_row(&self, p: Palette, focused: Option<EditorSlot>, ui: &mut AppUi) -> AppNode {
         let dims = size(ICON_BUTTON_SIZE, ICON_BUTTON_SIZE);
-        let btn = |hit, tip, glyph, sz, ui: &mut AppUi| {
-            icon_button(p, HitId::Find(hit), tip, (glyph, sz), dims, true, ui)
+        let mut icon = |hit, tip, glyph, glyph_size| {
+            icon_button(
+                p,
+                HitId::Find(hit),
+                tip,
+                (glyph, glyph_size),
+                dims,
+                true,
+                ui,
+            )
         };
-        let replace = self.replace;
-        let expand_btn = btn(
+        let (toggle_tip, toggle_glyph) = if self.replace {
+            ("Close replace options", CHEVRON_DOWN_GLYPH)
+        } else {
+            ("Open replace options", CHEVRON_UP_GLYPH)
+        };
+        let toggle = icon(
             FindHit::ToggleReplace,
-            if replace {
-                "Close replace options"
-            } else {
-                "Open replace options"
-            },
-            if replace {
-                CHEVRON_DOWN_GLYPH
-            } else {
-                CHEVRON_UP_GLYPH
-            },
+            toggle_tip,
+            toggle_glyph,
             CHEVRON_SIZE,
-            ui,
         );
-        let query_field = text_field(
-            p,
-            p.card_surface,
-            &self.query,
-            focused_slot == Some(EditorSlot::FindQuery),
-            true,
-            ui,
-        );
-        let next_btn = btn(FindHit::Next, "Search down", ARROW_DOWN_GLYPH, ICON_SIZE, ui);
-        let prev_btn = btn(FindHit::Prev, "Search up", ARROW_UP_GLYPH, ICON_SIZE, ui);
-        let opts_btn = btn(FindHit::Options, "More options", OPTIONS_GLYPH, ICON_SIZE, ui);
-        let close_btn = btn(
-            FindHit::Close,
-            "Exit Find and Replace",
-            CLOSE_GLYPH,
-            ICON_SIZE,
-            ui,
-        );
-
+        let focused = focused == Some(EditorSlot::FindQuery);
+        let field = text_field(p, p.card_surface, &self.query, focused, true, ui);
+        let mut icon = |hit, tip, glyph| {
+            icon_button(p, HitId::Find(hit), tip, (glyph, ICON_SIZE), dims, true, ui)
+        };
+        let next = icon(FindHit::Next, "Search down", ARROW_DOWN_GLYPH);
+        let prev = icon(FindHit::Prev, "Search up", ARROW_UP_GLYPH);
+        let options = icon(FindHit::Options, "More options", OPTIONS_GLYPH);
+        let close = icon(FindHit::Close, "Exit Find and Replace", CLOSE_GLYPH);
         row()
             .items_center()
             .gap(ICON_GAP)
-            .child(expand_btn)
-            .child(box_().flex_1().min_w_0().child(query_field))
-            .child(next_btn)
-            .child(prev_btn)
-            .child(opts_btn)
-            .child(close_btn)
+            .child(toggle)
+            .child(box_().flex_1().min_w_0().child(field))
+            .child(next)
+            .child(prev)
+            .child(options)
+            .child(close)
     }
 
-    fn render_replace_row(
-        &self,
-        p: Palette,
-        focused_slot: Option<EditorSlot>,
-        ui: &mut AppUi,
-    ) -> AppNode {
-        let replace_field = text_field(
-            p,
-            p.card_surface,
-            &self.replacement,
-            focused_slot == Some(EditorSlot::FindReplace),
-            false,
-            ui,
-        );
-        let replace_btn = button(
-            p,
-            p.card_surface,
-            HitId::Find(FindHit::Replace),
-            "Replace",
-            false,
-            false,
-            ui,
-        );
-        let replace_all_btn = button(
-            p,
-            p.card_surface,
-            HitId::Find(FindHit::ReplaceAll),
-            "Replace all",
-            false,
-            false,
-            ui,
-        );
-
-        let action = |btn| box_().flex_none().ml(ACTION_GAP).w(ACTION_WIDTH).child(btn);
+    /// The replacement field under the query's, and the replace buttons.
+    fn replace_row(&self, p: Palette, focused: Option<EditorSlot>, ui: &mut AppUi) -> AppNode {
+        let surface = p.card_surface;
+        let focused = focused == Some(EditorSlot::FindReplace);
+        let field = text_field(p, surface, &self.replacement, focused, false, ui);
+        let mut action = |hit, label| {
+            let button = button(p, surface, HitId::Find(hit), label, false, false, ui);
+            box_()
+                .flex_none()
+                .ml(ACTION_GAP)
+                .w(ACTION_WIDTH)
+                .child(button)
+        };
+        let replace = action(FindHit::Replace, "Replace");
+        let replace_all = action(FindHit::ReplaceAll, "Replace all");
         row()
             .items_center()
             .mt(ROW_GAP)
             .child(box_().flex_none().w(ICON_BUTTON_SIZE + ICON_GAP))
-            .child(box_().flex_1().min_w_0().child(replace_field))
-            .child(action(replace_btn))
-            .child(action(replace_all_btn))
+            .child(box_().flex_1().min_w_0().child(field))
+            .child(replace)
+            .child(replace_all)
     }
 }
 
-fn not_found(query: &str) -> String {
-    format!("Cannot find \"{query}\"")
-}
-
-fn place_notice(card: Rect, popup: Size, _viewport: Size) -> Point {
-    point(
-        card.center().x - (popup.width / 2.).floor(),
-        card.bottom() + BORDER + NOTICE_GAP,
-    )
-}
-
+/// The notice, centred under the card.
 fn render_notice(p: Palette, msg: SharedStr) -> AppNode {
+    fn place(card: Rect, popup: Size, _viewport: Size) -> Point {
+        let x = card.center().x - (popup.width / 2.).floor();
+        point(x, card.bottom() + BORDER + NOTICE_GAP)
+    }
     let face = box_()
         .px(NOTICE_PADDING_X)
         .pt(NOTICE_PADDING_TOP)
@@ -518,16 +474,29 @@ fn render_notice(p: Palette, msg: SharedStr) -> AppNode {
         .line_height(NOTICE_LINE)
         .text_color(p.text_primary)
         .child(text(msg));
-    let (stroke, fill) = (p.flyout_stroke, p.notice_fill);
-    card(p, stroke, fill, OVERLAY_RADIUS, NOTICE_Z, face).anchored(Anchor::Target {
+    let anchor = Anchor::Target {
         target: HitId::Find(FindHit::Card),
-        place: place_notice,
-    })
+        place,
+    };
+    card(
+        p,
+        p.flyout_stroke,
+        p.notice_fill,
+        OVERLAY_RADIUS,
+        NOTICE_Z,
+        face,
+    )
+    .anchored(anchor)
 }
 
+// ---- 4. Matching ----------------------------------------------------------------------------
+
+/// How much of the document is searched at a time, and the most bytes a character takes.
 const BLOCK_SIZE: usize = 256 * 1024;
 const MAX_UTF8_LEN: usize = 4;
 
+/// `c` folded for a case-insensitive match: lower case where that's one character, with the
+/// characters that fold to another's lower case (long s, final sigma, Kelvin, ...) mapped to it.
 fn fold_char(c: char) -> char {
     if c.is_ascii() {
         return c.to_ascii_lowercase();
@@ -554,10 +523,8 @@ fn fold_char(c: char) -> char {
     }
 }
 
+/// Where a folded match of `rest` starting at `start` in `haystack` ends, if it does.
 fn match_rest_folded(haystack: &str, start: usize, rest: &[char]) -> Option<usize> {
-    if rest.is_empty() {
-        return Some(start);
-    }
     let mut chars = haystack[start..].char_indices();
     for &expected in rest {
         let (_, ch) = chars.next()?;
@@ -565,16 +532,16 @@ fn match_rest_folded(haystack: &str, start: usize, rest: &[char]) -> Option<usiz
             return None;
         }
     }
-    let end = chars
-        .next()
-        .map_or(haystack.len(), |(rel, _)| start + rel);
-    Some(end)
+    Some(chars.next().map_or(haystack.len(), |(at, _)| start + at))
 }
 
+/// A query to search for, exactly or folded.
 pub(crate) struct Matcher {
     query: String,
     match_case: bool,
+    /// The query folded (for a case-insensitive search).
     folded: Vec<char>,
+    /// How far blocks overlap (the longest a match can be), and how big they are.
     overlap: usize,
     block: usize,
 }
@@ -599,78 +566,75 @@ impl Matcher {
         })
     }
 
+    /// Copies `range` of `text`, widened to whole characters, into `buffer`; where it starts.
     fn fill(text: &Rope, range: Range<usize>, buffer: &mut String) -> usize {
         let start = text.floor_char_boundary(range.start);
         let end = text.ceil_char_boundary(range.end.min(text.len()));
         buffer.clear();
-        for chunk in text.slice(start..end).chunks() {
-            buffer.push_str(chunk);
-        }
+        buffer.extend(text.slice(start..end).chunks());
         start
     }
 
+    /// The first match in `haystack` from `at`.
     fn find_at(&self, haystack: &str, at: usize) -> Option<Range<usize>> {
         if at >= haystack.len() {
             return None;
         }
         let at = haystack.ceil_char_boundary(at);
         if self.match_case {
-            return haystack[at..]
-                .find(&self.query)
-                .map(|off| (at + off)..(at + off + self.query.len()));
+            let found = haystack[at..].find(&self.query)?;
+            return Some(at + found..at + found + self.query.len());
         }
         let (&first, rest) = self.folded.split_first()?;
-        if first.is_ascii() {
-            let lower = first as u8;
-            let upper = lower.to_ascii_uppercase();
-            let check_non_ascii = lower == b'k' || lower == b's';
-            let bytes = haystack.as_bytes();
-            let mut i = at;
-            while i < bytes.len() {
-                let b = bytes[i];
-                if b < 0x80 {
-                    if (b == lower || b == upper)
-                        && let Some(end) = match_rest_folded(haystack, i + 1, rest)
-                    {
-                        return Some(i..end);
-                    }
-                    i += 1;
-                } else {
-                    let ch = haystack[i..].chars().next()?;
-                    let next = i + ch.len_utf8();
-                    if check_non_ascii
-                        && fold_char(ch) == first
-                        && let Some(end) = match_rest_folded(haystack, next, rest)
-                    {
-                        return Some(i..end);
-                    }
-                    i = next;
+        if !first.is_ascii() {
+            return haystack[at..].char_indices().find_map(|(off, ch)| {
+                if fold_char(ch) != first {
+                    return None;
                 }
-            }
-            None
-        } else {
-            for (rel, ch) in haystack[at..].char_indices() {
-                if fold_char(ch) == first {
-                    let start = at + rel;
-                    if let Some(end) = match_rest_folded(haystack, start + ch.len_utf8(), rest) {
-                        return Some(start..end);
-                    }
-                }
-            }
-            None
+                let start = at + off;
+                match_rest_folded(haystack, start + ch.len_utf8(), rest).map(|end| start..end)
+            });
         }
+        // An ASCII first character is looked for byte by byte; only k and s also fold from
+        // characters outside ASCII (Kelvin, long s).
+        let (lower, upper) = (first as u8, first.to_ascii_uppercase() as u8);
+        let folds_from_wide = lower == b'k' || lower == b's';
+        let bytes = haystack.as_bytes();
+        let mut i = at;
+        while i < bytes.len() {
+            let b = bytes[i];
+            if b < 0x80 {
+                if (b == lower || b == upper)
+                    && let Some(end) = match_rest_folded(haystack, i + 1, rest)
+                {
+                    return Some(i..end);
+                }
+                i += 1;
+                continue;
+            }
+            let ch = haystack[i..].chars().next()?;
+            let next = i + ch.len_utf8();
+            if folds_from_wide
+                && fold_char(ch) == first
+                && let Some(end) = match_rest_folded(haystack, next, rest)
+            {
+                return Some(i..end);
+            }
+            i = next;
+        }
+        None
     }
 
+    /// Whether `text` is, whole, a match.
     fn is_match(&self, text: &str) -> bool {
         if self.match_case {
             text == self.query
         } else {
-            text.chars()
-                .map(fold_char)
-                .eq(self.folded.iter().copied())
+            text.chars().map(fold_char).eq(self.folded.iter().copied())
         }
     }
 
+    /// The most bytes a match can take.
     fn max_match_bytes(&self) -> usize {
         if self.match_case {
             self.query.len()
@@ -679,6 +643,7 @@ impl Matcher {
         }
     }
 
+    /// The first match starting in `from..limit`.
     pub(crate) fn next(
         &self,
         text: &Rope,
@@ -689,33 +654,31 @@ impl Matcher {
         let len = text.len();
         let limit = limit.min(len);
         let mut pos = from.min(len);
-        loop {
-            if pos >= limit {
-                return None;
-            }
+        while pos < limit {
             let end = (pos + self.block + self.overlap)
                 .min(len)
                 .min(limit + self.overlap);
             let start = Self::fill(text, pos..end, buffer);
-            let haystack = buffer.as_str();
+            // A match starting in the overlap is found whole in the next block.
             let safe = if end == len {
                 limit
             } else {
                 (end - self.overlap).min(limit)
             };
-            if let Some(found) = self.find_at(haystack, pos - start) {
-                let range = start + found.start..start + found.end;
-                if range.start < safe {
-                    return Some(range);
-                }
+            if let Some(found) = self.find_at(buffer, pos - start)
+                && start + found.start < safe
+            {
+                return Some(start + found.start..start + found.end);
             }
             if end == len {
                 return None;
             }
             pos = end - self.overlap;
         }
+        None
     }
 
+    /// The last match starting in `floor..before` (the rightmost, overlapping ones included).
     pub(crate) fn previous(
         &self,
         text: &Rope,
@@ -729,26 +692,23 @@ impl Matcher {
         loop {
             let begin = before.saturating_sub(self.block).max(floor);
             let start = Self::fill(text, begin..(before + self.overlap).min(len), buffer);
-            let haystack = buffer.as_str();
             let limit = before - start;
+            // The last of the matches that don't overlap, then any later one overlapping it.
             let mut found = None;
             let mut cursor = 0;
-            while let Some(hit) = self.find_at(haystack, cursor) {
-                if hit.start >= limit {
-                    break;
-                }
+            while let Some(hit) = self.find_at(buffer, cursor).filter(|hit| hit.start < limit) {
                 cursor = hit.end;
                 found = Some(hit);
             }
             while let Some(later) = found
                 .as_ref()
-                .and_then(|range| self.find_at(haystack, range.start + 1))
+                .and_then(|hit| self.find_at(buffer, hit.start + 1))
                 .filter(|later| later.start < limit)
             {
                 found = Some(later);
             }
-            if let Some(range) = found {
-                return Some(start + range.start..start + range.end);
+            if let Some(hit) = found {
+                return Some(start + hit.start..start + hit.end);
             }
             if begin <= floor {
                 return None;
@@ -757,6 +717,7 @@ impl Matcher {
         }
     }
 
+    /// Every match, none overlapping, in order.
     pub(crate) fn all(&self, text: &Rope, buffer: &mut String) -> Vec<Range<usize>> {
         let len = text.len();
         let mut ranges = Vec::new();
@@ -764,22 +725,22 @@ impl Matcher {
         loop {
             let end = (pos + self.block + self.overlap).min(len);
             let start = Self::fill(text, pos..end, buffer);
-            let haystack = buffer.as_str();
             let safe = if end == len {
                 usize::MAX
             } else {
                 end - self.overlap
             };
+            // The next block starts past the last match taken, or at the overlap.
             let mut resume = safe;
             let mut cursor = pos - start;
-            while let Some(found) = self.find_at(haystack, cursor) {
+            while let Some(found) = self.find_at(buffer, cursor) {
                 let range = start + found.start..start + found.end;
                 if range.start >= safe {
                     break;
                 }
                 resume = resume.max(range.end);
-                ranges.push(range);
                 cursor = found.end;
+                ranges.push(range);
             }
             if end == len {
                 return ranges;
@@ -788,6 +749,8 @@ impl Matcher {
         }
     }
 
+    /// The next match down from the selection's end (or up from its start), then, with `wrap`,
+    /// from the other end of the document; and whether it wrapped.
     pub(crate) fn search(
         &self,
         text: &Rope,
@@ -796,25 +759,23 @@ impl Matcher {
         wrap: bool,
         buffer: &mut String,
     ) -> Option<(Range<usize>, bool)> {
-        if forward {
-            if let Some(range) = self.next(text, selection.end, usize::MAX, buffer) {
-                return Some((range, false));
-            }
-            if !wrap {
-                return None;
-            }
-            self.next(text, 0, selection.end, buffer)
-                .map(|range| (range, true))
+        let first = if forward {
+            self.next(text, selection.end, usize::MAX, buffer)
         } else {
-            if let Some(range) = self.previous(text, selection.start, 0, buffer) {
-                return Some((range, false));
-            }
-            if !wrap {
-                return None;
-            }
-            self.previous(text, text.len(), selection.start, buffer)
-                .map(|range| (range, true))
+            self.previous(text, selection.start, 0, buffer)
+        };
+        if let Some(range) = first {
+            return Some((range, false));
         }
+        if !wrap {
+            return None;
+        }
+        let wrapped = if forward {
+            self.next(text, 0, selection.end, buffer)
+        } else {
+            self.previous(text, text.len(), selection.start, buffer)
+        };
+        wrapped.map(|range| (range, true))
     }
 }
 
