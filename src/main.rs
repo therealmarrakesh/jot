@@ -37,8 +37,8 @@ use crate::geom::{Point, Rect, ScreenPoint, Size, point, size};
 use crate::gfx::{Gpu, TextSystem, WindowSurface};
 use crate::platform::{
     Arbitration, Key, MainWindowConfig, MouseButton, NativeWindow, Platform, PlatformEvent,
-    PlatformHandler, WindowAppearance, WindowEvent, WindowHandle, WindowId, WindowPlacement,
-    WindowsDisplay, arbitrate_instance, cursor_screen_pos, debug_log, install_panic_hook,
+    PlatformHandler, WindowEvent, WindowHandle, WindowId, WindowPlacement, WindowsDisplay,
+    arbitrate_instance, cursor_screen_pos, debug_log, install_panic_hook,
     primary_mouse_button_down, release_mouse_capture, show_error_dialog, top_visible_window_at,
 };
 use crate::shell::{Cx, Effect, Shell};
@@ -260,7 +260,7 @@ impl App {
                 }
                 Effect::ToggleTheme => {
                     self.shell.toggle_theme();
-                    self.windows.apply_theme(self.shell.appearance());
+                    self.windows.apply_theme(self.shell.dark());
                 }
                 Effect::ToggleWordWrap => {
                     self.shell.view.word_wrap = !self.shell.view.word_wrap;
@@ -446,7 +446,7 @@ impl PlatformHandler for App {
             PlatformEvent::Window(id, event) => handled = self.on_window_event(id, event),
             PlatformEvent::SettingsChanged(settings) => {
                 self.shell.apply_settings(settings);
-                self.windows.apply_theme(self.shell.appearance());
+                self.windows.apply_theme(self.shell.dark());
             }
             PlatformEvent::ModifiersChanged(modifiers) => {
                 self.tooltips.on_modifiers_changed(modifiers);
@@ -639,9 +639,9 @@ impl Windows {
         }
     }
 
-    pub(crate) fn apply_theme(&mut self, appearance: WindowAppearance) {
+    pub(crate) fn apply_theme(&mut self, dark: bool) {
         for w in &mut self.list {
-            w.apply_theme(appearance);
+            w.apply_theme(dark);
         }
     }
 
@@ -731,7 +731,7 @@ impl Windows {
         shell: &Shell,
     ) -> std::result::Result<(WindowId, WindowHandle), Box<OpenWindowError>> {
         let config = self.window_config(window_size, target_point);
-        let win_surface = match NativeWindow::create_main(&config, shell.appearance())
+        let win_surface = match NativeWindow::create_main(&config, shell.dark())
             .and_then(|n| WindowSurface::new(shell.gpu.clone(), n))
         {
             Ok(created) => created,

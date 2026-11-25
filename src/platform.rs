@@ -284,13 +284,6 @@ fn ffi_guard<R>(context: &str, fallback: R, f: impl FnOnce() -> R) -> R {
 
 crate::types::id_type!(WindowId);
 
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) enum WindowAppearance {
-    #[default]
-    Light,
-    Dark,
-}
-
 /// What a point in a window's client area is for, as far as Windows is concerned.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub(crate) enum WindowControlArea {
@@ -956,10 +949,7 @@ pub(crate) struct NativeWindow {
 }
 
 impl NativeWindow {
-    pub(crate) fn create_main(
-        config: &MainWindowConfig,
-        appearance: WindowAppearance,
-    ) -> Result<Self> {
+    pub(crate) fn create_main(config: &MainWindowConfig, dark: bool) -> Result<Self> {
         let hinstance = unsafe { GetModuleHandleW(None)? };
         let hwnd = unsafe {
             CreateWindowExW(
@@ -997,7 +987,7 @@ impl NativeWindow {
             DWMWA_SYSTEMBACKDROP_TYPE,
             DWM_SYSTEMBACKDROP_TYPE(DWMSBT_TABBEDWINDOW),
         );
-        window.set_appearance(appearance);
+        window.set_dark(dark);
         if let Some(b) = config.bounds {
             let display = config.display_id.and_then(WindowsDisplay::from_id);
             let scale = display.map_or(window.state.scale.get(), |d| d.scale_factor());
@@ -1092,9 +1082,13 @@ impl NativeWindow {
         let _ = unsafe { SetWindowTextW(self.hwnd, &HSTRING::from(title)) };
     }
 
-    pub(crate) fn set_appearance(&self, appearance: WindowAppearance) {
-        let dark = BOOL(i32::from(appearance == WindowAppearance::Dark));
-        set_dwm(self.hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, dark);
+    /// Whether the title bar and frame are drawn dark.
+    pub(crate) fn set_dark(&self, dark: bool) {
+        set_dwm(
+            self.hwnd,
+            DWMWA_USE_IMMERSIVE_DARK_MODE,
+            BOOL(i32::from(dark)),
+        );
     }
 
     pub(crate) fn set_cursor(&self, style: CursorStyle) {
@@ -2337,9 +2331,10 @@ pub(crate) struct HighContrastColors {
 /// The user's settings that change how Jot looks and behaves.
 #[derive(Copy, Clone, Debug)]
 pub(crate) struct SystemSettings {
-    pub(crate) appearance: WindowAppearance,
-    accent_light: Option<u32>,
-    accent_dark: Option<u32>,
+    /// Apps are set to the dark theme.
+    pub(crate) dark: bool,
+    /// The accent colour for the light theme and for the dark one.
+    pub(crate) accent: [Option<u32>; 2],
     pub(crate) high_contrast: Option<HighContrastColors>,
     pub(crate) reduce_motion: bool,
     pub(crate) caret_blink_interval: Option<Duration>,
@@ -2349,24 +2344,6 @@ pub(crate) struct SystemSettings {
     pub(crate) menu_show_delay: Duration,
 }
 
-#[cfg(test)]
-impl Default for SystemSettings {
-    fn default() -> Self {
-        Self {
-            appearance: WindowAppearance::Light,
-            accent_light: None,
-            accent_dark: None,
-            high_contrast: None,
-            reduce_motion: false,
-            caret_blink_interval: None,
-            caret_blink_timeout: None,
-            caret_width_px: 1,
-            mouse_hover_time: Duration::from_millis(u64::from(DEFAULT_HOVER_TIME_MS)),
-            menu_show_delay: Duration::from_millis(u64::from(DEFAULT_MENU_SHOW_DELAY_MS)),
-        }
-    }
-}
-
 impl SystemSettings {
     pub(crate) fn query() -> Self {
         const SPI_GETCARETTIMEOUT: u32 = 0x2022;
@@ -2374,11 +2351,9 @@ impl SystemSettings {
             Duration::from_millis(system_parameters_u32(action).unwrap_or(default).into())
         };
         let blink = |ms: u32| (ms != 0 && ms != u32::MAX).then(|| Duration::from_millis(ms.into()));
-        let (accent_light, accent_dark) = accent_colors();
         Self {
-            appearance: app_appearance(),
-            accent_light,
-            accent_dark,
+            dark: apps_use_dark(),
+            accent: accent_colors(),
             high_contrast: high_contrast_colors(),
             reduce_motion: system_parameters_u32(SPI_GETCLIENTAREAANIMATION.0) == Some(0),
             caret_blink_interval: blink(unsafe { GetCaretBlinkTime() }),
@@ -2388,14 +2363,6 @@ impl SystemSettings {
                 .clamp(1, 20),
             mouse_hover_time: ms(SPI_GETMOUSEHOVERTIME.0, DEFAULT_HOVER_TIME_MS),
             menu_show_delay: ms(SPI_GETMENUSHOWDELAY.0, DEFAULT_MENU_SHOW_DELAY_MS),
-        }
-    }
-
-    pub(crate) fn accent(self, dark: bool) -> Option<u32> {
-        if dark {
-            self.accent_dark
-        } else {
-            self.accent_light
         }
     }
 }
@@ -2422,7 +2389,7 @@ fn read_user_registry(
     status.is_ok().then_some(len as usize)
 }
 
-fn app_appearance() -> WindowAppearance {
+fn apps_use_dark() -> bool {
     let mut light = [0u8; 4];
     let read = read_user_registry(
         w!(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"),
@@ -2430,15 +2397,11 @@ fn app_appearance() -> WindowAppearance {
         RRF_RT_REG_DWORD,
         &mut light,
     );
-    if read.is_some() && u32::from_ne_bytes(light) == 0 {
-        WindowAppearance::Dark
-    } else {
-        WindowAppearance::Light
-    }
+    read.is_some() && u32::from_ne_bytes(light) == 0
 }
 
 /// The accent colors for light and dark backgrounds (0xRRGGBB), from the accent palette.
-fn accent_colors() -> (Option<u32>, Option<u32>) {
+fn accent_colors() -> [Option<u32>; 2] {
     let mut shades = [0u8; 32];
     let Some(len) = read_user_registry(
         w!(r"Software\Microsoft\Windows\CurrentVersion\Explorer\Accent"),
@@ -2446,12 +2409,12 @@ fn accent_colors() -> (Option<u32>, Option<u32>) {
         RRF_RT_REG_BINARY,
         &mut shades,
     ) else {
-        return (None, None);
+        return [None; 2];
     };
     let shade = |at: usize| {
         (len >= at + 3).then(|| u32::from_be_bytes([0, shades[at], shades[at + 1], shades[at + 2]]))
     };
-    (shade(16), shade(4))
+    [shade(16), shade(4)]
 }
 
 fn high_contrast_colors() -> Option<HighContrastColors> {
@@ -2959,7 +2922,7 @@ mod tests {
             focus: false,
             ..Default::default()
         };
-        NativeWindow::create_main(&config, WindowAppearance::Light).expect("window")
+        NativeWindow::create_main(&config, false).expect("window")
     }
 
     fn send(hwnd: HWND, msg: u32, wparam: usize, lparam: isize) -> LRESULT {

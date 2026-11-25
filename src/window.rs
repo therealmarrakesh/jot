@@ -17,8 +17,8 @@ use crate::gfx::{TextStyle, TextSystem, WindowSurface, fill};
 use crate::layout::AvailSize;
 use crate::menu::{FocusRequest, MENU_BAR_HEIGHT, MenuOutcome, MenuState, Menus};
 use crate::platform::{
-    KeyEvent, Modifiers, MouseButton, WindowAppearance, WindowControlArea, WindowEvent,
-    WindowHandle, WindowId, clipboard_has_text, format_local_time_date,
+    KeyEvent, Modifiers, MouseButton, WindowControlArea, WindowEvent, WindowHandle, WindowId,
+    clipboard_has_text, format_local_time_date,
 };
 use crate::shell::{Cx, Effect, Shell};
 use crate::tabs::{self, Removal, StripFrame, TAB_HEIGHT, TabData, TabSet};
@@ -148,8 +148,8 @@ impl MainWindow {
             .min()
     }
 
-    pub(crate) fn apply_theme(&mut self, appearance: WindowAppearance) {
-        self.win.window.set_appearance(appearance);
+    pub(crate) fn apply_theme(&mut self, dark: bool) {
+        self.win.window.set_dark(dark);
         self.dirty = true;
     }
 
