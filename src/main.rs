@@ -401,7 +401,7 @@ impl App {
         let needs_vsync = self.windows[ix].render_frame(now, &self.shell);
         let (anchor, tips) = self.windows[ix].key_tip_request(&self.shell);
         self.keytips.sync(anchor, tips, &self.shell);
-        if self.windows[ix].ui.pointer().is_some() {
+        if self.windows[ix].ui.pointer.is_some() {
             self.evaluate_tooltip_for(ix);
         }
         needs_vsync

@@ -119,7 +119,7 @@ impl TestHarness {
 
     fn hit_rect(&self, hit: HitId) -> Option<Rect> {
         let app = self.app.borrow();
-        app.windows.get(self.window_id)?.ui.frame().rect_of(hit)
+        app.windows.get(self.window_id)?.ui.frame.rect_of(hit)
     }
 
     fn click_menu_command(&mut self, cmd: impl Into<Command>) {

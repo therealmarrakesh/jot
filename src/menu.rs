@@ -856,7 +856,9 @@ impl Menus {
                 };
                 true
             }
-            (MouseButton::Left, Some(HitId::Menu(hit))) => hit.is_popup(),
+            (MouseButton::Left, Some(HitId::Menu(hit))) => {
+                !matches!(hit, MenuHit::Bar | MenuHit::Trigger(_))
+            }
             (MouseButton::Left, _) => false,
             (MouseButton::Right, _) => in_menu,
             (MouseButton::Middle, _) => false,

@@ -118,7 +118,7 @@ impl DocumentView {
 
 pub(crate) struct Editor {
     /// Which editor of the window this is: its hits, drawing and scrollbars are keyed by it.
-    slot: EditorSlot,
+    pub(crate) slot: EditorSlot,
     /// Whether it has the keyboard: its caret shows and blinks, and the pointer can drag-select.
     focused: bool,
     model: TextModel,
@@ -1840,7 +1840,7 @@ impl ScrollbarState {
                 && shown
                 && track_hovered[axis_ix(axis)]
                 && ui
-                    .pointer()
+                    .pointer
                     .is_some_and(|ptr| (thumb.0..thumb.1).contains(&axis_val(ptr.pos, axis)));
 
             let is_dragged = self.drag.is_some_and(|d| d.axis == axis);

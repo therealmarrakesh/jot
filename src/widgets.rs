@@ -2,11 +2,11 @@ use crate::editor::Editor;
 use crate::geom::{Edges, Rgba, Size, black, transparent_black, white};
 use crate::platform::CursorStyle;
 use crate::theme::{
-    BODY_LINE, BODY_SIZE, BORDER, CONTROL_HEIGHT, CONTROL_RADIUS, ControlColors, ICON_FONT,
+    BODY_SIZE, BORDER, CONTROL_HEIGHT, CONTROL_RADIUS, ControlColors, FIELD_LINE, ICON_FONT,
     Palette, TEXT_FONT, theme_shadow,
 };
 use crate::types::SharedStr;
-use crate::ui::{AppNode, AppUi, Brushes, EditorSlot, HitId, Node, box_, row, text};
+use crate::ui::{AppNode, AppUi, Brushes, HitId, Node, box_, row, text};
 
 const ACCENT_TOP_EDGE: f32 = 0x14 as f32 / 255.;
 const ACCENT_HOVER_OPACITY: f32 = 0.9;
@@ -196,16 +196,15 @@ fn field_glyph(p: Palette, glyph: &'static str, right: f32) -> AppNode {
 pub(crate) fn text_field(
     p: Palette,
     surface: ControlColors,
-    slot: EditorSlot,
     editor: &Editor,
     focused: bool,
     search_icon: bool,
     ui: &AppUi,
 ) -> AppNode {
-    let field_hit = HitId::Editor(slot);
-    let clear_hit = HitId::FieldClear(slot);
+    let field_hit = HitId::Editor(editor.slot);
+    let clear_hit = HitId::FieldClear(editor.slot);
     let empty = editor.model().text().len() == 0;
-    let editor_node = editor.view(BODY_LINE + 2.);
+    let editor_node = editor.view(FIELD_LINE);
     let (trailing, clear_right) = if search_icon {
         (
             2. * FIELD_GLYPH_WIDTH + FIELD_GLYPH_RIGHT,
@@ -241,10 +240,6 @@ pub(crate) fn text_field(
                 .items_center()
                 .pl(FIELD_PADDING - 1.)
                 .pr(trailing)
-                .font_family(TEXT_FONT)
-                .text_size(BODY_SIZE)
-                .line_height(BODY_LINE + 2.)
-                .text_color(p.text_primary)
                 .child(editor_node),
         )
         .child(

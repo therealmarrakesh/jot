@@ -101,12 +101,6 @@ impl AvailSize {
     }
 }
 
-impl From<Size> for AvailSize {
-    fn from(s: Size) -> Self {
-        Self::definite(s.width, s.height)
-    }
-}
-
 #[derive(Copy, Clone, Debug, Default, PartialEq)]
 pub(crate) enum Dim {
     #[default]
@@ -302,17 +296,25 @@ struct Node {
     next: usize,
 }
 
-/// Layout tree; node ids are insertion order.
-#[derive(Default)]
+/// Layout tree, laid out in pixels at `scale`; node ids are insertion order.
 pub(crate) struct LayoutTree {
+    pub(crate) scale: f32,
     nodes: Vec<Node>,
     kids: Vec<usize>,
 }
 
 impl LayoutTree {
-    pub(crate) fn add(&mut self, style: FlexStyle, scale: f32, measured: bool) -> usize {
+    pub(crate) fn new(scale: f32) -> Self {
+        Self {
+            scale,
+            nodes: Vec::new(),
+            kids: Vec::new(),
+        }
+    }
+
+    pub(crate) fn add(&mut self, style: FlexStyle, measured: bool) -> usize {
         self.nodes.push(Node {
-            style: style.snap_for_scale(scale),
+            style: style.snap_for_scale(self.scale),
             parent: None,
             kids: 0..0,
             measured,
@@ -338,9 +340,9 @@ impl LayoutTree {
         &mut self,
         root: usize,
         avail: AvailSize,
-        scale: f32,
         measure: &mut impl FnMut(usize, Option<f32>, Option<f32>, AvailSize) -> Size,
     ) {
+        let scale = self.scale;
         let avail = [avail.width, avail.height].map(|s| s.scale(scale));
         let parent = avail.map(|s| match s {
             Space::Definite(v) => Some(v),
@@ -357,7 +359,8 @@ impl LayoutTree {
     }
 
     /// Pixel-snapped bounds in logical units.
-    pub(crate) fn rect(&self, id: usize, scale: f32) -> Rect {
+    pub(crate) fn rect(&self, id: usize) -> Rect {
+        let scale = self.scale;
         let (o, s) = (self.origin(id), self.nodes[id].size);
         let snap = |x: f32, y: f32| point(round_half_toward_zero(x), round_half_toward_zero(y));
         let px = Rect::from_corners(snap(o.x, o.y), snap(o.x + s.width, o.y + s.height));
@@ -368,9 +371,10 @@ impl LayoutTree {
     }
 
     /// Moves `id` so its top-left lands on `logical`.
-    pub(crate) fn set_origin(&mut self, id: usize, logical: Point, scale: f32) {
+    pub(crate) fn set_origin(&mut self, id: usize, logical: Point) {
         let parent = self.nodes[id].parent.map_or(Point::ZERO, |p| self.origin(p));
-        self.nodes[id].pos = point(round_px(logical.x, scale), round_px(logical.y, scale)) - parent;
+        let px = |v: f32| round_px(v, self.scale);
+        self.nodes[id].pos = point(px(logical.x), px(logical.y)) - parent;
     }
 }
 

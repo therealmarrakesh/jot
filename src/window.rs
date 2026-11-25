@@ -23,7 +23,7 @@ use crate::platform::{
 use crate::shell::{Cx, Effect, Shell};
 use crate::tabs::{self, Removal, StripFrame, TAB_HEIGHT, TabData, TabSet};
 use crate::text::{Rope, RopeExt as _};
-use crate::theme::{BODY_LINE, BODY_SIZE, FIELD_CARET, ICON_FONT, Palette, SMALL_FONT, TEXT_FONT};
+use crate::theme::{BODY_SIZE, FIELD_CARET, FIELD_LINE, ICON_FONT, Palette, SMALL_FONT, TEXT_FONT};
 use crate::tooltip::{KeyTip, TooltipProbe};
 use crate::types::APP_NAME;
 use crate::ui::{
@@ -177,15 +177,15 @@ impl MainWindow {
     pub(crate) fn key_tip_request(&self, shell: &Shell) -> (OverlayAnchor, Vec<KeyTip>) {
         let tips = self
             .menus
-            .key_tips(self.focus, self.ui.frame(), &shell.text_system);
+            .key_tips(self.focus, &self.ui.frame, &shell.text_system);
         (self.overlay_anchor(), tips)
     }
 
     pub(crate) fn tooltip_probe(&self) -> TooltipProbe<'_> {
         TooltipProbe {
             anchor: self.overlay_anchor(),
-            pointer: self.ui.pointer(),
-            frame: self.ui.frame(),
+            pointer: self.ui.pointer,
+            frame: &self.ui.frame,
         }
     }
 }
@@ -285,7 +285,7 @@ impl MainWindow {
 
     fn pointer_in_strip(&self, pos: Point) -> bool {
         self.ui
-            .frame()
+            .frame
             .rect_of(HitId::Tab(TabHit::Strip))
             .is_some_and(|r| r.contains(pos))
     }
@@ -370,7 +370,7 @@ impl MainWindow {
                         self.activate_tab(index, cx.shell);
                         let left = self
                             .ui
-                            .frame()
+                            .frame
                             .rect_of(HitId::Tab(TabHit::Item(id)))
                             .map_or(pos.x, |r| r.origin.x);
                         cx.emit(Effect::StartTabDrag {
@@ -472,7 +472,7 @@ impl MainWindow {
         if matches!(self.mode(), InputMode::Dialog | InputMode::Popup) {
             return;
         }
-        let chain = self.ui.frame().hit_chain(pos);
+        let chain = self.ui.frame.hit_chain(pos);
         if chain.contains(&HitId::Tab(TabHit::List)) && self.tabs.wheel(lines) {
             self.dirty = true;
             return;
@@ -554,7 +554,7 @@ impl MainWindow {
     }
 
     fn sync_cursor(&self, pos: Point) {
-        self.win.window.set_cursor(self.ui.frame().cursor_at(pos));
+        self.win.window.set_cursor(self.ui.frame.cursor_at(pos));
     }
 }
 
@@ -898,7 +898,7 @@ impl MainWindow {
     pub(crate) fn remove_tab(&mut self, ix: usize, shell: &Shell) {
         let hovering = self
             .ui
-            .pointer()
+            .pointer
             .is_some_and(|p| self.pointer_in_strip(p.pos));
         let removal = self.tabs.remove(ix, hovering);
         if let Removal::Removed { id, .. } = removal {
@@ -982,7 +982,7 @@ impl MainWindow {
     /// Whether `pt` is over the tab strip, give or take `magnetism` above and below.
     pub(crate) fn strip_hit(&self, pt: ScreenPoint, magnetism: f32) -> bool {
         let pos = self.hwnd.to_client(pt);
-        let frame = self.ui.frame();
+        let frame = &self.ui.frame;
         let right = frame.rect_of(HitId::Caption(CaptionHit::Min)).map_or_else(
             || self.win.window.logical_size().width - CAPTION_WIDTH,
             |r| r.left(),
@@ -1178,7 +1178,9 @@ impl MainWindow {
             scale,
             ts,
         );
-        self.win.window.set_control_areas(frame.control_areas());
+        self.win
+            .window
+            .set_control_areas(frame.control_areas.clone());
         self.update_min_size(view.status_bar, &frame, p, ts);
 
         // Every editor lays out where it landed: the document in the editor font, the fields in
@@ -1191,7 +1193,7 @@ impl MainWindow {
         };
         let field = EditorPaintStyle {
             text: TextStyle::regular(TEXT_FONT, BODY_SIZE),
-            line_height: BODY_LINE + 2.,
+            line_height: FIELD_LINE,
             color: p.text_primary,
             caret_height: FIELD_CARET,
         };
@@ -1257,7 +1259,7 @@ impl MainWindow {
 
         self.has_painted = true;
         let ui_needs_vsync = self.ui.finish_frame(frame);
-        if let Some(ptr) = self.ui.pointer() {
+        if let Some(ptr) = self.ui.pointer {
             self.sync_cursor(ptr.pos);
         }
         let needs_vsync = ui_needs_vsync || editor_needs_redraw || needs_retry;
@@ -1336,25 +1338,13 @@ impl MainWindow {
     }
 
     fn editor_area(&self, find: Option<AppNode>, p: Palette) -> AppNode {
-        let line_height = self.line_height();
-        let font_size = EDITOR_FONT_SIZE * self.zoom();
-        let view = self.tabs.active().editor.view(line_height);
+        let view = self.tabs.active().editor.view(self.line_height());
         box_()
             .hit(HitId::EditorArea)
             .flex_1()
             .min_h(self.editor_min_height())
             .bg(p.editor)
-            .child(
-                box_().size_full().overflow_hidden().child(
-                    box_()
-                        .size_full()
-                        .font_family(EDITOR_FONT)
-                        .text_size(font_size)
-                        .line_height(line_height)
-                        .text_color(p.text_primary)
-                        .child(view),
-                ),
-            )
+            .child(box_().size_full().overflow_hidden().child(view))
             .when_some(find, AppNode::child)
     }
 

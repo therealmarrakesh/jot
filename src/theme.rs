@@ -12,6 +12,8 @@ pub(crate) const OVERLAY_RADIUS: f32 = 8.;
 pub(crate) const BORDER: f32 = 1.;
 pub(crate) const BODY_SIZE: f32 = 14.;
 pub(crate) const BODY_LINE: f32 = 18.;
+/// A text field's line, which its view lays out and its editor paints.
+pub(crate) const FIELD_LINE: f32 = BODY_LINE + 2.;
 pub(crate) const FIELD_CARET: f32 = 19.;
 
 #[derive(Clone, Copy, Debug)]

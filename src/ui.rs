@@ -411,7 +411,7 @@ pub(crate) struct Frame<H, C> {
     child_order: Vec<usize>,
     root: Option<usize>,
     hits: Vec<HitEntry>,
-    control_areas: Vec<(Rect, WindowControlArea)>,
+    pub(crate) control_areas: Vec<(Rect, WindowControlArea)>,
 }
 
 impl<H, C> Default for Frame<H, C> {
@@ -440,14 +440,14 @@ impl<H: Copy + Eq, C: Copy> Frame<H, C> {
         scale: f32,
         text_system: &TextSystem,
     ) -> Self {
-        let mut tree = LayoutTree::default();
+        let mut tree = LayoutTree::new(scale);
         let mut frame = Frame::default();
         let default_text = ResolvedTextStyle::default();
 
-        let root_idx = frame.flatten(root_node, None, &default_text, scale, &mut tree);
+        let root_idx = frame.flatten(root_node, None, &default_text, &mut tree);
         frame.root = Some(root_idx);
 
-        tree.solve(root_idx, available, scale, &mut |idx, kw, _kh, avail| {
+        tree.solve(root_idx, available, &mut |idx, kw, _kh, avail| {
             let FlatKind::Text {
                 content,
                 style,
@@ -478,7 +478,7 @@ impl<H: Copy + Eq, C: Copy> Frame<H, C> {
             sz
         });
 
-        let root_rect = tree.rect(root_idx, scale);
+        let root_rect = tree.rect(root_idx);
         let viewport = match (available.width, available.height) {
             (Space::Definite(w), Space::Definite(h)) => size(w, h),
             _ => root_rect.size,
@@ -487,7 +487,7 @@ impl<H: Copy + Eq, C: Copy> Frame<H, C> {
             let Some(anchor) = frame.nodes[idx].anchor else {
                 continue;
             };
-            let popup_size = tree.rect(idx, scale).size;
+            let popup_size = tree.rect(idx).size;
             let origin = anchor.resolve(viewport, popup_size, |target| {
                 frame
                     .nodes
@@ -495,13 +495,13 @@ impl<H: Copy + Eq, C: Copy> Frame<H, C> {
                     .enumerate()
                     .rev()
                     .find(|(_, n)| n.interact.hit == Some(target))
-                    .map(|(i, _)| tree.rect(i, scale))
+                    .map(|(i, _)| tree.rect(i))
             });
-            tree.set_origin(idx, origin, scale);
+            tree.set_origin(idx, origin);
         }
 
         for (idx, node) in frame.nodes.iter_mut().enumerate() {
-            node.rect = tree.rect(idx, scale);
+            node.rect = tree.rect(idx);
         }
 
         let initial_clip = Rect::new(Point::ZERO, viewport);
@@ -526,12 +526,11 @@ impl<H: Copy + Eq, C: Copy> Frame<H, C> {
         node: Node<H, C>,
         parent: Option<usize>,
         inherited_text: &ResolvedTextStyle,
-        scale: f32,
         tree: &mut LayoutTree,
     ) -> usize {
         let resolved_text = inherited_text.merge(&node.text);
         let clip = node.flex.clip[0] || node.flex.clip[1];
-        let border = snap_border_edges(node.flex.border, scale);
+        let border = snap_border_edges(node.flex.border, tree.scale);
         let Node {
             mut flex,
             decor,
@@ -545,7 +544,7 @@ impl<H: Copy + Eq, C: Copy> Frame<H, C> {
         }
         let is_text = matches!(payload, NodePayload::Text(_));
         let flat_idx = self.nodes.len();
-        tree.add(flex, scale, is_text);
+        tree.add(flex, is_text);
 
         self.nodes.push(FlatNode {
             parent,
@@ -565,7 +564,7 @@ impl<H: Copy + Eq, C: Copy> Frame<H, C> {
             NodePayload::Box(children) => {
                 let child_flat_ids: Vec<usize> = children
                     .into_iter()
-                    .map(|child| self.flatten(child, Some(flat_idx), &resolved_text, scale, tree))
+                    .map(|child| self.flatten(child, Some(flat_idx), &resolved_text, tree))
                     .collect();
                 let start = self.child_order.len();
                 self.child_order.extend_from_slice(&child_flat_ids);
@@ -622,10 +621,6 @@ impl<H: Copy + Eq, C: Copy> Frame<H, C> {
                 self.collect_hits(self.child_order[children_start + offset], child_clip);
             }
         }
-    }
-
-    pub(crate) fn control_areas(&self) -> Vec<(Rect, WindowControlArea)> {
-        self.control_areas.clone()
     }
 
     fn top_hit(&self, pos: Point) -> Option<&HitEntry> {
@@ -783,42 +778,24 @@ impl<H: Copy + Eq, C: Copy> Frame<H, C> {
     }
 }
 
-pub(crate) struct UiState<H: Copy + Eq + Hash, C: Copy, K: Copy + Eq + Hash> {
-    frame: Frame<H, C>,
-    pointer: Option<PointerState>,
-    hovered_chain: Vec<H>,
-    pressed: Option<H>,
+/// A window's interaction state: the last frame laid out, where the pointer is and what it's
+/// over or pressing, and the animations its widgets run.
+#[derive(Default)]
+pub(crate) struct AppUi {
+    pub(crate) frame: AppFrame,
+    pub(crate) pointer: Option<PointerState>,
+    hovered_chain: Vec<HitId>,
+    pressed: Option<HitId>,
     pub(crate) last_input_was_keyboard: bool,
-    anims: AnimTracks<K>,
+    anims: AnimTracks<AnimKey>,
 }
 
-impl<H: Copy + Eq + Hash, C: Copy, K: Copy + Eq + Hash> Default for UiState<H, C, K> {
-    fn default() -> Self {
-        Self {
-            frame: Frame::default(),
-            pointer: None,
-            hovered_chain: Vec::new(),
-            pressed: None,
-            last_input_was_keyboard: false,
-            anims: AnimTracks::default(),
-        }
-    }
-}
-
-impl<H: Copy + Eq + Hash, C: Copy, K: Copy + Eq + Hash> UiState<H, C, K> {
-    pub(crate) fn frame(&self) -> &Frame<H, C> {
-        &self.frame
-    }
-
-    pub(crate) fn pointer(&self) -> Option<PointerState> {
-        self.pointer
-    }
-
+impl AppUi {
     pub(crate) fn begin_frame(&mut self, now: Instant, reduce_motion: bool) {
         self.anims.begin_frame(now, reduce_motion);
     }
 
-    pub(crate) fn finish_frame(&mut self, frame: Frame<H, C>) -> bool {
+    pub(crate) fn finish_frame(&mut self, frame: AppFrame) -> bool {
         self.frame = frame;
         let animating = self.anims.end_frame();
         let hover_shifted = self.pointer.is_some_and(|p| self.refresh_hover(p.pos));
@@ -862,7 +839,7 @@ impl<H: Copy + Eq + Hash, C: Copy, K: Copy + Eq + Hash> UiState<H, C, K> {
         had
     }
 
-    pub(crate) fn on_mouse_down(&mut self, pos: Point, button: MouseButton) -> &[H] {
+    pub(crate) fn on_mouse_down(&mut self, pos: Point, button: MouseButton) -> &[HitId] {
         self.last_input_was_keyboard = false;
         self.pointer = Some(PointerState { pos, pressed: true });
         self.hovered_chain = self.frame.hit_chain(pos);
@@ -872,7 +849,11 @@ impl<H: Copy + Eq + Hash, C: Copy, K: Copy + Eq + Hash> UiState<H, C, K> {
         &self.hovered_chain
     }
 
-    pub(crate) fn on_mouse_up(&mut self, pos: Point, button: MouseButton) -> (Option<H>, &[H]) {
+    pub(crate) fn on_mouse_up(
+        &mut self,
+        pos: Point,
+        button: MouseButton,
+    ) -> (Option<HitId>, &[HitId]) {
         if let Some(p) = &mut self.pointer {
             p.pos = pos;
             p.pressed = false;
@@ -888,22 +869,19 @@ impl<H: Copy + Eq + Hash, C: Copy, K: Copy + Eq + Hash> UiState<H, C, K> {
         (clicked, &self.hovered_chain)
     }
 
-    pub(crate) fn top_hit(&self) -> Option<H> {
+    pub(crate) fn top_hit(&self) -> Option<HitId> {
         self.hovered_chain.first().copied()
     }
 
-    pub(crate) fn is_hovered(&self, hit: H) -> bool {
+    pub(crate) fn is_hovered(&self, hit: HitId) -> bool {
         self.hovered_chain.contains(&hit)
     }
 
-    pub(crate) fn is_pressed(&self, hit: H) -> bool {
+    pub(crate) fn is_pressed(&self, hit: HitId) -> bool {
         self.pressed == Some(hit) && self.hovered_chain.contains(&hit)
     }
 
-    pub(crate) fn brush(&mut self, hit: H, brushes: Brushes, enabled: bool) -> Rgba
-    where
-        K: From<H>,
-    {
+    pub(crate) fn brush(&mut self, hit: HitId, brushes: Brushes, enabled: bool) -> Rgba {
         let target = if !enabled {
             brushes.rest
         } else if self.is_pressed(hit) {
@@ -913,17 +891,21 @@ impl<H: Copy + Eq + Hash, C: Copy, K: Copy + Eq + Hash> UiState<H, C, K> {
         } else {
             brushes.rest
         };
-        self.anims
-            .animate_color(K::from(hit), target, BRUSH_FADE_DURATION, Easing::Linear)
+        self.anims.animate_color(
+            AnimKey::Hit(hit),
+            target,
+            BRUSH_FADE_DURATION,
+            Easing::Linear,
+        )
     }
 
-    pub(crate) fn progress(&mut self, key: K, active: bool, curve: Curve) -> AnimSample<f32> {
+    pub(crate) fn progress(&mut self, key: AnimKey, active: bool, curve: Curve) -> AnimSample<f32> {
         self.anims.progress(key, active, curve)
     }
 
     pub(crate) fn animate_f32_from(
         &mut self,
-        key: K,
+        key: AnimKey,
         initial: f32,
         target: f32,
         duration: Duration,
@@ -1475,12 +1457,6 @@ pub(crate) enum MenuHit {
     },
 }
 
-impl MenuHit {
-    pub(crate) fn is_popup(self) -> bool {
-        !matches!(self, Self::Bar | Self::Trigger(_))
-    }
-}
-
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum FindHit {
     Card,
@@ -1526,15 +1502,8 @@ pub(crate) enum AnimKey {
     ScrollThickness(EditorSlot, Axis),
 }
 
-impl From<HitId> for AnimKey {
-    fn from(hit: HitId) -> Self {
-        Self::Hit(hit)
-    }
-}
-
 pub(crate) type AppNode = Node<HitId, CustomDraw>;
 pub(crate) type AppFrame = Frame<HitId, CustomDraw>;
-pub(crate) type AppUi = UiState<HitId, CustomDraw, AnimKey>;
 
 #[cfg(test)]
 mod tests {
@@ -1935,26 +1904,27 @@ mod tests {
 
     struct Tree {
         tree: LayoutTree,
-        scale: f32,
     }
 
     impl Tree {
         fn new(scale: f32) -> Self {
-            Self { tree: LayoutTree::default(), scale }
+            Self {
+                tree: LayoutTree::new(scale),
+            }
         }
         fn leaf(&mut self, style: FlexStyle) -> usize {
-            self.tree.add(style, self.scale, false)
+            self.tree.add(style, false)
         }
         fn text(&mut self) -> usize {
-            self.tree.add(st(), self.scale, true)
+            self.tree.add(st(), true)
         }
         fn node(&mut self, style: FlexStyle, children: &[usize]) -> usize {
-            let id = self.tree.add(style, self.scale, false);
+            let id = self.tree.add(style, false);
             self.tree.set_children(id, children);
             id
         }
         fn compute(&mut self, root: usize, avail: AvailSize) {
-            self.tree.solve(root, avail, self.scale, &mut |_, _, _, _| Size::ZERO);
+            self.tree.solve(root, avail, &mut |_, _, _, _| Size::ZERO);
         }
         fn compute_with(
             &mut self,
@@ -1962,10 +1932,10 @@ mod tests {
             avail: AvailSize,
             mut measure: impl FnMut(usize, Option<f32>, Option<f32>, AvailSize) -> Size,
         ) {
-            self.tree.solve(root, avail, self.scale, &mut measure);
+            self.tree.solve(root, avail, &mut measure);
         }
         fn bounds(&mut self, id: usize) -> Rect {
-            self.tree.rect(id, self.scale)
+            self.tree.rect(id)
         }
     }
 

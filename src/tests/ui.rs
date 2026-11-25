@@ -169,13 +169,13 @@ fn find_replace_bar_clear_button_and_key_contexts() {
     let find_card = h.hit_rect(HitId::Find(FindHit::Card)).unwrap();
     let beside_find = point(ed_bounds.right() - 30.0, find_card.center().y);
     h.read(|w, _| {
-        let chain = w.ui.frame().hit_chain(beside_find);
+        let chain = w.ui.frame.hit_chain(beside_find);
         assert!(
             chain.contains(&HitId::Editor(w.tabs.active_slot())),
             "invisible Find bar row wrapper must not occlude editor hits beside FindCard: {chain:?}"
         );
         assert_eq!(
-            w.ui.frame().cursor_at(beside_find),
+            w.ui.frame.cursor_at(beside_find),
             crate::platform::CursorStyle::IBeam
         );
     });
@@ -341,7 +341,7 @@ fn theme_zoom_editing_undo_scrollbar_and_caption_hit_tests() {
     let max_pt = h.hit_rect(HitId::Caption(CaptionHit::Max)).unwrap().center();
     let min_pt = h.hit_rect(HitId::Caption(CaptionHit::Min)).unwrap().center();
     h.read(|w, _| {
-        let areas = w.ui.frame().control_areas();
+        let areas = w.ui.frame.control_areas.clone();
         assert_eq!(
             hit_test_control_areas(&areas, close_pt),
             WindowControlArea::Close
@@ -608,7 +608,7 @@ fn keyboard_system_chords_altgr_menu_gate_popup_occlusion_and_fractional_borders
     let close_pt = h.hit_rect(HitId::Caption(CaptionHit::Close)).unwrap().center();
     h.read(|w, _| {
         assert_eq!(
-            hit_test_control_areas(&w.ui.frame().control_areas(), close_pt),
+            hit_test_control_areas(&w.ui.frame.control_areas, close_pt),
             WindowControlArea::Client,
             "modal dialog backdrop must occlude caption buttons"
         );

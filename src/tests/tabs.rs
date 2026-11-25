@@ -150,7 +150,7 @@ fn tab_drag_pop_out_and_reattach_does_not_panic() {
         let (hwnd1, scale, tab_rect, tab_id) = h.read(|w, _| {
             let id = w.tabs[1].data.id;
             let rect = w
-                .ui.frame()
+                .ui.frame
                 .rect_of(HitId::Tab(TabHit::Item(id)))
                 .expect("tab 1 rect");
             (w.hwnd, w.win.window.scale_factor(), rect, id)

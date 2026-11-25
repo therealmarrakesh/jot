@@ -362,7 +362,6 @@ impl Dialogs {
         let field = text_field(
             p,
             p.content_surface,
-            slot,
             &self.line,
             focus == Focus::Editor(slot),
             false,

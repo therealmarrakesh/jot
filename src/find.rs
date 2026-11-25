@@ -426,7 +426,6 @@ impl FindBar {
         let query_field = text_field(
             p,
             p.card_surface,
-            EditorSlot::FindQuery,
             &self.query,
             focused_slot == Some(EditorSlot::FindQuery),
             true,
@@ -463,7 +462,6 @@ impl FindBar {
         let replace_field = text_field(
             p,
             p.card_surface,
-            EditorSlot::FindReplace,
             &self.replacement,
             focused_slot == Some(EditorSlot::FindReplace),
             false,
