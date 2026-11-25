@@ -405,7 +405,7 @@ impl Editor {
             return (0, false);
         };
         let rel = pos
-            - frame.content_bounds.origin
+            - frame.origin
             - point(
                 self.scroll.x - frame.scroll_x,
                 (self.scroll.y - frame.scroll_y) as f32,
@@ -571,7 +571,7 @@ impl Editor {
 
     pub(crate) fn ime_caret_bounds(&self) -> Option<Rect> {
         let frame = self.fresh_frame()?;
-        let origin = frame.content_bounds.origin;
+        let origin = frame.origin;
         let selection = self.model.selection().range();
         frame
             .layout
@@ -893,11 +893,11 @@ impl Editor {
         let Some(frame) = self.frame.as_ref() else {
             return;
         };
-        canvas.with_clip(frame.input_bounds, |canvas| {
+        canvas.with_clip(self.input_bounds, |canvas| {
             for &rect in &frame.selection_rects {
                 canvas.paint_quad(fill(rect, p.selection));
             }
-            let origin = frame.content_bounds.origin;
+            let origin = frame.origin;
             let marked = frame.marked_range.as_ref();
             frame.layout.paint(origin, frame.text_color, marked, canvas);
             if frame.show_caret {
@@ -919,13 +919,9 @@ impl Editor {
     ) {
         // Vertical scroll is baked into each line's top in f64 so D2D coordinates stay exact on
         // huge files.
-        let input_bounds = self.input_bounds;
-        let content_bounds = Rect::new(
-            point(input_bounds.origin.x + self.scroll.x, input_bounds.origin.y),
-            input_bounds.size,
-        );
+        let origin = self.input_bounds.origin + point(self.scroll.x, 0.);
         let caret_rect = caret_rect(
-            content_bounds.origin + head_pt,
+            origin + head_pt,
             layout.line_height,
             params.style.caret_height,
             params.scale,
@@ -943,7 +939,7 @@ impl Editor {
             && self.model.composition().is_none()
             && !self.model.selection().is_empty()
         {
-            layout.range_rects(&self.model.selection().range(), content_bounds.origin)
+            layout.range_rects(&self.model.selection().range(), origin)
         } else {
             Vec::new()
         };
@@ -952,8 +948,7 @@ impl Editor {
             revision: self.model.revision(),
             scroll_x: self.scroll.x,
             scroll_y: self.scroll.y,
-            input_bounds,
-            content_bounds,
+            origin,
             text_color,
             caret_rect,
             show_caret,
@@ -1349,8 +1344,8 @@ struct Frame {
     revision: u64,
     scroll_x: f32,
     scroll_y: f64,
-    input_bounds: Rect,
-    content_bounds: Rect,
+    /// Where the text was drawn from: the editor's top left, scrolled horizontally.
+    origin: Point,
     text_color: Rgba,
     caret_rect: Rect,
     show_caret: bool,
@@ -1372,13 +1367,6 @@ const FADE_IN: Curve = Curve::new(Duration::from_millis(120), Easing::Linear);
 const FADE_OUT: Curve = Curve::new(Duration::from_millis(200), Easing::EaseInCubic);
 const EXPAND: Curve = Curve::new(Duration::from_millis(120), Easing::EaseOutCubic);
 const DRAG_NOTIFY_INTERVAL: Duration = Duration::from_micros(8_333);
-
-fn axis_ix(axis: Axis) -> usize {
-    match axis {
-        Axis::Vertical => 0,
-        Axis::Horizontal => 1,
-    }
-}
 
 fn axis_val(p: Point, axis: Axis) -> f32 {
     match axis {
@@ -1463,25 +1451,6 @@ struct ScrollbarViewport {
     horizontal: bool,
 }
 
-impl ScrollbarViewport {
-    /// The viewport the bars measure: the text area with the padding the tracks lie over.
-    fn size(&self) -> Size {
-        let p = self.paddings;
-        size(
-            self.input.size.width + p.right,
-            self.input.size.height + p.top + p.bottom,
-        )
-    }
-
-    fn content(&self) -> Size {
-        let p = self.paddings;
-        size(
-            self.content_size.width + p.right,
-            self.content_size.height + p.top + p.bottom,
-        )
-    }
-}
-
 #[derive(Clone, Copy, Debug)]
 struct Drag {
     axis: Axis,
@@ -1514,47 +1483,30 @@ impl ActiveAxis {
     }
 }
 
+#[derive(Default)]
 struct ScrollbarState {
     drag: Option<Drag>,
     last_offset: Point,
     last_activity: Option<Instant>,
     was_hovered: bool,
-    last_drag_notify: Instant,
+    last_drag_notify: Option<Instant>,
     /// When a throttled drag next notifies, and when the bar next starts fading.
     drag_at: Option<Instant>,
     idle_at: Option<Instant>,
+    /// Each bar as last laid out, by `Axis`.
     axes: [Option<ActiveAxis>; 2],
 }
 
-impl Default for ScrollbarState {
-    fn default() -> Self {
-        Self::new_at(Instant::now())
-    }
-}
-
 impl ScrollbarState {
-    fn new_at(now: Instant) -> Self {
-        Self {
-            drag: None,
-            last_offset: Point::ZERO,
-            last_activity: None,
-            was_hovered: false,
-            last_drag_notify: now,
-            drag_at: None,
-            idle_at: None,
-            axes: [None, None],
-        }
-    }
-
     fn is_interactive(&self, axis: Axis) -> bool {
-        self.axes[axis_ix(axis)].is_some_and(|a| a.interactive)
+        self.axes[axis as usize].is_some_and(|a| a.interactive)
     }
 
     /// Whether the pointer at `pos` has come onto or off a thumb since it was last drawn (with
     /// nothing over its track).
     fn hover_changed(&self, slot: EditorSlot, pos: Point, ui: &AppUi) -> bool {
         [Axis::Vertical, Axis::Horizontal].into_iter().any(|axis| {
-            self.axes[axis_ix(axis)].is_some_and(|a| {
+            self.axes[axis as usize].is_some_and(|a| {
                 let over = ui.is_hovered(HitId::ScrollTrack(slot, axis));
                 let on = a.interactive && over && a.on_thumb(axis, pos);
                 on != a.hovered
@@ -1566,7 +1518,7 @@ impl ScrollbarState {
         let idle = take_due(&mut self.idle_at, now);
         let drag = take_due(&mut self.drag_at, now);
         if drag {
-            self.last_drag_notify = now;
+            self.last_drag_notify = Some(now);
         }
         idle || drag
     }
@@ -1613,7 +1565,10 @@ impl ScrollbarState {
             self.idle_at = Some(last + IDLE_HOLD);
         }
 
-        let (viewport, content) = (vp.size(), vp.content());
+        // The bars measure the text area with the padding their tracks lie over.
+        let pad = vp.paddings;
+        let padded = |s: Size| size(s.width + pad.right, s.height + pad.top + pad.bottom);
+        let (viewport, content) = (padded(vp.input.size), padded(vp.content_size));
         let vertical_needed = viewport.height > 0. && content.height > viewport.height;
         let horizontal_needed =
             vp.horizontal && viewport.width > 0. && content.width > viewport.width;
@@ -1630,7 +1585,7 @@ impl ScrollbarState {
         let interactive = visible || opacity > 0.0;
 
         // In device pixels, rounded value by value the way layout places nodes.
-        let (scale, pad) = (vp.scale, vp.paddings);
+        let scale = vp.scale;
         let px = |v: f32| round_px(v, scale);
         let input = vp.input;
         let view = Rect::from_corners(
@@ -1688,7 +1643,7 @@ impl ScrollbarState {
             let shown = opacity > 0.0;
             let hovered = interactive
                 && shown
-                && track_hovered[axis_ix(axis)]
+                && track_hovered[axis as usize]
                 && ui
                     .pointer
                     .is_some_and(|ptr| (thumb.0..thumb.1).contains(&axis_val(ptr.pos, axis)));
@@ -1721,7 +1676,7 @@ impl ScrollbarState {
                     size(thumb_len, thick),
                 ),
             };
-            self.axes[axis_ix(axis)] = Some(ActiveAxis {
+            self.axes[axis as usize] = Some(ActiveAxis {
                 metrics,
                 viewport_span,
                 thumb_local,
@@ -1740,7 +1695,7 @@ impl ScrollbarState {
 
     /// The bars' tracks, laid out over the editor's padding for hit-testing and the cursor.
     fn tracks(&self, slot: EditorSlot, horizontal_left: f32) -> Vec<AppNode> {
-        let corner = if self.axes[axis_ix(Axis::Vertical)].is_some() {
+        let corner = if self.axes[Axis::Vertical as usize].is_some() {
             TRACK_THICKNESS
         } else {
             0.
@@ -1748,7 +1703,7 @@ impl ScrollbarState {
         [Axis::Horizontal, Axis::Vertical]
             .into_iter()
             .filter_map(|axis| {
-                let active = self.axes[axis_ix(axis)]?;
+                let active = self.axes[axis as usize]?;
                 let track = match axis {
                     Axis::Vertical => box_()
                         .absolute()
@@ -1771,7 +1726,7 @@ impl ScrollbarState {
 
     fn paint(&self, canvas: &mut Canvas) {
         for axis in [Axis::Horizontal, Axis::Vertical] {
-            if let Some(active) = self.axes[axis_ix(axis)].filter(|a| a.shown) {
+            if let Some(active) = self.axes[axis as usize].filter(|a| a.shown) {
                 canvas.paint_quad(PaintQuad {
                     bounds: active.pill,
                     corner_radii: Corners::all(active.radius),
@@ -1788,7 +1743,7 @@ impl ScrollbarState {
         position: Point,
         current_offset: Point,
     ) -> Option<Point> {
-        let active = self.axes[axis_ix(axis)]?;
+        let active = self.axes[axis as usize]?;
         if !active.interactive {
             return None;
         }
@@ -1820,7 +1775,7 @@ impl ScrollbarState {
         current_offset: Point,
     ) -> Option<(Option<Point>, bool)> {
         let drag = self.drag.filter(|_| dragging_primary)?;
-        let active = self.axes[axis_ix(drag.axis)]?;
+        let active = self.axes[drag.axis as usize]?;
         let track_origin = axis_val(active.track.origin, drag.axis);
         let now = Instant::now();
         let next = active
@@ -1828,14 +1783,15 @@ impl ScrollbarState {
             .apply_drag(drag.axis, track_origin, position, drag.grab, current_offset);
         let moved = next != current_offset;
         if moved {
-            let elapsed = now.saturating_duration_since(self.last_drag_notify);
-            if elapsed >= DRAG_NOTIFY_INTERVAL {
-                self.last_drag_notify = now;
-                self.drag_at = None;
-                return Some((Some(next), true));
-            }
-            if self.drag_at.is_none() {
-                self.drag_at = Some(self.last_drag_notify + DRAG_NOTIFY_INTERVAL);
+            match self.last_drag_notify {
+                Some(last) if now.saturating_duration_since(last) < DRAG_NOTIFY_INTERVAL => {
+                    self.drag_at.get_or_insert(last + DRAG_NOTIFY_INTERVAL);
+                }
+                _ => {
+                    self.last_drag_notify = Some(now);
+                    self.drag_at = None;
+                    return Some((Some(next), true));
+                }
             }
         }
         Some((moved.then_some(next), false))
@@ -1845,7 +1801,7 @@ impl ScrollbarState {
         let drag = self.drag.take()?;
         self.drag_at = None;
         self.last_activity = Some(Instant::now());
-        let active = self.axes[axis_ix(drag.axis)]?;
+        let active = self.axes[drag.axis as usize]?;
         let track_origin = axis_val(active.track.origin, drag.axis);
         Some(active.metrics.apply_drag(
             drag.axis,
@@ -2144,7 +2100,7 @@ mod tests {
     #[test]
     fn scene_scrollbar_renders_fades_and_snaps_on_reduce_motion() {
         let t0 = Instant::now();
-        let mut sb = ScrollbarState::new_at(t0);
+        let mut sb = ScrollbarState::default();
         let mut ui = AppUi::default();
         let p = Palette::resolve(false, None, None);
         let slot = EditorSlot::Tab(TabId::next());
