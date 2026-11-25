@@ -24,11 +24,11 @@ use crate::shell::{Cx, Effect, Shell};
 use crate::tabs::{self, Removal, StripFrame, TAB_HEIGHT, TabData, TabSet};
 use crate::text::{Rope, RopeExt as _};
 use crate::theme::{BODY_SIZE, FIELD_CARET, FIELD_LINE, ICON_FONT, Palette, SMALL_FONT, TEXT_FONT};
-use crate::tooltip::{KeyTip, TooltipProbe};
+use crate::tooltip::{KeyTip, OverlayAnchor, TooltipProbe};
 use crate::types::APP_NAME;
 use crate::ui::{
     AppFrame, AppNode, AppUi, Brushes, CaptionHit, CustomDraw, DialogHit, EditorSlot, Focus, HitId,
-    MenuHit, OverlayAnchor, TabHit, TabId, box_, custom, row, text,
+    MenuHit, TabHit, TabId, box_, custom, row, text,
 };
 use crate::widgets::icon_button;
 

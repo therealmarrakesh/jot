@@ -1,19 +1,14 @@
 use std::collections::HashMap;
 use std::hash::Hash;
-use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::geom::{
-    Axis, Corners, Edges, Point, Rect, Rgba, ScreenPoint, ScreenRect, Shadows, Size, black, point,
-    size, transparent_black,
+    Axis, Corners, Edges, Point, Rect, Rgba, Shadows, Size, black, point, size, transparent_black,
 };
-use crate::gfx::{
-    Canvas, FontWeight, Gpu, Label, LabelLayout, PaintQuad, Scope, TextStyle, TextSystem,
-    WindowSurface,
-};
+use crate::gfx::{Canvas, FontWeight, Label, LabelLayout, PaintQuad, Scope, TextStyle, TextSystem};
 use crate::layout::{AvailSize, Dim, Flex, FlexStyle, LayoutTree, Space, snap_border_edges};
-use crate::platform::{CursorStyle, MouseButton, NativeWindow, WindowControlArea, WindowId};
+use crate::platform::{CursorStyle, MouseButton, WindowControlArea};
 use crate::types::SharedStr;
 
 pub(crate) const BRUSH_FADE_DURATION: Duration = Duration::from_millis(83);
@@ -918,73 +913,6 @@ impl AppUi {
     #[cfg(test)]
     pub(crate) fn track_count(&self) -> usize {
         self.anims.track_count()
-    }
-}
-
-#[derive(Copy, Clone, Debug, PartialEq)]
-pub(crate) struct OverlayAnchor {
-    pub(crate) window: WindowId,
-    pub(crate) origin: ScreenPoint,
-    pub(crate) scale: f32,
-}
-
-#[derive(Default)]
-pub(crate) struct OverlaySurface {
-    live: Option<WindowSurface>,
-    create_failed: bool,
-}
-
-impl OverlaySurface {
-    pub(crate) fn show(&mut self, gpu: &Rc<Gpu>, rect: ScreenRect) {
-        if self.live.is_none() {
-            if self.create_failed {
-                return;
-            }
-            match NativeWindow::create_overlay()
-                .and_then(|window| WindowSurface::new(gpu.clone(), window))
-            {
-                Ok(live) => self.live = Some(live),
-                Err(err) => {
-                    self.create_failed = true;
-                    crate::platform::debug_log(&format!("overlay create failed: {err}"));
-                    return;
-                }
-            }
-        }
-        if let Some(live) = &self.live {
-            let hwnd = live.window.hwnd();
-            hwnd.place_topmost_noactivate(rect);
-            hwnd.show_noactivate();
-        }
-    }
-
-    pub(crate) fn hide(&self) {
-        if let Some(live) = &self.live {
-            live.window.hwnd().hide();
-        }
-    }
-
-    pub(crate) fn paint_scene(
-        &mut self,
-        ts: &TextSystem,
-        build: impl FnOnce(Size) -> Node<(), ()>,
-    ) -> bool {
-        let Some(live) = &mut self.live else {
-            return false;
-        };
-        let Some((_, _, scale)) = live.window.sync_live_metrics() else {
-            return false;
-        };
-        let logical = live.window.logical_size();
-        live.draw(transparent_black(), |canvas| {
-            let frame = Frame::layout(
-                build(logical),
-                AvailSize::definite(logical.width, logical.height),
-                scale,
-                ts,
-            );
-            frame.paint(canvas, &mut |_, _, _| {});
-        })
     }
 }
 
