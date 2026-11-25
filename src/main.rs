@@ -9,6 +9,7 @@ mod find;
 mod geom;
 mod gfx;
 mod layout;
+mod lines;
 mod menu;
 mod platform;
 mod shell;
@@ -20,7 +21,6 @@ mod types;
 mod ui;
 mod widgets;
 mod window;
-mod wrap;
 #[cfg(test)]
 mod tests;
 

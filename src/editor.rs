@@ -1,9 +1,9 @@
-use std::borrow::Cow;
 use std::ops::Range;
 use std::time::{Duration, Instant};
 
 use crate::geom::{Axis, Edges, Point, Rect, Rgba, Size, point, size};
 use crate::gfx::{Canvas, TextStyle, TextSystem, fill};
+use crate::lines::{FrameLayout, LineIndex, Viewport};
 use crate::platform::{CursorStyle, Modifiers, MouseButton, TimerHandle};
 use crate::text::{
     Bias, EditPolicy, LineChange, Rope, RopeExt as _, TextModel, ValidateFn,
@@ -12,7 +12,6 @@ use crate::text::{
 use crate::theme::Palette;
 use crate::types::SharedStr;
 use crate::ui::{AnimKey, AppNode, AppUi, Easing, EditorSlot, HitId, Node, box_, custom, row};
-use crate::wrap::{FrameLayout, Viewport, WrapIndex};
 
 const RIGHT_MARGIN: f32 = 10.0;
 
@@ -130,7 +129,7 @@ pub(crate) enum EditCommand {
 }
 
 struct DocumentView {
-    wrap: WrapIndex,
+    lines: LineIndex,
     soft_wrap: bool,
     last_line_height: f32,
     paddings: Edges<f32>,
@@ -142,7 +141,7 @@ struct DocumentView {
 impl DocumentView {
     fn new(opts: DocOptions) -> Self {
         Self {
-            wrap: WrapIndex::new(TextStyle::default(), None),
+            lines: LineIndex::new(TextStyle::default(), None),
             soft_wrap: opts.soft_wrap,
             last_line_height: 20.0,
             paddings: opts.paddings,
@@ -263,7 +262,7 @@ impl Editor {
         self.goal = None;
         self.reset_pointer_selection_state();
         if let Some(doc) = &mut self.doc {
-            doc.wrap.apply_line_change(self.model.text(), &lines, ts);
+            doc.lines.apply_line_change(self.model.text(), &lines, ts);
         }
         let aff = self.model.selection().end_affinity;
         self.request_reveal(self.model.cursor(), aff, None, true);
@@ -302,10 +301,10 @@ impl Editor {
                     (self.input_bounds.size.width > RIGHT_MARGIN)
                         .then_some(self.input_bounds.size.width - RIGHT_MARGIN)
                 });
-            doc.wrap.set_wrap_width(text, width, ts);
+            doc.lines.set_wrap_width(text, width, ts);
             self.scroll.x = 0.0;
         } else {
-            doc.wrap.set_wrap_width(text, None, ts);
+            doc.lines.set_wrap_width(text, None, ts);
         }
         if let Some(anchor) = anchor {
             self.scroll.y = doc.restore_scroll_anchor(text, anchor, doc.last_line_height);
@@ -783,8 +782,8 @@ impl Editor {
         let pt = text.offset_to_point(offset);
         let line_start = text.line_start_offset(pt.row);
         if doc.soft_wrap {
-            let disp = doc.wrap.offset_to_display(text, offset, end_affinity);
-            if let Some((range, _)) = doc.wrap.visual_row_range(pt.row, disp.sub_row) {
+            let disp = doc.lines.offset_to_display(text, offset, end_affinity);
+            if let Some((range, _)) = doc.lines.visual_row_range(pt.row, disp.sub_row) {
                 return line_start + range.start;
             }
         }
@@ -799,8 +798,8 @@ impl Editor {
         let pt = text.offset_to_point(offset);
         let line_start = text.line_start_offset(pt.row);
         if doc.soft_wrap {
-            let disp = doc.wrap.offset_to_display(text, offset, end_affinity);
-            if let Some((range, soft_end)) = doc.wrap.visual_row_range(pt.row, disp.sub_row) {
+            let disp = doc.lines.offset_to_display(text, offset, end_affinity);
+            if let Some((range, soft_end)) = doc.lines.visual_row_range(pt.row, disp.sub_row) {
                 return (line_start + range.end, soft_end);
             }
         }
@@ -815,8 +814,8 @@ impl Editor {
         let frame = self.fresh_frame()?;
         let text = self.model.text();
         let pt = text.offset_to_point(offset);
-        let row_layout = frame.layout.row_layout(pt.row)?;
-        let line_height = frame.layout.line_height();
+        let row_layout = frame.layout.line(pt.row)?;
+        let line_height = frame.layout.line_height;
         let pos = row_layout.position_for_index(pt.column, line_height, end_affinity)?;
         Some((pos.x, pt.column))
     }
@@ -841,7 +840,7 @@ impl Editor {
         let lh = self
             .frame
             .as_ref()
-            .map_or(doc.last_line_height, |f| f.layout.line_height())
+            .map_or(doc.last_line_height, |f| f.layout.line_height)
             .max(1.0);
         ((self.input_bounds.size.height / lh).floor() as isize).max(1)
     }
@@ -854,27 +853,27 @@ impl Editor {
         end_affinity: bool,
         delta_rows: isize,
     ) -> (usize, bool) {
-        if doc.wrap.visual_row_count() == 0 {
+        if doc.lines.visual_row_count() == 0 {
             return (offset, end_affinity);
         }
         let text = self.model.text();
-        let mut display = doc.wrap.offset_to_display(text, offset, end_affinity);
-        let max_row = doc.wrap.visual_row_count().saturating_sub(1);
+        let mut display = doc.lines.offset_to_display(text, offset, end_affinity);
+        let max_row = doc.lines.visual_row_count().saturating_sub(1);
         display.row = display.row.saturating_add_signed(delta_rows).min(max_row);
         display.col = 0;
 
-        let mut target_offset = doc.wrap.display_to_offset(text, display);
+        let mut target_offset = doc.lines.display_to_offset(text, display);
         let mut target_affinity = false;
 
         if let Some((pref_x, byte_col)) = goal {
-            let mut next_disp = doc.wrap.offset_to_display(text, target_offset, false);
+            let mut next_disp = doc.lines.offset_to_display(text, target_offset, false);
             next_disp.col = 0;
-            let next_pt = doc.wrap.display_to_point(text, next_disp);
+            let next_pt = text.offset_to_point(doc.lines.display_to_offset(text, next_disp));
             let line_start = text.line_start_offset(next_pt.row);
             if let Some(frame) = self.fresh_frame()
-                && let Some(row_layout) = frame.layout.row_layout(next_pt.row)
+                && let Some(row_layout) = frame.layout.line(next_pt.row)
             {
-                let line_height = frame.layout.line_height();
+                let line_height = frame.layout.line_height;
                 if let Some((local_ix, affinity)) = row_layout.closest_index_for_position(
                     point(pref_x, next_disp.sub_row as f32 * line_height),
                     line_height,
@@ -883,7 +882,7 @@ impl Editor {
                     target_affinity = affinity;
                 }
             } else if let Some((sub_range, soft_end)) =
-                doc.wrap.visual_row_range(next_pt.row, next_disp.sub_row)
+                doc.lines.visual_row_range(next_pt.row, next_disp.sub_row)
             {
                 let max_col = sub_range.len();
                 let col = byte_col.min(max_col);
@@ -976,13 +975,13 @@ impl Editor {
                         .or_else(|| self.preferred_x_for(sel.head, sel.end_affinity));
                     let mut target =
                         self.vertical_target(doc, sel.head, goal, sel.end_affinity, delta);
-                    if doc.wrap.visual_row_count() > 0 {
+                    if doc.lines.visual_row_count() > 0 {
                         let text = self.model.text();
                         let before_row = doc
-                            .wrap
+                            .lines
                             .offset_to_display(text, sel.head, sel.end_affinity)
                             .row;
-                        let after_row = doc.wrap.offset_to_display(text, target.0, target.1).row;
+                        let after_row = doc.lines.offset_to_display(text, target.0, target.1).row;
                         if before_row == after_row {
                             target = (if delta < 0 { 0 } else { len }, false);
                         }
@@ -1109,7 +1108,7 @@ impl Editor {
         let caret_rect = self.compute_caret_rect(
             content_bounds.origin,
             head_pt,
-            layout.line_height(),
+            layout.line_height,
             params.scale,
             params.caret_width_px,
         );
@@ -1151,16 +1150,14 @@ impl Editor {
         let style = params.style;
         let text_style = &style.text;
         let line_height = style.line_height.max(1.0);
-        let space_width = ts.face(text_style).space_width();
         let is_empty = self.model.text().len() == 0;
         let (display_str, text_color): (SharedStr, Rgba) = if is_empty {
             (self.placeholder.clone(), params.palette.text_secondary)
         } else {
             (self.model.text().to_string().into(), style.color)
         };
-        let shaped = ts.shape_row(display_str, text_style);
-        let layout =
-            FrameLayout::single_row(shaped, self.model.text().len(), line_height, space_width);
+        let text_len = self.model.text().len();
+        let layout = FrameLayout::single_row(display_str, text_len, text_style, line_height, ts);
         let head = self.model.cursor();
         let head_pt = layout
             .position_for_offset(self.model.text(), head, false)
@@ -1185,7 +1182,6 @@ impl Editor {
         let style = params.style;
         let text_style = &style.text;
         let line_height = style.line_height.max(1.0);
-        let face = ts.face(text_style);
         let text = self.model.text();
         let reveal_req = self.reveal.take();
         let head = self.model.cursor();
@@ -1195,8 +1191,8 @@ impl Editor {
         let soft_wrap = doc.soft_wrap;
         let wrap_width = soft_wrap.then_some((input_bounds.size.width - RIGHT_MARGIN).max(1.0));
 
-        let reflowing = doc.wrap.style() != text_style
-            || doc.wrap.wrap_width() != wrap_width
+        let reflowing = doc.lines.style() != text_style
+            || doc.lines.wrap_width() != wrap_width
             || (doc.last_line_height - line_height).abs() > 0.01;
         let anchor = if reflowing && reveal_req.is_none() {
             doc.capture_scroll_anchor(self.scroll.y, doc.last_line_height)
@@ -1204,21 +1200,21 @@ impl Editor {
             None
         };
 
-        doc.wrap.sync_layout(text, text_style, wrap_width, ts);
+        doc.lines.sync_layout(text, text_style, wrap_width, ts);
         doc.last_line_height = line_height;
 
         if let Some(anchor) = anchor {
             self.scroll.y = doc.restore_scroll_anchor(text, anchor, line_height);
         }
 
-        let total_rows = doc.wrap.visual_row_count().max(1);
+        let total_rows = doc.lines.visual_row_count().max(1);
         let content_h = (total_rows as f64 * f64::from(line_height))
             .max(f64::from(input_bounds.size.height));
         self.scroll.content_h = content_h;
 
         if let Some(req) = reveal_req {
             let target = req.offset.min(text.len());
-            let disp = doc.wrap.offset_to_display(text, target, req.end_affinity);
+            let disp = doc.lines.offset_to_display(text, target, req.end_affinity);
             let row_y = disp.row as f64 * f64::from(line_height);
             let vp_h = f64::from(input_bounds.size.height);
             let lh_f64 = f64::from(line_height);
@@ -1249,12 +1245,9 @@ impl Editor {
         if soft_wrap {
             self.scroll.x = 0.0;
         } else {
-            max_line_w = doc.wrap.longest_line_width(text, ts);
+            max_line_w = doc.lines.longest_line_width(text, ts);
             if reveal_req.is_some() {
-                let pt = text.offset_to_point(head);
-                let line = text.slice_line(pt.row);
-                let prefix: Cow<str> = line.slice(..pt.column.min(line.len())).into();
-                let caret_x = face.unwrapped_width(&prefix);
+                let caret_x = doc.lines.unwrapped_x(text, head, ts);
                 max_line_w = max_line_w.max(caret_x);
                 self.scroll.x =
                     reveal_horizontal_scroll(self.scroll.x, caret_x, input_bounds.size.width);
@@ -1270,7 +1263,7 @@ impl Editor {
             scroll_y: self.scroll.y,
         };
         let (layout, shaped_windowed) =
-            doc.wrap
+            doc.lines
                 .layout_visible(text, view, head, end_affinity, line_height, ts);
         if !soft_wrap {
             max_line_w = max_line_w.max(layout.width());
@@ -1278,7 +1271,7 @@ impl Editor {
         let head_pt = layout
             .position_for_offset(text, head, end_affinity)
             .unwrap_or_else(|| {
-                let disp = doc.wrap.offset_to_display(text, head, end_affinity);
+                let disp = doc.lines.offset_to_display(text, head, end_affinity);
                 point(
                     0.0,
                     (disp.row as f64 * f64::from(line_height) + self.scroll.y) as f32,
@@ -1387,17 +1380,17 @@ fn caret_vertical_margin(viewport_height: f32, line_height: f32) -> f32 {
 
 impl DocumentView {
     fn capture_scroll_anchor(&self, scroll_y: f64, line_height: f32) -> Option<ScrollAnchor> {
-        if self.wrap.visual_row_count() == 0 || line_height <= 0.0 {
+        if self.lines.visual_row_count() == 0 || line_height <= 0.0 {
             return None;
         }
         let lh = f64::from(line_height);
         let top = (-scroll_y).max(0.0);
         let top_row = (top / lh).floor() as usize;
         let frac_px = top - top_row as f64 * lh;
-        let clamped_row = top_row.min(self.wrap.visual_row_count().saturating_sub(1));
-        let (line, sub_row) = self.wrap.visual_row_to_line_and_sub_row(clamped_row);
+        let clamped_row = top_row.min(self.lines.visual_row_count().saturating_sub(1));
+        let (line, sub_row) = self.lines.visual_row_to_line_and_sub_row(clamped_row);
         let byte_in_line = self
-            .wrap
+            .lines
             .visual_row_range(line, sub_row)
             .map_or(0, |(r, _)| r.start);
         Some(ScrollAnchor {
@@ -1413,14 +1406,14 @@ impl DocumentView {
         anchor: ScrollAnchor,
         line_height: f32,
     ) -> f64 {
-        if self.wrap.line_count() == 0 || line_height <= 0.0 {
+        if self.lines.line_count() == 0 || line_height <= 0.0 {
             return 0.0;
         }
-        let line = anchor.line.min(self.wrap.line_count().saturating_sub(1));
+        let line = anchor.line.min(self.lines.line_count().saturating_sub(1));
         let line_start = text.line_start_offset(line);
         let line_len = text.line_len(line);
         let target = line_start + anchor.byte_in_line.min(line_len);
-        let disp = self.wrap.offset_to_display(text, target, false);
+        let disp = self.lines.offset_to_display(text, target, false);
         let new_top = disp.row as f64 * f64::from(line_height) + anchor.frac_px;
         -new_top.max(0.0)
     }
@@ -1537,14 +1530,14 @@ impl Editor {
         let lh = self
             .frame
             .as_ref()
-            .map_or(default_line_height, |f| f.layout.line_height())
+            .map_or(default_line_height, |f| f.layout.line_height)
             .max(1.0);
         let vp = self.input_bounds.size;
         let dx = if delta_lines.x != 0.0 {
             let space_w = self
                 .frame
                 .as_ref()
-                .map_or(lh * 0.5, |f| f.layout.space_width().max(1.0));
+                .map_or(lh * 0.5, |f| f.layout.space_width.max(1.0));
             (delta_lines.x * space_w * 3.0)
                 .round()
                 .clamp(-vp.width.max(lh), vp.width.max(lh))
