@@ -1630,20 +1630,15 @@ impl ScrollbarState {
     ) -> bool {
         let before = self.axes.map(|a| a.is_some());
         let scroll_offset = vp.scroll_offset;
-        if scroll_offset != self.last_offset {
-            self.last_offset = scroll_offset;
-            self.last_activity = Some(now);
-            self.idle_at = None;
-        }
-
         let track_hovered = [Axis::Vertical, Axis::Horizontal]
             .map(|axis| ui.is_hovered(HitId::ScrollTrack(slot, axis)));
         let hovered = track_hovered.contains(&true);
-        if hovered || (self.was_hovered && !hovered) {
+        // Scrolling, and the pointer on a track or just leaving one, keep the bars awake.
+        if scroll_offset != self.last_offset || hovered || self.was_hovered {
             self.last_activity = Some(now);
             self.idle_at = None;
         }
-        self.was_hovered = hovered;
+        (self.last_offset, self.was_hovered) = (scroll_offset, hovered);
 
         let visible = hovered
             || self.drag.is_some()
