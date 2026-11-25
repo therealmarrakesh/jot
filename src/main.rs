@@ -33,7 +33,7 @@ use std::time::{Duration, Instant};
 use crate::document::{DocPath, Format, PathKey};
 use crate::text::Rope;
 use crate::files::{
-    DocHost, FileEvents, FileIo, FileOps, FileRequest, Prompt, PromptId, TabSnapshot, spawn_file_io,
+    DocHost, FileEvents, FileIo, FileOps, FileRequest, Prompt, PromptId, TabSnapshot,
 };
 use crate::geom::{Point, Rect, ScreenPoint, Size, point, size};
 use crate::gfx::{Gpu, TextSystem, WindowSurface};
@@ -146,23 +146,18 @@ impl App {
         }
     }
 
+    /// Runs `f` on the file workflows, the windows hosting them, then starts the file work it
+    /// asked for; whether there was any.
     fn run_file_ops(
         &mut self,
         f: impl FnOnce(&mut FileOps, &mut WindowsHost<'_>, &mut Vec<FileIo>),
-    ) {
+    ) -> bool {
         let mut io = Vec::new();
-        {
-            let mut host = self.windows.host(&self.shell);
-            f(&mut self.file_ops, &mut host, &mut io);
-        }
-        for cmd in io {
-            let owner_hwnd = match &cmd {
-                FileIo::OpenDialog { window, .. } => self.windows.hwnd(*window),
-                FileIo::SaveDialog { owner, .. } => self.windows.hwnd(*owner),
-                FileIo::LoadFiles { .. } | FileIo::WriteFile { .. } => None,
-            };
-            spawn_file_io(cmd, owner_hwnd, &self.file_ops.writes, &self.file_events);
-        }
+        let mut host = self.windows.host(&self.shell);
+        f(&mut self.file_ops, &mut host, &mut io);
+        let started = !io.is_empty();
+        self.file_ops.spawn(io, &host, &self.file_events);
+        started
     }
 
     /// Runs `f` on a window, then the effects it emitted.
@@ -384,11 +379,8 @@ impl App {
             return Ok(());
         }
         if let Some(window) = self.windows.fallback(None) {
-            let mut loaded_any = false;
-            self.run_file_ops(|ops, host, io| {
-                let before = io.len();
+            let loaded_any = self.run_file_ops(|ops, host, io| {
                 ops.request(FileRequest::OpenPaths { window, paths }, host, io);
-                loaded_any = io.len() > before;
             });
             if bring_to_front
                 && loaded_any
@@ -927,6 +919,10 @@ impl DocHost for WindowsHost<'_> {
         if let Some(w) = self.windows.get_mut(window) {
             w.pending_close = true;
         }
+    }
+
+    fn window_handle(&self, window: WindowId) -> Option<WindowHandle> {
+        self.windows.hwnd(window)
     }
 
     fn show_prompt(&mut self, window: WindowId, prompt: Prompt) {

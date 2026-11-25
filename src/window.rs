@@ -790,9 +790,7 @@ impl MainWindow {
             DialogKind::Prompt(prompt) => {
                 self.close_dialog(cx.shell);
                 if let Some((id, _)) = prompt.reply {
-                    let answer = button
-                        .and_then(|ix| prompt.choices.get(ix))
-                        .map_or(prompt.cancel, |&(_, a)| a);
+                    let answer = prompt.answer(button);
                     cx.emit(Effect::PromptResponse { id, answer });
                 }
             }

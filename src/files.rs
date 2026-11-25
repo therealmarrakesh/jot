@@ -42,6 +42,13 @@ impl Prompt {
     pub(crate) fn tab(&self) -> Option<TabId> {
         self.reply.map(|(_, tab)| tab)
     }
+
+    /// What choosing button `button` (or, with `None`, dismissing the prompt) answers.
+    pub(crate) fn answer(&self, button: Option<usize>) -> PromptAnswer {
+        button
+            .and_then(|ix| self.choices.get(ix))
+            .map_or(self.cancel, |&(_, answer)| answer)
+    }
 }
 
 pub(crate) enum FileRequest {
@@ -132,6 +139,8 @@ pub(crate) trait DocHost {
     fn remove_tab(&mut self, tab: TabId);
     fn mark_window_close(&mut self, window: WindowId);
     fn show_prompt(&mut self, window: WindowId, prompt: Prompt);
+    /// The window's handle, to own the file dialogs it asked for.
+    fn window_handle(&self, window: WindowId) -> Option<WindowHandle>;
 }
 
 enum Goal {
@@ -255,6 +264,20 @@ pub(crate) struct FileOps {
 }
 
 impl FileOps {
+    /// Starts `io`, the file work requests and events asked for, on worker threads; it reports
+    /// back through `events`.
+    pub(crate) fn spawn(&self, io: Vec<FileIo>, host: &impl DocHost, events: &FileEvents) {
+        for cmd in io {
+            let owner = match &cmd {
+                FileIo::OpenDialog { window, .. } | FileIo::SaveDialog { owner: window, .. } => {
+                    host.window_handle(*window)
+                }
+                FileIo::LoadFiles { .. } | FileIo::WriteFile { .. } => None,
+            };
+            spawn_file_io(cmd, owner, &self.writes, events);
+        }
+    }
+
     pub(crate) fn has_active_workflow_for(&self, window: WindowId) -> bool {
         self.flows.iter().any(|f| f.origin == window)
     }
@@ -883,7 +906,7 @@ impl FileEvents {
     }
 }
 
-pub(crate) fn spawn_file_io(
+fn spawn_file_io(
     io: FileIo,
     owner: Option<WindowHandle>,
     tracker: &WriteTracker,
@@ -1311,6 +1334,10 @@ mod tests {
 
         fn show_prompt(&mut self, window: WindowId, prompt: Prompt) {
             self.prompts.push((window, prompt));
+        }
+
+        fn window_handle(&self, _: WindowId) -> Option<WindowHandle> {
+            None
         }
     }
 
