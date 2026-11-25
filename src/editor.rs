@@ -15,7 +15,7 @@ use crate::text::{
 use crate::theme::Palette;
 use crate::types::{SharedStr, take_due};
 use crate::ui::{
-    AnimKey, AppNode, AppUi, CustomDraw, Easing, EditorSlot, HitId, TabId, box_, custom, row,
+    AnimKey, AppNode, AppUi, Curve, CustomDraw, Easing, EditorSlot, HitId, TabId, box_, custom, row,
 };
 
 const RIGHT_MARGIN: f32 = 10.0;
@@ -1494,9 +1494,9 @@ const THUMB_REST_RADIUS: f32 = 3.;
 const THUMB_ACTIVE_RADIUS: f32 = 4.;
 
 const IDLE_HOLD: Duration = Duration::from_secs(2);
-const FADE_IN_DURATION: Duration = Duration::from_millis(120);
-const FADE_OUT_DURATION: Duration = Duration::from_millis(200);
-const EXPAND_DURATION: Duration = Duration::from_millis(120);
+const FADE_IN: Curve = Curve::new(Duration::from_millis(120), Easing::Linear);
+const FADE_OUT: Curve = Curve::new(Duration::from_millis(200), Easing::EaseInCubic);
+const EXPAND: Curve = Curve::new(Duration::from_millis(120), Easing::EaseOutCubic);
 const DRAG_NOTIFY_INTERVAL: Duration = Duration::from_micros(8_333);
 
 fn axis_ix(axis: Axis) -> usize {
@@ -1763,19 +1763,10 @@ impl ScrollbarState {
             return before != [false, false];
         }
 
-        let (fade_dur, fade_ease) = if visible {
-            (FADE_IN_DURATION, Easing::Linear)
-        } else {
-            (FADE_OUT_DURATION, Easing::EaseInCubic)
-        };
+        let fade = if visible { FADE_IN } else { FADE_OUT };
         let opacity = ui
-            .animate_f32_from(
-                AnimKey::ScrollOpacity(slot),
-                0.0,
-                if visible { 1.0 } else { 0.0 },
-                fade_dur,
-                fade_ease,
-            )
+            .anims
+            .progress(AnimKey::ScrollOpacity(slot), visible, fade)
             .value;
         let interactive = visible || opacity > 0.0;
 
@@ -1851,14 +1842,10 @@ impl ScrollbarState {
             } else {
                 (p.text_tertiary, THUMB_REST_THICKNESS, THUMB_REST_RADIUS)
             };
+            let key = AnimKey::ScrollThickness(slot, axis);
             let thickness = ui
-                .animate_f32_from(
-                    AnimKey::ScrollThickness(slot, axis),
-                    THUMB_REST_THICKNESS,
-                    target_thickness,
-                    EXPAND_DURATION,
-                    Easing::EaseOutCubic,
-                )
+                .anims
+                .animate_f32_from(key, THUMB_REST_THICKNESS, target_thickness, EXPAND)
                 .value;
             let (pill_w, pill_h) = match axis {
                 Axis::Vertical => (thickness, metrics.thumb_len),
@@ -2268,8 +2255,8 @@ mod tests {
         );
         assert!(ui.finish_frame(crate::ui::AppFrame::default()));
 
-        ui.begin_frame(t0 + FADE_IN_DURATION, false);
-        assert!(!sb.update(slot, vp, p, t0 + FADE_IN_DURATION, &mut ui));
+        ui.begin_frame(t0 + FADE_IN.duration, false);
+        assert!(!sb.update(slot, vp, p, t0 + FADE_IN.duration, &mut ui));
         assert!(!ui.finish_frame(crate::ui::AppFrame::default()));
 
         assert!(!sb.tick(t0 + IDLE_HOLD - Duration::from_millis(1)));

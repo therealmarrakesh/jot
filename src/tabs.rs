@@ -11,8 +11,8 @@ use crate::platform::CursorStyle;
 use crate::theme::{OVERLAY_RADIUS, Palette, SMALL_FONT};
 use crate::types::SharedStr;
 use crate::ui::{
-    AnimKey, AnimStatus, AppNode, AppUi, Brushes, Easing, EditorSlot, HitId, TabHit, TabId, box_,
-    row, text,
+    AnimKey, AnimStatus, AppNode, AppUi, Brushes, Curve, Easing, EditorSlot, HitId, TabHit, TabId,
+    box_, row, text,
 };
 use crate::widgets::icon_button;
 
@@ -592,13 +592,15 @@ const UNSAVED_DOT_RIGHT: f32 = 19.;
 const CLOSE_BUTTON_TOP: f32 = 5.;
 const CLOSE_BUTTON_RIGHT: f32 = 6.;
 const SCROLL_GLYPH_SIZE: f32 = 8.;
-const SLIDE_DURATION: Duration = Duration::from_millis(200);
-const SLIDE_EASING: Easing = Easing::CubicBezier {
-    x1: 1. / 3.,
-    y1: 2. / 3.,
-    x2: 2. / 3.,
-    y2: 1.,
-};
+const SLIDE: Curve = Curve::new(
+    Duration::from_millis(200),
+    Easing::CubicBezier {
+        x1: 1. / 3.,
+        y1: 2. / 3.,
+        x2: 2. / 3.,
+        y2: 1.,
+    },
+);
 const CARET_LEFT: &str = "\u{EDD9}";
 const CARET_RIGHT: &str = "\u{EDDA}";
 const ADD_GLYPH: &str = "\u{E710}";
@@ -789,8 +791,15 @@ impl TabSet {
 }
 
 fn slide(key: AnimKey, seed: f32, target: f32, snap: bool, ui: &mut AppUi) -> (f32, bool) {
-    let duration = if snap { Duration::ZERO } else { SLIDE_DURATION };
-    let sample = ui.animate_f32_from(key, seed, target, duration, SLIDE_EASING);
+    let curve = if snap {
+        Curve {
+            duration: Duration::ZERO,
+            ..SLIDE
+        }
+    } else {
+        SLIDE
+    };
+    let sample = ui.anims.animate_f32_from(key, seed, target, curve);
     (sample.value.round(), sample.status == AnimStatus::Running)
 }
 

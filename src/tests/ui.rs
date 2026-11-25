@@ -519,10 +519,10 @@ fn status_bar_min_width_and_no_vertical_char_wrapping() {
 #[test]
 fn window_anim_tracks_prune_unused_tracks_and_word_wrap_updates_tabs() {
     let mut h = TestHarness::new();
-    let baseline_tracks = h.read(|w, _| w.ui.track_count());
+    let baseline_tracks = h.read(|w, _| w.ui.anims.track_count());
 
     h.press_key("ctrl-g");
-    let open_tracks = h.read(|w, _| w.ui.track_count());
+    let open_tracks = h.read(|w, _| w.ui.anims.track_count());
     assert!(
         open_tracks > baseline_tracks,
         "dialog open must allocate anim tracks ({open_tracks} > {baseline_tracks})"
@@ -530,7 +530,7 @@ fn window_anim_tracks_prune_unused_tracks_and_word_wrap_updates_tabs() {
 
     h.press_key("escape");
     h.draw();
-    let closed_tracks = h.read(|w, _| w.ui.track_count());
+    let closed_tracks = h.read(|w, _| w.ui.anims.track_count());
     assert_eq!(
         closed_tracks, baseline_tracks,
         "closing dialog must prune unused anim tracks back to baseline"

@@ -11,7 +11,7 @@ use crate::layout::{AvailSize, Dim, Flex, FlexStyle, LayoutTree, Space, snap_bor
 use crate::platform::{CursorStyle, MouseButton, WindowControlArea};
 use crate::types::SharedStr;
 
-pub(crate) const BRUSH_FADE_DURATION: Duration = Duration::from_millis(83);
+const BRUSH_FADE: Curve = Curve::new(Duration::from_millis(83), Easing::Linear);
 
 #[derive(Copy, Clone, Debug)]
 pub(crate) struct Brushes {
@@ -782,7 +782,7 @@ pub(crate) struct AppUi {
     hovered_chain: Vec<HitId>,
     pressed: Option<HitId>,
     pub(crate) last_input_was_keyboard: bool,
-    anims: AnimTracks<AnimKey>,
+    pub(crate) anims: AnimTracks<AnimKey>,
 }
 
 impl AppUi {
@@ -886,33 +886,8 @@ impl AppUi {
         } else {
             brushes.rest
         };
-        self.anims.animate_color(
-            AnimKey::Hit(hit),
-            target,
-            BRUSH_FADE_DURATION,
-            Easing::Linear,
-        )
-    }
-
-    pub(crate) fn progress(&mut self, key: AnimKey, active: bool, curve: Curve) -> AnimSample<f32> {
-        self.anims.progress(key, active, curve)
-    }
-
-    pub(crate) fn animate_f32_from(
-        &mut self,
-        key: AnimKey,
-        initial: f32,
-        target: f32,
-        duration: Duration,
-        easing: Easing,
-    ) -> AnimSample<f32> {
         self.anims
-            .animate_f32_from(key, initial, target, duration, easing)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn track_count(&self) -> usize {
-        self.anims.track_count()
+            .animate_color(AnimKey::Hit(hit), target, BRUSH_FADE)
     }
 }
 
@@ -1107,7 +1082,7 @@ impl Transition {
         active: bool,
         curve: Curve,
     ) -> AnimSample<f32> {
-        ui.progress(
+        ui.anims.progress(
             AnimKey::Transition {
                 serial: self.serial,
                 track,
@@ -1157,8 +1132,7 @@ impl<T: Lerp> AnimTrack<T> {
     fn sample_and_update(
         &mut self,
         target: T,
-        duration: Duration,
-        easing: Easing,
+        Curve { duration, easing }: Curve,
         now: Instant,
         reduce_motion: bool,
         frame: u64,
@@ -1264,35 +1238,25 @@ impl<K: Copy + Eq + Hash> AnimTracks<K> {
         self.running_this_frame
     }
 
+    /// Runs from 0 toward 1 while `active`, and back toward 0 when not.
     pub(crate) fn progress(&mut self, key: K, active: bool, curve: Curve) -> AnimSample<f32> {
-        self.animate_f32_from(
-            key,
-            0.0,
-            if active { 1.0 } else { 0.0 },
-            curve.duration,
-            curve.easing,
-        )
+        self.animate_f32_from(key, 0.0, if active { 1.0 } else { 0.0 }, curve)
     }
 
+    /// Animates toward `target`, starting from `initial` the first time `key` is seen.
     pub(crate) fn animate_f32_from(
         &mut self,
         key: K,
         initial: f32,
         target: f32,
-        duration: Duration,
-        easing: Easing,
+        curve: Curve,
     ) -> AnimSample<f32> {
-        self.animate(|t| &mut t.scalars, key, initial, target, duration, easing)
+        self.animate(|t| &mut t.scalars, key, initial, target, curve)
     }
 
-    pub(crate) fn animate_color(
-        &mut self,
-        key: K,
-        target: Rgba,
-        duration: Duration,
-        easing: Easing,
-    ) -> Rgba {
-        self.animate(|t| &mut t.colors, key, target, target, duration, easing).value
+    pub(crate) fn animate_color(&mut self, key: K, target: Rgba, curve: Curve) -> Rgba {
+        self.animate(|t| &mut t.colors, key, target, target, curve)
+            .value
     }
 
     fn animate<T: Lerp>(
@@ -1301,8 +1265,7 @@ impl<K: Copy + Eq + Hash> AnimTracks<K> {
         key: K,
         from: T,
         target: T,
-        duration: Duration,
-        easing: Easing,
+        curve: Curve,
     ) -> AnimSample<T> {
         let (frame, now, reduce_motion) = (self.frame, self.now, self.reduce_motion);
         let track = tracks(self).entry(key).or_insert_with(|| AnimTrack {
@@ -1310,10 +1273,10 @@ impl<K: Copy + Eq + Hash> AnimTracks<K> {
             target,
             started_at: now,
             reversing_scale: 1.0,
-            duration,
+            duration: curve.duration,
             last_frame: frame,
         });
-        let sample = track.sample_and_update(target, duration, easing, now, reduce_motion, frame);
+        let sample = track.sample_and_update(target, curve, now, reduce_motion, frame);
         self.running_this_frame |= sample.status == AnimStatus::Running;
         sample
     }
@@ -1748,7 +1711,7 @@ mod tests {
         let mut tracks: AnimTracks<u32> = AnimTracks::default();
 
         tracks.begin_frame(t0, false);
-        let s0 = tracks.animate_f32_from(1, 0.0, 100.0, dur, Easing::Linear);
+        let s0 = tracks.animate_f32_from(1, 0.0, 100.0, Curve::new(dur, Easing::Linear));
         assert_eq!(s0.status, AnimStatus::Running);
         assert_eq!(s0.value, 0.0);
         assert!(tracks.end_frame());
@@ -1756,14 +1719,14 @@ mod tests {
 
         let t_mid = t0 + Duration::from_millis(50);
         tracks.begin_frame(t_mid, false);
-        let s1 = tracks.animate_f32_from(1, 0.0, 0.0, dur, Easing::Linear);
+        let s1 = tracks.animate_f32_from(1, 0.0, 0.0, Curve::new(dur, Easing::Linear));
         assert_eq!(s1.status, AnimStatus::Running);
         assert!((s1.value - 50.0).abs() < 1e-3);
         assert!(tracks.end_frame());
 
         let t_done = t_mid + Duration::from_millis(50);
         tracks.begin_frame(t_done, false);
-        let s2 = tracks.animate_f32_from(1, 0.0, 0.0, dur, Easing::Linear);
+        let s2 = tracks.animate_f32_from(1, 0.0, 0.0, Curve::new(dur, Easing::Linear));
         assert_eq!(s2.status, AnimStatus::Finished);
         assert_eq!(s2.value, 0.0);
         assert!(!tracks.end_frame());
