@@ -1,3 +1,7 @@
+//! A window's tabs and its strip: tabs share the width between a minimum and a maximum, then
+//! the strip scrolls; tabs slide into place, a closed one shrinks away as a ghost, and a
+//! dragged one follows the pointer over the others.
+
 use std::ops::Index;
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -5,9 +9,9 @@ use std::time::{Duration, Instant};
 use crate::command::{AppCommand, shortcut_tooltip};
 use crate::document::{self, DocPath, Format, PathKey};
 use crate::editor::{DocOptions, Editor};
-use crate::text::Rope;
-use crate::geom::{Edges, Point, size, transparent_black};
+use crate::geom::{Edges, Point, Rgba, size, transparent_black};
 use crate::platform::CursorStyle;
+use crate::text::Rope;
 use crate::theme::{OVERLAY_RADIUS, Palette, SMALL_FONT};
 use crate::types::SharedStr;
 use crate::ui::{
@@ -30,12 +34,96 @@ const NEW_TAB_GAP: f32 = 5.;
 const NEW_TAB_GAP_SCROLLING: f32 = 3.;
 pub(crate) const STRIP_END_RESERVE: f32 = NEW_TAB_GAP_SCROLLING + BUTTON_WIDTH;
 pub(crate) const MIN_STRIP_WIDTH: f32 = 2. * LIST_PAD + STRIP_END_RESERVE;
+/// How far a dragged tab moves before it can swap places again.
+const REORDER_THRESHOLD: f32 = 16.;
+
 const SCROLL_STEP: f32 = 50.;
 const SCROLL_REPEAT_DELAY: Duration = Duration::from_millis(250);
 const SCROLL_REPEAT_INTERVAL: Duration = Duration::from_millis(100);
 const WHEEL_SHARE: f32 = 0.15;
+
+const TAB_LABEL_INSET: f32 = 8.;
+const TAB_LABEL_TRAILING: f32 = 44.;
+const TAB_LABEL_TRAILING_BARE: f32 = 8.;
+const UNSAVED_DOT: f32 = 6.;
+const UNSAVED_DOT_TOP: f32 = 13.;
+const UNSAVED_DOT_RIGHT: f32 = 19.;
+const CLOSE_BUTTON_TOP: f32 = 5.;
+const CLOSE_BUTTON_RIGHT: f32 = 6.;
+const SCROLL_GLYPH_SIZE: f32 = 8.;
+const BUTTON_GLYPH_SIZE: f32 = 12.;
 const CLOSE_GLYPH: &str = "\u{E711}";
-const REORDER_THRESHOLD: f32 = 16.;
+const CARET_LEFT: &str = "\u{EDD9}";
+const CARET_RIGHT: &str = "\u{EDDA}";
+const ADD_GLYPH: &str = "\u{E710}";
+const SLIDE: Curve = Curve::new(
+    Duration::from_millis(200),
+    Easing::CubicBezier {
+        x1: 1. / 3.,
+        y1: 2. / 3.,
+        x2: 2. / 3.,
+        y2: 1.,
+    },
+);
+
+// ---- 1. Tabs --------------------------------------------------------------------------------
+
+pub(crate) struct TabData {
+    pub(crate) id: TabId,
+    pub(crate) editor: Editor,
+    pub(crate) zoom: f32,
+    pub(crate) doc_path: Option<DocPath>,
+    pub(crate) format: Format,
+}
+
+impl TabData {
+    pub(crate) fn create(
+        content: Option<document::Loaded>,
+        word_wrap: bool,
+        paddings: Edges<f32>,
+    ) -> Self {
+        let (doc_path, text, format) = match content {
+            Some(loaded) => (Some(loaded.doc_path), loaded.text, loaded.format),
+            None => (None, Rope::new(), Format::default()),
+        };
+        let id = TabId::next();
+        let options = DocOptions {
+            tab: id,
+            soft_wrap: word_wrap,
+            paddings,
+        };
+        Self {
+            id,
+            editor: Editor::document(text, options),
+            zoom: 1.,
+            doc_path,
+            format,
+        }
+    }
+
+    pub(crate) fn path(&self) -> Option<&Path> {
+        self.doc_path.as_ref().map(DocPath::as_path)
+    }
+
+    fn path_key(&self) -> Option<&PathKey> {
+        self.doc_path.as_ref().map(DocPath::key)
+    }
+
+    /// Whether it has changes to save: an edited file, or an untitled document with text.
+    pub(crate) fn is_dirty(&self) -> bool {
+        let m = self.editor.model();
+        !m.is_clean() && (self.doc_path.is_some() || m.text().len() > 0)
+    }
+}
+
+/// A tab: its data, and the key its slides run under (kept when the data is replaced).
+pub(crate) struct Tab {
+    pub(crate) data: TabData,
+    pub(crate) slot: SlotKey,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct SlotKey(usize);
 
 pub(crate) enum Removal {
     LastTab,
@@ -53,6 +141,7 @@ struct Ghost {
     was_active: bool,
 }
 
+/// A tab being dragged: held `grab` from its left, at `left`, and where it last swapped.
 #[derive(Clone, Copy)]
 struct Drag {
     id: TabId,
@@ -61,21 +150,27 @@ struct Drag {
     left: f32,
 }
 
+// ---- 2. The set -----------------------------------------------------------------------------
+
 pub(crate) struct TabSet {
     tabs: Vec<Tab>,
     active: usize,
     extent: f32,
     scroll: f32,
+    /// The next frame jumps to the layout, or to the scroll, instead of sliding.
     snap_layout: bool,
     snap_scroll: bool,
     next_key: usize,
     column: f32,
     width: f32,
+    /// The tabs don't fit; whether there's room for the scroll arrows too.
     overflow: bool,
     buttons: bool,
+    /// The width held while the pointer stays on the strip after a close.
     frozen: Option<f32>,
     ghosts: Vec<Ghost>,
     drag: Option<Drag>,
+    /// The tab drawn over the others: the dragged one, until it settles.
     lifted: Option<TabId>,
     /// While a scroll arrow is held: when it next scrolls, and by how much.
     repeat: Option<(Instant, f32)>,
@@ -84,21 +179,24 @@ pub(crate) struct TabSet {
 impl Index<usize> for TabSet {
     type Output = Tab;
 
-    fn index(&self, index: usize) -> &Self::Output {
+    fn index(&self, index: usize) -> &Tab {
         &self.tabs[index]
     }
 }
 
 impl TabSet {
     pub(crate) fn new(initial: TabData) -> Self {
-        let mut set = Self {
-            tabs: Vec::with_capacity(1),
+        Self {
+            tabs: vec![Tab {
+                data: initial,
+                slot: SlotKey(1),
+            }],
             active: 0,
             extent: TAB_WIDTH,
             scroll: 0.,
             snap_layout: false,
             snap_scroll: false,
-            next_key: 0,
+            next_key: 1,
             column: f32::INFINITY,
             width: TAB_WIDTH,
             overflow: false,
@@ -108,14 +206,15 @@ impl TabSet {
             drag: None,
             lifted: None,
             repeat: None,
-        };
-        let slot = set.next_slot();
-        set.tabs.push(Tab { data: initial, slot });
-        set
+        }
     }
 
     pub(crate) fn len(&self) -> usize {
         self.tabs.len()
+    }
+
+    pub(crate) fn iter(&self) -> std::slice::Iter<'_, Tab> {
+        self.tabs.iter()
     }
 
     pub(crate) fn active_index(&self) -> usize {
@@ -131,15 +230,11 @@ impl TabSet {
     }
 
     pub(crate) fn active_id(&self) -> TabId {
-        self.tabs[self.active].data.id
+        self.active().id
     }
 
     pub(crate) fn active_slot(&self) -> EditorSlot {
         EditorSlot::Tab(self.active_id())
-    }
-
-    pub(crate) fn iter(&self) -> std::slice::Iter<'_, Tab> {
-        self.tabs.iter()
     }
 
     pub(crate) fn index_of(&self, id: TabId) -> Option<usize> {
@@ -147,11 +242,12 @@ impl TabSet {
     }
 
     pub(crate) fn editor(&self, id: TabId) -> Option<&Editor> {
-        self.index_of(id).map(|ix| &self.tabs[ix].data.editor)
+        Some(&self.tabs[self.index_of(id)?].data.editor)
     }
 
     pub(crate) fn editor_mut(&mut self, id: TabId) -> Option<&mut Editor> {
-        self.index_of(id).map(|ix| &mut self.tabs[ix].data.editor)
+        let ix = self.index_of(id)?;
+        Some(&mut self.tabs[ix].data.editor)
     }
 
     pub(crate) fn for_each_editor_mut(&mut self, mut f: impl FnMut(&mut Editor)) {
@@ -167,49 +263,62 @@ impl TabSet {
     pub(crate) fn find_by_key(&self, key: &PathKey) -> Option<usize> {
         self.tabs
             .iter()
-            .position(|tab| tab.data.path_key() == Some(key))
+            .position(|t| t.data.path_key() == Some(key))
     }
 
     pub(crate) fn is_blank(&self, ix: usize) -> bool {
-        let tab = &self.tabs[ix];
-        tab.data.doc_path.is_none() && tab.data.editor.model().text().len() == 0
+        let data = &self.tabs[ix].data;
+        data.doc_path.is_none() && data.editor.model().text().len() == 0
     }
 
     pub(crate) fn has_dirty(&self) -> bool {
-        self.tabs.iter().any(|tab| tab.data.is_dirty())
+        self.tabs.iter().any(|t| t.data.is_dirty())
     }
 
     pub(crate) fn dirty_tabs(&self) -> Vec<TabId> {
-        self.tabs
-            .iter()
-            .filter(|tab| tab.data.is_dirty())
-            .map(|tab| tab.data.id)
-            .collect()
+        let dirty = self.tabs.iter().filter(|t| t.data.is_dirty());
+        dirty.map(|t| t.data.id).collect()
     }
 
-    fn next_slot(&mut self) -> SlotKey {
-        self.next_key += 1;
-        SlotKey(self.next_key)
+    pub(crate) fn mark_saved(
+        &mut self,
+        tab: TabId,
+        snapshot: u64,
+        doc_path: DocPath,
+        format: Format,
+    ) -> bool {
+        let Some(ix) = self.index_of(tab) else {
+            return false;
+        };
+        let data = &mut self.tabs[ix].data;
+        data.editor.mark_saved_version(snapshot);
+        (data.doc_path, data.format) = (Some(doc_path), format);
+        true
     }
+}
 
-    fn snap(&mut self) {
-        self.snap_layout = true;
-        self.snap_scroll = true;
-    }
+// ---- 3. Layout and scrolling ----------------------------------------------------------------
 
+/// The slot a tab whose left edge is at `left` takes: the one its middle is over.
+fn slot_index(left: f32, width: f32, last: usize) -> usize {
+    ((left / width - 0.5).ceil().max(0.) as usize).min(last)
+}
+
+impl TabSet {
+    /// Works out the tabs' width for `count` of them, and whether they overflow the strip.
     fn measure_for(&mut self, count: usize) {
         let alone = count <= 1;
         let count = count.max(1) as f32;
         let room = (self.column - 2. * LIST_PAD).max(0.);
-        let min_width = if alone { 0. } else { TAB_MIN_WIDTH };
-        let fit = (room / count).clamp(min_width, TAB_WIDTH);
-        self.width = self.frozen.unwrap_or(fit);
+        let min = if alone { 0. } else { TAB_MIN_WIDTH };
+        self.width = self.frozen.unwrap_or((room / count).clamp(min, TAB_WIDTH));
         self.overflow = !alone && self.width * count > room;
-        let between_buttons = room - 2. * SCROLL_AREA;
-        self.buttons = self.overflow && between_buttons >= TAB_MIN_WIDTH;
+        let between_arrows = room - 2. * SCROLL_AREA;
+        self.buttons = self.overflow && between_arrows >= TAB_MIN_WIDTH;
+        // Overflowing, the tabs shrink to fit between the arrows (or all the room).
         if self.overflow && self.frozen.is_none() {
             self.width = if self.buttons {
-                (between_buttons / count).clamp(TAB_MIN_WIDTH, TAB_WIDTH)
+                (between_arrows / count).clamp(TAB_MIN_WIDTH, TAB_WIDTH)
             } else {
                 room.min(TAB_WIDTH)
             };
@@ -220,6 +329,10 @@ impl TabSet {
         self.measure_for(self.tabs.len());
         self.extent = self.tabs.len() as f32 * self.width;
         self.scroll_to(self.scroll);
+    }
+
+    fn snap(&mut self) {
+        (self.snap_layout, self.snap_scroll) = (true, true);
     }
 
     fn scroll_area(&self) -> f32 {
@@ -242,34 +355,21 @@ impl TabSet {
         self.scroll_area() + LIST_PAD - self.scroll
     }
 
-    fn new_tab_gap(&self) -> f32 {
-        if self.buttons {
-            NEW_TAB_GAP_SCROLLING
-        } else {
-            NEW_TAB_GAP
+    /// Where tab `ix` belongs: its slot, or where it's dragged.
+    fn tab_target(&self, ix: usize) -> f32 {
+        let id = self.tabs[ix].data.id;
+        match self.drag {
+            Some(drag) if drag.id == id => drag.left,
+            _ => ix as f32 * self.width,
         }
     }
 
-    fn tab_target(&self, ix: usize) -> f32 {
-        let id = self.tabs[ix].data.id;
-        self.drag
-            .filter(|drag| drag.id == id)
-            .map_or(ix as f32 * self.width, |drag| drag.left)
-    }
-
+    /// The pointer at `strip_x`, holding a tab `grab` in: where it is along the list, where the
+    /// tab's left edge goes (kept within the list), and the slot it's over.
     fn place(&self, strip_x: f32, grab: f32, last: usize) -> (f32, f32, usize) {
         let x = strip_x - self.origin_in_strip();
         let left = (x - grab).clamp(0., last as f32 * self.width);
         (x, left, slot_index(left, self.width, last))
-    }
-
-    fn depart(&mut self, id: TabId) {
-        if self.drag.is_some_and(|drag| drag.id == id) {
-            self.drag = None;
-        }
-        if self.lifted == Some(id) {
-            self.lifted = None;
-        }
     }
 
     fn scroll_to(&mut self, target: f32) {
@@ -282,14 +382,14 @@ impl TabSet {
         self.scroll != before
     }
 
+    /// Scrolls the least that shows `left..right` of the list.
     fn reveal(&mut self, left: f32, right: f32) {
         if !self.overflow {
             self.scroll = 0.;
             self.snap_scroll = true;
             return;
         }
-        let viewport = self.scroll_viewport();
-        let current = self.scroll;
+        let (viewport, current) = (self.scroll_viewport(), self.scroll);
         let target = if left < current {
             left
         } else if right + 2. * LIST_PAD > current + viewport {
@@ -306,6 +406,15 @@ impl TabSet {
             self.reveal(left, left + self.width);
         }
     }
+}
+
+// ---- 4. Changing the set --------------------------------------------------------------------
+
+impl TabSet {
+    fn next_slot(&mut self) -> SlotKey {
+        self.next_key += 1;
+        SlotKey(self.next_key)
+    }
 
     pub(crate) fn select(&mut self, ix: usize) -> bool {
         let changed = self.active != ix;
@@ -321,22 +430,29 @@ impl TabSet {
         self.tabs.len() - 1
     }
 
+    /// Puts `data` in tab `ix`'s place (it keeps the slot, so it doesn't slide).
     pub(crate) fn replace(&mut self, ix: usize, data: TabData) {
-        let slot = self.tabs[ix].slot;
-        let replaced = std::mem::replace(&mut self.tabs[ix], Tab { data, slot });
-        self.depart(replaced.data.id);
+        let replaced = std::mem::replace(&mut self.tabs[ix].data, data);
+        self.depart(replaced.id);
     }
 
+    pub(crate) fn restore(&mut self, data: TabData, ix: usize) -> usize {
+        let slot = self.next_slot();
+        let ix = ix.min(self.tabs.len());
+        self.tabs.insert(ix, Tab { data, slot });
+        self.layout();
+        ix
+    }
+
+    /// Closes tab `ix` into a ghost; `freeze_if_hovering` holds the width till the pointer goes.
     pub(crate) fn remove(&mut self, ix: usize, freeze_if_hovering: bool) -> Removal {
         if self.tabs.len() == 1 {
             return Removal::LastTab;
         }
-        let was_active = ix == self.active;
         let width = self.width;
-        let name: SharedStr = self.tab_name(ix).into();
+        let name = self.tab_name(ix).into();
         let tab = self.tabs.remove(ix);
-        let id = tab.data.id;
-        self.depart(id);
+        self.depart(tab.data.id);
         if ix < self.tabs.len() && freeze_if_hovering {
             self.frozen = Some(width);
         }
@@ -344,48 +460,53 @@ impl TabSet {
             name,
             key: tab.slot,
             x: ix as f32 * width,
-            was_active,
+            was_active: ix == self.active,
         });
-        let (closed_active, next_active) = self.settle_after_removal(ix);
-        Removal::Removed {
-            id,
-            closed_active,
-            next_active,
-        }
+        self.settle(tab.data.id, ix)
     }
 
+    /// Takes tab `id` out (to another window), without a ghost; even the last one.
     pub(crate) fn take(&mut self, id: TabId) -> Option<(TabData, Removal)> {
         let ix = self.index_of(id)?;
         let tab = self.tabs.remove(ix);
         self.depart(id);
-        let outcome = if self.tabs.is_empty() {
+        let removal = if self.tabs.is_empty() {
             Removal::LastTab
         } else {
-            let (closed_active, next_active) = self.settle_after_removal(ix);
-            Removal::Removed {
-                id,
-                closed_active,
-                next_active,
-            }
+            self.settle(id, ix)
         };
-        Some((tab.data, outcome))
+        Some((tab.data, removal))
     }
 
-    fn settle_after_removal(&mut self, ix: usize) -> (bool, usize) {
+    /// After tab `id` left from `ix`: the same tab stays active, or the next if it was this one.
+    fn settle(&mut self, id: TabId, ix: usize) -> Removal {
         let closed_active = ix == self.active;
         if ix < self.active || self.active == self.tabs.len() {
             self.active -= 1;
         }
         self.layout();
-        (closed_active, self.active)
+        Removal::Removed {
+            id,
+            closed_active,
+            next_active: self.active,
+        }
     }
 
+    /// A tab that left stops being dragged or drawn on top.
+    fn depart(&mut self, id: TabId) {
+        if self.drag.is_some_and(|drag| drag.id == id) {
+            self.drag = None;
+        }
+        if self.lifted == Some(id) {
+            self.lifted = None;
+        }
+    }
+
+    /// A tab dragged in from another window: it takes the slot under the pointer, still dragged.
     pub(crate) fn insert_dragged(&mut self, data: TabData, strip_x: f32, grab: f32) -> usize {
-        let slot = self.next_slot();
-        let id = data.id;
-        let count_before = self.tabs.len();
-        self.measure_for(count_before + 1);
-        let (x, left, ix) = self.place(strip_x, grab, count_before);
+        let (slot, id, before) = (self.next_slot(), data.id, self.tabs.len());
+        self.measure_for(before + 1);
+        let (x, left, ix) = self.place(strip_x, grab, before);
         self.drag = Some(Drag {
             id,
             grab,
@@ -399,14 +520,7 @@ impl TabSet {
         ix
     }
 
-    pub(crate) fn restore(&mut self, data: TabData, ix: usize) -> usize {
-        let slot = self.next_slot();
-        let ix = ix.min(self.tabs.len());
-        self.tabs.insert(ix, Tab { data, slot });
-        self.layout();
-        ix
-    }
-
+    /// A dragged tab goes back to `ix`; where it ended up.
     pub(crate) fn return_tab(&mut self, id: TabId, ix: usize) -> Option<usize> {
         self.drag = None;
         if let Some(from) = self.index_of(id) {
@@ -418,29 +532,28 @@ impl TabSet {
         self.index_of(id)
     }
 
+    /// Tab `id` follows the pointer, swapping into the slot it's over once it's moved far enough.
     pub(crate) fn drag(&mut self, id: TabId, strip_x: f32, grab: f32, strip_start: f32) {
         let Some(from) = self.index_of(id) else {
             return;
         };
-        let active_id = self.active_id();
-        let origin = self.origin_in_strip();
-        let mut drag = self.drag.filter(|d| d.id == id).unwrap_or(Drag {
+        let active = self.active_id();
+        let fresh = Drag {
             id,
             grab,
-            last_move: strip_start - origin,
+            last_move: strip_start - self.origin_in_strip(),
             left: 0.,
-        });
+        };
+        let mut drag = self.drag.filter(|d| d.id == id).unwrap_or(fresh);
         self.lifted = Some(id);
-        let width = self.width;
-        let last = self.tabs.len() - 1;
-        let (x, left, to) = self.place(strip_x, drag.grab, last);
+        let (x, left, to) = self.place(strip_x, drag.grab, self.tabs.len() - 1);
         drag.left = left;
         self.snap_scroll = true;
-        self.reveal(left, left + width);
+        self.reveal(left, left + self.width);
         if to != from && (x - drag.last_move).abs() > REORDER_THRESHOLD {
             let tab = self.tabs.remove(from);
             self.tabs.insert(to, tab);
-            self.active = self.index_of(active_id).unwrap_or(to);
+            self.active = self.index_of(active).unwrap_or(to);
             drag.last_move = x;
         }
         self.drag = Some(drag);
@@ -448,40 +561,26 @@ impl TabSet {
     }
 
     pub(crate) fn release_drag(&mut self) -> bool {
-        if self.drag.take().is_some() {
+        let dragged = self.drag.take().is_some();
+        if dragged {
             self.layout();
-            true
-        } else {
-            false
         }
+        dragged
     }
 
-    pub(crate) fn mark_saved(
-        &mut self,
-        tab: TabId,
-        snapshot: u64,
-        doc_path: DocPath,
-        format: Format,
-    ) -> bool {
-        let Some(ix) = self.index_of(tab) else {
-            return false;
-        };
-        let data = &mut self.tabs[ix].data;
-        data.editor.mark_saved_version(snapshot);
-        data.doc_path = Some(doc_path);
-        data.format = format;
-        true
-    }
-
+    /// The pointer left the strip: a width held after a close is let go; whether there was one.
     pub(crate) fn thaw_if_frozen(&mut self) -> bool {
-        if self.frozen.take().is_some() {
+        let frozen = self.frozen.take().is_some();
+        if frozen {
             self.layout();
-            true
-        } else {
-            false
         }
+        frozen
     }
+}
 
+// ---- 5. Scroll arrows and the wheel ---------------------------------------------------------
+
+impl TabSet {
     /// A press on a scroll arrow scrolls a step, and keeps scrolling while it's held.
     pub(crate) fn press_arrow(&mut self, right: bool, now: Instant) {
         let step = if right { SCROLL_STEP } else { -SCROLL_STEP };
@@ -490,7 +589,6 @@ impl TabSet {
         }
     }
 
-    /// The arrow is no longer held, or the pointer left it.
     pub(crate) fn release_arrow(&mut self) {
         self.repeat = None;
     }
@@ -505,14 +603,12 @@ impl TabSet {
         true
     }
 
-    /// Scrolls again while an arrow is held; whether it was due.
     pub(crate) fn tick(&mut self, now: Instant) -> bool {
         let Some((_, step)) = self.repeat.filter(|&(at, _)| at <= now) else {
             return false;
         };
-        self.repeat = self
-            .scroll_by(step)
-            .then_some((now + SCROLL_REPEAT_INTERVAL, step));
+        let moved = self.scroll_by(step);
+        self.repeat = moved.then_some((now + SCROLL_REPEAT_INTERVAL, step));
         true
     }
 
@@ -521,96 +617,28 @@ impl TabSet {
     }
 }
 
-fn slot_index(left: f32, width: f32, last: usize) -> usize {
-    ((left / width - 0.5).ceil().max(0.) as usize).min(last)
-}
+// ---- 6. Drawing -----------------------------------------------------------------------------
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct SlotKey(usize);
-
-pub(crate) struct TabData {
-    pub(crate) id: TabId,
-    pub(crate) editor: Editor,
-    pub(crate) zoom: f32,
-    pub(crate) doc_path: Option<DocPath>,
-    pub(crate) format: Format,
-}
-
-impl TabData {
-    pub(crate) fn path(&self) -> Option<&Path> {
-        self.doc_path.as_ref().map(DocPath::as_path)
-    }
-
-    fn path_key(&self) -> Option<&PathKey> {
-        self.doc_path.as_ref().map(DocPath::key)
-    }
-
-    pub(crate) fn is_dirty(&self) -> bool {
-        let m = self.editor.model();
-        !m.is_clean() && (self.doc_path.is_some() || m.text().len() > 0)
-    }
-
-    pub(crate) fn create(
-        content: Option<document::Loaded>,
-        word_wrap: bool,
-        paddings: Edges<f32>,
-    ) -> Self {
-        let (doc_path, text, format) = match content {
-            Some(loaded) => (Some(loaded.doc_path), loaded.text, loaded.format),
-            None => (None, Rope::new(), Format::default()),
-        };
-        let id = TabId::next();
-        let editor = Editor::document(
-            text,
-            DocOptions {
-                tab: id,
-                soft_wrap: word_wrap,
-                paddings,
-            },
-        );
-        Self {
-            id,
-            editor,
-            zoom: 1.,
-            doc_path,
-            format,
-        }
-    }
-}
-
-pub(crate) struct Tab {
-    pub(crate) data: TabData,
-    pub(crate) slot: SlotKey,
-}
-
-const TAB_LABEL_INSET: f32 = 8.;
-const TAB_LABEL_TRAILING: f32 = 44.;
-const TAB_LABEL_TRAILING_BARE: f32 = 8.;
-const UNSAVED_DOT: f32 = 6.;
-const UNSAVED_DOT_TOP: f32 = 13.;
-const UNSAVED_DOT_RIGHT: f32 = 19.;
-const CLOSE_BUTTON_TOP: f32 = 5.;
-const CLOSE_BUTTON_RIGHT: f32 = 6.;
-const SCROLL_GLYPH_SIZE: f32 = 8.;
-const SLIDE: Curve = Curve::new(
-    Duration::from_millis(200),
-    Easing::CubicBezier {
-        x1: 1. / 3.,
-        y1: 2. / 3.,
-        x2: 2. / 3.,
-        y2: 1.,
-    },
-);
-const CARET_LEFT: &str = "\u{EDD9}";
-const CARET_RIGHT: &str = "\u{EDDA}";
-const ADD_GLYPH: &str = "\u{E710}";
-const BUTTON_GLYPH_SIZE: f32 = 12.;
-
+/// Where this frame draws the strip: the list's shift and width, the tabs, and shrinking ghosts.
 pub(crate) struct StripFrame {
     shift: f32,
     viewport: f32,
     tabs: Vec<(f32, f32)>,
     ghosts: Vec<(SharedStr, f32, f32, bool)>,
+}
+
+/// Slides `key` to `target` (from `seed`), or jumps with `snap`: whole pixels, and if moving.
+fn slide(key: AnimKey, seed: f32, target: f32, snap: bool, ui: &mut AppUi) -> (f32, bool) {
+    let curve = if snap {
+        Curve {
+            duration: Duration::ZERO,
+            ..SLIDE
+        }
+    } else {
+        SLIDE
+    };
+    let sample = ui.anims.animate_f32_from(key, seed, target, curve);
+    (sample.value.round(), sample.status == AnimStatus::Running)
 }
 
 impl TabSet {
@@ -625,37 +653,39 @@ impl TabSet {
         let snap_scroll = std::mem::take(&mut self.snap_scroll);
         let (scroll, _) = slide(AnimKey::TabScroll, 0., self.scroll, snap_scroll, ui);
         let (extent, _) = slide(AnimKey::TabExtent, TAB_WIDTH, self.extent, snap, ui);
-        let mut right = 0.;
-        let mut lifted_moving = false;
-        let mut sampled_tabs = Vec::with_capacity(self.tabs.len());
-        for ix in 0..self.tabs.len() {
-            let tab = &self.tabs[ix];
+        // Each tab slides in from where the one before it ends.
+        let (mut right, mut lifted_moving) = (0., false);
+        let mut tabs = Vec::with_capacity(self.tabs.len());
+        for (ix, tab) in self.tabs.iter().enumerate() {
             let id = tab.data.id;
-            let dragged = self.drag.is_some_and(|drag| drag.id == id);
+            let dragged = self.drag.is_some_and(|d| d.id == id);
+            let key = tab.slot.0;
             let (x, moving) = slide(
-                AnimKey::TabX(tab.slot.0),
+                AnimKey::TabX(key),
                 right,
                 self.tab_target(ix),
                 snap || dragged,
                 ui,
             );
-            let (width, _) = slide(AnimKey::TabWidth(tab.slot.0), 0., self.width, snap, ui);
+            let (width, _) = slide(AnimKey::TabWidth(key), 0., self.width, snap, ui);
             if self.lifted == Some(id) {
                 lifted_moving = moving;
             }
             right = x + width;
-            sampled_tabs.push((x, width));
+            tabs.push((x, width));
         }
         let mut ghosts = Vec::new();
         self.ghosts.retain(|ghost| {
-            let (x, sliding) = slide(AnimKey::TabX(ghost.key.0), ghost.x, ghost.x, false, ui);
-            let (width, shrinking) = slide(AnimKey::TabWidth(ghost.key.0), 0., 0., false, ui);
+            let key = ghost.key.0;
+            let (x, sliding) = slide(AnimKey::TabX(key), ghost.x, ghost.x, false, ui);
+            let (width, shrinking) = slide(AnimKey::TabWidth(key), 0., 0., false, ui);
             let moving = sliding || shrinking;
             if moving {
                 ghosts.push((ghost.name.clone(), x, width, ghost.was_active));
             }
             moving
         });
+        // A dropped tab stays on top until it has slid into place.
         if self.drag.is_none() && !lifted_moving {
             self.lifted = None;
         }
@@ -667,25 +697,24 @@ impl TabSet {
         StripFrame {
             shift: LIST_PAD - scroll,
             viewport,
-            tabs: sampled_tabs,
+            tabs,
             ghosts,
         }
     }
 
-    pub(crate) fn render(&self, sampled: &StripFrame, p: Palette, ui: &mut AppUi) -> AppNode {
-        let shift = sampled.shift;
-        let viewport = sampled.viewport;
+    /// The strip: arrows, the list (ghosts, then tabs, the lifted one on top), the new-tab button.
+    pub(crate) fn render(&self, frame: &StripFrame, p: Palette, ui: &mut AppUi) -> AppNode {
+        let shift = frame.shift;
         let lifted = self.lifted.and_then(|id| self.index_of(id));
         let cover = lifted.map(|ix| {
-            let (x, width) = sampled.tabs[ix];
+            let (x, width) = frame.tabs[ix];
             (shift + x, shift + x + width)
         });
-        let hovered_ix = self
+        let hovered = self
             .tabs
             .iter()
             .position(|t| ui.is_hovered(HitId::Tab(TabHit::Item(t.data.id))));
-
-        let ghosts: Vec<AppNode> = sampled
+        let ghosts: Vec<AppNode> = frame
             .ghosts
             .iter()
             .map(|(name, x, width, was_active)| {
@@ -694,37 +723,23 @@ impl TabSet {
                 } else {
                     transparent_black()
                 };
-                tab_frame(
-                    shift + x,
-                    *width,
-                    cover,
-                    tab_face(
-                        p,
-                        *was_active,
-                        bg,
-                        TAB_LABEL_TRAILING_BARE,
-                        name.clone(),
-                    ),
-                )
+                let face = tab_face(p, *was_active, bg, TAB_LABEL_TRAILING_BARE, name.clone());
+                tab_frame(shift + x, *width, cover, face)
             })
             .collect();
-
-        let tab_nodes: Vec<AppNode> = (0..self.tabs.len())
+        let order = (0..self.tabs.len())
             .filter(|&ix| Some(ix) != lifted)
-            .chain(lifted)
+            .chain(lifted);
+        let tabs: Vec<AppNode> = order
             .map(|ix| {
-                let (x, width) = sampled.tabs[ix];
-                tab_frame(
-                    shift + x,
-                    width,
-                    cover.filter(|_| Some(ix) != lifted),
-                    render_tab(&self.tabs, ix, self.active, hovered_ix, p, ui),
-                )
+                let (x, width) = frame.tabs[ix];
+                let under = cover.filter(|_| Some(ix) != lifted);
+                let tab = render_tab(&self.tabs, ix, self.active, hovered, p, ui);
+                tab_frame(shift + x, width, under, tab)
             })
             .collect();
-
-        let scroll_back = self.buttons.then(|| self.scroll_button(false, p, ui));
-        let scroll_fwd = self.buttons.then(|| self.scroll_button(true, p, ui));
+        let back = self.buttons.then(|| self.scroll_button(false, p, ui));
+        let forward = self.buttons.then(|| self.scroll_button(true, p, ui));
         let new_tab = icon_button(
             p,
             HitId::Tab(TabHit::New),
@@ -734,45 +749,56 @@ impl TabSet {
             true,
             ui,
         )
-        .ml(self.new_tab_gap())
+        .ml(if self.buttons {
+            NEW_TAB_GAP_SCROLLING
+        } else {
+            NEW_TAB_GAP
+        })
         .mt(BUTTON_TOP);
-
+        let list = box_()
+            .hit(HitId::Tab(TabHit::List))
+            .flex_none()
+            .h_full()
+            .w(frame.viewport)
+            .overflow_hidden()
+            .children(ghosts)
+            .children(tabs);
         row()
             .hit(HitId::Tab(TabHit::Strip))
             .h(TAB_HEIGHT)
-            .when_some(scroll_back, |this, btn| this.child(btn))
-            .child(
-                box_()
-                    .hit(HitId::Tab(TabHit::List))
-                    .flex_none()
-                    .h_full()
-                    .w(viewport)
-                    .overflow_hidden()
-                    .children(ghosts)
-                    .children(tab_nodes),
-            )
-            .when_some(scroll_fwd, |this, btn| this.child(btn))
+            .when_some(back, AppNode::child)
+            .child(list)
+            .when_some(forward, AppNode::child)
             .child(new_tab)
     }
 
     fn scroll_button(&self, forward: bool, p: Palette, ui: &mut AppUi) -> AppNode {
-        let target = self.scroll;
-        let enabled = if forward {
-            target < self.max_scroll() - 0.1
-        } else {
-            target > 0.1
-        };
-        let (hit, tip, glyph, left, right) = if forward {
+        let (enabled, hit, tip, glyph, left, right) = if forward {
             let tip = "Scroll tab list forward";
-            (TabHit::ScrollRight, tip, CARET_RIGHT, SCROLL_INNER_PAD, SCROLL_OUTER_PAD)
+            let enabled = self.scroll < self.max_scroll() - 0.1;
+            (
+                enabled,
+                TabHit::ScrollRight,
+                tip,
+                CARET_RIGHT,
+                SCROLL_INNER_PAD,
+                SCROLL_OUTER_PAD,
+            )
         } else {
             let tip = "Scroll tab list backward";
-            (TabHit::ScrollLeft, tip, CARET_LEFT, SCROLL_OUTER_PAD, SCROLL_INNER_PAD)
+            let enabled = self.scroll > 0.1;
+            (
+                enabled,
+                TabHit::ScrollLeft,
+                tip,
+                CARET_LEFT,
+                SCROLL_OUTER_PAD,
+                SCROLL_INNER_PAD,
+            )
         };
-        let hit = HitId::Tab(hit);
         let button = icon_button(
             p,
-            hit,
+            HitId::Tab(hit),
             tip,
             (glyph, SCROLL_GLYPH_SIZE),
             size(BUTTON_WIDTH, BUTTON_HEIGHT),
@@ -781,28 +807,11 @@ impl TabSet {
         )
         .mt(BUTTON_TOP)
         .when(enabled, |this| this.text_color(p.text_secondary));
-        box_()
-            .flex_none()
-            .h_full()
-            .pl(left)
-            .pr(right)
-            .child(button)
+        box_().flex_none().h_full().pl(left).pr(right).child(button)
     }
 }
 
-fn slide(key: AnimKey, seed: f32, target: f32, snap: bool, ui: &mut AppUi) -> (f32, bool) {
-    let curve = if snap {
-        Curve {
-            duration: Duration::ZERO,
-            ..SLIDE
-        }
-    } else {
-        SLIDE
-    };
-    let sample = ui.anims.animate_f32_from(key, seed, target, curve);
-    (sample.value.round(), sample.status == AnimStatus::Running)
-}
-
+/// The part of `x..right` not under `cover` (the lifted tab), from whichever side shows.
 fn visible(x: f32, right: f32, cover: Option<(f32, f32)>) -> (f32, f32) {
     match cover {
         Some((left, end)) if left < right && x < end => {
@@ -816,8 +825,16 @@ fn visible(x: f32, right: f32, cover: Option<(f32, f32)>) -> (f32, f32) {
     }
 }
 
+/// A tab's place in the list, `width` wide at `x`, clipped to what `cover` leaves showing.
 fn tab_frame(x: f32, width: f32, cover: Option<(f32, f32)>, content: AppNode) -> AppNode {
     let (left, right) = visible(x, x + width, cover);
+    let content = box_()
+        .absolute()
+        .top(0.)
+        .left(x - left)
+        .w(width)
+        .h_full()
+        .child(content);
     box_()
         .absolute()
         .top(0.)
@@ -825,33 +842,25 @@ fn tab_frame(x: f32, width: f32, cover: Option<(f32, f32)>, content: AppNode) ->
         .w((right - left).max(0.))
         .h(TAB_HEIGHT)
         .overflow_hidden()
-        .child(
-            box_()
-                .absolute()
-                .top(0.)
-                .left(x - left)
-                .w(width)
-                .h_full()
-                .child(content),
-        )
+        .child(content)
 }
 
+/// Tab `ix`: raised if active, else hover fill and separator; a close button, or an unsaved dot.
 fn render_tab(
     tabs: &[Tab],
     ix: usize,
     active_ix: usize,
-    hovered_ix: Option<usize>,
+    hovered: Option<usize>,
     p: Palette,
     ui: &mut AppUi,
 ) -> AppNode {
-    let tab = &tabs[ix];
-    let id = tab.data.id;
+    let data = &tabs[ix].data;
+    let id = data.id;
     let active = ix == active_ix;
-    let is_hovered = hovered_ix == Some(ix);
     let separator =
-        !active && ix + 1 != active_ix && hovered_ix != Some(ix) && hovered_ix != Some(ix + 1);
-    let dirty = tab.data.is_dirty();
-    let show_close = is_hovered || (active && !dirty);
+        !active && ix + 1 != active_ix && hovered != Some(ix) && hovered != Some(ix + 1);
+    let dirty = data.is_dirty();
+    let show_close = hovered == Some(ix) || (active && !dirty);
     let show_dot = dirty && !show_close;
     let trailing = if show_close || show_dot {
         TAB_LABEL_TRAILING
@@ -859,29 +868,23 @@ fn render_tab(
         TAB_LABEL_TRAILING_BARE
     };
     let inset = if active { 1. } else { 0. };
-    let name = document::display_name(tab.data.path());
-    let tip: SharedStr = tab
-        .data
+    let name = document::display_name(data.path());
+    let tip: SharedStr = data
         .path()
         .map_or_else(|| name.clone(), |path| path.display().to_string())
         .into();
-
     let hit = HitId::Tab(TabHit::Item(id));
     let face_bg = if active {
         p.layer
     } else {
-        ui.brush(
-            hit,
-            Brushes {
-                rest: transparent_black(),
-                hover: p.layer_hover,
-                pressed: p.layer_hover,
-            },
-            true,
-        )
+        let brushes = Brushes {
+            rest: transparent_black(),
+            hover: p.layer_hover,
+            pressed: p.layer_hover,
+        };
+        ui.brush(hit, brushes, true)
     };
-
-    let close_node = show_close.then(|| {
+    let close = show_close.then(|| {
         icon_button(
             p,
             HitId::Tab(TabHit::Close(id)),
@@ -895,7 +898,6 @@ fn render_tab(
         .top(CLOSE_BUTTON_TOP - inset)
         .right(CLOSE_BUTTON_RIGHT - inset)
     });
-
     box_()
         .hit(hit)
         .tooltip(tip)
@@ -910,18 +912,47 @@ fn render_tab(
                 .rounded_t(OVERLAY_RADIUS)
         })
         .child(tab_face(p, active, face_bg, trailing, name))
-        .when(show_dot, |this| this.child(unsaved_dot(p, inset)))
-        .when(separator, |this| this.child(tab_separator(p)))
-        .when_some(close_node, |this, btn| this.child(btn))
+        .when(show_dot, |this| {
+            let dot = box_()
+                .absolute()
+                .top(UNSAVED_DOT_TOP - inset)
+                .right(UNSAVED_DOT_RIGHT - inset)
+                .size(UNSAVED_DOT)
+                .rounded_full()
+                .bg(p.text_tertiary);
+            this.child(dot)
+        })
+        .when(separator, |this| {
+            let divider = box_()
+                .absolute()
+                .right(0.)
+                .top(8.)
+                .w(1.)
+                .h(16.)
+                .bg(p.divider);
+            this.child(divider)
+        })
+        .when_some(close, AppNode::child)
 }
 
 fn tab_face(
     p: Palette,
     active: bool,
-    bg: crate::geom::Rgba,
+    bg: Rgba,
     trailing: f32,
     name: impl Into<SharedStr>,
 ) -> AppNode {
+    let (radius, color) = if active {
+        (OVERLAY_RADIUS - 1., p.text_primary)
+    } else {
+        (OVERLAY_RADIUS, p.text_secondary)
+    };
+    let label = box_()
+        .flex_1()
+        .min_w_0()
+        .overflow_hidden()
+        .nowrap()
+        .child(text(name));
     row()
         .items_center()
         .size_full()
@@ -930,43 +961,10 @@ fn tab_face(
         .font_family(SMALL_FONT)
         .text_size(12.)
         .bg(bg)
-        .when(active, |this| {
-            this.rounded_t(OVERLAY_RADIUS - 1.)
-                .text_color(p.text_primary)
-                .font_semibold()
-        })
-        .when(!active, |this| {
-            this.rounded_t(OVERLAY_RADIUS)
-                .text_color(p.text_secondary)
-        })
-        .child(
-            box_()
-                .flex_1()
-                .min_w_0()
-                .overflow_hidden()
-                .nowrap()
-                .child(text(name)),
-        )
-}
-
-fn unsaved_dot(p: Palette, inset: f32) -> AppNode {
-    box_()
-        .absolute()
-        .top(UNSAVED_DOT_TOP - inset)
-        .right(UNSAVED_DOT_RIGHT - inset)
-        .size(UNSAVED_DOT)
-        .rounded_full()
-        .bg(p.text_tertiary)
-}
-
-fn tab_separator(p: Palette) -> AppNode {
-    box_()
-        .absolute()
-        .right(0.)
-        .top(8.)
-        .w(1.)
-        .h(16.)
-        .bg(p.divider)
+        .rounded_t(radius)
+        .text_color(color)
+        .when(active, AppNode::font_semibold)
+        .child(label)
 }
 
 #[cfg(test)]
