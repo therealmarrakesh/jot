@@ -1,3 +1,10 @@
+//! A text editor: a tab's document, or a one-line field (find, replace, go to line).
+//!
+//! The window forwards keys, text, IME and pointer input; `prepare` lays the editor out where
+//! the frame placed it, works out the caret, selection and scrolling, and `paint` draws them. A
+//! document also has a line index (wrapping and windowed shaping), scrollbars, and auto-scroll
+//! while drag-selecting past its edge.
+
 use std::ops::Range;
 use std::time::{Duration, Instant};
 
@@ -18,7 +25,7 @@ use crate::ui::{
     AnimKey, AppNode, AppUi, Curve, CustomDraw, Easing, EditorSlot, HitId, TabId, box_, custom, row,
 };
 
-const RIGHT_MARGIN: f32 = 10.0;
+// ---- 1. Options and commands ----------------------------------------------------------------
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct DocOptions {
@@ -32,28 +39,6 @@ pub(crate) struct FieldOptions {
     pub(crate) slot: EditorSlot,
     pub(crate) placeholder: SharedStr,
     pub(crate) validate: Option<ValidateFn>,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum MoveDirection {
-    Up,
-    Down,
-}
-
-/// A request to scroll the caret into view at the next layout: only up or down (`direction`)
-/// if it moved one way, and keeping a few rows' margin from the edges (`with_margin`).
-#[derive(Clone, Copy, Debug)]
-struct RevealRequest {
-    direction: Option<MoveDirection>,
-    with_margin: bool,
-}
-
-#[derive(Copy, Clone, Debug, Default)]
-struct Scroll {
-    x: f32,
-    y: f64,
-    content_w: f32,
-    content_h: f64,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
@@ -92,29 +77,29 @@ pub(crate) enum EditCommand {
     Escape,
 }
 
-struct DocumentView {
-    lines: LineIndex,
-    soft_wrap: bool,
-    last_line_height: f32,
-    paddings: Edges<f32>,
-    scrollbar: ScrollbarState,
-    auto_scroll: AutoScroll,
-    pending_context_menu: Option<(Point, usize)>,
+/// How the editor is drawn: its font, line height, text colour and caret height.
+#[derive(Clone, Debug)]
+pub(crate) struct EditorPaintStyle {
+    pub(crate) text: TextStyle,
+    pub(crate) line_height: f32,
+    pub(crate) color: Rgba,
+    pub(crate) caret_height: f32,
 }
 
-impl DocumentView {
-    fn new(opts: DocOptions) -> Self {
-        Self {
-            lines: LineIndex::new(TextStyle::default(), None),
-            soft_wrap: opts.soft_wrap,
-            last_line_height: 20.0,
-            paddings: opts.paddings,
-            scrollbar: ScrollbarState::default(),
-            auto_scroll: AutoScroll::default(),
-            pending_context_menu: None,
-        }
-    }
+/// Everything a layout of the editor is drawn with.
+#[derive(Copy, Clone)]
+pub(crate) struct EditorPaintParams<'a> {
+    pub(crate) style: &'a EditorPaintStyle,
+    pub(crate) palette: Palette,
+    pub(crate) window_active: bool,
+    pub(crate) show_selection: bool,
+    pub(crate) scale: f32,
+    pub(crate) caret_width_px: u32,
+    /// The frame's time, for the scrollbars' fades.
+    pub(crate) now: Instant,
 }
+
+// ---- 2. The editor --------------------------------------------------------------------------
 
 pub(crate) struct Editor {
     /// Which editor of the window this is: its hits, drawing and scrollbars are keyed by it.
@@ -122,16 +107,75 @@ pub(crate) struct Editor {
     /// Whether it has the keyboard: its caret shows and blinks, and the pointer can drag-select.
     focused: bool,
     model: TextModel,
+    /// What only a document has; a field has none.
     doc: Option<Box<DocumentView>>,
     blink: BlinkState,
+    /// The x the caret keeps moving up and down at, and the column it came from.
     goal: Option<(f32, usize)>,
+    /// The word a double-click selected, which a drag extends by.
     word_anchor: Option<Range<usize>>,
+    /// The left button is down on the text (a drag selects).
     selecting: bool,
     scroll: Scroll,
+    /// How to bring the caret into view at the next layout.
     reveal: Option<RevealRequest>,
+    /// Where the text area was laid out.
     input_bounds: Rect,
     frame: Option<Frame>,
+    /// What an empty field shows.
     placeholder: SharedStr,
+}
+
+/// A document's view of its text: how it's laid out and scrolled.
+struct DocumentView {
+    lines: LineIndex,
+    soft_wrap: bool,
+    /// The line height of the last layout.
+    last_line_height: f32,
+    paddings: Edges<f32>,
+    scrollbar: ScrollbarState,
+    auto_scroll: AutoScroll,
+    /// A right press, waiting for its release to open the context menu: where, and at which
+    /// offset.
+    pending_context_menu: Option<(Point, usize)>,
+}
+
+#[derive(Copy, Clone, Debug, Default)]
+struct Scroll {
+    x: f32,
+    y: f64,
+    content_w: f32,
+    content_h: f64,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum MoveDirection {
+    Up,
+    Down,
+}
+
+/// A request to scroll the caret into view at the next layout: only up or down (`direction`)
+/// if it moved one way, and keeping a few rows' margin from the edges (`with_margin`).
+#[derive(Clone, Copy, Debug)]
+struct RevealRequest {
+    direction: Option<MoveDirection>,
+    with_margin: bool,
+}
+
+/// The editor's last layout, with where it was placed and what was drawn over it.
+struct Frame {
+    layout: FrameLayout,
+    revision: u64,
+    scroll_x: f32,
+    scroll_y: f64,
+    /// Where the text was drawn from: the editor's top left, scrolled horizontally.
+    origin: Point,
+    text_color: Rgba,
+    caret_rect: Rect,
+    show_caret: bool,
+    selection_rects: Vec<Rect>,
+    marked_range: Option<Range<usize>>,
+    last_cursor: usize,
 }
 
 impl Editor {
@@ -140,9 +184,19 @@ impl Editor {
             multi_line: true,
             validate: None,
         });
-        let doc = Some(Box::new(DocumentView::new(opts)));
-        let slot = EditorSlot::Tab(opts.tab);
-        Self::new(slot, model.with_rope(rope), doc, SharedStr::default())
+        let doc = DocumentView {
+            lines: LineIndex::new(TextStyle::default(), None),
+            soft_wrap: opts.soft_wrap,
+            last_line_height: 20.0,
+            paddings: opts.paddings,
+            scrollbar: ScrollbarState::default(),
+            auto_scroll: AutoScroll::default(),
+            pending_context_menu: None,
+        };
+        Self {
+            doc: Some(Box::new(doc)),
+            ..Self::blank(EditorSlot::Tab(opts.tab), model.with_rope(rope))
+        }
     }
 
     pub(crate) fn field(opts: FieldOptions) -> Self {
@@ -150,20 +204,18 @@ impl Editor {
             multi_line: false,
             validate: opts.validate,
         });
-        Self::new(opts.slot, model, None, opts.placeholder)
+        Self {
+            placeholder: opts.placeholder,
+            ..Self::blank(opts.slot, model)
+        }
     }
 
-    fn new(
-        slot: EditorSlot,
-        model: TextModel,
-        doc: Option<Box<DocumentView>>,
-        placeholder: SharedStr,
-    ) -> Self {
+    fn blank(slot: EditorSlot, model: TextModel) -> Self {
         Self {
             slot,
             focused: false,
             model,
-            doc,
+            doc: None,
             blink: BlinkState::default(),
             goal: None,
             word_anchor: None,
@@ -172,7 +224,7 @@ impl Editor {
             reveal: None,
             input_bounds: Rect::ZERO,
             frame: None,
-            placeholder,
+            placeholder: SharedStr::default(),
         }
     }
 
@@ -180,14 +232,26 @@ impl Editor {
         &self.model
     }
 
+    /// The last layout, if the text hasn't changed since.
     fn fresh_frame(&self) -> Option<&Frame> {
-        self.frame
-            .as_ref()
-            .filter(|f| f.revision == self.model.revision())
+        let frame = self.frame.as_ref()?;
+        (frame.revision == self.model.revision()).then_some(frame)
     }
 
     pub(crate) fn caret_bounds(&self) -> Option<Rect> {
         self.fresh_frame().map(|f| f.caret_rect)
+    }
+
+    /// Where the IME's window goes: by the composition, or the caret.
+    pub(crate) fn ime_caret_bounds(&self) -> Option<Rect> {
+        let frame = self.fresh_frame()?;
+        let selection = self.model.selection().range();
+        let text = self.model.text();
+        let bounds =
+            frame
+                .layout
+                .bounds_for_range(text, selection, frame.last_cursor, frame.origin);
+        bounds.or(Some(frame.caret_rect))
     }
 
     #[cfg(test)]
@@ -197,33 +261,6 @@ impl Editor {
 
     pub(crate) fn scroll_offset(&self) -> Point {
         point(self.scroll.x, self.scroll.y as f32)
-    }
-
-    fn request_reveal(&mut self, direction: Option<MoveDirection>, with_margin: bool) {
-        self.reveal = Some(RevealRequest {
-            direction,
-            with_margin,
-        });
-    }
-
-    fn reset_pointer_selection_state(&mut self) {
-        self.word_anchor = None;
-        self.selecting = false;
-        if let Some(doc) = &mut self.doc {
-            doc.auto_scroll.stop();
-        }
-    }
-
-    fn apply_change(&mut self, change: Option<LineChange>, ts: &TextSystem) {
-        let Some(lines) = change else {
-            return;
-        };
-        self.goal = None;
-        self.reset_pointer_selection_state();
-        if let Some(doc) = &mut self.doc {
-            doc.lines.apply_line_change(self.model.text(), &lines, ts);
-        }
-        self.request_reveal(None, true);
     }
 
     /// Turns soft wrap on or off; the next layout rewraps, keeping the top line in view.
@@ -259,7 +296,7 @@ impl Editor {
         self.focused = false;
         self.model.break_coalescing();
         self.blink = BlinkState::default();
-        self.reset_pointer_selection_state();
+        self.end_pointer_selection();
     }
 
     /// Holds the caret steady for a moment while keys come in.
@@ -291,6 +328,934 @@ impl Editor {
             .h_full()
             .child(box_().size_full().padding(doc.paddings).child(text))
             .children(doc.scrollbar.tracks(self.slot, doc.paddings.left))
+    }
+
+    fn request_reveal(&mut self, direction: Option<MoveDirection>, with_margin: bool) {
+        self.reveal = Some(RevealRequest {
+            direction,
+            with_margin,
+        });
+    }
+
+    /// A drag-selection (and any auto-scroll it started) ends.
+    fn end_pointer_selection(&mut self) {
+        self.word_anchor = None;
+        self.selecting = false;
+        if let Some(doc) = &mut self.doc {
+            doc.auto_scroll.stop();
+        }
+    }
+}
+
+// ---- 3. Editing -----------------------------------------------------------------------------
+
+impl Editor {
+    /// Takes in an edit the model made: rewraps the lines it changed and reveals the caret.
+    fn apply_change(&mut self, change: Option<LineChange>, ts: &TextSystem) {
+        let Some(lines) = change else {
+            return;
+        };
+        self.goal = None;
+        self.end_pointer_selection();
+        if let Some(doc) = &mut self.doc {
+            doc.lines.apply_line_change(self.model.text(), &lines, ts);
+        }
+        self.request_reveal(None, true);
+    }
+
+    /// An edit typed or commanded: the caret holds steady while it's taken in.
+    fn commit_edit(&mut self, change: Option<LineChange>, ts: &TextSystem) {
+        self.pause_blink();
+        self.apply_change(change, ts);
+    }
+
+    fn selected_string(&self) -> Option<String> {
+        let selection = self.model.selection();
+        (!selection.is_empty()).then(|| self.model.text().slice(selection.range()).to_string())
+    }
+
+    /// Runs `command`; whether the editor handled it.
+    pub(crate) fn handle_command(&mut self, command: EditCommand, ts: &TextSystem) -> bool {
+        let m = &mut self.model;
+        let change = match command {
+            // With nothing to do these go unhandled, so the key can mean something else.
+            EditCommand::Backspace => match m.delete_backward() {
+                None => return false,
+                change => change,
+            },
+            EditCommand::Enter => match m.enter() {
+                None => return false,
+                change => change,
+            },
+            EditCommand::Escape => {
+                let Some(change) = m.cancel_composition() else {
+                    return false;
+                };
+                self.apply_change(Some(change), ts);
+                return true;
+            }
+            EditCommand::IndentInline | EditCommand::Indent | EditCommand::Outdent
+                if !m.is_multi_line() =>
+            {
+                return false;
+            }
+            EditCommand::Move { motion, extend } => return self.move_caret(motion, extend),
+            EditCommand::SelectAll => {
+                self.select_all();
+                return true;
+            }
+            EditCommand::Copy => {
+                if let Some(text) = self.selected_string() {
+                    write_clipboard_text(&text);
+                }
+                return true;
+            }
+            EditCommand::Delete => m.delete_forward(),
+            EditCommand::DeletePrevWord => m.delete_prev_word(),
+            EditCommand::DeleteNextWord => m.delete_next_word(),
+            EditCommand::IndentInline | EditCommand::Indent => {
+                m.indent(command == EditCommand::Indent)
+            }
+            EditCommand::Outdent => m.outdent(),
+            EditCommand::Undo => m.undo(),
+            EditCommand::Redo => m.redo(),
+            EditCommand::Cut => {
+                m.commit_composition();
+                match self.selected_string() {
+                    Some(text) if write_clipboard_text(&text) => self.model.replace_selection(""),
+                    _ => None,
+                }
+            }
+            EditCommand::Paste => match read_clipboard_text().filter(|s| !s.is_empty()) {
+                Some(text) => m.replace_selection(&text),
+                None => None,
+            },
+        };
+        self.commit_edit(change, ts);
+        true
+    }
+
+    pub(crate) fn handle_text_input(&mut self, text: &str, ts: &TextSystem) {
+        let change = self.model.insert_text(text);
+        self.commit_edit(change, ts);
+    }
+
+    pub(crate) fn handle_ime_composition(
+        &mut self,
+        text: &str,
+        cursor_utf16: usize,
+        ts: &TextSystem,
+    ) {
+        if text.is_empty() && self.model.composition().is_none() {
+            return;
+        }
+        let change = self.model.set_composition(text, cursor_utf16);
+        self.apply_change(change, ts);
+    }
+
+    /// Replaces the whole text, scrolled back to its start.
+    pub(crate) fn set_value(&mut self, value: &str, ts: &TextSystem) {
+        self.end_pointer_selection();
+        let change = self.model.set_value(value);
+        self.apply_change(change, ts);
+        (self.scroll.x, self.scroll.y) = (0.0, 0.0);
+        self.reveal = None;
+    }
+
+    /// Replaces the selection with `text`.
+    pub(crate) fn replace(&mut self, text: &str, ts: &TextSystem) {
+        let change = self.model.replace_selection(text);
+        self.apply_change(change, ts);
+    }
+
+    pub(crate) fn replace_all(
+        &mut self,
+        ranges: &[Range<usize>],
+        replacement: &str,
+        ts: &TextSystem,
+    ) {
+        let change = self.model.replace_all(ranges, replacement);
+        self.apply_change(change, ts);
+    }
+
+    pub(crate) fn select_all(&mut self) {
+        self.goal = None;
+        self.model.select_all();
+    }
+
+    pub(crate) fn set_selected_range(&mut self, range: Range<usize>) {
+        self.goal = None;
+        self.word_anchor = None;
+        self.model.set_selected_range(range);
+        self.request_reveal(None, true);
+    }
+
+    pub(crate) fn go_to_line(&mut self, line: usize) {
+        self.goal = None;
+        self.model.go_to_line(line);
+        self.request_reveal(None, true);
+    }
+}
+
+// ---- 4. Caret motion ------------------------------------------------------------------------
+
+impl Editor {
+    fn move_caret(&mut self, motion: Motion, extend: bool) -> bool {
+        let vertical = matches!(
+            motion,
+            Motion::Up | Motion::Down | Motion::PageUp | Motion::PageDown
+        );
+        if vertical && self.doc.is_none() {
+            return false;
+        }
+        self.model.commit_composition();
+        let sel = self.model.selection();
+        let (text, len) = (self.model.text(), self.model.text().len());
+        // Against the start or end with nothing selected, Left and Right do nothing.
+        if !extend && sel.is_empty() {
+            let cursor = self.model.cursor();
+            if (motion == Motion::Left && cursor == 0) || (motion == Motion::Right && cursor == len)
+            {
+                return false;
+            }
+        }
+        let collapsing = !extend && !sel.is_empty();
+        let (target, target_aff, next_goal, direction) = match motion {
+            Motion::Left if collapsing => (sel.start(), false, None, None),
+            Motion::Right if collapsing => (sel.end(), false, None, None),
+            Motion::Left => (prev_grapheme_boundary(text, sel.head), false, None, None),
+            Motion::Right => (next_grapheme_boundary(text, sel.head), false, None, None),
+            Motion::PrevWord => (prev_word_start(text, sel.head), false, None, None),
+            Motion::NextWord => (next_word_end(text, sel.head), false, None, None),
+            Motion::LineStart => {
+                let (row, _) = self.visual_row_for(sel.head, sel.end_affinity);
+                (row.start, false, None, Some(MoveDirection::Up))
+            }
+            Motion::LineEnd => {
+                let (row, soft_end) = self.visual_row_for(sel.head, sel.end_affinity);
+                (row.end, soft_end, None, Some(MoveDirection::Down))
+            }
+            Motion::DocStart => (0, false, None, None),
+            Motion::DocEnd => (len, false, None, None),
+            Motion::Up | Motion::Down | Motion::PageUp | Motion::PageDown => {
+                let Some(doc) = &self.doc else {
+                    return false;
+                };
+                let page = || {
+                    let lh = doc.last_line_height.max(1.0);
+                    ((self.input_bounds.size.height / lh).floor() as isize).max(1)
+                };
+                let delta = match motion {
+                    Motion::Up => -1,
+                    Motion::Down => 1,
+                    Motion::PageUp => -page(),
+                    _ => page(),
+                };
+                let dir = if delta < 0 {
+                    MoveDirection::Up
+                } else {
+                    MoveDirection::Down
+                };
+                // Up or Down collapses a selection from its edge in that direction; otherwise the
+                // caret moves, keeping the column it was moving in.
+                let collapse = collapsing && matches!(motion, Motion::Up | Motion::Down);
+                let (base, aff) = if !collapse {
+                    (sel.head, sel.end_affinity)
+                } else if delta < 0 {
+                    (sel.start(), false)
+                } else {
+                    let at_head = sel.end() == self.model.cursor();
+                    (sel.end(), at_head && sel.end_affinity)
+                };
+                let goal = self
+                    .goal
+                    .filter(|_| !collapse)
+                    .or_else(|| self.preferred_x_for(base, aff));
+                let mut target = self.vertical_target(doc, base, goal, aff, delta);
+                // Extending from the first or last row selects to the document's start or end.
+                if extend && doc.lines.visual_row_count() > 0 {
+                    let row = |(offset, aff)| doc.lines.offset_to_display(text, offset, aff).row;
+                    if row((base, aff)) == row(target) {
+                        target = (if delta < 0 { 0 } else { len }, false);
+                    }
+                }
+                (target.0, target.1, goal, Some(dir))
+            }
+        };
+        self.goal = next_goal;
+        self.pause_blink();
+        if extend {
+            self.model.break_coalescing();
+            self.model.extend_selection(target, target_aff, None);
+        } else {
+            self.model.place_caret(target, target_aff);
+        }
+        self.request_reveal(direction.filter(|_| !extend), true);
+        true
+    }
+
+    /// The visual row `offset` is on, as text offsets, and whether it ends at a soft wrap; a
+    /// field's row is all of it.
+    fn visual_row_for(&self, offset: usize, end_affinity: bool) -> (Range<usize>, bool) {
+        let text = self.model.text();
+        let Some(doc) = &self.doc else {
+            return (0..text.len(), false);
+        };
+        let row = text.offset_to_point(offset).row;
+        let line_start = text.line_start_offset(row);
+        if doc.soft_wrap {
+            let disp = doc.lines.offset_to_display(text, offset, end_affinity);
+            if let Some((range, soft_end)) = doc.lines.visual_row_range(row, disp.sub_row) {
+                return (line_start + range.start..line_start + range.end, soft_end);
+            }
+        }
+        (line_start..text.line_end_offset(row), false)
+    }
+
+    /// Where `offset` is drawn across its row, and its column, from the last layout.
+    fn preferred_x_for(&self, offset: usize, end_affinity: bool) -> Option<(f32, usize)> {
+        let frame = self.fresh_frame()?;
+        let pt = self.model.text().offset_to_point(offset);
+        let line = frame.layout.line(pt.row)?;
+        let pos = line.position_for_index(pt.column, frame.layout.line_height, end_affinity)?;
+        Some((pos.x, pt.column))
+    }
+
+    /// Where `delta_rows` visual rows from `offset` the caret lands: at `goal`'s x where the row
+    /// was laid out, else at its column.
+    fn vertical_target(
+        &self,
+        doc: &DocumentView,
+        offset: usize,
+        goal: Option<(f32, usize)>,
+        end_affinity: bool,
+        delta_rows: isize,
+    ) -> (usize, bool) {
+        if doc.lines.visual_row_count() == 0 {
+            return (offset, end_affinity);
+        }
+        let text = self.model.text();
+        let mut display = doc.lines.offset_to_display(text, offset, end_affinity);
+        let last_row = doc.lines.visual_row_count().saturating_sub(1);
+        display.row = display.row.saturating_add_signed(delta_rows).min(last_row);
+        display.col = 0;
+        let row_start = doc.lines.display_to_offset(text, display);
+        let Some((x, column)) = goal else {
+            return (row_start, false);
+        };
+        let mut row = doc.lines.offset_to_display(text, row_start, false);
+        row.col = 0;
+        let line = text
+            .offset_to_point(doc.lines.display_to_offset(text, row))
+            .row;
+        let line_start = text.line_start_offset(line);
+        if let Some(frame) = self.fresh_frame()
+            && let Some(shown) = frame.layout.line(line)
+        {
+            let lh = frame.layout.line_height;
+            let at = point(x, row.sub_row as f32 * lh);
+            return match shown.closest_index_for_position(at, lh) {
+                Some((ix, affinity)) => (line_start + ix, affinity),
+                None => (row_start, false),
+            };
+        }
+        if let Some((range, soft_end)) = doc.lines.visual_row_range(line, row.sub_row) {
+            let col = column.min(range.len());
+            return (
+                line_start + range.start + col,
+                soft_end && col == range.len(),
+            );
+        }
+        (line_start + column.min(text.slice_line(line).len()), false)
+    }
+
+    fn move_to_with_affinity(&mut self, offset: usize, end_affinity: bool) {
+        self.goal = None;
+        self.model.place_caret(offset, end_affinity);
+        self.request_reveal(None, false);
+        self.pause_blink();
+    }
+
+    fn select_to_with_affinity(&mut self, offset: usize, end_affinity: bool) {
+        self.goal = None;
+        self.model
+            .extend_selection(offset, end_affinity, self.word_anchor.clone());
+    }
+}
+
+// ---- 5. The pointer -------------------------------------------------------------------------
+
+impl Editor {
+    /// The offset at `pos` (and whether it's at the end of a wrapped row), in the last layout as
+    /// it's scrolled now.
+    fn hit_test_point(&self, pos: Point) -> (usize, bool) {
+        let Some(frame) = self.fresh_frame() else {
+            return (0, false);
+        };
+        let scrolled = point(
+            self.scroll.x - frame.scroll_x,
+            (self.scroll.y - frame.scroll_y) as f32,
+        );
+        let rel = pos - frame.origin - scrolled;
+        let len = self.model.text().len();
+        frame.layout.hit_test(rel, len, self.model.is_multi_line())
+    }
+
+    pub(crate) fn on_mouse_down(
+        &mut self,
+        button: MouseButton,
+        position: Point,
+        modifiers: Modifiers,
+        click_count: usize,
+    ) {
+        self.model.break_coalescing();
+        self.selecting = true;
+        let (offset, aff) = self.hit_test_point(position);
+        match button {
+            MouseButton::Left if click_count >= 3 => {
+                self.goal = None;
+                self.model.select_line_at(offset);
+                self.word_anchor = None;
+            }
+            MouseButton::Left if click_count == 2 => {
+                self.goal = None;
+                if let Some(word) = self.model.select_word_at(offset) {
+                    self.word_anchor = Some(word);
+                }
+            }
+            // A right press inside the selection keeps it for the context menu, which opens on
+            // the release.
+            MouseButton::Right => {
+                if !self.model.selection().contains(offset) {
+                    self.move_to_with_affinity(offset, aff);
+                }
+                if let Some(doc) = &mut self.doc {
+                    doc.pending_context_menu = Some((position, offset));
+                }
+            }
+            _ if modifiers.shift => {
+                self.select_to_with_affinity(offset, aff);
+                self.request_reveal(None, false);
+            }
+            _ => self.move_to_with_affinity(offset, aff),
+        }
+    }
+
+    /// The pointer moved; dragging with the left button extends the selection, and past the
+    /// edge auto-scrolls. Whether the editor needs repainting.
+    pub(crate) fn on_mouse_move(&mut self, position: Point, dragging_left: bool) -> bool {
+        let dragging = dragging_left && self.selecting && self.model.text().len() > 0;
+        if !dragging || self.fresh_frame().is_none() {
+            return false;
+        }
+        let (offset, aff) = self.hit_test_point(position);
+        self.select_to_with_affinity(offset, aff);
+        if let Some(doc) = &mut self.doc {
+            doc.auto_scroll.last_drag_pos = Some(position);
+            let delta = AutoScroll::compute_delta(position.y, self.input_bounds);
+            doc.auto_scroll.update(delta.map(|d| -d));
+        }
+        self.request_reveal(None, false);
+        true
+    }
+
+    /// A button came up: where to open the context menu, if a right click asked for one.
+    pub(crate) fn on_mouse_up(&mut self, button: MouseButton) -> Option<Point> {
+        let mut context_menu = None;
+        if button == MouseButton::Right
+            && let Some(doc) = &mut self.doc
+            && let Some((pos, offset)) = doc.pending_context_menu.take()
+        {
+            if !self.model.selection().contains(offset) {
+                self.move_to_with_affinity(offset, false);
+            }
+            context_menu = Some(pos);
+        }
+        self.end_pointer_selection();
+        context_menu
+    }
+}
+
+// ---- 6. Scrolling ---------------------------------------------------------------------------
+
+/// The space kept right of the caret, and right of the longest line.
+const RIGHT_MARGIN: f32 = 10.0;
+/// Rows kept between a revealed caret and the edge, in a view tall enough.
+const BOTTOM_MARGIN_ROWS: usize = 3;
+
+/// Where the top of the view is in the text, to keep it there through a reflow: the line, how
+/// far into it the top row starts, and how far into that row the view starts.
+#[derive(Copy, Clone, Debug)]
+struct ScrollAnchor {
+    line: usize,
+    byte_in_line: usize,
+    frac_px: f64,
+}
+
+/// How wide the content is: the longest line, and the margin past it if it scrolls.
+fn content_width_with_margin(max_line_w: f32, viewport_width: f32) -> f32 {
+    if max_line_w + RIGHT_MARGIN > viewport_width {
+        max_line_w + RIGHT_MARGIN
+    } else {
+        max_line_w
+    }
+}
+
+fn clamp_horizontal_scroll(offset_x: f32, content_width: f32, viewport_width: f32) -> f32 {
+    let min_x = (viewport_width - content_width).min(0.0);
+    offset_x.clamp(min_x, 0.0)
+}
+
+/// The scroll that brings `caret_x` into view, moving as little as it can.
+fn reveal_horizontal_scroll(scroll_x: f32, caret_x: f32, viewport_width: f32) -> f32 {
+    if scroll_x + caret_x > viewport_width - RIGHT_MARGIN {
+        viewport_width - RIGHT_MARGIN - caret_x
+    } else if scroll_x + caret_x < 0.0 {
+        -caret_x
+    } else {
+        scroll_x
+    }
+}
+
+/// The margin kept above and below a revealed caret: a row in a short view, a few in a tall one,
+/// never more than half of it.
+fn caret_vertical_margin(viewport_height: f32, line_height: f32) -> f32 {
+    let rows = (viewport_height / line_height.max(1.0)) as usize;
+    let margin = if rows < BOTTOM_MARGIN_ROWS * 8 {
+        line_height
+    } else {
+        BOTTOM_MARGIN_ROWS as f32 * line_height
+    };
+    margin.min(rows as f32 * line_height * 0.5)
+}
+
+impl DocumentView {
+    fn capture_scroll_anchor(&self, scroll_y: f64, line_height: f32) -> Option<ScrollAnchor> {
+        let rows = self.lines.visual_row_count();
+        if rows == 0 || line_height <= 0.0 {
+            return None;
+        }
+        let lh = f64::from(line_height);
+        let top = (-scroll_y).max(0.0);
+        let top_row = (top / lh).floor() as usize;
+        let frac_px = top - top_row as f64 * lh;
+        let (line, sub_row) = self
+            .lines
+            .visual_row_to_line_and_sub_row(top_row.min(rows.saturating_sub(1)));
+        let byte_in_line = self
+            .lines
+            .visual_row_range(line, sub_row)
+            .map_or(0, |(r, _)| r.start);
+        Some(ScrollAnchor {
+            line,
+            byte_in_line,
+            frac_px,
+        })
+    }
+
+    fn restore_scroll_anchor(&self, text: &Rope, anchor: ScrollAnchor, line_height: f32) -> f64 {
+        let lines = self.lines.line_count();
+        if lines == 0 || line_height <= 0.0 {
+            return 0.0;
+        }
+        let line = anchor.line.min(lines.saturating_sub(1));
+        let target = text.line_start_offset(line) + anchor.byte_in_line.min(text.line_len(line));
+        let row = self.lines.offset_to_display(text, target, false).row;
+        -(row as f64 * f64::from(line_height) + anchor.frac_px).max(0.0)
+    }
+}
+
+impl Editor {
+    /// Scrolls a document to (`x`, `y`), kept within its content; whether it moved.
+    fn scroll_to(&mut self, x: f32, y: f64) -> bool {
+        let view = self.input_bounds.size;
+        let min_y = (f64::from(view.height) - self.scroll.content_h).min(0.0);
+        let next = (
+            clamp_horizontal_scroll(x, self.scroll.content_w, view.width),
+            y.clamp(min_y, 0.0),
+        );
+        let moved = next != (self.scroll.x, self.scroll.y);
+        (self.scroll.x, self.scroll.y) = next;
+        moved
+    }
+
+    pub(crate) fn on_scroll_wheel(
+        &mut self,
+        delta_lines: Point,
+        page_scroll: bool,
+        modifiers: Modifiers,
+    ) -> bool {
+        let Some(doc) = self.doc.as_deref().filter(|_| !modifiers.ctrl) else {
+            return false;
+        };
+        let lh = doc.last_line_height.max(1.0);
+        let view = self.input_bounds.size;
+        // Sideways by three spaces a notch, never more than a view.
+        let dx = if delta_lines.x == 0.0 {
+            0.0
+        } else {
+            let space = self
+                .frame
+                .as_ref()
+                .map_or(lh * 0.5, |f| f.layout.space_width.max(1.0));
+            let most = view.width.max(lh);
+            (delta_lines.x * space * 3.0).round().clamp(-most, most)
+        };
+        let row = if page_scroll {
+            (view.height - lh).max(lh)
+        } else {
+            lh
+        };
+        let dy = f64::from(delta_lines.y) * f64::from(row);
+        self.reveal = None;
+        self.scroll_to(self.scroll.x + dx, self.scroll.y + dy)
+    }
+
+    fn apply_scrollbar_scroll(&mut self, next: Option<Point>) {
+        if let Some(next) = next {
+            self.reveal = None;
+            self.scroll_to(next.x, f64::from(next.y));
+        }
+    }
+
+    /// A press on a scrollbar track: on the thumb it starts a drag, elsewhere it pages. Whether
+    /// the scrollbar took it, which it doesn't while faded out.
+    pub(crate) fn press_scrollbar(&mut self, axis: Axis, pos: Point) -> bool {
+        let scroll = self.scroll_offset();
+        let Some(doc) = self.doc.as_deref_mut() else {
+            return false;
+        };
+        if !doc.scrollbar.is_interactive(axis) {
+            return false;
+        }
+        let next = doc.scrollbar.on_mouse_down(axis, pos, scroll);
+        self.apply_scrollbar_scroll(next);
+        true
+    }
+
+    /// The pointer moved: whether a scrollbar thumb needs redrawing because it came onto or off
+    /// one.
+    pub(crate) fn hover_scrollbar(&self, pos: Point, ui: &AppUi) -> bool {
+        self.doc
+            .as_deref()
+            .is_some_and(|doc| doc.scrollbar.hover_changed(self.slot, pos, ui))
+    }
+
+    /// While the thumb is dragged, follows the pointer: whether to repaint now (`None` when no
+    /// drag is going on).
+    pub(crate) fn drag_scrollbar(&mut self, pos: Point, pressed: bool) -> Option<bool> {
+        let scroll = self.scroll_offset();
+        let (next, notify) = self
+            .doc
+            .as_deref_mut()?
+            .scrollbar
+            .on_mouse_move(pos, pressed, scroll)?;
+        self.apply_scrollbar_scroll(next);
+        Some(notify)
+    }
+
+    /// Ends a thumb drag at `pos`.
+    pub(crate) fn release_scrollbar(&mut self, pos: Point) {
+        let scroll = self.scroll_offset();
+        let next = self
+            .doc
+            .as_deref_mut()
+            .and_then(|d| d.scrollbar.on_mouse_up(pos, scroll));
+        self.apply_scrollbar_scroll(next);
+    }
+}
+
+// ---- 7. Layout and painting -----------------------------------------------------------------
+
+impl Editor {
+    /// Lays the editor out in `input_bounds`, where its text landed, and works out what to draw;
+    /// whether another frame should follow (a document's windowed lines or scrollbars changed
+    /// in ways this frame's layout couldn't show).
+    pub(crate) fn prepare(
+        &mut self,
+        input_bounds: Rect,
+        params: EditorPaintParams<'_>,
+        ui: &mut AppUi,
+        ts: &TextSystem,
+    ) -> bool {
+        self.input_bounds = input_bounds;
+        if self.doc.is_none() {
+            self.prepare_field(params, ts);
+            return false;
+        }
+        let reshaped = self.prepare_document(params, ts);
+        let scroll = self.scroll_offset();
+        let content = size(self.scroll.content_w, self.scroll.content_h as f32);
+        let doc = self.doc.as_deref_mut().expect("a document");
+        let vp = ScrollbarViewport {
+            input: input_bounds,
+            paddings: doc.paddings,
+            scale: params.scale,
+            content_size: content,
+            scroll_offset: scroll,
+            horizontal: !doc.soft_wrap,
+        };
+        let bars_changed = doc
+            .scrollbar
+            .update(self.slot, vp, params.palette, params.now, ui);
+        reshaped || bars_changed
+    }
+
+    /// A field's one row: its text, or its placeholder while empty.
+    fn prepare_field(&mut self, params: EditorPaintParams<'_>, ts: &TextSystem) {
+        let style = params.style;
+        let text = self.model.text();
+        let empty = text.len() == 0;
+        let (shown, color): (SharedStr, Rgba) = if empty {
+            (self.placeholder.clone(), params.palette.text_secondary)
+        } else {
+            (text.to_string().into(), style.color)
+        };
+        let lh = style.line_height.max(1.0);
+        let layout = FrameLayout::single_row(shown, text.len(), &style.text, lh, ts);
+        let head_pt = layout
+            .position_for_offset(text, self.model.cursor(), false)
+            .unwrap_or(Point::ZERO);
+        let width = self.input_bounds.size.width;
+        self.scroll.content_w = content_width_with_margin(layout.width().max(head_pt.x), width);
+        if self.reveal.take().is_some() {
+            self.scroll.x = reveal_horizontal_scroll(self.scroll.x, head_pt.x, width);
+        }
+        self.scroll.x = clamp_horizontal_scroll(self.scroll.x, self.scroll.content_w, width);
+        self.finish_frame(layout, color, head_pt, empty, params);
+    }
+
+    /// A document's visible lines, scrolled to keep its top line through a reflow and to reveal
+    /// the caret when asked; whether a long line's shaped window moved out from under the view.
+    fn prepare_document(&mut self, params: EditorPaintParams<'_>, ts: &TextSystem) -> bool {
+        let style = params.style;
+        let lh = style.line_height.max(1.0);
+        let text = self.model.text();
+        let reveal = self.reveal.take();
+        let (head, end_affinity) = (self.model.cursor(), self.model.selection().end_affinity);
+        let view = self.input_bounds.size;
+        let doc = self.doc.as_deref_mut().expect("a document");
+        let wrap_width = doc
+            .soft_wrap
+            .then_some((view.width - RIGHT_MARGIN).max(1.0));
+
+        // A reflow keeps the top line in view, unless the caret is about to be revealed anyway.
+        let anchor = reveal
+            .is_none()
+            .then(|| doc.capture_scroll_anchor(self.scroll.y, doc.last_line_height))
+            .flatten();
+        let reflowed = doc.lines.sync_layout(text, &style.text, wrap_width, ts)
+            || (doc.last_line_height - lh).abs() > 0.01;
+        doc.last_line_height = lh;
+        if let Some(anchor) = anchor.filter(|_| reflowed) {
+            self.scroll.y = doc.restore_scroll_anchor(text, anchor, lh);
+        }
+
+        let rows = doc.lines.visual_row_count().max(1);
+        let content_h = (rows as f64 * f64::from(lh)).max(f64::from(view.height));
+        self.scroll.content_h = content_h;
+        if let Some(req) = reveal {
+            // Scrolls the least that brings the caret's row (and its margin) into view, but
+            // only the way the caret moved.
+            let (lh, height) = (f64::from(lh), f64::from(view.height));
+            let row_y = doc.lines.offset_to_display(text, head, end_affinity).row as f64 * lh;
+            let margin = if req.with_margin {
+                f64::from(caret_vertical_margin(
+                    view.height,
+                    style.line_height.max(1.0),
+                ))
+            } else {
+                0.0
+            };
+            let was = self.scroll.y;
+            let mut y = was;
+            if row_y < -y + margin {
+                y = (margin - row_y).min(0.0);
+            } else if row_y + lh > -y + height - margin {
+                y = height - margin - (row_y + lh);
+            }
+            self.scroll.y = match req.direction {
+                Some(MoveDirection::Up) => y.max(was),
+                Some(MoveDirection::Down) => y.min(was),
+                None => y,
+            };
+        }
+        let min_y = (-content_h + f64::from(view.height)).min(0.0);
+        self.scroll.y = self.scroll.y.clamp(min_y, 0.0);
+
+        // Unwrapped, the horizontal extent and reveal are settled before the windowed lines are
+        // shaped, then refined from what was shaped.
+        let width = view.width;
+        let mut widest = match wrap_width {
+            Some(wrap) => {
+                self.scroll.x = 0.0;
+                wrap
+            }
+            None => {
+                let mut widest = doc.lines.longest_line_width(text, ts);
+                if reveal.is_some() {
+                    let caret_x = doc.lines.unwrapped_x(text, head, ts);
+                    widest = widest.max(caret_x);
+                    self.scroll.x = reveal_horizontal_scroll(self.scroll.x, caret_x, width);
+                }
+                let estimate = content_width_with_margin(widest, width);
+                self.scroll.x = clamp_horizontal_scroll(self.scroll.x, estimate, width);
+                widest
+            }
+        };
+        let shaped_at = self.scroll.x;
+        let shown = Viewport {
+            size: view,
+            scroll_x: self.scroll.x,
+            scroll_y: self.scroll.y,
+        };
+        let (layout, windowed) = doc
+            .lines
+            .layout_visible(text, shown, head, end_affinity, lh, ts);
+        let head_pt = layout
+            .position_for_offset(text, head, end_affinity)
+            .unwrap_or_else(|| {
+                let row = doc.lines.offset_to_display(text, head, end_affinity).row;
+                point(0.0, (row as f64 * f64::from(lh) + self.scroll.y) as f32)
+            });
+        if wrap_width.is_none() {
+            widest = widest.max(layout.width()).max(head_pt.x);
+            if reveal.is_some() {
+                self.scroll.x = reveal_horizontal_scroll(self.scroll.x, head_pt.x, width);
+            }
+        }
+        self.scroll.content_w = content_width_with_margin(widest, width);
+        self.scroll.x = clamp_horizontal_scroll(self.scroll.x, self.scroll.content_w, width);
+        self.finish_frame(layout, style.color, head_pt, false, params);
+        windowed && (self.scroll.x - shaped_at).abs() > 1.0
+    }
+
+    /// Keeps `layout` as the frame, with the caret at `head_pt` and the selection over it.
+    fn finish_frame(
+        &mut self,
+        layout: FrameLayout,
+        text_color: Rgba,
+        head_pt: Point,
+        placeholder: bool,
+        params: EditorPaintParams<'_>,
+    ) {
+        // Vertical scroll is baked into each line's top in f64 so D2D coordinates stay exact on
+        // huge files.
+        let origin = self.input_bounds.origin + point(self.scroll.x, 0.);
+        let caret_rect = caret_rect(
+            origin + head_pt,
+            layout.line_height,
+            params.style.caret_height,
+            params.scale,
+            params.caret_width_px,
+        );
+        let m = &self.model;
+        let composing = m.composition().is_some();
+        let show_caret = self.focused
+            && params.window_active
+            && self.blink.visible
+            && (m.selection().is_empty() || composing);
+        let marked_range = m
+            .composition()
+            .filter(|_| !placeholder)
+            .map(|c| c.start..c.end);
+        let selection_rects = if params.window_active
+            && params.show_selection
+            && !composing
+            && !m.selection().is_empty()
+        {
+            layout.range_rects(&m.selection().range(), origin)
+        } else {
+            Vec::new()
+        };
+        self.frame = Some(Frame {
+            layout,
+            revision: m.revision(),
+            scroll_x: self.scroll.x,
+            scroll_y: self.scroll.y,
+            origin,
+            text_color,
+            caret_rect,
+            show_caret,
+            selection_rects,
+            marked_range,
+            last_cursor: m.cursor(),
+        });
+    }
+
+    pub(crate) fn paint(&self, p: Palette, canvas: &mut Canvas) {
+        let Some(frame) = self.frame.as_ref() else {
+            return;
+        };
+        canvas.with_clip(self.input_bounds, |canvas| {
+            for &rect in &frame.selection_rects {
+                canvas.paint_quad(fill(rect, p.selection));
+            }
+            let marked = frame.marked_range.as_ref();
+            frame
+                .layout
+                .paint(frame.origin, frame.text_color, marked, canvas);
+            if frame.show_caret {
+                canvas.paint_quad(fill(frame.caret_rect, p.caret));
+            }
+        });
+        if let Some(doc) = &self.doc {
+            doc.scrollbar.paint(canvas);
+        }
+    }
+}
+
+/// The caret at `at` (the top of its line), `height` tall and centred on the line, on whole
+/// pixels.
+fn caret_rect(at: Point, line_height: f32, height: f32, scale: f32, width_px: u32) -> Rect {
+    let top = point(at.x, at.y + (line_height - height) * 0.5);
+    let origin = point(
+        (top.x * scale).round() / scale,
+        (top.y * scale).round() / scale,
+    );
+    let width = (width_px.max(1) as f32 / scale).max(1.0 / scale);
+    Rect::new(origin, size(width, height))
+}
+
+// ---- 8. Timers: blinking and auto-scroll ----------------------------------------------------
+
+impl Editor {
+    /// Acts on whatever is due at `now`: blinking, auto-scrolling, scrollbar fading. Returns
+    /// whether the editor needs repainting.
+    pub(crate) fn tick(&mut self, now: Instant) -> bool {
+        let mut changed = self.blink.tick(now);
+        let Some(doc) = &mut self.doc else {
+            return changed;
+        };
+        changed |= doc.scrollbar.tick(now);
+        if take_due(&mut doc.auto_scroll.next, now) {
+            let Some(delta) = doc.auto_scroll.delta else {
+                doc.auto_scroll.stop();
+                return changed;
+            };
+            doc.auto_scroll.next = Some(now + AUTO_SCROLL_INTERVAL);
+            let drag_pos = doc.auto_scroll.last_drag_pos;
+            self.reveal = None;
+            self.scroll_to(self.scroll.x, self.scroll.y + f64::from(delta));
+            // The selection follows the text scrolling under the pointer.
+            if let Some(pos) = drag_pos {
+                let (offset, aff) = self.hit_test_point(pos);
+                self.select_to_with_affinity(offset, aff);
+            }
+            changed = true;
+        }
+        changed
+    }
+
+    /// When the editor next needs a `tick`.
+    pub(crate) fn deadline(&self) -> Option<Instant> {
+        let doc = self.doc.as_deref();
+        let auto_scroll = doc.and_then(|doc| doc.auto_scroll.next);
+        let scrollbar = doc.and_then(|doc| doc.scrollbar.deadline());
+        [self.blink.next, auto_scroll, scrollbar]
+            .into_iter()
+            .flatten()
+            .min()
     }
 }
 
@@ -351,8 +1316,10 @@ impl BlinkState {
     }
 }
 
+/// Scrolling while a drag-selection is past the editor's top or bottom edge.
 #[derive(Default)]
 struct AutoScroll {
+    /// How far each step scrolls (negative is down the text), while past an edge.
     delta: Option<f32>,
     next: Option<Instant>,
     last_drag_pos: Option<Point>,
@@ -362,30 +1329,28 @@ struct AutoScroll {
 const AUTO_SCROLL_INTERVAL: Duration = Duration::from_millis(16);
 
 impl AutoScroll {
+    /// How fast a drag at `y` scrolls: not within the edges, faster the further past.
     fn compute_delta(y: f32, bounds: Rect) -> Option<f32> {
         const MIN_SPEED: f32 = 12.0;
         const MAX_SPEED: f32 = 64.0;
         const INNER_ZONE: f32 = 16.0;
         const OUTER_RAMP: f32 = 80.0;
-
-        let bottom = bounds.bottom() - INNER_ZONE;
-        let top = bounds.top() + INNER_ZONE;
-
+        let speed = |past: f32| {
+            let t = (past / (INNER_ZONE + OUTER_RAMP)).min(1.0);
+            MIN_SPEED + t * (MAX_SPEED - MIN_SPEED)
+        };
+        let (top, bottom) = (bounds.top() + INNER_ZONE, bounds.bottom() - INNER_ZONE);
         if y > bottom {
-            let t = ((y - bottom) / (INNER_ZONE + OUTER_RAMP)).min(1.0);
-            Some(MIN_SPEED + t * (MAX_SPEED - MIN_SPEED))
+            Some(speed(y - bottom))
         } else if y < top {
-            let t = ((top - y) / (INNER_ZONE + OUTER_RAMP)).min(1.0);
-            Some(-(MIN_SPEED + t * (MAX_SPEED - MIN_SPEED)))
+            Some(-speed(top - y))
         } else {
             None
         }
     }
 
     fn stop(&mut self) {
-        self.delta = None;
-        self.next = None;
-        self.last_drag_pos = None;
+        *self = Self::default();
     }
 
     fn update(&mut self, delta: Option<f32>) {
@@ -399,960 +1364,7 @@ impl AutoScroll {
     }
 }
 
-impl Editor {
-    fn hit_test_point(&self, pos: Point) -> (usize, bool) {
-        let Some(frame) = self.fresh_frame() else {
-            return (0, false);
-        };
-        let rel = pos
-            - frame.origin
-            - point(
-                self.scroll.x - frame.scroll_x,
-                (self.scroll.y - frame.scroll_y) as f32,
-            );
-        frame
-            .layout
-            .hit_test(rel, self.model.text().len(), self.model.is_multi_line())
-    }
-
-    pub(crate) fn on_mouse_down(
-        &mut self,
-        button: MouseButton,
-        position: Point,
-        modifiers: Modifiers,
-        click_count: usize,
-    ) {
-        self.model.break_coalescing();
-        self.selecting = true;
-        let (offset, aff) = self.hit_test_point(position);
-
-        if button == MouseButton::Left && click_count >= 3 {
-            self.select_line_at(offset);
-            return;
-        }
-        if button == MouseButton::Left && click_count == 2 {
-            self.select_word_at(offset);
-            return;
-        }
-        if button == MouseButton::Right {
-            if !self.model.selection().contains(offset) {
-                self.move_to_with_affinity(offset, aff);
-            }
-            if let Some(doc) = &mut self.doc {
-                doc.pending_context_menu = Some((position, offset));
-            }
-            return;
-        }
-        if modifiers.shift {
-            self.select_to_with_affinity(offset, aff);
-            self.request_reveal(None, false);
-        } else {
-            self.move_to_with_affinity(offset, aff);
-        }
-    }
-
-    pub(crate) fn on_mouse_move(&mut self, position: Point, dragging_left: bool) -> bool {
-        if dragging_left
-            && self.selecting
-            && self.model.text().len() > 0
-            && self.fresh_frame().is_some()
-        {
-            let (offset, aff) = self.hit_test_point(position);
-            self.select_to_with_affinity(offset, aff);
-            if let Some(doc) = &mut self.doc {
-                doc.auto_scroll.last_drag_pos = Some(position);
-                let delta = AutoScroll::compute_delta(position.y, self.input_bounds);
-                doc.auto_scroll.update(delta.map(|d| -d));
-            }
-            self.request_reveal(None, false);
-            return true;
-        }
-        false
-    }
-
-    pub(crate) fn on_mouse_up(&mut self, button: MouseButton) -> Option<Point> {
-        let mut open_context_menu = None;
-        if button == MouseButton::Right
-            && let Some(doc) = &mut self.doc
-            && let Some((pos, offset)) = doc.pending_context_menu.take()
-        {
-            if !self.model.selection().contains(offset) {
-                self.move_to_with_affinity(offset, false);
-            }
-            open_context_menu = Some(pos);
-        }
-        self.reset_pointer_selection_state();
-        open_context_menu
-    }
-}
-
-impl Editor {
-    fn commit_edit(&mut self, change: Option<LineChange>, ts: &TextSystem) {
-        self.pause_blink();
-        self.apply_change(change, ts);
-    }
-
-    fn selected_string(&self) -> Option<String> {
-        (!self.model.selection().is_empty()).then(|| self.model.text().slice(self.model.selection().range()).to_string())
-    }
-
-    pub(crate) fn handle_command(&mut self, command: EditCommand, ts: &TextSystem) -> bool {
-        let m = &mut self.model;
-        let change = match command {
-            // With nothing to do these go unhandled, so the key can mean something else.
-            EditCommand::Backspace => match m.delete_backward() {
-                None => return false,
-                change => change,
-            },
-            EditCommand::Enter => match m.enter() {
-                None => return false,
-                change => change,
-            },
-            EditCommand::Escape => {
-                let Some(change) = m.cancel_composition() else {
-                    return false;
-                };
-                self.apply_change(Some(change), ts);
-                return true;
-            }
-            EditCommand::IndentInline | EditCommand::Indent | EditCommand::Outdent
-                if !m.is_multi_line() =>
-            {
-                return false;
-            }
-            EditCommand::Move { motion, extend } => return self.move_caret(motion, extend),
-            EditCommand::SelectAll => {
-                self.select_all();
-                return true;
-            }
-            EditCommand::Copy => {
-                if let Some(text) = self.selected_string() {
-                    write_clipboard_text(&text);
-                }
-                return true;
-            }
-            EditCommand::Delete => m.delete_forward(),
-            EditCommand::DeletePrevWord => m.delete_prev_word(),
-            EditCommand::DeleteNextWord => m.delete_next_word(),
-            EditCommand::IndentInline | EditCommand::Indent => {
-                m.indent(command == EditCommand::Indent)
-            }
-            EditCommand::Outdent => m.outdent(),
-            EditCommand::Undo => m.undo(),
-            EditCommand::Redo => m.redo(),
-            EditCommand::Cut => {
-                m.commit_composition();
-                match self.selected_string() {
-                    Some(text) if write_clipboard_text(&text) => self.model.replace_selection(""),
-                    _ => None,
-                }
-            }
-            EditCommand::Paste => match read_clipboard_text().filter(|s| !s.is_empty()) {
-                Some(raw) => m.replace_selection(&raw),
-                None => None,
-            },
-        };
-        self.commit_edit(change, ts);
-        true
-    }
-
-    pub(crate) fn handle_text_input(&mut self, text: &str, ts: &TextSystem) {
-        let change = self.model.insert_text(text);
-        self.commit_edit(change, ts);
-    }
-
-    pub(crate) fn handle_ime_composition(&mut self, text: &str, cursor_utf16: usize, ts: &TextSystem) {
-        if text.is_empty() && self.model.composition().is_none() {
-            return;
-        }
-        let change = self.model.set_composition(text, cursor_utf16);
-        self.apply_change(change, ts);
-    }
-
-    pub(crate) fn ime_caret_bounds(&self) -> Option<Rect> {
-        let frame = self.fresh_frame()?;
-        let origin = frame.origin;
-        let selection = self.model.selection().range();
-        frame
-            .layout
-            .bounds_for_range(self.model.text(), selection, frame.last_cursor, origin)
-            .or(Some(frame.caret_rect))
-    }
-
-    pub(crate) fn set_value(&mut self, value: &str, ts: &TextSystem) {
-        self.reset_pointer_selection_state();
-        let change = self.model.set_value(value);
-        self.apply_change(change, ts);
-        self.scroll.x = 0.0;
-        self.scroll.y = 0.0;
-        self.reveal = None;
-    }
-
-    pub(crate) fn replace(&mut self, text: &str, ts: &TextSystem) {
-        let change = self.model.replace_selection(text);
-        self.apply_change(change, ts);
-    }
-
-    pub(crate) fn replace_all(&mut self, ranges: &[Range<usize>], replacement: &str, ts: &TextSystem) {
-        let change = self.model.replace_all(ranges, replacement);
-        self.apply_change(change, ts);
-    }
-
-    pub(crate) fn select_all(&mut self) {
-        self.goal = None;
-        self.model.select_all();
-    }
-
-    pub(crate) fn set_selected_range(&mut self, range: Range<usize>) {
-        self.goal = None;
-        self.word_anchor = None;
-        self.model.set_selected_range(range);
-        self.request_reveal(None, true);
-    }
-
-    pub(crate) fn go_to_line(&mut self, line: usize) {
-        self.goal = None;
-        self.model.go_to_line(line);
-        self.request_reveal(None, true);
-    }
-
-    /// The visual row `offset` is on, as text offsets, and whether it ends at a soft wrap; a
-    /// field's row is all of it.
-    fn visual_row_for(&self, offset: usize, end_affinity: bool) -> (Range<usize>, bool) {
-        let text = self.model.text();
-        let Some(doc) = &self.doc else {
-            return (0..text.len(), false);
-        };
-        let row = text.offset_to_point(offset).row;
-        let line_start = text.line_start_offset(row);
-        if doc.soft_wrap {
-            let disp = doc.lines.offset_to_display(text, offset, end_affinity);
-            if let Some((range, soft_end)) = doc.lines.visual_row_range(row, disp.sub_row) {
-                return (line_start + range.start..line_start + range.end, soft_end);
-            }
-        }
-        (line_start..text.line_end_offset(row), false)
-    }
-
-    fn preferred_x_for(
-        &self,
-        offset: usize,
-        end_affinity: bool,
-    ) -> Option<(f32, usize)> {
-        let frame = self.fresh_frame()?;
-        let text = self.model.text();
-        let pt = text.offset_to_point(offset);
-        let row_layout = frame.layout.line(pt.row)?;
-        let line_height = frame.layout.line_height;
-        let pos = row_layout.position_for_index(pt.column, line_height, end_affinity)?;
-        Some((pos.x, pt.column))
-    }
-
-    fn move_to_with_affinity(&mut self, offset: usize, end_affinity: bool) {
-        self.goal = None;
-        self.model.place_caret(offset, end_affinity);
-        self.request_reveal(None, false);
-        self.pause_blink();
-    }
-
-    fn page_rows(&self, doc: &DocumentView) -> isize {
-        let lh = doc.last_line_height.max(1.0);
-        ((self.input_bounds.size.height / lh).floor() as isize).max(1)
-    }
-
-    fn vertical_target(
-        &self,
-        doc: &DocumentView,
-        offset: usize,
-        goal: Option<(f32, usize)>,
-        end_affinity: bool,
-        delta_rows: isize,
-    ) -> (usize, bool) {
-        if doc.lines.visual_row_count() == 0 {
-            return (offset, end_affinity);
-        }
-        let text = self.model.text();
-        let mut display = doc.lines.offset_to_display(text, offset, end_affinity);
-        let max_row = doc.lines.visual_row_count().saturating_sub(1);
-        display.row = display.row.saturating_add_signed(delta_rows).min(max_row);
-        display.col = 0;
-
-        let mut target_offset = doc.lines.display_to_offset(text, display);
-        let mut target_affinity = false;
-
-        if let Some((pref_x, byte_col)) = goal {
-            let mut next_disp = doc.lines.offset_to_display(text, target_offset, false);
-            next_disp.col = 0;
-            let next_pt = text.offset_to_point(doc.lines.display_to_offset(text, next_disp));
-            let line_start = text.line_start_offset(next_pt.row);
-            if let Some(frame) = self.fresh_frame()
-                && let Some(row_layout) = frame.layout.line(next_pt.row)
-            {
-                let line_height = frame.layout.line_height;
-                if let Some((local_ix, affinity)) = row_layout.closest_index_for_position(
-                    point(pref_x, next_disp.sub_row as f32 * line_height),
-                    line_height,
-                ) {
-                    target_offset = line_start + local_ix;
-                    target_affinity = affinity;
-                }
-            } else if let Some((sub_range, soft_end)) =
-                doc.lines.visual_row_range(next_pt.row, next_disp.sub_row)
-            {
-                let max_col = sub_range.len();
-                let col = byte_col.min(max_col);
-                target_offset = line_start + sub_range.start + col;
-                target_affinity = soft_end && col == max_col;
-            } else {
-                let max_len = text.slice_line(next_pt.row).len();
-                target_offset = line_start + byte_col.min(max_len);
-            }
-        }
-        (target_offset, target_affinity)
-    }
-
-    fn move_caret(&mut self, motion: Motion, extend: bool) -> bool {
-        let is_vertical = matches!(
-            motion,
-            Motion::Up | Motion::Down | Motion::PageUp | Motion::PageDown
-        );
-        if is_vertical && self.doc.is_none() {
-            return false;
-        }
-        self.model.commit_composition();
-
-        let sel = self.model.selection();
-        let len = self.model.text().len();
-        if !extend {
-            if matches!(motion, Motion::Left) && sel.is_empty() && self.model.cursor() == 0 {
-                return false;
-            }
-            if matches!(motion, Motion::Right) && sel.is_empty() && self.model.cursor() == len {
-                return false;
-            }
-        }
-
-        let (target, target_aff, next_goal, direction) = match motion {
-            Motion::Left => {
-                let t = if !extend && !sel.is_empty() {
-                    sel.start()
-                } else {
-                    prev_grapheme_boundary(self.model.text(), sel.head)
-                };
-                (t, false, None, None)
-            }
-            Motion::Right => {
-                let t = if !extend && !sel.is_empty() {
-                    sel.end()
-                } else {
-                    next_grapheme_boundary(self.model.text(), sel.head)
-                };
-                (t, false, None, None)
-            }
-            Motion::PrevWord => (prev_word_start(self.model.text(), sel.head), false, None, None),
-            Motion::NextWord => (next_word_end(self.model.text(), sel.head), false, None, None),
-            Motion::LineStart => {
-                let (row, _) = self.visual_row_for(sel.head, sel.end_affinity);
-                (row.start, false, None, Some(MoveDirection::Up))
-            }
-            Motion::LineEnd => {
-                let (row, soft_end) = self.visual_row_for(sel.head, sel.end_affinity);
-                (row.end, soft_end, None, Some(MoveDirection::Down))
-            }
-            Motion::DocStart => (0, false, None, None),
-            Motion::DocEnd => (len, false, None, None),
-            Motion::Up | Motion::Down | Motion::PageUp | Motion::PageDown => {
-                let Some(doc) = &self.doc else {
-                    return false;
-                };
-                let delta = match motion {
-                    Motion::Up => -1,
-                    Motion::Down => 1,
-                    Motion::PageUp => -self.page_rows(doc),
-                    Motion::PageDown => self.page_rows(doc),
-                    _ => unreachable!(),
-                };
-                let dir = if delta < 0 {
-                    MoveDirection::Up
-                } else {
-                    MoveDirection::Down
-                };
-                // Up or Down collapses a selection from its edge in that direction; otherwise the
-                // caret moves, keeping the column it was moving in.
-                let collapse =
-                    !extend && !sel.is_empty() && matches!(motion, Motion::Up | Motion::Down);
-                let (base, aff) = if !collapse {
-                    (sel.head, sel.end_affinity)
-                } else if delta < 0 {
-                    (sel.start(), false)
-                } else {
-                    (
-                        sel.end(),
-                        sel.end() == self.model.cursor() && sel.end_affinity,
-                    )
-                };
-                let goal = self
-                    .goal
-                    .filter(|_| !collapse)
-                    .or_else(|| self.preferred_x_for(base, aff));
-                let mut target = self.vertical_target(doc, base, goal, aff, delta);
-                // Extending from the first or last row selects to the document's start or end.
-                if extend && doc.lines.visual_row_count() > 0 {
-                    let text = self.model.text();
-                    let row = |(offset, aff)| doc.lines.offset_to_display(text, offset, aff).row;
-                    if row((base, aff)) == row(target) {
-                        target = (if delta < 0 { 0 } else { len }, false);
-                    }
-                }
-                (target.0, target.1, goal, Some(dir))
-            }
-        };
-
-        self.goal = next_goal;
-        self.pause_blink();
-        if extend {
-            self.model.break_coalescing();
-            self.model.extend_selection(target, target_aff, None);
-        } else {
-            self.model.place_caret(target, target_aff);
-        }
-        self.request_reveal(direction.filter(|_| !extend), true);
-        true
-    }
-
-    fn select_to_with_affinity(&mut self, offset: usize, end_affinity: bool) {
-        self.goal = None;
-        self.model
-            .extend_selection(offset, end_affinity, self.word_anchor.clone());
-    }
-
-    fn select_word_at(&mut self, offset: usize) {
-        self.goal = None;
-        if let Some(range) = self.model.select_word_at(offset) {
-            self.word_anchor = Some(range);
-        }
-    }
-
-    fn select_line_at(&mut self, offset: usize) {
-        self.goal = None;
-        self.model.select_line_at(offset);
-        self.word_anchor = None;
-    }
-}
-
-fn snap_point(pt: Point, scale: f32) -> Point {
-    point(
-        (pt.x * scale).round() / scale,
-        (pt.y * scale).round() / scale,
-    )
-}
-
-fn content_width_with_margin(max_line_w: f32, viewport_width: f32) -> f32 {
-    if max_line_w + RIGHT_MARGIN > viewport_width {
-        max_line_w + RIGHT_MARGIN
-    } else {
-        max_line_w
-    }
-}
-
-impl Editor {
-    /// Lays the editor out in `input_bounds`, where its text landed, and works out what to draw;
-    /// whether another frame should follow (a document's windowed lines or scrollbars changed
-    /// in ways this frame's layout couldn't show).
-    pub(crate) fn prepare(
-        &mut self,
-        input_bounds: Rect,
-        params: EditorPaintParams<'_>,
-        ui: &mut AppUi,
-        ts: &TextSystem,
-    ) -> bool {
-        self.input_bounds = input_bounds;
-        if self.doc.is_none() {
-            self.prepare_field(input_bounds, params, ts);
-            return false;
-        }
-        let reshaped = self.prepare_document(input_bounds, params, ts);
-        let scroll = self.scroll_offset();
-        let content = size(self.scroll.content_w, self.scroll.content_h as f32);
-        let doc = self.doc.as_deref_mut().expect("document view");
-        let vp = ScrollbarViewport {
-            input: input_bounds,
-            paddings: doc.paddings,
-            scale: params.scale,
-            content_size: content,
-            scroll_offset: scroll,
-            horizontal: !doc.soft_wrap,
-        };
-        let bars_changed = doc
-            .scrollbar
-            .update(self.slot, vp, params.palette, params.now, ui);
-        reshaped || bars_changed
-    }
-
-    pub(crate) fn paint(&self, p: Palette, canvas: &mut Canvas) {
-        let Some(frame) = self.frame.as_ref() else {
-            return;
-        };
-        canvas.with_clip(self.input_bounds, |canvas| {
-            for &rect in &frame.selection_rects {
-                canvas.paint_quad(fill(rect, p.selection));
-            }
-            let origin = frame.origin;
-            let marked = frame.marked_range.as_ref();
-            frame.layout.paint(origin, frame.text_color, marked, canvas);
-            if frame.show_caret {
-                canvas.paint_quad(fill(frame.caret_rect, p.caret));
-            }
-        });
-        if let Some(doc) = &self.doc {
-            doc.scrollbar.paint(canvas);
-        }
-    }
-
-    fn finish_frame(
-        &mut self,
-        layout: FrameLayout,
-        text_color: Rgba,
-        head_pt: Point,
-        is_empty_field: bool,
-        params: EditorPaintParams<'_>,
-    ) {
-        // Vertical scroll is baked into each line's top in f64 so D2D coordinates stay exact on
-        // huge files.
-        let origin = self.input_bounds.origin + point(self.scroll.x, 0.);
-        let caret_rect = caret_rect(
-            origin + head_pt,
-            layout.line_height,
-            params.style.caret_height,
-            params.scale,
-            params.caret_width_px,
-        );
-        let show_caret = self.focused
-            && params.window_active
-            && self.blink.visible
-            && (self.model.selection().is_empty() || self.model.composition().is_some());
-        let marked_range = (!is_empty_field)
-            .then(|| self.model.composition().map(|c| c.start..c.end))
-            .flatten();
-        let selection_rects = if params.window_active
-            && params.show_selection
-            && self.model.composition().is_none()
-            && !self.model.selection().is_empty()
-        {
-            layout.range_rects(&self.model.selection().range(), origin)
-        } else {
-            Vec::new()
-        };
-        self.frame = Some(Frame {
-            layout,
-            revision: self.model.revision(),
-            scroll_x: self.scroll.x,
-            scroll_y: self.scroll.y,
-            origin,
-            text_color,
-            caret_rect,
-            show_caret,
-            selection_rects,
-            marked_range,
-            last_cursor: self.model.cursor(),
-        });
-    }
-
-    fn prepare_field(&mut self, input_bounds: Rect, params: EditorPaintParams<'_>, ts: &TextSystem) {
-        let style = params.style;
-        let text_style = &style.text;
-        let line_height = style.line_height.max(1.0);
-        let is_empty = self.model.text().len() == 0;
-        let (display_str, text_color): (SharedStr, Rgba) = if is_empty {
-            (self.placeholder.clone(), params.palette.text_secondary)
-        } else {
-            (self.model.text().to_string().into(), style.color)
-        };
-        let text_len = self.model.text().len();
-        let layout = FrameLayout::single_row(display_str, text_len, text_style, line_height, ts);
-        let head = self.model.cursor();
-        let head_pt = layout
-            .position_for_offset(self.model.text(), head, false)
-            .unwrap_or(Point::ZERO);
-        let max_line_w = layout.width().max(head_pt.x);
-        self.scroll.content_w = content_width_with_margin(max_line_w, input_bounds.size.width);
-        if self.reveal.take().is_some() {
-            self.scroll.x =
-                reveal_horizontal_scroll(self.scroll.x, head_pt.x, input_bounds.size.width);
-        }
-        self.scroll.x =
-            clamp_horizontal_scroll(self.scroll.x, self.scroll.content_w, input_bounds.size.width);
-        self.finish_frame(layout, text_color, head_pt, is_empty, params);
-    }
-
-    fn prepare_document(
-        &mut self,
-        input_bounds: Rect,
-        params: EditorPaintParams<'_>,
-        ts: &TextSystem,
-    ) -> bool {
-        let style = params.style;
-        let text_style = &style.text;
-        let line_height = style.line_height.max(1.0);
-        let text = self.model.text();
-        let reveal_req = self.reveal.take();
-        let head = self.model.cursor();
-        let end_affinity = self.model.selection().end_affinity;
-
-        let doc = self.doc.as_deref_mut().expect("document view");
-        let soft_wrap = doc.soft_wrap;
-        let wrap_width = soft_wrap.then_some((input_bounds.size.width - RIGHT_MARGIN).max(1.0));
-
-        // A reflow keeps the top line in view, unless the caret is about to be revealed anyway.
-        let anchor = reveal_req
-            .is_none()
-            .then(|| doc.capture_scroll_anchor(self.scroll.y, doc.last_line_height))
-            .flatten();
-        let reflowed = doc.lines.sync_layout(text, text_style, wrap_width, ts)
-            || (doc.last_line_height - line_height).abs() > 0.01;
-        doc.last_line_height = line_height;
-        if let Some(anchor) = anchor.filter(|_| reflowed) {
-            self.scroll.y = doc.restore_scroll_anchor(text, anchor, line_height);
-        }
-
-        let total_rows = doc.lines.visual_row_count().max(1);
-        let content_h = (total_rows as f64 * f64::from(line_height))
-            .max(f64::from(input_bounds.size.height));
-        self.scroll.content_h = content_h;
-
-        if let Some(req) = reveal_req {
-            let disp = doc.lines.offset_to_display(text, head, end_affinity);
-            let row_y = disp.row as f64 * f64::from(line_height);
-            let vp_h = f64::from(input_bounds.size.height);
-            let lh_f64 = f64::from(line_height);
-            let v_margin = if req.with_margin {
-                f64::from(caret_vertical_margin(input_bounds.size.height, line_height))
-            } else {
-                0.0
-            };
-            let prev_y = self.scroll.y;
-            let mut next_y = prev_y;
-            if row_y < -next_y + v_margin {
-                next_y = (v_margin - row_y).min(0.0);
-            } else if row_y + lh_f64 > -next_y + vp_h - v_margin {
-                next_y = vp_h - v_margin - (row_y + lh_f64);
-            }
-            match req.direction {
-                Some(MoveDirection::Up) => next_y = next_y.max(prev_y),
-                Some(MoveDirection::Down) => next_y = next_y.min(prev_y),
-                None => {}
-            }
-            self.scroll.y = next_y;
-        }
-        let min_y = (-content_h + f64::from(input_bounds.size.height)).min(0.0);
-        self.scroll.y = self.scroll.y.clamp(min_y, 0.0);
-
-        // Unwrapped, the horizontal extent and reveal are settled before the windowed lines are
-        // shaped, then refined from what was shaped.
-        let width = input_bounds.size.width;
-        let mut max_line_w = match wrap_width {
-            Some(wrap) => {
-                self.scroll.x = 0.0;
-                wrap
-            }
-            None => {
-                let mut max = doc.lines.longest_line_width(text, ts);
-                if reveal_req.is_some() {
-                    let caret_x = doc.lines.unwrapped_x(text, head, ts);
-                    max = max.max(caret_x);
-                    self.scroll.x = reveal_horizontal_scroll(self.scroll.x, caret_x, width);
-                }
-                let estimate = content_width_with_margin(max, width);
-                self.scroll.x = clamp_horizontal_scroll(self.scroll.x, estimate, width);
-                max
-            }
-        };
-
-        let prev_scroll_x = self.scroll.x;
-        let view = Viewport {
-            size: input_bounds.size,
-            scroll_x: self.scroll.x,
-            scroll_y: self.scroll.y,
-        };
-        let (layout, shaped_windowed) =
-            doc.lines
-                .layout_visible(text, view, head, end_affinity, line_height, ts);
-        let head_pt = layout
-            .position_for_offset(text, head, end_affinity)
-            .unwrap_or_else(|| {
-                let disp = doc.lines.offset_to_display(text, head, end_affinity);
-                point(
-                    0.0,
-                    (disp.row as f64 * f64::from(line_height) + self.scroll.y) as f32,
-                )
-            });
-        if !soft_wrap {
-            max_line_w = max_line_w.max(layout.width()).max(head_pt.x);
-            if reveal_req.is_some() {
-                self.scroll.x = reveal_horizontal_scroll(self.scroll.x, head_pt.x, width);
-            }
-        }
-        self.scroll.content_w = content_width_with_margin(max_line_w, width);
-        self.scroll.x = clamp_horizontal_scroll(self.scroll.x, self.scroll.content_w, width);
-
-        self.finish_frame(layout, style.color, head_pt, false, params);
-
-        shaped_windowed && (self.scroll.x - prev_scroll_x).abs() > 1.0
-    }
-
-}
-
-/// The caret at `at` (the top of its line), `height` tall and centred on the line.
-fn caret_rect(at: Point, line_height: f32, height: f32, scale: f32, width_px: u32) -> Rect {
-    let origin = snap_point(point(at.x, at.y + (line_height - height) * 0.5), scale);
-    let width = (width_px.max(1) as f32 / scale).max(1.0 / scale);
-    Rect::new(origin, size(width, height))
-}
-
-const BOTTOM_MARGIN_ROWS: usize = 3;
-
-#[derive(Copy, Clone, Debug)]
-struct ScrollAnchor {
-    line: usize,
-    byte_in_line: usize,
-    frac_px: f64,
-}
-
-fn clamp_horizontal_scroll(offset_x: f32, content_width: f32, viewport_width: f32) -> f32 {
-    let min_x = (viewport_width - content_width).min(0.0);
-    offset_x.clamp(min_x, 0.0)
-}
-
-fn reveal_horizontal_scroll(scroll_x: f32, caret_x: f32, viewport_width: f32) -> f32 {
-    if scroll_x + caret_x > viewport_width - RIGHT_MARGIN {
-        viewport_width - RIGHT_MARGIN - caret_x
-    } else if scroll_x + caret_x < 0.0 {
-        -caret_x
-    } else {
-        scroll_x
-    }
-}
-
-fn caret_vertical_margin(viewport_height: f32, line_height: f32) -> f32 {
-    let rows = (viewport_height / line_height.max(1.0)) as usize;
-    let raw = if rows < BOTTOM_MARGIN_ROWS * 8 {
-        line_height
-    } else {
-        BOTTOM_MARGIN_ROWS as f32 * line_height
-    };
-    raw.min(rows as f32 * line_height * 0.5)
-}
-
-impl DocumentView {
-    fn capture_scroll_anchor(&self, scroll_y: f64, line_height: f32) -> Option<ScrollAnchor> {
-        if self.lines.visual_row_count() == 0 || line_height <= 0.0 {
-            return None;
-        }
-        let lh = f64::from(line_height);
-        let top = (-scroll_y).max(0.0);
-        let top_row = (top / lh).floor() as usize;
-        let frac_px = top - top_row as f64 * lh;
-        let clamped_row = top_row.min(self.lines.visual_row_count().saturating_sub(1));
-        let (line, sub_row) = self.lines.visual_row_to_line_and_sub_row(clamped_row);
-        let byte_in_line = self
-            .lines
-            .visual_row_range(line, sub_row)
-            .map_or(0, |(r, _)| r.start);
-        Some(ScrollAnchor {
-            line,
-            byte_in_line,
-            frac_px,
-        })
-    }
-
-    fn restore_scroll_anchor(
-        &self,
-        text: &Rope,
-        anchor: ScrollAnchor,
-        line_height: f32,
-    ) -> f64 {
-        if self.lines.line_count() == 0 || line_height <= 0.0 {
-            return 0.0;
-        }
-        let line = anchor.line.min(self.lines.line_count().saturating_sub(1));
-        let line_start = text.line_start_offset(line);
-        let line_len = text.line_len(line);
-        let target = line_start + anchor.byte_in_line.min(line_len);
-        let disp = self.lines.offset_to_display(text, target, false);
-        let new_top = disp.row as f64 * f64::from(line_height) + anchor.frac_px;
-        -new_top.max(0.0)
-    }
-}
-
-impl Editor {
-    /// Scrolls a document to (`x`, `y`), kept within its content; whether it moved.
-    fn scroll_to(&mut self, x: f32, y: f64) -> bool {
-        let view = self.input_bounds.size;
-        let min_y = (f64::from(view.height) - self.scroll.content_h).min(0.0);
-        let next = (
-            clamp_horizontal_scroll(x, self.scroll.content_w, view.width),
-            y.clamp(min_y, 0.0),
-        );
-        let moved = next != (self.scroll.x, self.scroll.y);
-        (self.scroll.x, self.scroll.y) = next;
-        moved
-    }
-
-    fn apply_scrollbar_scroll(&mut self, next: Option<Point>) {
-        if let Some(next) = next {
-            self.reveal = None;
-            self.scroll_to(next.x, f64::from(next.y));
-        }
-    }
-
-    /// A press on a scrollbar track: on the thumb it starts a drag, elsewhere it pages. Whether
-    /// the scrollbar took it, which it doesn't while faded out.
-    pub(crate) fn press_scrollbar(&mut self, axis: Axis, pos: Point) -> bool {
-        let scroll = self.scroll_offset();
-        let Some(doc) = self.doc.as_deref_mut() else {
-            return false;
-        };
-        if !doc.scrollbar.is_interactive(axis) {
-            return false;
-        }
-        let next = doc.scrollbar.on_mouse_down(axis, pos, scroll);
-        self.apply_scrollbar_scroll(next);
-        true
-    }
-
-    /// The pointer moved: whether a scrollbar thumb needs redrawing because it came onto or off
-    /// one.
-    pub(crate) fn hover_scrollbar(&self, pos: Point, ui: &AppUi) -> bool {
-        self.doc
-            .as_deref()
-            .is_some_and(|doc| doc.scrollbar.hover_changed(self.slot, pos, ui))
-    }
-
-    /// While the thumb is dragged, follows the pointer: whether to repaint now (`None` when no
-    /// drag is going on).
-    pub(crate) fn drag_scrollbar(&mut self, pos: Point, pressed: bool) -> Option<bool> {
-        let scroll = self.scroll_offset();
-        let doc = self.doc.as_deref_mut()?;
-        let (next, notify) = doc.scrollbar.on_mouse_move(pos, pressed, scroll)?;
-        self.apply_scrollbar_scroll(next);
-        Some(notify)
-    }
-
-    /// Ends a thumb drag at `pos`.
-    pub(crate) fn release_scrollbar(&mut self, pos: Point) {
-        let scroll = self.scroll_offset();
-        let next = self
-            .doc
-            .as_deref_mut()
-            .and_then(|doc| doc.scrollbar.on_mouse_up(pos, scroll));
-        self.apply_scrollbar_scroll(next);
-    }
-
-    pub(crate) fn on_scroll_wheel(
-        &mut self,
-        delta_lines: Point,
-        page_scroll: bool,
-        modifiers: Modifiers,
-    ) -> bool {
-        let Some(doc) = self.doc.as_deref().filter(|_| !modifiers.ctrl) else {
-            return false;
-        };
-        let lh = doc.last_line_height.max(1.0);
-        let vp = self.input_bounds.size;
-        let dx = if delta_lines.x != 0.0 {
-            let space_w = self
-                .frame
-                .as_ref()
-                .map_or(lh * 0.5, |f| f.layout.space_width.max(1.0));
-            (delta_lines.x * space_w * 3.0)
-                .round()
-                .clamp(-vp.width.max(lh), vp.width.max(lh))
-        } else {
-            0.0
-        };
-        let dy = if page_scroll {
-            f64::from(delta_lines.y) * f64::from((vp.height - lh).max(lh))
-        } else {
-            f64::from(delta_lines.y) * f64::from(lh)
-        };
-
-        self.reveal = None;
-        self.scroll_to(self.scroll.x + dx, self.scroll.y + dy)
-    }
-
-    /// Acts on whatever is due at `now`: blinking, auto-scrolling, scrollbar fading. Returns
-    /// whether the editor needs repainting.
-    pub(crate) fn tick(&mut self, now: Instant) -> bool {
-        let mut changed = self.blink.tick(now);
-        let Some(doc) = &mut self.doc else {
-            return changed;
-        };
-        changed |= doc.scrollbar.tick(now);
-        if take_due(&mut doc.auto_scroll.next, now) {
-            let Some(delta) = doc.auto_scroll.delta else {
-                doc.auto_scroll.stop();
-                return changed;
-            };
-            doc.auto_scroll.next = Some(now + AUTO_SCROLL_INTERVAL);
-            let drag_pos = doc.auto_scroll.last_drag_pos;
-            self.reveal = None;
-            self.scroll_to(self.scroll.x, self.scroll.y + f64::from(delta));
-            if let Some(pos) = drag_pos {
-                let (offset, aff) = self.hit_test_point(pos);
-                self.select_to_with_affinity(offset, aff);
-            }
-            changed = true;
-        }
-        changed
-    }
-
-    /// When the editor next needs a `tick`.
-    pub(crate) fn deadline(&self) -> Option<Instant> {
-        let doc = self.doc.as_deref();
-        let auto_scroll = doc.and_then(|doc| doc.auto_scroll.next);
-        let scrollbar = doc.and_then(|doc| doc.scrollbar.deadline());
-        [self.blink.next, auto_scroll, scrollbar]
-            .into_iter()
-            .flatten()
-            .min()
-    }
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct EditorPaintStyle {
-    pub(crate) text: TextStyle,
-    pub(crate) line_height: f32,
-    pub(crate) color: Rgba,
-    pub(crate) caret_height: f32,
-}
-
-#[derive(Copy, Clone)]
-pub(crate) struct EditorPaintParams<'a> {
-    pub(crate) style: &'a EditorPaintStyle,
-    pub(crate) palette: Palette,
-    pub(crate) window_active: bool,
-    pub(crate) show_selection: bool,
-    pub(crate) scale: f32,
-    pub(crate) caret_width_px: u32,
-    /// The frame's time, for the scrollbars' fades.
-    pub(crate) now: Instant,
-}
-
-/// The editor's last layout, with where it was placed and what was drawn over it.
-struct Frame {
-    layout: FrameLayout,
-    revision: u64,
-    scroll_x: f32,
-    scroll_y: f64,
-    /// Where the text was drawn from: the editor's top left, scrolled horizontally.
-    origin: Point,
-    text_color: Rgba,
-    caret_rect: Rect,
-    show_caret: bool,
-    selection_rects: Vec<Rect>,
-    marked_range: Option<Range<usize>>,
-    last_cursor: usize,
-}
+// ---- 9. Scrollbars --------------------------------------------------------------------------
 
 const TRACK_THICKNESS: f32 = 16.;
 const MIN_THUMB_LENGTH: f32 = 48.;
@@ -1362,10 +1374,12 @@ const THUMB_ACTIVE_THICKNESS: f32 = 8.;
 const THUMB_REST_RADIUS: f32 = 3.;
 const THUMB_ACTIVE_RADIUS: f32 = 4.;
 
+/// How long the bars stay after the last scroll or hover, then how they fade and thicken.
 const IDLE_HOLD: Duration = Duration::from_secs(2);
 const FADE_IN: Curve = Curve::new(Duration::from_millis(120), Easing::Linear);
 const FADE_OUT: Curve = Curve::new(Duration::from_millis(200), Easing::EaseInCubic);
 const EXPAND: Curve = Curve::new(Duration::from_millis(120), Easing::EaseOutCubic);
+/// A dragged thumb repaints at most this often.
 const DRAG_NOTIFY_INTERVAL: Duration = Duration::from_micros(8_333);
 
 fn axis_val(p: Point, axis: Axis) -> f32 {
@@ -1389,10 +1403,13 @@ fn axis_size(s: Size, axis: Axis) -> f32 {
     }
 }
 
+/// A corner radius that fits a pill `width` by `height`.
 fn clamp_radius(radius: f32, width: f32, height: f32) -> f32 {
     radius.min(width * 0.5).min(height * 0.5).max(0.0)
 }
 
+/// A bar's thumb along its track: its margin and length, how far it travels, and how far the
+/// content scrolls.
 #[derive(Clone, Copy, Debug)]
 struct TrackMetrics {
     margin: f32,
@@ -1404,23 +1421,26 @@ struct TrackMetrics {
 impl TrackMetrics {
     fn compute(viewport_span: f32, content_span: f32, corner_reserve: f32) -> Self {
         let track_span = (viewport_span - corner_reserve).max(0.);
-        let raw_thumb = (viewport_span / content_span * viewport_span)
+        let thumb = (viewport_span / content_span * viewport_span)
             .max(MIN_THUMB_LENGTH)
             .min(track_span);
-        let margin = THUMB_MARGIN.clamp(0., raw_thumb * 0.5);
+        let margin = THUMB_MARGIN.clamp(0., thumb * 0.5);
         Self {
             margin,
-            thumb_len: raw_thumb - margin * 2.,
-            travel: track_span - raw_thumb,
+            thumb_len: thumb - margin * 2.,
+            travel: track_span - thumb,
             max_scroll: content_span - viewport_span,
         }
     }
 
+    /// Where the thumb starts along the track at `scroll_offset`.
     fn thumb_local(self, scroll_offset: f32) -> f32 {
         let ratio = (-scroll_offset / self.max_scroll).clamp(0., 1.);
         self.margin + ratio * self.travel
     }
 
+    /// `offset` with the axis scrolled to where the pointer, holding the thumb `grab` into it,
+    /// puts it.
     fn apply_drag(
         self,
         axis: Axis,
@@ -1432,9 +1452,12 @@ impl TrackMetrics {
         if self.travel <= 0. {
             return offset;
         }
-        let pos = axis_val(pointer, axis);
-        let ratio = ((pos - track_origin - self.margin - grab) / self.travel).clamp(0., 1.);
-        set_axis_val(&mut offset, axis, -self.max_scroll * ratio);
+        let along = axis_val(pointer, axis) - track_origin - self.margin - grab;
+        set_axis_val(
+            &mut offset,
+            axis,
+            -self.max_scroll * (along / self.travel).clamp(0., 1.),
+        );
         offset
     }
 }
@@ -1451,6 +1474,7 @@ struct ScrollbarViewport {
     horizontal: bool,
 }
 
+/// A thumb being dragged, held `grab` along from its start.
 #[derive(Clone, Copy, Debug)]
 struct Drag {
     axis: Axis,
@@ -1478,11 +1502,12 @@ struct ActiveAxis {
 
 impl ActiveAxis {
     fn on_thumb(&self, axis: Axis, pos: Point) -> bool {
-        let at = axis_val(pos, axis);
-        self.shown && (self.thumb.0..self.thumb.1).contains(&at)
+        self.shown && (self.thumb.0..self.thumb.1).contains(&axis_val(pos, axis))
     }
 }
 
+/// A document's scrollbars: overlay bars that show while scrolling or hovered, fade after a
+/// while, thicken under the pointer, and drag or page.
 #[derive(Default)]
 struct ScrollbarState {
     drag: Option<Drag>,
@@ -1508,8 +1533,7 @@ impl ScrollbarState {
         [Axis::Vertical, Axis::Horizontal].into_iter().any(|axis| {
             self.axes[axis as usize].is_some_and(|a| {
                 let over = ui.is_hovered(HitId::ScrollTrack(slot, axis));
-                let on = a.interactive && over && a.on_thumb(axis, pos);
-                on != a.hovered
+                (a.interactive && over && a.on_thumb(axis, pos)) != a.hovered
             })
         })
     }
@@ -1549,18 +1573,15 @@ impl ScrollbarState {
             self.idle_at = None;
         }
         (self.last_offset, self.was_hovered) = (scroll_offset, hovered);
-
-        let visible = hovered
-            || self.drag.is_some()
-            || self
-                .last_activity
-                .is_some_and(|t| now.saturating_duration_since(t) < IDLE_HOLD);
-
+        let recent = self
+            .last_activity
+            .filter(|&t| now.saturating_duration_since(t) < IDLE_HOLD);
+        let visible = hovered || self.drag.is_some() || recent.is_some();
+        // Left alone, they fade when the hold runs out.
         if !hovered
             && self.drag.is_none()
             && self.idle_at.is_none()
-            && let Some(last) = self.last_activity
-            && now.saturating_duration_since(last) < IDLE_HOLD
+            && let Some(last) = recent
         {
             self.idle_at = Some(last + IDLE_HOLD);
         }
@@ -1569,11 +1590,10 @@ impl ScrollbarState {
         let pad = vp.paddings;
         let padded = |s: Size| size(s.width + pad.right, s.height + pad.top + pad.bottom);
         let (viewport, content) = (padded(vp.input.size), padded(vp.content_size));
-        let vertical_needed = viewport.height > 0. && content.height > viewport.height;
-        let horizontal_needed =
-            vp.horizontal && viewport.width > 0. && content.width > viewport.width;
+        let vertical = viewport.height > 0. && content.height > viewport.height;
+        let horizontal = vp.horizontal && viewport.width > 0. && content.width > viewport.width;
         self.axes = [None, None];
-        if !vertical_needed && !horizontal_needed {
+        if !vertical && !horizontal {
             return before != [false, false];
         }
 
@@ -1604,22 +1624,18 @@ impl ScrollbarState {
                 size(r.size.width / scale, r.size.height / scale),
             )
         };
-
-        for (needed, axis) in [
-            (horizontal_needed, Axis::Horizontal),
-            (vertical_needed, Axis::Vertical),
-        ] {
+        for (needed, axis) in [(horizontal, Axis::Horizontal), (vertical, Axis::Vertical)] {
             if !needed {
                 continue;
             }
             let viewport_span = axis_size(viewport, axis);
-            let content_span = axis_size(content, axis);
-            let corner_reserve = if axis == Axis::Horizontal && vertical_needed {
+            // The horizontal bar stops short of the vertical one's corner.
+            let corner = if axis == Axis::Horizontal && vertical {
                 TRACK_THICKNESS
             } else {
                 0.
             };
-            let metrics = TrackMetrics::compute(viewport_span, content_span, corner_reserve);
+            let metrics = TrackMetrics::compute(viewport_span, axis_size(content, axis), corner);
             let thumb_local = metrics.thumb_local(axis_val(scroll_offset, axis));
 
             // The track and the thumb's span along it, then whether the pointer is on the thumb
@@ -1635,24 +1651,26 @@ impl ScrollbarState {
                         view.left() + px(pad.left),
                         view.bottom() - px(TRACK_THICKNESS),
                     ),
-                    point(view.right() - px(corner_reserve), view.bottom()),
+                    point(view.right() - px(corner), view.bottom()),
                 ),
             };
             let thumb_start = axis_val(track.origin, axis) + thumb_at;
             let thumb = (thumb_start / scale, (thumb_start + thumb_len) / scale);
             let shown = opacity > 0.0;
-            let hovered = interactive
-                && shown
-                && track_hovered[axis as usize]
-                && ui
-                    .pointer
-                    .is_some_and(|ptr| (thumb.0..thumb.1).contains(&axis_val(ptr.pos, axis)));
+            let pointer_on_thumb = ui
+                .pointer
+                .is_some_and(|ptr| (thumb.0..thumb.1).contains(&axis_val(ptr.pos, axis)));
+            let hovered = interactive && shown && track_hovered[axis as usize] && pointer_on_thumb;
 
-            let is_dragged = self.drag.is_some_and(|d| d.axis == axis);
-            let (thumb_color, target_thickness, target_radius) = if is_dragged {
+            let dragged = self.drag.is_some_and(|d| d.axis == axis);
+            let (color, target_thickness, radius) = if dragged {
                 (p.text_primary, THUMB_ACTIVE_THICKNESS, THUMB_ACTIVE_RADIUS)
             } else if hovered {
-                (p.text_secondary, THUMB_ACTIVE_THICKNESS, THUMB_ACTIVE_RADIUS)
+                (
+                    p.text_secondary,
+                    THUMB_ACTIVE_THICKNESS,
+                    THUMB_ACTIVE_RADIUS,
+                )
             } else {
                 (p.text_tertiary, THUMB_REST_THICKNESS, THUMB_REST_RADIUS)
             };
@@ -1684,8 +1702,8 @@ impl ScrollbarState {
                 track: logical(track),
                 thumb,
                 pill: logical(pill),
-                radius: clamp_radius(target_radius, pill_w, pill_h),
-                color: thumb_color.opacity(opacity),
+                radius: clamp_radius(radius, pill_w, pill_h),
+                color: color.opacity(opacity),
                 shown,
                 hovered,
             });
@@ -1737,37 +1755,33 @@ impl ScrollbarState {
         }
     }
 
+    /// A press on `axis`'s track: on the thumb it starts a drag, elsewhere it pages toward the
+    /// pointer. The offset to scroll to.
     fn on_mouse_down(
         &mut self,
         axis: Axis,
         position: Point,
         current_offset: Point,
     ) -> Option<Point> {
-        let active = self.axes[axis as usize]?;
-        if !active.interactive {
-            return None;
-        }
+        let active = self.axes[axis as usize].filter(|a| a.interactive)?;
         let track_origin = axis_val(active.track.origin, axis);
         let pointer = axis_val(position, axis);
         let thumb_origin = track_origin + active.thumb_local;
         if active.on_thumb(axis, position) {
             let grab = pointer - thumb_origin;
             self.drag = Some(Drag { axis, grab });
-            Some(
-                active
-                    .metrics
-                    .apply_drag(axis, track_origin, position, grab, current_offset),
-            )
-        } else {
-            let page = (active.viewport_span - 24.0).max(24.0);
-            let delta = if pointer < thumb_origin { page } else { -page };
-            let mut next = current_offset;
-            let val = axis_val(next, axis) + delta;
-            set_axis_val(&mut next, axis, val);
-            Some(next)
+            let metrics = active.metrics;
+            return Some(metrics.apply_drag(axis, track_origin, position, grab, current_offset));
         }
+        let page = (active.viewport_span - 24.0).max(24.0);
+        let delta = if pointer < thumb_origin { page } else { -page };
+        let mut next = current_offset;
+        set_axis_val(&mut next, axis, axis_val(current_offset, axis) + delta);
+        Some(next)
     }
 
+    /// A dragged thumb follows the pointer: the offset to scroll to (if it moved) and whether
+    /// to repaint now, or `None` when no drag is going on.
     fn on_mouse_move(
         &mut self,
         position: Point,
@@ -1778,12 +1792,14 @@ impl ScrollbarState {
         let active = self.axes[drag.axis as usize]?;
         let track_origin = axis_val(active.track.origin, drag.axis);
         let now = Instant::now();
-        let next = active
-            .metrics
-            .apply_drag(drag.axis, track_origin, position, drag.grab, current_offset);
+        let next =
+            active
+                .metrics
+                .apply_drag(drag.axis, track_origin, position, drag.grab, current_offset);
         let moved = next != current_offset;
         if moved {
             match self.last_drag_notify {
+                // Too soon since the last repaint: one comes when the interval's up.
                 Some(last) if now.saturating_duration_since(last) < DRAG_NOTIFY_INTERVAL => {
                     self.drag_at.get_or_insert(last + DRAG_NOTIFY_INTERVAL);
                 }
@@ -1797,6 +1813,7 @@ impl ScrollbarState {
         Some((moved.then_some(next), false))
     }
 
+    /// Ends a thumb drag at `position`: the offset to scroll to.
     fn on_mouse_up(&mut self, position: Point, current_offset: Point) -> Option<Point> {
         let drag = self.drag.take()?;
         self.drag_at = None;
