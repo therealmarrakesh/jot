@@ -245,14 +245,6 @@ impl LineIndex {
         self.rows
     }
 
-    pub(crate) fn style(&self) -> &TextStyle {
-        &self.style
-    }
-
-    pub(crate) fn wrap_width(&self) -> Option<f32> {
-        self.wrap_width
-    }
-
     /// Line `line` and the visual row it starts on (the row count past the last line).
     fn line(&self, line: usize) -> (usize, Option<&Line>) {
         let (c, i) = self.chunk_of(line);
@@ -372,14 +364,14 @@ impl LineIndex {
     }
 
     /// Brings the index up to date with `style` and `wrap_width`, wrapping the whole text the
-    /// first time or when either changes what wraps.
+    /// first time or when either changes what wraps; whether either changed.
     pub(crate) fn sync_layout(
         &mut self,
         text: &Rope,
         style: &TextStyle,
         wrap_width: Option<f32>,
         ts: &TextSystem,
-    ) {
+    ) -> bool {
         let style_changed = self.style != *style;
         let width_changed = self.wrap_width != wrap_width;
         if style_changed || width_changed || !self.synced {
@@ -393,6 +385,7 @@ impl LineIndex {
             self.synced = true;
             self.rebuild(text, ts);
         }
+        style_changed || width_changed
     }
 
     /// Re-wraps the lines an edit changed.

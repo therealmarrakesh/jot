@@ -1092,19 +1092,15 @@ impl Editor {
         let soft_wrap = doc.soft_wrap;
         let wrap_width = soft_wrap.then_some((input_bounds.size.width - RIGHT_MARGIN).max(1.0));
 
-        let reflowing = doc.lines.style() != text_style
-            || doc.lines.wrap_width() != wrap_width
+        // A reflow keeps the top line in view, unless the caret is about to be revealed anyway.
+        let anchor = reveal_req
+            .is_none()
+            .then(|| doc.capture_scroll_anchor(self.scroll.y, doc.last_line_height))
+            .flatten();
+        let reflowed = doc.lines.sync_layout(text, text_style, wrap_width, ts)
             || (doc.last_line_height - line_height).abs() > 0.01;
-        let anchor = if reflowing && reveal_req.is_none() {
-            doc.capture_scroll_anchor(self.scroll.y, doc.last_line_height)
-        } else {
-            None
-        };
-
-        doc.lines.sync_layout(text, text_style, wrap_width, ts);
         doc.last_line_height = line_height;
-
-        if let Some(anchor) = anchor {
+        if let Some(anchor) = anchor.filter(|_| reflowed) {
             self.scroll.y = doc.restore_scroll_anchor(text, anchor, line_height);
         }
 

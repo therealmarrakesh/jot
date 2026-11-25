@@ -56,7 +56,6 @@ impl<'a> Cx<'a> {
 pub(crate) struct Shell {
     pub(crate) text_system: TextSystem,
     appearance_override: Option<WindowAppearance>,
-    appearance: WindowAppearance,
     pub(crate) palette: Palette,
     pub(crate) settings: SystemSettings,
     pub(crate) view: ViewSettings,
@@ -69,7 +68,6 @@ impl Shell {
         let mut shell = Self {
             text_system,
             appearance_override: None,
-            appearance: settings.appearance,
             palette: crate::theme::LIGHT,
             settings,
             view: ViewSettings::default(),
@@ -79,8 +77,9 @@ impl Shell {
         shell
     }
 
+    /// Light or dark: the user's choice if they toggled it, else the system's.
     pub(crate) fn appearance(&self) -> WindowAppearance {
-        self.appearance
+        self.appearance_override.unwrap_or(self.settings.appearance)
     }
 
     pub(crate) fn toggle_theme(&mut self) {
@@ -99,9 +98,7 @@ impl Shell {
     }
 
     fn rebuild_palette(&mut self) {
-        let next = self.appearance_override.unwrap_or(self.settings.appearance);
-        let dark = matches!(next, WindowAppearance::Dark);
-        self.appearance = next;
+        let dark = self.appearance() == WindowAppearance::Dark;
         self.palette =
             Palette::resolve(dark, self.settings.accent(dark), self.settings.high_contrast);
     }
