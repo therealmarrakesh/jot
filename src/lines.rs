@@ -395,17 +395,6 @@ impl LineIndex {
         }
     }
 
-    pub(crate) fn set_wrap_width(&mut self, text: &Rope, wrap_width: Option<f32>, ts: &TextSystem) {
-        if self.wrap_width == wrap_width {
-            return;
-        }
-        self.wrap_width = wrap_width;
-        self.longest_width = None;
-        if self.synced {
-            self.rebuild(text, ts);
-        }
-    }
-
     /// Re-wraps the lines an edit changed.
     pub(crate) fn apply_line_change(&mut self, text: &Rope, change: &LineChange, ts: &TextSystem) {
         self.longest_width = None;

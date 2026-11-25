@@ -154,9 +154,8 @@ impl MainWindow {
     }
 
     pub(crate) fn set_word_wrap(&mut self, shell: &Shell) {
-        let word_wrap = shell.view.word_wrap;
-        self.tabs
-            .for_each_editor_mut(|ed| ed.set_soft_wrap(word_wrap, &shell.text_system));
+        let wrap = shell.view.word_wrap;
+        self.tabs.for_each_editor_mut(|ed| ed.set_soft_wrap(wrap));
         self.dirty = true;
     }
 
@@ -303,7 +302,9 @@ impl MainWindow {
         if mode != InputMode::Dialog {
             let (tabs, shell) = (&self.tabs, cx.shell);
             let state = || menu_state(tabs, shell);
-            let out = self.menus.on_hover_change(top, state, shell.settings.menu_show_delay);
+            let out = self
+                .menus
+                .on_hover_change(top, state, shell.settings.menu_show_delay);
             // The menu followed the pointer, so focus no longer shows as from the keyboard.
             self.ui.last_input_was_keyboard &= !out.dirty;
             self.apply_menu_outcome(out, cx);

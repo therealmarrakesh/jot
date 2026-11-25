@@ -235,32 +235,15 @@ impl Editor {
         self.request_reveal(self.model.cursor(), aff, None, true);
     }
 
-    pub(crate) fn set_soft_wrap(&mut self, wrap: bool, ts: &TextSystem) {
-        let Some(doc) = &mut self.doc else {
-            return;
-        };
-        if doc.soft_wrap == wrap {
-            return;
-        }
-        let anchor = doc.capture_scroll_anchor(self.scroll.y, doc.last_line_height);
-        doc.soft_wrap = wrap;
-        let text = self.model.text();
-        if wrap {
-            let width = self
-                .frame
-                .as_ref()
-                .and_then(|f| f.wrap_width)
-                .or_else(|| {
-                    (self.input_bounds.size.width > RIGHT_MARGIN)
-                        .then_some(self.input_bounds.size.width - RIGHT_MARGIN)
-                });
-            doc.lines.set_wrap_width(text, width, ts);
-            self.scroll.x = 0.0;
-        } else {
-            doc.lines.set_wrap_width(text, None, ts);
-        }
-        if let Some(anchor) = anchor {
-            self.scroll.y = doc.restore_scroll_anchor(text, anchor, doc.last_line_height);
+    /// Turns soft wrap on or off; the next layout rewraps, keeping the top line in view.
+    pub(crate) fn set_soft_wrap(&mut self, wrap: bool) {
+        if let Some(doc) = &mut self.doc
+            && doc.soft_wrap != wrap
+        {
+            doc.soft_wrap = wrap;
+            if wrap {
+                self.scroll.x = 0.0;
+            }
         }
     }
 
@@ -1013,7 +996,6 @@ impl Editor {
     fn finish_frame(
         &mut self,
         layout: FrameLayout,
-        wrap_width: Option<f32>,
         text_color: Rgba,
         head_pt: Point,
         is_empty_field: bool,
@@ -1056,7 +1038,6 @@ impl Editor {
             scroll_y: self.scroll.y,
             input_bounds,
             content_bounds,
-            wrap_width,
             text_color,
             caret_rect,
             show_caret,
@@ -1090,7 +1071,7 @@ impl Editor {
         }
         self.scroll.x =
             clamp_horizontal_scroll(self.scroll.x, self.scroll.content_w, input_bounds.size.width);
-        self.finish_frame(layout, None, text_color, head_pt, is_empty, params);
+        self.finish_frame(layout, text_color, head_pt, is_empty, params);
     }
 
     fn prepare_document(
@@ -1212,7 +1193,7 @@ impl Editor {
             clamp_horizontal_scroll(self.scroll.x, self.scroll.content_w, input_bounds.size.width)
         };
 
-        self.finish_frame(layout, wrap_width, style.color, head_pt, false, params);
+        self.finish_frame(layout, style.color, head_pt, false, params);
 
         shaped_windowed && (self.scroll.x - prev_scroll_x).abs() > 1.0
     }
@@ -1476,7 +1457,6 @@ struct Frame {
     scroll_y: f64,
     input_bounds: Rect,
     content_bounds: Rect,
-    wrap_width: Option<f32>,
     text_color: Rgba,
     caret_rect: Rect,
     show_caret: bool,
