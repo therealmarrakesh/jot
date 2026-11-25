@@ -40,10 +40,10 @@ enum MoveDirection {
     Down,
 }
 
+/// A request to scroll the caret into view at the next layout: only up or down (`direction`)
+/// if it moved one way, and keeping a few rows' margin from the edges (`with_margin`).
 #[derive(Clone, Copy, Debug)]
 struct RevealRequest {
-    offset: usize,
-    end_affinity: bool,
     direction: Option<MoveDirection>,
     with_margin: bool,
 }
@@ -199,16 +199,8 @@ impl Editor {
         point(self.scroll.x, self.scroll.y as f32)
     }
 
-    fn request_reveal(
-        &mut self,
-        offset: usize,
-        end_affinity: bool,
-        direction: Option<MoveDirection>,
-        with_margin: bool,
-    ) {
+    fn request_reveal(&mut self, direction: Option<MoveDirection>, with_margin: bool) {
         self.reveal = Some(RevealRequest {
-            offset,
-            end_affinity,
             direction,
             with_margin,
         });
@@ -231,8 +223,7 @@ impl Editor {
         if let Some(doc) = &mut self.doc {
             doc.lines.apply_line_change(self.model.text(), &lines, ts);
         }
-        let aff = self.model.selection().end_affinity;
-        self.request_reveal(self.model.cursor(), aff, None, true);
+        self.request_reveal(None, true);
     }
 
     /// Turns soft wrap on or off; the next layout rewraps, keeping the top line in view.
@@ -454,7 +445,7 @@ impl Editor {
         }
         if modifiers.shift {
             self.select_to_with_affinity(offset, aff);
-            self.request_reveal(self.model.cursor(), aff, None, false);
+            self.request_reveal(None, false);
         } else {
             self.move_to_with_affinity(offset, aff);
         }
@@ -473,7 +464,7 @@ impl Editor {
                 let delta = AutoScroll::compute_delta(position.y, self.input_bounds);
                 doc.auto_scroll.update(delta.map(|d| -d));
             }
-            self.request_reveal(self.model.cursor(), aff, None, false);
+            self.request_reveal(None, false);
             return true;
         }
         false
@@ -616,13 +607,13 @@ impl Editor {
         self.goal = None;
         self.word_anchor = None;
         self.model.set_selected_range(range);
-        self.request_reveal(self.model.cursor(), false, None, true);
+        self.request_reveal(None, true);
     }
 
     pub(crate) fn go_to_line(&mut self, line: usize) {
         self.goal = None;
         self.model.go_to_line(line);
-        self.request_reveal(self.model.cursor(), false, None, true);
+        self.request_reveal(None, true);
     }
 
     /// The visual row `offset` is on, as text offsets, and whether it ends at a soft wrap; a
@@ -660,7 +651,7 @@ impl Editor {
     fn move_to_with_affinity(&mut self, offset: usize, end_affinity: bool) {
         self.goal = None;
         self.model.place_caret(offset, end_affinity);
-        self.request_reveal(self.model.cursor(), end_affinity, None, false);
+        self.request_reveal(None, false);
         self.pause_blink();
     }
 
@@ -830,10 +821,10 @@ impl Editor {
             self.pause_blink();
             self.model.break_coalescing();
             self.model.extend_selection(target, target_aff, None);
-            self.request_reveal(self.model.cursor(), target_aff, None, true);
+            self.request_reveal(None, true);
         } else {
             self.model.place_caret(target, target_aff);
-            self.request_reveal(self.model.cursor(), target_aff, direction, true);
+            self.request_reveal(direction, true);
             self.pause_blink();
         }
         true
@@ -1045,8 +1036,7 @@ impl Editor {
         self.scroll.content_h = content_h;
 
         if let Some(req) = reveal_req {
-            let target = req.offset.min(text.len());
-            let disp = doc.lines.offset_to_display(text, target, req.end_affinity);
+            let disp = doc.lines.offset_to_display(text, head, end_affinity);
             let row_y = disp.row as f64 * f64::from(line_height);
             let vp_h = f64::from(input_bounds.size.height);
             let lh_f64 = f64::from(line_height);
