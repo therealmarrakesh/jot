@@ -1,3 +1,8 @@
+//! The retained UI. Renderers build a tree of `AppNode`s each frame; `AppFrame::layout` lays it
+//! out and keeps it, in tree order, for painting and for pointer queries. `AppUi` is a window's
+//! pointer, hover and press state over its last frame, with the animations its widgets run.
+//! The hit, drawing and animation ids the whole app uses are at the end.
+
 use std::collections::HashMap;
 use std::hash::Hash;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -11,21 +16,9 @@ use crate::layout::{AvailSize, Dim, Flex, FlexStyle, LayoutTree, Space, snap_bor
 use crate::platform::{CursorStyle, MouseButton, WindowControlArea};
 use crate::types::SharedStr;
 
-const BRUSH_FADE: Curve = Curve::new(Duration::from_millis(83), Easing::Linear);
+// ---- 1. Building nodes ----------------------------------------------------------------------
 
-#[derive(Copy, Clone, Debug)]
-pub(crate) struct Brushes {
-    pub(crate) rest: Rgba,
-    pub(crate) hover: Rgba,
-    pub(crate) pressed: Rgba,
-}
-
-#[derive(Copy, Clone, Debug, PartialEq)]
-pub(crate) struct PointerState {
-    pub(crate) pos: Point,
-    pub(crate) pressed: bool,
-}
-
+/// Text properties a node sets for itself and its descendants; unset ones are inherited.
 #[derive(Clone, Default)]
 struct TextOverrides {
     family: Option<SharedStr>,
@@ -37,6 +30,7 @@ struct TextOverrides {
     line_clamp: Option<usize>,
 }
 
+/// The text properties in effect at a node.
 #[derive(Clone)]
 struct ResolvedTextStyle {
     style: TextStyle,
@@ -61,41 +55,37 @@ impl Default for ResolvedTextStyle {
 impl ResolvedTextStyle {
     fn merge(&self, o: &TextOverrides) -> Self {
         let mut out = self.clone();
-        if let Some(fam) = &o.family {
-            out.style.font.family = fam.clone();
+        if let Some(family) = &o.family {
+            out.style.font.family = family.clone();
         }
-        if let Some(w) = o.weight {
-            out.style.font.weight = w;
+        if let Some(weight) = o.weight {
+            out.style.font.weight = weight;
         }
-        if let Some(s) = o.size {
-            out.style.set_size(s);
+        if let Some(size) = o.size {
+            out.style.set_size(size);
         }
-        if let Some(lh) = o.line_height {
-            out.line_height = lh;
-        }
-        if let Some(c) = o.color {
-            out.color = c;
-        }
-        if let Some(nw) = o.nowrap {
-            out.nowrap = nw;
-        }
-        if let Some(lc) = o.line_clamp {
-            out.line_clamp = Some(lc);
-        }
+        out.line_height = o.line_height.unwrap_or(out.line_height);
+        out.color = o.color.unwrap_or(out.color);
+        out.nowrap = o.nowrap.unwrap_or(out.nowrap);
+        out.line_clamp = o.line_clamp.or(out.line_clamp);
         out
     }
 }
 
+/// How a node is drawn transformed: scaled about its centre, or revealed from the top.
 #[derive(Copy, Clone, Debug, Default, PartialEq)]
 pub(crate) enum Transform {
     #[default]
     None,
     Scale(f32, f32),
+    /// Grows from `collapsed` pixels (but at least `min_start` of its size) to full size as `t`
+    /// goes from 0 to 1.
     ScaleFromPx {
         collapsed: f32,
         min_start: f32,
         t: f32,
     },
+    /// Shows the top `shown_ratio` of the node, sliding its content down with it if `slide`.
     RevealY {
         shown_ratio: f32,
         slide: bool,
@@ -103,9 +93,10 @@ pub(crate) enum Transform {
 }
 
 impl Transform {
-    fn resolved_scale(self, sz: Size) -> Option<(f32, f32)> {
-        match self {
-            Self::Scale(sx, sy) => Some((sx, sy)),
+    /// The scale this applies to a node of size `sz`, if it scales it at all.
+    fn scale(self, sz: Size) -> Option<(f32, f32)> {
+        let scale = match self {
+            Self::Scale(sx, sy) => (sx, sy),
             Self::ScaleFromPx {
                 collapsed,
                 min_start,
@@ -115,13 +106,15 @@ impl Transform {
                     let start = (collapsed / dim.max(collapsed)).min(min_start);
                     start + (1.0 - start) * t
                 };
-                Some((axis(sz.width), axis(sz.height)))
+                (axis(sz.width), axis(sz.height))
             }
-            Self::None | Self::RevealY { .. } => None,
-        }
+            Self::None | Self::RevealY { .. } => return None,
+        };
+        Some(scale).filter(|(sx, sy)| (sx - 1.0).abs() > 1e-4 || (sy - 1.0).abs() > 1e-4)
     }
 }
 
+/// How a node looks, apart from its layout.
 #[derive(Copy, Clone)]
 struct Decor {
     bg: Rgba,
@@ -130,6 +123,7 @@ struct Decor {
     shadows: Shadows,
     opacity: f32,
     transform: Transform,
+    /// Takes no pointer input, nor does anything inside it.
     inert: bool,
 }
 
@@ -147,6 +141,7 @@ impl Default for Decor {
     }
 }
 
+/// What a node means to the pointer and to Windows.
 #[derive(Default)]
 struct Interact {
     hit: Option<HitId>,
@@ -155,12 +150,8 @@ struct Interact {
     tooltip: Option<SharedStr>,
 }
 
-enum NodePayload {
-    Box(Vec<AppNode>),
-    Text(SharedStr),
-    Custom(CustomDraw),
-}
-
+/// Where an anchored node goes once everything is laid out: at a point, or placed against the
+/// node with hit `target`. Either way it's kept inside the viewport.
 #[derive(Copy, Clone)]
 pub(crate) enum Anchor {
     Point(Point),
@@ -175,37 +166,42 @@ impl Anchor {
         self,
         viewport: Size,
         popup: Size,
-        mut lookup: impl FnMut(HitId) -> Option<Rect>,
+        target_rect: impl FnOnce(HitId) -> Option<Rect>,
     ) -> Point {
-        let raw = match self {
+        let at = match self {
             Self::Point(p) => p,
-            Self::Target { target, place } => {
-                let Some(rect) = lookup(target) else {
-                    return Point::ZERO;
-                };
-                place(rect, popup, viewport)
-            }
+            Self::Target { target, place } => match target_rect(target) {
+                Some(rect) => place(rect, popup, viewport),
+                None => return Point::ZERO,
+            },
         };
         point(
-            raw.x.min((viewport.width - popup.width).max(0.0)).max(0.0),
-            raw.y.min((viewport.height - popup.height).max(0.0)).max(0.0),
+            at.x.min((viewport.width - popup.width).max(0.0)).max(0.0),
+            at.y.min((viewport.height - popup.height).max(0.0)).max(0.0),
         )
     }
 }
 
+enum Payload {
+    Box(Vec<AppNode>),
+    Text(SharedStr),
+    Custom(CustomDraw),
+}
+
+/// A node of the tree a renderer builds: a box of children, a text, or something the app draws
+/// itself, with its layout, look and pointer meaning set through the builder methods.
 pub(crate) struct AppNode {
     flex: FlexStyle,
     decor: Decor,
     interact: Interact,
     anchor: Option<Anchor>,
     text: TextOverrides,
-    payload: NodePayload,
+    payload: Payload,
 }
 
 macro_rules! setters {
-    ($($(#[$meta:meta])* $name:ident ($($arg:ident : $ty:ty),*) => |$s:ident| $body:block)*) => {
+    ($($name:ident ($($arg:ident : $ty:ty),*) => |$s:ident| $body:block)*) => {
         $(
-            $(#[$meta])*
             pub(crate) fn $name(mut self $(, $arg: $ty)*) -> Self {
                 let $s = &mut self;
                 $body
@@ -216,7 +212,7 @@ macro_rules! setters {
 }
 
 impl AppNode {
-    fn new_box(row: bool) -> Self {
+    fn new(row: bool, payload: Payload) -> Self {
         Self {
             flex: FlexStyle {
                 row,
@@ -226,7 +222,7 @@ impl AppNode {
             interact: Interact::default(),
             anchor: None,
             text: TextOverrides::default(),
-            payload: NodePayload::Box(Vec::new()),
+            payload,
         }
     }
 
@@ -318,15 +314,16 @@ impl AppNode {
         self.interact.tooltip = Some(tip.into());
         self
     }
+    /// Adds a child (a text or custom node has none, and ignores it).
     pub(crate) fn child(mut self, child: AppNode) -> Self {
-        if let NodePayload::Box(children) = &mut self.payload {
-            children.push(child);
+        if let Payload::Box(list) = &mut self.payload {
+            list.push(child);
         }
         self
     }
-    pub(crate) fn children(mut self, iter: impl IntoIterator<Item = AppNode>) -> Self {
-        if let NodePayload::Box(children) = &mut self.payload {
-            children.extend(iter);
+    pub(crate) fn children(mut self, children: impl IntoIterator<Item = AppNode>) -> Self {
+        if let Payload::Box(list) = &mut self.payload {
+            list.extend(children);
         }
         self
     }
@@ -341,31 +338,31 @@ impl AppNode {
     }
 }
 
+/// A box laying its children out in a row.
 pub(crate) fn row() -> AppNode {
-    AppNode::new_box(true)
+    AppNode::new(true, Payload::Box(Vec::new()))
 }
 
+/// A box laying its children out in a column.
 pub(crate) fn box_() -> AppNode {
-    AppNode::new_box(false)
+    AppNode::new(false, Payload::Box(Vec::new()))
 }
 
 pub(crate) fn text(content: impl Into<SharedStr>) -> AppNode {
-    let mut node = AppNode::new_box(false);
-    node.payload = NodePayload::Text(content.into());
-    node
+    AppNode::new(false, Payload::Text(content.into()))
 }
 
+/// A node the app draws itself (`AppFrame::paint` hands it back with its rect).
 pub(crate) fn custom(token: CustomDraw) -> AppNode {
-    let mut node = AppNode::new_box(false);
-    node.payload = NodePayload::Custom(token);
-    node
+    AppNode::new(false, Payload::Custom(token))
 }
 
-enum FlatKind {
-    Box {
-        children_start: usize,
-        children_len: usize,
-    },
+// ---- 2. The laid-out frame ------------------------------------------------------------------
+
+/// What a laid-out node holds: children (the nodes after it in its subtree), a shaped text, or
+/// something the app draws itself.
+enum Content {
+    Box,
     Text {
         content: SharedStr,
         style: ResolvedTextStyle,
@@ -374,137 +371,123 @@ enum FlatKind {
     Custom(CustomDraw),
 }
 
-struct FlatNode {
+/// A laid-out node. Nodes are kept in tree order: a node's subtree is the nodes after it, up to
+/// `end`.
+struct FrameNode {
     parent: Option<usize>,
+    end: usize,
     rect: Rect,
     border: Edges<f32>,
     clip: bool,
     decor: Decor,
     interact: Interact,
-    anchor: Option<Anchor>,
-    kind: FlatKind,
+    content: Content,
 }
 
-#[derive(Copy, Clone, Debug)]
-struct HitEntry {
-    node_idx: usize,
-    clipped_rect: Rect,
-}
-
+/// A laid-out tree, kept for painting and for pointer queries until the next frame.
 #[derive(Default)]
 pub(crate) struct AppFrame {
-    nodes: Vec<FlatNode>,
-    child_order: Vec<usize>,
-    root: Option<usize>,
-    hits: Vec<HitEntry>,
+    nodes: Vec<FrameNode>,
+    /// The nodes that take the pointer, in tree order, each with where it does: its rect within
+    /// its ancestors' clips. Nodes inert or scaling in or out, and all inside them, take none.
+    hits: Vec<(usize, Rect)>,
+    /// What Windows should treat each part of the window as, in tree order.
     pub(crate) control_areas: Vec<(Rect, WindowControlArea)>,
 }
 
 impl AppFrame {
-    pub(crate) fn custom_rects(&self) -> impl Iterator<Item = (CustomDraw, Rect)> + '_ {
-        self.nodes.iter().filter_map(|n| match n.kind {
-            FlatKind::Custom(token) => Some((token, n.rect)),
-            _ => None,
-        })
-    }
-
+    /// Lays `root` out in `available` space at `scale`, shaping its texts.
     pub(crate) fn layout(
-        root_node: AppNode,
+        root: AppNode,
         available: AvailSize,
         scale: f32,
         text_system: &TextSystem,
     ) -> Self {
+        let mut frame = Self::default();
         let mut tree = LayoutTree::new(scale);
-        let mut frame = AppFrame::default();
-        let default_text = ResolvedTextStyle::default();
+        let mut anchors = Vec::new();
+        frame.add(
+            root,
+            None,
+            &ResolvedTextStyle::default(),
+            &mut tree,
+            &mut anchors,
+        );
 
-        let root_idx = frame.flatten(root_node, None, &default_text, &mut tree);
-        frame.root = Some(root_idx);
-
-        tree.solve(root_idx, available, &mut |idx, kw, _kh, avail| {
-            let FlatKind::Text {
+        tree.solve(0, available, &mut |idx, known_width, _, avail| {
+            let Content::Text {
                 content,
                 style,
                 label,
-            } = &mut frame.nodes[idx].kind
+            } = &mut frame.nodes[idx].content
             else {
                 return Size::ZERO;
             };
-            let wrap_width = if style.nowrap {
-                None
-            } else {
-                kw.or(match avail.width {
-                    Space::Definite(w) => Some(w),
-                    _ => None,
-                })
+            let wrap_width = match avail.width {
+                _ if style.nowrap => None,
+                Space::Definite(w) => known_width.or(Some(w)),
+                _ => known_width,
             };
-            let shaped = text_system.shape_label(
-                content.clone(),
-                &style.style,
-                LabelLayout {
-                    line_height: style.line_height,
-                    wrap_width,
-                    line_clamp: style.line_clamp,
-                },
-            );
-            let sz = shaped.size();
+            let layout = LabelLayout {
+                line_height: style.line_height,
+                wrap_width,
+                line_clamp: style.line_clamp,
+            };
+            let shaped = text_system.shape_label(content.clone(), &style.style, layout);
+            let size = shaped.size();
             *label = Some(shaped);
-            sz
+            size
         });
 
-        let root_rect = tree.rect(root_idx);
         let viewport = match (available.width, available.height) {
             (Space::Definite(w), Space::Definite(h)) => size(w, h),
-            _ => root_rect.size,
+            _ => tree.rect(0).size,
         };
-        for idx in 0..frame.nodes.len() {
-            let Some(anchor) = frame.nodes[idx].anchor else {
-                continue;
-            };
-            let popup_size = tree.rect(idx).size;
-            let origin = anchor.resolve(viewport, popup_size, |target| {
-                frame
+        // Anchored nodes go where they're anchored, in tree order: a later one can be anchored
+        // to an earlier one where it landed.
+        for (idx, anchor) in anchors {
+            let popup = tree.rect(idx).size;
+            let origin = anchor.resolve(viewport, popup, |target| {
+                let target = frame
                     .nodes
                     .iter()
-                    .enumerate()
-                    .rev()
-                    .find(|(_, n)| n.interact.hit == Some(target))
-                    .map(|(i, _)| tree.rect(i))
+                    .rposition(|n| n.interact.hit == Some(target));
+                target.map(|t| tree.rect(t))
             });
             tree.set_origin(idx, origin);
         }
-
         for (idx, node) in frame.nodes.iter_mut().enumerate() {
             node.rect = tree.rect(idx);
         }
-
-        let initial_clip = Rect::new(Point::ZERO, viewport);
-        frame.collect_hits(root_idx, initial_clip);
+        frame.place_hits(Rect::new(Point::ZERO, viewport));
         frame
     }
 
+    /// The size `root` takes laid out in `available` space.
     pub(crate) fn measure(
-        root_node: AppNode,
+        root: AppNode,
         available: AvailSize,
         scale: f32,
         text_system: &TextSystem,
     ) -> Size {
-        let frame = Self::layout(root_node, available, scale, text_system);
+        let frame = Self::layout(root, available, scale, text_system);
         frame
-            .root
-            .map_or(Size::ZERO, |idx| frame.nodes[idx].rect.size)
+            .nodes
+            .first()
+            .map_or(Size::ZERO, |root| root.rect.size)
     }
 
-    fn flatten(
+    /// Adds `node` and its subtree, in tree order, to the frame and to the layout tree.
+    fn add(
         &mut self,
         node: AppNode,
         parent: Option<usize>,
-        inherited_text: &ResolvedTextStyle,
+        inherited: &ResolvedTextStyle,
         tree: &mut LayoutTree,
+        anchors: &mut Vec<(usize, Anchor)>,
     ) -> usize {
-        let resolved_text = inherited_text.merge(&node.text);
-        let clip = node.flex.clip[0] || node.flex.clip[1];
-        let border = snap_border_edges(node.flex.border, tree.scale);
+        let idx = self.nodes.len();
+        let style = inherited.merge(&node.text);
         let AppNode {
             mut flex,
             decor,
@@ -513,155 +496,133 @@ impl AppFrame {
             payload,
             ..
         } = node;
-        if anchor.is_some() {
+        if let Some(anchor) = anchor {
             flex.absolute = true;
+            anchors.push((idx, anchor));
         }
-        let is_text = matches!(payload, NodePayload::Text(_));
-        let flat_idx = self.nodes.len();
-        tree.add(flex, is_text);
-
-        self.nodes.push(FlatNode {
+        self.nodes.push(FrameNode {
             parent,
+            end: idx + 1,
             rect: Rect::ZERO,
-            border,
-            clip,
+            border: snap_border_edges(flex.border, tree.scale),
+            clip: flex.clip[0] || flex.clip[1],
             decor,
             interact,
-            anchor,
-            kind: FlatKind::Box {
-                children_start: 0,
-                children_len: 0,
-            },
+            content: Content::Box,
         });
-
-        let kind = match payload {
-            NodePayload::Box(children) => {
-                let child_flat_ids: Vec<usize> = children
+        tree.add(flex, matches!(payload, Payload::Text(_)));
+        match payload {
+            Payload::Box(children) => {
+                let ids: Vec<usize> = children
                     .into_iter()
-                    .map(|child| self.flatten(child, Some(flat_idx), &resolved_text, tree))
+                    .map(|child| self.add(child, Some(idx), &style, tree, anchors))
                     .collect();
-                let start = self.child_order.len();
-                self.child_order.extend_from_slice(&child_flat_ids);
-                tree.set_children(flat_idx, &child_flat_ids);
-                FlatKind::Box {
-                    children_start: start,
-                    children_len: child_flat_ids.len(),
-                }
+                tree.set_children(idx, &ids);
             }
-            NodePayload::Text(content) => FlatKind::Text {
-                content,
-                style: resolved_text,
-                label: None,
-            },
-            NodePayload::Custom(token) => FlatKind::Custom(token),
-        };
-        self.nodes[flat_idx].kind = kind;
-        flat_idx
+            Payload::Text(content) => {
+                self.nodes[idx].content = Content::Text {
+                    content,
+                    style,
+                    label: None,
+                };
+            }
+            Payload::Custom(token) => self.nodes[idx].content = Content::Custom(token),
+        }
+        self.nodes[idx].end = self.nodes.len();
+        idx
     }
 
-    fn collect_hits(&mut self, idx: usize, clip: Rect) {
-        let node = &self.nodes[idx];
-        let scaled = node
-            .decor
-            .transform
-            .resolved_scale(node.rect.size)
-            .is_some_and(|(sx, sy)| (sx - 1.0).abs() > 1e-4 || (sy - 1.0).abs() > 1e-4);
-        if node.decor.inert || scaled {
-            return;
-        }
-        let clipped = node.rect.intersect(clip);
-        let child_clip = if node.clip { clipped } else { clip };
-
-        if !clipped.is_empty() {
-            if let Some(area) = self.nodes[idx].interact.window_area {
+    /// Works out where each node takes the pointer, and what Windows should treat each part of
+    /// the window as.
+    fn place_hits(&mut self, viewport: Rect) {
+        // For each node, the clip its children are in, or none if nothing below it takes input.
+        let mut inner: Vec<Option<Rect>> = Vec::with_capacity(self.nodes.len());
+        for (idx, node) in self.nodes.iter().enumerate() {
+            let outer = node.parent.map_or(Some(viewport), |p| inner[p]);
+            let open = !node.decor.inert && node.decor.transform.scale(node.rect.size).is_none();
+            let Some(outer) = outer.filter(|_| open) else {
+                inner.push(None);
+                continue;
+            };
+            let clipped = node.rect.intersect(outer);
+            inner.push(Some(if node.clip { clipped } else { outer }));
+            if clipped.is_empty() {
+                continue;
+            }
+            let area = node.interact.window_area;
+            if let Some(area) = area.or(node.interact.hit.map(|_| WindowControlArea::Client)) {
                 self.control_areas.push((clipped, area));
-            } else if self.nodes[idx].interact.hit.is_some() {
-                self.control_areas.push((clipped, WindowControlArea::Client));
             }
-            if self.nodes[idx].interact.hit.is_some() {
-                self.hits.push(HitEntry {
-                    node_idx: idx,
-                    clipped_rect: clipped,
-                });
-            }
-        }
-
-        if let FlatKind::Box {
-            children_start,
-            children_len,
-        } = self.nodes[idx].kind
-        {
-            for offset in 0..children_len {
-                self.collect_hits(self.child_order[children_start + offset], child_clip);
+            if node.interact.hit.is_some() {
+                self.hits.push((idx, clipped));
             }
         }
     }
 
-    fn top_hit(&self, pos: Point) -> Option<&HitEntry> {
-        self.hits
-            .iter()
-            .rev()
-            .find(|entry| entry.clipped_rect.contains(pos))
+    /// The children of node `idx`, in order.
+    fn children(&self, idx: usize) -> impl Iterator<Item = usize> + '_ {
+        let (mut next, end) = (idx + 1, self.nodes[idx].end);
+        std::iter::from_fn(move || {
+            let child = (next < end).then_some(next)?;
+            next = self.nodes[child].end;
+            Some(child)
+        })
     }
 
+    /// The topmost node taking the pointer at `pos`, then its ancestors.
+    fn chain_at(&self, pos: Point) -> impl Iterator<Item = &FrameNode> {
+        let top = self.hits.iter().rev().find(|(_, rect)| rect.contains(pos));
+        let mut next = top.map(|&(idx, _)| idx);
+        std::iter::from_fn(move || {
+            let node = &self.nodes[next?];
+            next = node.parent;
+            Some(node)
+        })
+    }
+
+    /// The hits under `pos`, innermost first.
     pub(crate) fn hit_chain(&self, pos: Point) -> Vec<HitId> {
-        let Some(top) = self.top_hit(pos) else {
-            return Vec::new();
-        };
-        let mut chain = Vec::with_capacity(4);
-        let mut cur = Some(top.node_idx);
-        while let Some(idx) = cur {
-            if let Some(hit) = self.nodes[idx].interact.hit {
-                chain.push(hit);
-            }
-            cur = self.nodes[idx].parent;
-        }
-        chain
-    }
-
-    pub(crate) fn rect_of(&self, id: HitId) -> Option<Rect> {
-        self.nodes
-            .iter()
-            .rev()
-            .find(|node| node.interact.hit == Some(id))
-            .map(|node| node.rect)
+        self.chain_at(pos).filter_map(|n| n.interact.hit).collect()
     }
 
     pub(crate) fn cursor_at(&self, pos: Point) -> CursorStyle {
-        let Some(top) = self.top_hit(pos) else {
-            return CursorStyle::Arrow;
-        };
-        let mut cur = Some(top.node_idx);
-        while let Some(idx) = cur {
-            if let Some(c) = self.nodes[idx].interact.cursor {
-                return c;
-            }
-            cur = self.nodes[idx].parent;
-        }
-        CursorStyle::Arrow
+        self.chain_at(pos)
+            .find_map(|n| n.interact.cursor)
+            .unwrap_or(CursorStyle::Arrow)
     }
 
+    /// The innermost hit under `pos` with a tooltip: its hit, the tip, and its rect.
     pub(crate) fn tooltip_at(&self, pos: Point) -> Option<(HitId, SharedStr, Rect)> {
-        let top = self.top_hit(pos)?;
-        let mut cur = Some(top.node_idx);
-        while let Some(idx) = cur {
-            if let Some(tip) = &self.nodes[idx].interact.tooltip
-                && let Some(hit) = self.nodes[idx].interact.hit
-            {
-                return Some((hit, tip.clone(), self.nodes[idx].rect));
-            }
-            cur = self.nodes[idx].parent;
-        }
-        None
+        self.chain_at(pos)
+            .find_map(|n| Some((n.interact.hit?, n.interact.tooltip.clone()?, n.rect)))
     }
 
+    /// Where the last node with hit `id` was laid out.
+    pub(crate) fn rect_of(&self, id: HitId) -> Option<Rect> {
+        let node = self
+            .nodes
+            .iter()
+            .rev()
+            .find(|n| n.interact.hit == Some(id))?;
+        Some(node.rect)
+    }
+
+    /// The nodes the app draws itself, with their rects.
+    pub(crate) fn custom_rects(&self) -> impl Iterator<Item = (CustomDraw, Rect)> + '_ {
+        self.nodes.iter().filter_map(|n| match n.content {
+            Content::Custom(token) => Some((token, n.rect)),
+            _ => None,
+        })
+    }
+
+    /// Paints the frame, handing each custom node to `draw_custom` in its place.
     pub(crate) fn paint(
         &self,
         canvas: &mut Canvas,
         draw_custom: &mut impl FnMut(CustomDraw, Rect, &mut Canvas),
     ) {
-        if let Some(root) = self.root {
-            self.paint_node(root, canvas, draw_custom);
+        if !self.nodes.is_empty() {
+            self.paint_node(0, canvas, draw_custom);
         }
     }
 
@@ -672,85 +633,81 @@ impl AppFrame {
         draw_custom: &mut impl FnMut(CustomDraw, Rect, &mut Canvas),
     ) {
         let node = &self.nodes[idx];
-        let d = node.decor;
-        let resolved_scale = d.transform.resolved_scale(node.rect.size);
-        if d.opacity <= 0.0 || resolved_scale.is_some_and(|(sx, sy)| sx <= 1e-3 || sy <= 1e-3) {
+        let (d, rect) = (node.decor, node.rect);
+        let scale = d.transform.scale(rect.size);
+        if d.opacity <= 0.0 || scale.is_some_and(|(sx, sy)| sx <= 1e-3 || sy <= 1e-3) {
             return;
         }
-        let opacity = (d.opacity < 1.0 - 1e-4).then_some(d.opacity);
-        let scale = resolved_scale.and_then(|(sx, sy)| {
-            ((sx - 1.0).abs() > 1e-4 || (sy - 1.0).abs() > 1e-4)
-                .then_some((node.rect.center(), sx, sy))
-        });
-        let (paint_rect, reveal_clip, reveal_translate) = match d.transform {
+        // A reveal paints the top of the node, its content clipped to it (and slid down with it).
+        let (shape, reveal_clip, slide) = match d.transform {
             Transform::RevealY { shown_ratio, slide } if shown_ratio < 1.0 - 1e-4 => {
-                let shown_h = (node.rect.size.height * shown_ratio).max(0.0);
-                let r = Rect::new(node.rect.origin, size(node.rect.size.width, shown_h));
-                let delta = slide.then_some(point(0.0, -(node.rect.size.height - shown_h)));
-                (r, Some(r.inset(node.border)), delta)
-            }
-            _ => (node.rect, None, None),
-        };
-
-        canvas.scoped(
-            Scope {
-                opacity,
-                scale,
-                ..Default::default()
-            },
-            |canvas| {
-                if !d.shadows.is_empty() {
-                    canvas.paint_shadows(paint_rect, d.corners, d.shadows);
-                }
-                if !d.bg.is_transparent()
-                    || (!d.border_color.is_transparent() && node.border.any_nonzero())
-                {
-                    canvas.paint_quad(PaintQuad {
-                        bounds: paint_rect,
-                        corner_radii: d.corners,
-                        background: d.bg,
-                        border_widths: node.border,
-                        border_color: d.border_color,
-                    });
-                }
-                canvas.scoped(
-                    Scope {
-                        clip: reveal_clip.or_else(|| node.clip.then_some(node.rect)),
-                        translate: reveal_translate,
-                        ..Default::default()
-                    },
-                    |canvas| match &node.kind {
-                        FlatKind::Box {
-                            children_start,
-                            children_len,
-                        } => {
-                            for offset in 0..*children_len {
-                                self.paint_node(
-                                    self.child_order[*children_start + offset],
-                                    canvas,
-                                    draw_custom,
-                                );
-                            }
-                        }
-                        FlatKind::Text { style, label, .. } => {
-                            if let Some(label) = label {
-                                canvas.draw_label(
-                                    label,
-                                    node.rect.origin,
-                                    node.rect.size.width,
-                                    style.color,
-                                );
-                            }
-                        }
-                        FlatKind::Custom(token) => {
-                            draw_custom(*token, node.rect, canvas);
-                        }
-                    },
+                let shown = Rect::new(
+                    rect.origin,
+                    size(rect.size.width, (rect.size.height * shown_ratio).max(0.0)),
                 );
-            },
-        );
+                let slide = slide.then_some(point(0.0, -(rect.size.height - shown.size.height)));
+                (shown, Some(shown.inset(node.border)), slide)
+            }
+            _ => (rect, None, None),
+        };
+        let outer = Scope {
+            opacity: (d.opacity < 1.0 - 1e-4).then_some(d.opacity),
+            scale: scale.map(|(sx, sy)| (rect.center(), sx, sy)),
+            ..Default::default()
+        };
+        canvas.scoped(outer, |canvas| {
+            if !d.shadows.is_empty() {
+                canvas.paint_shadows(shape, d.corners, d.shadows);
+            }
+            let bordered = !d.border_color.is_transparent() && node.border.any_nonzero();
+            if !d.bg.is_transparent() || bordered {
+                canvas.paint_quad(PaintQuad {
+                    bounds: shape,
+                    corner_radii: d.corners,
+                    background: d.bg,
+                    border_widths: node.border,
+                    border_color: d.border_color,
+                });
+            }
+            let inner = Scope {
+                clip: reveal_clip.or(node.clip.then_some(rect)),
+                translate: slide,
+                ..Default::default()
+            };
+            canvas.scoped(inner, |canvas| match &node.content {
+                Content::Box => {
+                    for child in self.children(idx) {
+                        self.paint_node(child, canvas, draw_custom);
+                    }
+                }
+                Content::Text { style, label, .. } => {
+                    if let Some(label) = label {
+                        canvas.draw_label(label, rect.origin, rect.size.width, style.color);
+                    }
+                }
+                Content::Custom(token) => draw_custom(*token, rect, canvas),
+            });
+        });
     }
 }
+
+// ---- 3. Pointer, hover and press ------------------------------------------------------------
+
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub(crate) struct PointerState {
+    pub(crate) pos: Point,
+    pub(crate) pressed: bool,
+}
+
+/// A control's fill at rest, hovered and pressed.
+#[derive(Copy, Clone, Debug)]
+pub(crate) struct Brushes {
+    pub(crate) rest: Rgba,
+    pub(crate) hover: Rgba,
+    pub(crate) pressed: Rgba,
+}
+
+const BRUSH_FADE: Curve = Curve::new(Duration::from_millis(83), Easing::Linear);
 
 /// A window's interaction state: the last frame laid out, where the pointer is and what it's
 /// over or pressing, and the animations its widgets run.
@@ -758,7 +715,9 @@ impl AppFrame {
 pub(crate) struct AppUi {
     pub(crate) frame: AppFrame,
     pub(crate) pointer: Option<PointerState>,
+    /// The hits under the pointer, innermost first.
     hovered_chain: Vec<HitId>,
+    /// The innermost hit the left button went down on.
     pressed: Option<HitId>,
     pub(crate) last_input_was_keyboard: bool,
     pub(crate) anims: AnimTracks<AnimKey>,
@@ -769,21 +728,21 @@ impl AppUi {
         self.anims.begin_frame(now, reduce_motion);
     }
 
+    /// Keeps the frame just laid out; whether another should follow, for a running animation
+    /// or because what's under the pointer moved.
     pub(crate) fn finish_frame(&mut self, frame: AppFrame) -> bool {
         self.frame = frame;
         let animating = self.anims.end_frame();
-        let hover_shifted = self.pointer.is_some_and(|p| self.refresh_hover(p.pos));
-        animating || hover_shifted
+        let hover_moved = self.pointer.is_some_and(|p| self.hover(p.pos));
+        animating || hover_moved
     }
 
-    fn refresh_hover(&mut self, pos: Point) -> bool {
-        let next = self.frame.hit_chain(pos);
-        if next != self.hovered_chain {
-            self.hovered_chain = next;
-            true
-        } else {
-            false
-        }
+    /// Re-reads what's under `pos`; whether it changed.
+    fn hover(&mut self, pos: Point) -> bool {
+        let chain = self.frame.hit_chain(pos);
+        let changed = chain != self.hovered_chain;
+        self.hovered_chain = chain;
+        changed
     }
 
     pub(crate) fn on_mouse_move(&mut self, pos: Point, pressed_any: bool) -> bool {
@@ -791,7 +750,7 @@ impl AppUi {
             pos,
             pressed: pressed_any,
         });
-        self.refresh_hover(pos)
+        self.hover(pos)
     }
 
     pub(crate) fn on_mouse_leave(&mut self) -> bool {
@@ -813,6 +772,7 @@ impl AppUi {
         had
     }
 
+    /// A button went down at `pos`: the hits under it, innermost first.
     pub(crate) fn on_mouse_down(&mut self, pos: Point, button: MouseButton) -> &[HitId] {
         self.last_input_was_keyboard = false;
         self.pointer = Some(PointerState { pos, pressed: true });
@@ -823,6 +783,8 @@ impl AppUi {
         &self.hovered_chain
     }
 
+    /// A button came up at `pos`: the hit clicked (pressed and released on it with the left
+    /// button), and the hits under it.
     pub(crate) fn on_mouse_up(
         &mut self,
         pos: Point,
@@ -834,9 +796,8 @@ impl AppUi {
         }
         self.hovered_chain = self.frame.hit_chain(pos);
         let clicked = if button == MouseButton::Left {
-            let was = self.pressed.take();
-            let now = self.hovered_chain.first().copied();
-            was.filter(|_| was == now)
+            let pressed = self.pressed.take();
+            pressed.filter(|_| pressed == self.hovered_chain.first().copied())
         } else {
             None
         };
@@ -851,10 +812,12 @@ impl AppUi {
         self.hovered_chain.contains(&hit)
     }
 
+    /// Whether `hit` is pressed with the pointer still over it.
     pub(crate) fn is_pressed(&self, hit: HitId) -> bool {
         self.pressed == Some(hit) && self.hovered_chain.contains(&hit)
     }
 
+    /// The fill of control `hit` now, fading between `brushes` as it's hovered and pressed.
     pub(crate) fn brush(&mut self, hit: HitId, brushes: Brushes, enabled: bool) -> Rgba {
         let target = if !enabled {
             brushes.rest
@@ -870,63 +833,7 @@ impl AppUi {
     }
 }
 
-fn cubic_bezier(x1: f32, y1: f32, x2: f32, y2: f32, t: f32) -> f32 {
-    let t = t.clamp(0.0, 1.0);
-    if t <= 0.0 {
-        return 0.0;
-    }
-    if t >= 1.0 {
-        return 1.0;
-    }
-
-    let cx = 3.0 * x1;
-    let bx = 3.0 * (x2 - x1) - cx;
-    let ax = 1.0 - cx - bx;
-
-    let cy = 3.0 * y1;
-    let by = 3.0 * (y2 - y1) - cy;
-    let ay = 1.0 - cy - by;
-
-    let eval_x = |s: f32| ((ax * s + bx) * s + cx) * s;
-    let eval_y = |s: f32| ((ay * s + by) * s + cy) * s;
-    let deriv_x = |s: f32| (3.0 * ax * s + 2.0 * bx) * s + cx;
-
-    const EPS: f32 = 1e-6;
-    let mut s = t;
-    let mut solved = false;
-    for _ in 0..8 {
-        let residual = eval_x(s) - t;
-        if residual.abs() < EPS {
-            solved = true;
-            break;
-        }
-        let slope = deriv_x(s);
-        if slope.abs() < EPS {
-            break;
-        }
-        s = (s - residual / slope).clamp(0.0, 1.0);
-    }
-
-    if !solved {
-        let mut lo = 0.0f32;
-        let mut hi = 1.0f32;
-        s = t;
-        for _ in 0..32 {
-            let x = eval_x(s);
-            if (x - t).abs() < EPS {
-                break;
-            }
-            if x < t {
-                lo = s;
-            } else {
-                hi = s;
-            }
-            s = 0.5 * (lo + hi);
-        }
-    }
-
-    eval_y(s).clamp(0.0, 1.0)
-}
+// ---- 4. Animation ---------------------------------------------------------------------------
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(crate) enum Easing {
@@ -961,7 +868,75 @@ impl Easing {
     }
 }
 
-pub(crate) trait Lerp: Copy + PartialEq {
+/// The CSS cubic Bézier timing function through (x1, y1) and (x2, y2) at time `t`: Newton's
+/// method for the curve parameter, falling back to bisection where it stalls.
+fn cubic_bezier(x1: f32, y1: f32, x2: f32, y2: f32, t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    if t <= 0.0 {
+        return 0.0;
+    }
+    if t >= 1.0 {
+        return 1.0;
+    }
+    let cx = 3.0 * x1;
+    let bx = 3.0 * (x2 - x1) - cx;
+    let ax = 1.0 - cx - bx;
+    let cy = 3.0 * y1;
+    let by = 3.0 * (y2 - y1) - cy;
+    let ay = 1.0 - cy - by;
+    let x_at = |s: f32| ((ax * s + bx) * s + cx) * s;
+    let y_at = |s: f32| ((ay * s + by) * s + cy) * s;
+    let dx_at = |s: f32| (3.0 * ax * s + 2.0 * bx) * s + cx;
+
+    const EPS: f32 = 1e-6;
+    let mut s = t;
+    let mut solved = false;
+    for _ in 0..8 {
+        let residual = x_at(s) - t;
+        if residual.abs() < EPS {
+            solved = true;
+            break;
+        }
+        let slope = dx_at(s);
+        if slope.abs() < EPS {
+            break;
+        }
+        s = (s - residual / slope).clamp(0.0, 1.0);
+    }
+    if !solved {
+        let (mut lo, mut hi) = (0.0f32, 1.0f32);
+        s = t;
+        for _ in 0..32 {
+            let x = x_at(s);
+            if (x - t).abs() < EPS {
+                break;
+            }
+            if x < t {
+                lo = s;
+            } else {
+                hi = s;
+            }
+            s = 0.5 * (lo + hi);
+        }
+    }
+    y_at(s).clamp(0.0, 1.0)
+}
+
+/// How long an animation runs, and how it eases.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Curve {
+    pub(crate) duration: Duration,
+    pub(crate) easing: Easing,
+}
+
+impl Curve {
+    pub(crate) const fn new(duration: Duration, easing: Easing) -> Self {
+        Self { duration, easing }
+    }
+}
+
+/// What can be animated: blended `t` of the way from one value to another.
+trait Lerp: Copy + PartialEq {
     fn lerp(self, target: Self, t: f32) -> Self;
 }
 
@@ -972,6 +947,7 @@ impl Lerp for f32 {
 }
 
 impl Lerp for Rgba {
+    /// Blends premultiplied, so a fade to or from transparent doesn't pass through black.
     fn lerp(self, target: Self, t: f32) -> Self {
         let a = self.a + (target.a - self.a) * t;
         let channel = |x: f32, y: f32| {
@@ -991,31 +967,189 @@ impl Lerp for Rgba {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct Curve {
-    pub(crate) duration: Duration,
-    pub(crate) easing: Easing,
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AnimStatus {
+    /// Settled where it was asked to be.
+    Idle,
+    Running,
+    /// Reached its target this frame.
+    Finished,
 }
 
-impl Curve {
-    pub(crate) const fn new(duration: Duration, easing: Easing) -> Self {
-        Self { duration, easing }
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct AnimSample<T> {
+    pub(crate) value: T,
+    pub(crate) status: AnimStatus,
+}
+
+/// One animated value: running from `from` to `target` since `started_at`, over `duration`.
+#[derive(Clone, Copy, Debug)]
+struct AnimTrack<T> {
+    from: T,
+    target: T,
+    started_at: Instant,
+    /// How much of a full run the current one is, after turning back partway.
+    reversing_scale: f32,
+    duration: Duration,
+    /// The last frame that asked for it (tracks not asked for in a frame are dropped).
+    last_frame: u64,
+}
+
+impl<T: Lerp> AnimTrack<T> {
+    fn new(
+        from: T,
+        target: T,
+        now: Instant,
+        duration: Duration,
+        reversing_scale: f32,
+        frame: u64,
+    ) -> Self {
+        Self {
+            from,
+            target,
+            started_at: now,
+            reversing_scale,
+            duration,
+            last_frame: frame,
+        }
+    }
+
+    /// Samples the track at `now` as it heads for `target` along `curve`, restarting it toward
+    /// a new target from where it is (turning back costs only the way it came).
+    fn step(
+        &mut self,
+        target: T,
+        curve: Curve,
+        now: Instant,
+        reduce_motion: bool,
+        frame: u64,
+    ) -> AnimSample<T> {
+        let sample = |value, status| AnimSample { value, status };
+        if reduce_motion || curve.duration.is_zero() {
+            *self = Self::new(target, target, now, curve.duration, 1.0, frame);
+            return sample(target, AnimStatus::Finished);
+        }
+        self.last_frame = frame;
+        let elapsed = now.saturating_duration_since(self.started_at);
+        let (progress, status) = if self.duration.is_zero() || elapsed >= self.duration {
+            (1.0, AnimStatus::Finished)
+        } else {
+            (
+                elapsed.as_secs_f32() / self.duration.as_secs_f32(),
+                AnimStatus::Running,
+            )
+        };
+        let eased = curve.easing.sample(progress);
+        let current = self.from.lerp(self.target, eased);
+        if target == self.target {
+            let settled = self.from == self.target;
+            return sample(current, if settled { AnimStatus::Idle } else { status });
+        }
+        let reversing_scale = if target == self.from {
+            (eased * self.reversing_scale + (1.0 - self.reversing_scale)).clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        let duration = curve.duration.mul_f32(reversing_scale);
+        *self = Self::new(current, target, now, duration, reversing_scale, frame);
+        if duration.is_zero() {
+            sample(target, AnimStatus::Finished)
+        } else {
+            sample(current, AnimStatus::Running)
+        }
     }
 }
 
+/// A set of animated values keyed by `K`, sampled once per frame. A track not asked for in a
+/// frame is dropped at its end.
+pub(crate) struct AnimTracks<K: Copy + Eq + Hash> {
+    frame: u64,
+    now: Instant,
+    reduce_motion: bool,
+    running: bool,
+    scalars: HashMap<K, AnimTrack<f32>>,
+    colors: HashMap<K, AnimTrack<Rgba>>,
+}
+
+impl<K: Copy + Eq + Hash> Default for AnimTracks<K> {
+    fn default() -> Self {
+        Self {
+            frame: 0,
+            now: Instant::now(),
+            reduce_motion: false,
+            running: false,
+            scalars: HashMap::new(),
+            colors: HashMap::new(),
+        }
+    }
+}
+
+impl<K: Copy + Eq + Hash> AnimTracks<K> {
+    pub(crate) fn begin_frame(&mut self, now: Instant, reduce_motion: bool) {
+        self.frame = self.frame.wrapping_add(1);
+        (self.now, self.reduce_motion, self.running) = (now, reduce_motion, false);
+    }
+
+    /// Drops the tracks this frame didn't ask for; whether any is still running.
+    pub(crate) fn end_frame(&mut self) -> bool {
+        let frame = self.frame;
+        self.scalars.retain(|_, track| track.last_frame == frame);
+        self.colors.retain(|_, track| track.last_frame == frame);
+        self.running
+    }
+
+    /// Runs from 0 toward 1 while `active`, and back toward 0 when not.
+    pub(crate) fn progress(&mut self, key: K, active: bool, curve: Curve) -> AnimSample<f32> {
+        self.animate_f32_from(key, 0.0, if active { 1.0 } else { 0.0 }, curve)
+    }
+
+    /// Animates toward `target`, starting from `initial` the first time `key` is seen.
+    pub(crate) fn animate_f32_from(
+        &mut self,
+        key: K,
+        initial: f32,
+        target: f32,
+        curve: Curve,
+    ) -> AnimSample<f32> {
+        let (frame, now) = (self.frame, self.now);
+        let track = self
+            .scalars
+            .entry(key)
+            .or_insert_with(|| AnimTrack::new(initial, target, now, curve.duration, 1.0, frame));
+        let sample = track.step(target, curve, now, self.reduce_motion, frame);
+        self.running |= sample.status == AnimStatus::Running;
+        sample
+    }
+
+    /// Fades toward `target`, starting there the first time `key` is seen.
+    fn animate_color(&mut self, key: K, target: Rgba, curve: Curve) -> Rgba {
+        let (frame, now) = (self.frame, self.now);
+        let track = self
+            .colors
+            .entry(key)
+            .or_insert_with(|| AnimTrack::new(target, target, now, curve.duration, 1.0, frame));
+        let sample = track.step(target, curve, now, self.reduce_motion, frame);
+        self.running |= sample.status == AnimStatus::Running;
+        sample.value
+    }
+
+    #[cfg(test)]
+    pub(crate) fn track_count(&self) -> usize {
+        self.scalars.len() + self.colors.len()
+    }
+}
+
+/// Whether something that animates in and out (a dialog, a menu panel, the find bar) is showing.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) enum Presence {
+enum Presence {
     #[default]
     Hidden,
     Open,
     Closing,
 }
 
-fn next_transition_serial() -> usize {
-    static NEXT: AtomicUsize = AtomicUsize::new(1);
-    NEXT.fetch_add(1, Ordering::Relaxed)
-}
-
+/// One showing of something that animates in and out. Each opening gets a new serial, so its
+/// animation tracks start fresh.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct Transition {
     serial: usize,
@@ -1024,25 +1158,27 @@ pub(crate) struct Transition {
 
 impl Transition {
     pub(crate) fn open_new() -> Self {
+        static NEXT: AtomicUsize = AtomicUsize::new(1);
         Self {
-            serial: next_transition_serial(),
+            serial: NEXT.fetch_add(1, Ordering::Relaxed),
             phase: Presence::Open,
         }
     }
 
+    /// Opens it, as a new showing, unless it's open already.
     pub(crate) fn open(&mut self) {
         if !self.is_open() {
-            self.serial = next_transition_serial();
-            self.phase = Presence::Open;
+            *self = Self::open_new();
         }
     }
 
+    /// Starts closing it; whether it was open.
     pub(crate) fn close(&mut self) -> bool {
-        if !self.is_open() {
-            return false;
+        let was_open = self.is_open();
+        if was_open {
+            self.phase = Presence::Closing;
         }
-        self.phase = Presence::Closing;
-        true
+        was_open
     }
 
     pub(crate) fn finish(&mut self) {
@@ -1061,14 +1197,11 @@ impl Transition {
         active: bool,
         curve: Curve,
     ) -> AnimSample<f32> {
-        ui.anims.progress(
-            AnimKey::Transition {
-                serial: self.serial,
-                track,
-            },
-            active,
-            curve,
-        )
+        let key = AnimKey::Transition {
+            serial: self.serial,
+            track,
+        };
+        ui.anims.progress(key, active, curve)
     }
 
     pub(crate) fn is_visible(self) -> bool {
@@ -1084,187 +1217,7 @@ impl Transition {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum AnimStatus {
-    Idle,
-    Running,
-    Finished,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct AnimSample<T> {
-    pub(crate) value: T,
-    pub(crate) status: AnimStatus,
-}
-
-#[derive(Clone, Copy, Debug)]
-struct AnimTrack<T> {
-    from: T,
-    target: T,
-    started_at: Instant,
-    reversing_scale: f32,
-    duration: Duration,
-    last_frame: u64,
-}
-
-impl<T: Lerp> AnimTrack<T> {
-    fn sample_and_update(
-        &mut self,
-        target: T,
-        Curve { duration, easing }: Curve,
-        now: Instant,
-        reduce_motion: bool,
-        frame: u64,
-    ) -> AnimSample<T> {
-        self.last_frame = frame;
-
-        if reduce_motion || duration.is_zero() {
-            self.from = target;
-            self.target = target;
-            self.started_at = now;
-            self.reversing_scale = 1.0;
-            self.duration = duration;
-            return AnimSample {
-                value: target,
-                status: AnimStatus::Finished,
-            };
-        }
-
-        let elapsed = now.saturating_duration_since(self.started_at);
-        let (progress, status) = if self.duration.is_zero() || elapsed >= self.duration {
-            (1.0, AnimStatus::Finished)
-        } else {
-            (
-                elapsed.as_secs_f32() / self.duration.as_secs_f32(),
-                AnimStatus::Running,
-            )
-        };
-        let eased = easing.sample(progress);
-        let current = self.from.lerp(self.target, eased);
-
-        if self.target != target {
-            let reversing = target == self.from;
-            let reversing_scale = if reversing {
-                (eased * self.reversing_scale + (1.0 - self.reversing_scale)).clamp(0.0, 1.0)
-            } else {
-                1.0
-            };
-            let next_duration = duration.mul_f32(reversing_scale);
-            self.from = current;
-            self.target = target;
-            self.started_at = now;
-            self.reversing_scale = reversing_scale;
-            self.duration = next_duration;
-            if next_duration.is_zero() {
-                AnimSample {
-                    value: target,
-                    status: AnimStatus::Finished,
-                }
-            } else {
-                AnimSample {
-                    value: current,
-                    status: AnimStatus::Running,
-                }
-            }
-        } else if self.from == self.target {
-            AnimSample {
-                value: current,
-                status: AnimStatus::Idle,
-            }
-        } else {
-            AnimSample {
-                value: current,
-                status,
-            }
-        }
-    }
-}
-
-pub(crate) struct AnimTracks<K: Copy + Eq + Hash> {
-    frame: u64,
-    now: Instant,
-    reduce_motion: bool,
-    running_this_frame: bool,
-    scalars: HashMap<K, AnimTrack<f32>>,
-    colors: HashMap<K, AnimTrack<Rgba>>,
-}
-
-impl<K: Copy + Eq + Hash> Default for AnimTracks<K> {
-    fn default() -> Self {
-        Self {
-            frame: 0,
-            now: Instant::now(),
-            reduce_motion: false,
-            running_this_frame: false,
-            scalars: HashMap::new(),
-            colors: HashMap::new(),
-        }
-    }
-}
-
-impl<K: Copy + Eq + Hash> AnimTracks<K> {
-    pub(crate) fn begin_frame(&mut self, now: Instant, reduce_motion: bool) {
-        self.frame = self.frame.wrapping_add(1);
-        self.now = now;
-        self.reduce_motion = reduce_motion;
-        self.running_this_frame = false;
-    }
-
-    pub(crate) fn end_frame(&mut self) -> bool {
-        let frame = self.frame;
-        self.scalars.retain(|_, track| track.last_frame == frame);
-        self.colors.retain(|_, track| track.last_frame == frame);
-        self.running_this_frame
-    }
-
-    /// Runs from 0 toward 1 while `active`, and back toward 0 when not.
-    pub(crate) fn progress(&mut self, key: K, active: bool, curve: Curve) -> AnimSample<f32> {
-        self.animate_f32_from(key, 0.0, if active { 1.0 } else { 0.0 }, curve)
-    }
-
-    /// Animates toward `target`, starting from `initial` the first time `key` is seen.
-    pub(crate) fn animate_f32_from(
-        &mut self,
-        key: K,
-        initial: f32,
-        target: f32,
-        curve: Curve,
-    ) -> AnimSample<f32> {
-        self.animate(|t| &mut t.scalars, key, initial, target, curve)
-    }
-
-    fn animate_color(&mut self, key: K, target: Rgba, curve: Curve) -> Rgba {
-        self.animate(|t| &mut t.colors, key, target, target, curve)
-            .value
-    }
-
-    fn animate<T: Lerp>(
-        &mut self,
-        tracks: impl FnOnce(&mut Self) -> &mut HashMap<K, AnimTrack<T>>,
-        key: K,
-        from: T,
-        target: T,
-        curve: Curve,
-    ) -> AnimSample<T> {
-        let (frame, now, reduce_motion) = (self.frame, self.now, self.reduce_motion);
-        let track = tracks(self).entry(key).or_insert_with(|| AnimTrack {
-            from,
-            target,
-            started_at: now,
-            reversing_scale: 1.0,
-            duration: curve.duration,
-            last_frame: frame,
-        });
-        let sample = track.sample_and_update(target, curve, now, reduce_motion, frame);
-        self.running_this_frame |= sample.status == AnimStatus::Running;
-        sample
-    }
-
-    #[cfg(test)]
-    pub(crate) fn track_count(&self) -> usize {
-        self.scalars.len() + self.colors.len()
-    }
-}
+// ---- 5. The app's ids -----------------------------------------------------------------------
 
 crate::types::id_type!(TabId);
 
@@ -1275,6 +1228,7 @@ pub(crate) enum MenuKind {
     View,
 }
 
+/// Which editor of a window: a tab's document, or one of the fields.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum EditorSlot {
     Tab(TabId),
@@ -1283,6 +1237,7 @@ pub(crate) enum EditorSlot {
     GoToLine,
 }
 
+/// What has a window's keyboard focus.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Focus {
     Editor(EditorSlot),
@@ -1290,6 +1245,7 @@ pub(crate) enum Focus {
     DialogButton(usize),
 }
 
+/// What a custom node is: the window draws these itself.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum CustomDraw {
     Editor(EditorSlot),
@@ -1346,6 +1302,7 @@ pub(crate) enum DialogHit {
     Button(usize),
 }
 
+/// What a node is to the pointer: every hit-testable part of a window.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum HitId {
     Caption(CaptionHit),
@@ -1360,21 +1317,27 @@ pub(crate) enum HitId {
     FieldClear(EditorSlot),
 }
 
+/// What an animation track belongs to.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum AnimKey {
+    /// A control's brush fade.
     Hit(HitId),
     TabX(usize),
     TabWidth(usize),
     TabScroll,
     TabExtent,
-    Transition { serial: usize, track: u8 },
+    /// Track `track` of a showing of something that animates in and out.
+    Transition {
+        serial: usize,
+        track: u8,
+    },
     ScrollOpacity(EditorSlot),
     ScrollThickness(EditorSlot, Axis),
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::geom::{point, rect, rgb, white};
+    use crate::geom::{point, rgb, white};
 
     use super::*;
 
@@ -1689,346 +1652,5 @@ mod tests {
         tracks.begin_frame(t_done, false);
         assert!(!tracks.end_frame());
         assert_eq!(tracks.track_count(), 0);
-    }
-
-    fn st() -> FlexStyle {
-        FlexStyle::default()
-    }
-
-    fn row_st() -> FlexStyle {
-        FlexStyle {
-            row: true,
-            ..Default::default()
-        }
-    }
-
-    fn full() -> FlexStyle {
-        st().w_full().h_full()
-    }
-
-    impl FlexStyle {
-        fn w(mut self, v: f32) -> Self { self.size[0] = Dim::Px(v); self }
-        fn h(mut self, v: f32) -> Self { self.size[1] = Dim::Px(v); self }
-        fn w_full(mut self) -> Self { self.size[0] = Dim::Full; self }
-        fn h_full(mut self) -> Self { self.size[1] = Dim::Full; self }
-        fn min_w(mut self, v: f32) -> Self { self.min[0] = Dim::Px(v); self }
-        fn min_h(mut self, v: f32) -> Self { self.min[1] = Dim::Px(v); self }
-        fn min_h_full(mut self) -> Self { self.min[1] = Dim::Full; self }
-        fn max_w_full(mut self) -> Self { self.max[0] = Dim::Full; self }
-        fn flex_1(mut self) -> Self { self.flex = Flex::Fill; self }
-        fn flex_none(mut self) -> Self { self.flex = Flex::Fixed; self }
-        fn gap(mut self, v: f32) -> Self { self.gap = v; self }
-        fn items_center(mut self) -> Self { self.items_center = true; self }
-        fn justify_center(mut self) -> Self { self.justify_center = true; self }
-        fn overflow_hidden(mut self) -> Self { self.clip = [true, true]; self }
-        fn overflow_x_hidden(mut self) -> Self { self.clip[0] = true; self }
-        fn pad_all(mut self, v: f32) -> Self { self.padding = Edges::all(v); self }
-        fn pad_xy(mut self, x: f32, y: f32) -> Self { self.padding = Edges::xy(x, y); self }
-        fn pad(mut self, t: f32, r: f32, b: f32, l: f32) -> Self {
-            self.padding = Edges { top: t, right: r, bottom: b, left: l };
-            self
-        }
-        fn margin(mut self, t: f32, l: f32) -> Self {
-            self.margin = Edges { top: t, left: l, ..Edges::ZERO };
-            self
-        }
-        fn border_all(mut self, v: f32) -> Self { self.border = Edges::all(v); self }
-        fn border(mut self, t: f32, r: f32, b: f32, l: f32) -> Self {
-            self.border = Edges { top: t, right: r, bottom: b, left: l };
-            self
-        }
-        fn abs(mut self) -> Self { self.absolute = true; self }
-        fn inset_tl(mut self, t: f32, l: f32) -> Self {
-            self.inset = Edges { top: Some(t), left: Some(l), ..Edges::all(None) };
-            self
-        }
-        fn inset(mut self, top: Option<f32>, right: Option<f32>, bottom: Option<f32>, left: Option<f32>) -> Self {
-            self.inset = Edges { top, right, bottom, left };
-            self
-        }
-    }
-
-    struct Tree {
-        tree: LayoutTree,
-    }
-
-    impl Tree {
-        fn new(scale: f32) -> Self {
-            Self {
-                tree: LayoutTree::new(scale),
-            }
-        }
-        fn leaf(&mut self, style: FlexStyle) -> usize {
-            self.tree.add(style, false)
-        }
-        fn text(&mut self) -> usize {
-            self.tree.add(st(), true)
-        }
-        fn node(&mut self, style: FlexStyle, children: &[usize]) -> usize {
-            let id = self.tree.add(style, false);
-            self.tree.set_children(id, children);
-            id
-        }
-        fn compute(&mut self, root: usize, avail: AvailSize) {
-            self.tree.solve(root, avail, &mut |_, _, _, _| Size::ZERO);
-        }
-        fn compute_with(
-            &mut self,
-            root: usize,
-            avail: AvailSize,
-            mut measure: impl FnMut(usize, Option<f32>, Option<f32>, AvailSize) -> Size,
-        ) {
-            self.tree.solve(root, avail, &mut measure);
-        }
-        fn bounds(&mut self, id: usize) -> Rect {
-            self.tree.rect(id)
-        }
-    }
-
-    #[test]
-    fn flex_col_window_chrome_and_flex_1_editor() {
-        let mut t = Tree::new(1.0);
-        let title = t.leaf(st().flex_none().h(40.));
-        let menu = t.leaf(st().flex_none().h(32.));
-        let editor = t.leaf(st().flex_1().min_h(60.));
-        let status = t.leaf(st().flex_none().h(33.));
-        let root = t.node(full(), &[title, menu, editor, status]);
-        t.compute(root, AvailSize::definite(800., 600.));
-
-        assert_eq!(t.bounds(title), rect(0., 0., 800., 40.));
-        assert_eq!(t.bounds(menu), rect(0., 40., 800., 32.));
-        assert_eq!(t.bounds(editor), rect(0., 72., 800., 495.));
-        assert_eq!(t.bounds(status), rect(0., 567., 800., 33.));
-    }
-
-    #[test]
-    fn dialog_wrapped_text_and_equal_buttons() {
-        let mut t = Tree::new(1.0);
-        let body_text = t.text();
-        let content = t.node(st().pad_all(24.).border(0., 0., 1., 0.), &[body_text]);
-        let btn = st().flex_1().min_w(0.).h(32.);
-        let (b1, b2) = (t.leaf(btn), t.leaf(btn));
-        let footer = t.node(row_st().pad_all(24.).gap(8.), &[b1, b2]);
-        let col = t.node(st(), &[content, footer]);
-        let frame = t.node(st().w(360.).max_w_full().border_all(1.), &[col]);
-        let overlay = t.node(full().abs().inset_tl(0., 0.).items_center().justify_center(), &[frame]);
-        let root = t.node(full(), &[overlay]);
-        t.compute_with(root, AvailSize::definite(800., 600.), |id, kw, _, avail| {
-            assert_eq!(id, body_text);
-            let wrap = kw.or(match avail.width {
-                Space::Definite(w) => Some(w),
-                _ => None,
-            });
-            match wrap {
-                Some(w) if w < 500. => size(w, (500.0 / w).ceil().max(1.0) * 20.),
-                _ => size(500., 20.),
-            }
-        });
-
-        assert_eq!(t.bounds(body_text).size, size(310., 40.));
-        assert_eq!(t.bounds(content).size, size(358., 89.));
-        assert_eq!(t.bounds(b1).size, size(151., 32.));
-        assert_eq!(t.bounds(b2).size, size(151., 32.));
-        let fb = t.bounds(frame);
-        assert_eq!(fb.size, size(360., 171.));
-        assert_eq!(fb.origin.x, 220.);
-    }
-
-    #[test]
-    fn tab_label_min_w_0_truncates_wide_nowrap_text() {
-        let mut t = Tree::new(1.0);
-        let long_text = t.text();
-        let label_box = t.node(st().flex_1().min_w(0.).overflow_hidden(), &[long_text]);
-        let tab = t.node(row_st().items_center().w(180.).h(32.).pad(0., 36., 0., 12.), &[label_box]);
-        t.compute_with(tab, AvailSize::definite(180., 32.), |_, _, _, _| size(400., 16.));
-
-        assert_eq!(t.bounds(label_box), rect(12., 8., 132., 16.));
-    }
-
-    #[test]
-    fn text_field_negative_insets_and_absolute_glyph() {
-        let mut t = Tree::new(1.0);
-        let bottom_edge = t.leaf(st().abs().inset(None, Some(-1.), Some(0.), Some(-1.)).h(2.));
-        let glyph = t.leaf(st().abs().inset(Some(2.), Some(4.), Some(2.), None).w(24.));
-        let field = t.node(st().w(200.).h(32.).border(1., 1., 0., 1.).pad(0., 0., 1., 0.), &[bottom_edge, glyph]);
-        t.compute(field, AvailSize::definite(200., 32.));
-
-        assert_eq!(t.bounds(bottom_edge), rect(0., 30., 200., 2.));
-        assert_eq!(t.bounds(glyph), rect(171., 3., 24., 27.));
-    }
-
-    #[test]
-    fn status_bar_min_content_root_measurement() {
-        let mut t = Tree::new(1.0);
-        let (t1, t2, t3) = (t.text(), t.text(), t.text());
-        let div1 = t.leaf(st().flex_none().w(1.).h(14.));
-        let spacer = t.leaf(st().flex_1().min_w(1.).h(14.));
-        let row = t.node(row_st().items_center().gap(24.).h(32.).pad_xy(22., 0.), &[t1, div1, t2, spacer, t3]);
-        let sep = t.leaf(st().h(1.));
-        let status = t.node(st().flex_none(), &[sep, row]);
-        t.compute_with(status, AvailSize::MIN, |id, _, _, _| {
-            if id == t1 { size(60., 16.) } else if id == t2 { size(80., 16.) } else { size(40., 16.) }
-        });
-
-        assert_eq!(t.bounds(status).size, size(322., 33.));
-    }
-
-    #[test]
-    fn menu_command_tile_items_center_and_relative_offset() {
-        let mut t = Tree::new(1.0);
-        let (icon, label_text) = (t.text(), t.text());
-        let icon_box = t.node(st().h(16.), &[icon]);
-        let label_box = t.node(st().margin(4., 0.).w(48.).h(16.), &[label_text]);
-        let tile = t.node(st().items_center().w(60.).h(50.).pad(8., 0., 0., 0.), &[icon_box, label_box]);
-        let nudged = t.leaf(st().inset_tl(2., 1.).w(10.).h(10.));
-        let root = t.node(row_st(), &[tile, nudged]);
-        t.compute_with(root, AvailSize::definite(200., 100.), |id, _, _, _| {
-            if id == icon { size(16., 16.) } else { size(24., 14.) }
-        });
-
-        assert_eq!(t.bounds(icon_box).origin, point(22., 8.));
-        assert_eq!(t.bounds(label_box), rect(6., 28., 48., 16.));
-        assert_eq!(t.bounds(label_text).size.width, 48.);
-        assert_eq!(t.bounds(nudged).origin, point(61., 2.));
-    }
-
-    #[test]
-    fn fractional_dpi_edge_closure_between_flex_siblings() {
-        let mut t = Tree::new(1.5);
-        let child = st().flex_1().h(20.);
-        let (a, b, c) = (t.leaf(child), t.leaf(child), t.leaf(child));
-        let root = t.node(row_st().w(100.).h(20.), &[a, b, c]);
-        t.compute(root, AvailSize::definite(100., 20.));
-
-        let (ba, bb, bc) = (t.bounds(a), t.bounds(b), t.bounds(c));
-        assert_eq!(ba.right(), bb.left());
-        assert_eq!(bb.right(), bc.left());
-        assert_eq!(bc.right(), 100.);
-    }
-
-    #[test]
-    fn editor_percentage_chain_through_flex_1() {
-        let mut t = Tree::new(1.0);
-        let text_el = t.leaf(full().min_h(40.));
-        let scrollbar = t.leaf(full().abs());
-        let editor_state = t.node(st().flex_1().h_full().pad(10., 12., 10., 14.), &[text_el, scrollbar]);
-        let inner = t.node(full(), &[editor_state]);
-        let editor_area = t.node(st().flex_1().min_h(60.), &[inner]);
-        let header = t.leaf(st().flex_none().h(100.));
-        let root = t.node(full(), &[header, editor_area]);
-        t.compute(root, AvailSize::definite(800., 500.));
-
-        assert_eq!(t.bounds(text_el), rect(14., 110., 774., 380.));
-        assert_eq!(t.bounds(scrollbar).size, size(800., 400.));
-    }
-
-    #[test]
-    fn flex_shrink_respects_flex_none_and_min_size() {
-        let mut t = Tree::new(1.0);
-        let fixed = t.leaf(st().flex_none().w(100.).h(20.));
-        let a = t.leaf(st().w(200.).min_w(80.).h(20.));
-        let b = t.leaf(st().w(200.).min_w(0.).h(20.));
-        let root = t.node(row_st().w(220.), &[fixed, a, b]);
-        t.compute(root, AvailSize::definite(220., 20.));
-
-        assert_eq!(t.bounds(fixed).size.width, 100.);
-        assert_eq!(t.bounds(a).size.width, 80.);
-        assert_eq!(t.bounds(b).size.width, 40.);
-    }
-
-    #[test]
-    fn abspos_dropdown_inside_narrow_button_does_not_squish() {
-        let mut t = Tree::new(1.0);
-        let item = t.text();
-        let dropdown = t.node(st().abs().inset_tl(32., 0.), &[item]);
-        let button = t.node(st().w(40.).h(32.), &[dropdown]);
-        t.compute_with(button, AvailSize::definite(40., 32.), |_, _, _, _| size(180., 28.));
-
-        assert_eq!(t.bounds(dropdown), rect(0., 32., 180., 28.));
-    }
-
-    #[test]
-    fn auto_height_flex_col_does_not_crush_in_short_window_and_respects_max_w_full() {
-        let mut t = Tree::new(1.0);
-        let content = t.leaf(st().h(120.));
-        let footer = t.leaf(st().h(80.));
-        let col = t.node(st(), &[content, footer]);
-        let frame = t.node(st().w(360.).max_w_full().border_all(1.), &[col]);
-        let overlay = t.node(full().abs().inset_tl(0., 0.).items_center().justify_center(), &[frame]);
-        let root = t.node(full(), &[overlay]);
-        t.compute(root, AvailSize::definite(250., 140.));
-
-        assert_eq!(t.bounds(frame).size, size(250., 202.));
-        assert_eq!(t.bounds(content).size, size(248., 120.));
-        assert_eq!(t.bounds(footer).size, size(248., 80.));
-    }
-
-    #[test]
-    fn single_line_text_field_min_h_full_centers_text_element() {
-        let mut t = Tree::new(1.0);
-        let text_el = t.leaf(st().w_full().h(20.));
-        let input_state = t.node(row_st().flex_1().min_h_full().items_center().overflow_x_hidden(), &[text_el]);
-        let inner = t.node(row_st().h_full().items_center().pad(0., 33., 0., 9.), &[input_state]);
-        let field = t.node(st().w(200.).h(32.).border(1., 1., 0., 1.).pad(0., 0., 1., 0.), &[inner]);
-        t.compute(field, AvailSize::definite(200., 32.));
-
-        assert_eq!(t.bounds(input_state), rect(10., 1., 156., 30.));
-        assert_eq!(t.bounds(text_el), rect(10., 6., 156., 20.));
-    }
-
-    #[test]
-    fn directwrite_status_bar_shapes_all_labels() {
-        use crate::gfx::{LabelLayout, TextStyle, TextSystem};
-        use crate::types::SharedStr;
-
-        let ts = TextSystem::new().unwrap();
-        let style = TextStyle::regular("Segoe UI Variable Small", 12.0);
-        let labels = ["Ln 1, Col 1", "0 characters", "100%", "Windows (CRLF)", "UTF-8"];
-
-        let build = |t: &mut Tree| {
-            let (t0, t2, t4, t6, t8) = (t.text(), t.text(), t.text(), t.text(), t.text());
-            let div = st().flex_none().w(1.).h(16.);
-            let (d1, d5, d7) = (t.leaf(div), t.leaf(div), t.leaf(div));
-            let sp = t.leaf(st().flex_1().min_w(1.).h(16.));
-            let row = t.node(
-                row_st().items_center().gap(24.).h(31.).pad_xy(22., 0.),
-                &[t0, d1, t2, sp, t4, d5, t6, d7, t8],
-            );
-            let sep = t.leaf(st().flex_none().h(1.));
-            let bar = t.node(st().flex_none(), &[sep, row]);
-            (bar, [t0, t2, t4, t6, t8], sp, d5)
-        };
-
-        let measure_labels = |ids: [usize; 5]| {
-            let (ts, style) = (&ts, &style);
-            move |id: usize, kw: Option<f32>, _: Option<f32>, avail: AvailSize| {
-                let ix = ids.iter().position(|&x| x == id).unwrap();
-                let wrap_width = kw.or(match avail.width {
-                    Space::Definite(x) => Some(x),
-                    _ => None,
-                });
-                ts.shape_label(
-                    SharedStr::Static(labels[ix]),
-                    style,
-                    LabelLayout { line_height: 16.0, wrap_width, line_clamp: None },
-                )
-                .size()
-            }
-        };
-
-        let mut probe = Tree::new(1.0);
-        let (bar_probe, probe_ids, _, _) = build(&mut probe);
-        probe.compute_with(bar_probe, AvailSize::MIN, measure_labels(probe_ids));
-        let min_sz = probe.bounds(bar_probe).size;
-
-        let mut win = Tree::new(1.0);
-        let (bar_win, win_ids, sp, d5) = build(&mut win);
-        let root = win.node(full(), &[bar_win]);
-        win.compute_with(root, AvailSize::definite(min_sz.width, 200.), measure_labels(win_ids));
-
-        let (spacer, zoom, next_div) = (win.bounds(sp), win.bounds(win_ids[2]), win.bounds(d5));
-        assert!(spacer.size.width >= 1.0);
-        assert!(zoom.size.height <= 16.0, "zoom must stay single-line, got {zoom:?}");
-        assert!(zoom.right() < next_div.left());
     }
 }

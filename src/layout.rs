@@ -715,3 +715,351 @@ fn resolve_lengths(items: &mut [Item], m: usize, inner: f32, gaps: f32, growing:
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::geom::{Edges, Rect, Size, rect};
+
+    use super::*;
+
+    fn st() -> FlexStyle {
+        FlexStyle::default()
+    }
+
+    fn row_st() -> FlexStyle {
+        FlexStyle {
+            row: true,
+            ..Default::default()
+        }
+    }
+
+    fn full() -> FlexStyle {
+        st().w_full().h_full()
+    }
+
+    impl FlexStyle {
+        fn w(mut self, v: f32) -> Self { self.size[0] = Dim::Px(v); self }
+        fn h(mut self, v: f32) -> Self { self.size[1] = Dim::Px(v); self }
+        fn w_full(mut self) -> Self { self.size[0] = Dim::Full; self }
+        fn h_full(mut self) -> Self { self.size[1] = Dim::Full; self }
+        fn min_w(mut self, v: f32) -> Self { self.min[0] = Dim::Px(v); self }
+        fn min_h(mut self, v: f32) -> Self { self.min[1] = Dim::Px(v); self }
+        fn min_h_full(mut self) -> Self { self.min[1] = Dim::Full; self }
+        fn max_w_full(mut self) -> Self { self.max[0] = Dim::Full; self }
+        fn flex_1(mut self) -> Self { self.flex = Flex::Fill; self }
+        fn flex_none(mut self) -> Self { self.flex = Flex::Fixed; self }
+        fn gap(mut self, v: f32) -> Self { self.gap = v; self }
+        fn items_center(mut self) -> Self { self.items_center = true; self }
+        fn justify_center(mut self) -> Self { self.justify_center = true; self }
+        fn overflow_hidden(mut self) -> Self { self.clip = [true, true]; self }
+        fn overflow_x_hidden(mut self) -> Self { self.clip[0] = true; self }
+        fn pad_all(mut self, v: f32) -> Self { self.padding = Edges::all(v); self }
+        fn pad_xy(mut self, x: f32, y: f32) -> Self { self.padding = Edges::xy(x, y); self }
+        fn pad(mut self, t: f32, r: f32, b: f32, l: f32) -> Self {
+            self.padding = Edges { top: t, right: r, bottom: b, left: l };
+            self
+        }
+        fn margin(mut self, t: f32, l: f32) -> Self {
+            self.margin = Edges { top: t, left: l, ..Edges::ZERO };
+            self
+        }
+        fn border_all(mut self, v: f32) -> Self { self.border = Edges::all(v); self }
+        fn border(mut self, t: f32, r: f32, b: f32, l: f32) -> Self {
+            self.border = Edges { top: t, right: r, bottom: b, left: l };
+            self
+        }
+        fn abs(mut self) -> Self { self.absolute = true; self }
+        fn inset_tl(mut self, t: f32, l: f32) -> Self {
+            self.inset = Edges { top: Some(t), left: Some(l), ..Edges::all(None) };
+            self
+        }
+        fn inset(mut self, top: Option<f32>, right: Option<f32>, bottom: Option<f32>, left: Option<f32>) -> Self {
+            self.inset = Edges { top, right, bottom, left };
+            self
+        }
+    }
+
+    struct Tree {
+        tree: LayoutTree,
+    }
+
+    impl Tree {
+        fn new(scale: f32) -> Self {
+            Self {
+                tree: LayoutTree::new(scale),
+            }
+        }
+        fn leaf(&mut self, style: FlexStyle) -> usize {
+            self.tree.add(style, false)
+        }
+        fn text(&mut self) -> usize {
+            self.tree.add(st(), true)
+        }
+        fn node(&mut self, style: FlexStyle, children: &[usize]) -> usize {
+            let id = self.tree.add(style, false);
+            self.tree.set_children(id, children);
+            id
+        }
+        fn compute(&mut self, root: usize, avail: AvailSize) {
+            self.tree.solve(root, avail, &mut |_, _, _, _| Size::ZERO);
+        }
+        fn compute_with(
+            &mut self,
+            root: usize,
+            avail: AvailSize,
+            mut measure: impl FnMut(usize, Option<f32>, Option<f32>, AvailSize) -> Size,
+        ) {
+            self.tree.solve(root, avail, &mut measure);
+        }
+        fn bounds(&mut self, id: usize) -> Rect {
+            self.tree.rect(id)
+        }
+    }
+
+    #[test]
+    fn flex_col_window_chrome_and_flex_1_editor() {
+        let mut t = Tree::new(1.0);
+        let title = t.leaf(st().flex_none().h(40.));
+        let menu = t.leaf(st().flex_none().h(32.));
+        let editor = t.leaf(st().flex_1().min_h(60.));
+        let status = t.leaf(st().flex_none().h(33.));
+        let root = t.node(full(), &[title, menu, editor, status]);
+        t.compute(root, AvailSize::definite(800., 600.));
+
+        assert_eq!(t.bounds(title), rect(0., 0., 800., 40.));
+        assert_eq!(t.bounds(menu), rect(0., 40., 800., 32.));
+        assert_eq!(t.bounds(editor), rect(0., 72., 800., 495.));
+        assert_eq!(t.bounds(status), rect(0., 567., 800., 33.));
+    }
+
+    #[test]
+    fn dialog_wrapped_text_and_equal_buttons() {
+        let mut t = Tree::new(1.0);
+        let body_text = t.text();
+        let content = t.node(st().pad_all(24.).border(0., 0., 1., 0.), &[body_text]);
+        let btn = st().flex_1().min_w(0.).h(32.);
+        let (b1, b2) = (t.leaf(btn), t.leaf(btn));
+        let footer = t.node(row_st().pad_all(24.).gap(8.), &[b1, b2]);
+        let col = t.node(st(), &[content, footer]);
+        let frame = t.node(st().w(360.).max_w_full().border_all(1.), &[col]);
+        let overlay = t.node(full().abs().inset_tl(0., 0.).items_center().justify_center(), &[frame]);
+        let root = t.node(full(), &[overlay]);
+        t.compute_with(root, AvailSize::definite(800., 600.), |id, kw, _, avail| {
+            assert_eq!(id, body_text);
+            let wrap = kw.or(match avail.width {
+                Space::Definite(w) => Some(w),
+                _ => None,
+            });
+            match wrap {
+                Some(w) if w < 500. => size(w, (500.0 / w).ceil().max(1.0) * 20.),
+                _ => size(500., 20.),
+            }
+        });
+
+        assert_eq!(t.bounds(body_text).size, size(310., 40.));
+        assert_eq!(t.bounds(content).size, size(358., 89.));
+        assert_eq!(t.bounds(b1).size, size(151., 32.));
+        assert_eq!(t.bounds(b2).size, size(151., 32.));
+        let fb = t.bounds(frame);
+        assert_eq!(fb.size, size(360., 171.));
+        assert_eq!(fb.origin.x, 220.);
+    }
+
+    #[test]
+    fn tab_label_min_w_0_truncates_wide_nowrap_text() {
+        let mut t = Tree::new(1.0);
+        let long_text = t.text();
+        let label_box = t.node(st().flex_1().min_w(0.).overflow_hidden(), &[long_text]);
+        let tab = t.node(row_st().items_center().w(180.).h(32.).pad(0., 36., 0., 12.), &[label_box]);
+        t.compute_with(tab, AvailSize::definite(180., 32.), |_, _, _, _| size(400., 16.));
+
+        assert_eq!(t.bounds(label_box), rect(12., 8., 132., 16.));
+    }
+
+    #[test]
+    fn text_field_negative_insets_and_absolute_glyph() {
+        let mut t = Tree::new(1.0);
+        let bottom_edge = t.leaf(st().abs().inset(None, Some(-1.), Some(0.), Some(-1.)).h(2.));
+        let glyph = t.leaf(st().abs().inset(Some(2.), Some(4.), Some(2.), None).w(24.));
+        let field = t.node(st().w(200.).h(32.).border(1., 1., 0., 1.).pad(0., 0., 1., 0.), &[bottom_edge, glyph]);
+        t.compute(field, AvailSize::definite(200., 32.));
+
+        assert_eq!(t.bounds(bottom_edge), rect(0., 30., 200., 2.));
+        assert_eq!(t.bounds(glyph), rect(171., 3., 24., 27.));
+    }
+
+    #[test]
+    fn status_bar_min_content_root_measurement() {
+        let mut t = Tree::new(1.0);
+        let (t1, t2, t3) = (t.text(), t.text(), t.text());
+        let div1 = t.leaf(st().flex_none().w(1.).h(14.));
+        let spacer = t.leaf(st().flex_1().min_w(1.).h(14.));
+        let row = t.node(row_st().items_center().gap(24.).h(32.).pad_xy(22., 0.), &[t1, div1, t2, spacer, t3]);
+        let sep = t.leaf(st().h(1.));
+        let status = t.node(st().flex_none(), &[sep, row]);
+        t.compute_with(status, AvailSize::MIN, |id, _, _, _| {
+            if id == t1 { size(60., 16.) } else if id == t2 { size(80., 16.) } else { size(40., 16.) }
+        });
+
+        assert_eq!(t.bounds(status).size, size(322., 33.));
+    }
+
+    #[test]
+    fn menu_command_tile_items_center_and_relative_offset() {
+        let mut t = Tree::new(1.0);
+        let (icon, label_text) = (t.text(), t.text());
+        let icon_box = t.node(st().h(16.), &[icon]);
+        let label_box = t.node(st().margin(4., 0.).w(48.).h(16.), &[label_text]);
+        let tile = t.node(st().items_center().w(60.).h(50.).pad(8., 0., 0., 0.), &[icon_box, label_box]);
+        let nudged = t.leaf(st().inset_tl(2., 1.).w(10.).h(10.));
+        let root = t.node(row_st(), &[tile, nudged]);
+        t.compute_with(root, AvailSize::definite(200., 100.), |id, _, _, _| {
+            if id == icon { size(16., 16.) } else { size(24., 14.) }
+        });
+
+        assert_eq!(t.bounds(icon_box).origin, point(22., 8.));
+        assert_eq!(t.bounds(label_box), rect(6., 28., 48., 16.));
+        assert_eq!(t.bounds(label_text).size.width, 48.);
+        assert_eq!(t.bounds(nudged).origin, point(61., 2.));
+    }
+
+    #[test]
+    fn fractional_dpi_edge_closure_between_flex_siblings() {
+        let mut t = Tree::new(1.5);
+        let child = st().flex_1().h(20.);
+        let (a, b, c) = (t.leaf(child), t.leaf(child), t.leaf(child));
+        let root = t.node(row_st().w(100.).h(20.), &[a, b, c]);
+        t.compute(root, AvailSize::definite(100., 20.));
+
+        let (ba, bb, bc) = (t.bounds(a), t.bounds(b), t.bounds(c));
+        assert_eq!(ba.right(), bb.left());
+        assert_eq!(bb.right(), bc.left());
+        assert_eq!(bc.right(), 100.);
+    }
+
+    #[test]
+    fn editor_percentage_chain_through_flex_1() {
+        let mut t = Tree::new(1.0);
+        let text_el = t.leaf(full().min_h(40.));
+        let scrollbar = t.leaf(full().abs());
+        let editor_state = t.node(st().flex_1().h_full().pad(10., 12., 10., 14.), &[text_el, scrollbar]);
+        let inner = t.node(full(), &[editor_state]);
+        let editor_area = t.node(st().flex_1().min_h(60.), &[inner]);
+        let header = t.leaf(st().flex_none().h(100.));
+        let root = t.node(full(), &[header, editor_area]);
+        t.compute(root, AvailSize::definite(800., 500.));
+
+        assert_eq!(t.bounds(text_el), rect(14., 110., 774., 380.));
+        assert_eq!(t.bounds(scrollbar).size, size(800., 400.));
+    }
+
+    #[test]
+    fn flex_shrink_respects_flex_none_and_min_size() {
+        let mut t = Tree::new(1.0);
+        let fixed = t.leaf(st().flex_none().w(100.).h(20.));
+        let a = t.leaf(st().w(200.).min_w(80.).h(20.));
+        let b = t.leaf(st().w(200.).min_w(0.).h(20.));
+        let root = t.node(row_st().w(220.), &[fixed, a, b]);
+        t.compute(root, AvailSize::definite(220., 20.));
+
+        assert_eq!(t.bounds(fixed).size.width, 100.);
+        assert_eq!(t.bounds(a).size.width, 80.);
+        assert_eq!(t.bounds(b).size.width, 40.);
+    }
+
+    #[test]
+    fn abspos_dropdown_inside_narrow_button_does_not_squish() {
+        let mut t = Tree::new(1.0);
+        let item = t.text();
+        let dropdown = t.node(st().abs().inset_tl(32., 0.), &[item]);
+        let button = t.node(st().w(40.).h(32.), &[dropdown]);
+        t.compute_with(button, AvailSize::definite(40., 32.), |_, _, _, _| size(180., 28.));
+
+        assert_eq!(t.bounds(dropdown), rect(0., 32., 180., 28.));
+    }
+
+    #[test]
+    fn auto_height_flex_col_does_not_crush_in_short_window_and_respects_max_w_full() {
+        let mut t = Tree::new(1.0);
+        let content = t.leaf(st().h(120.));
+        let footer = t.leaf(st().h(80.));
+        let col = t.node(st(), &[content, footer]);
+        let frame = t.node(st().w(360.).max_w_full().border_all(1.), &[col]);
+        let overlay = t.node(full().abs().inset_tl(0., 0.).items_center().justify_center(), &[frame]);
+        let root = t.node(full(), &[overlay]);
+        t.compute(root, AvailSize::definite(250., 140.));
+
+        assert_eq!(t.bounds(frame).size, size(250., 202.));
+        assert_eq!(t.bounds(content).size, size(248., 120.));
+        assert_eq!(t.bounds(footer).size, size(248., 80.));
+    }
+
+    #[test]
+    fn single_line_text_field_min_h_full_centers_text_element() {
+        let mut t = Tree::new(1.0);
+        let text_el = t.leaf(st().w_full().h(20.));
+        let input_state = t.node(row_st().flex_1().min_h_full().items_center().overflow_x_hidden(), &[text_el]);
+        let inner = t.node(row_st().h_full().items_center().pad(0., 33., 0., 9.), &[input_state]);
+        let field = t.node(st().w(200.).h(32.).border(1., 1., 0., 1.).pad(0., 0., 1., 0.), &[inner]);
+        t.compute(field, AvailSize::definite(200., 32.));
+
+        assert_eq!(t.bounds(input_state), rect(10., 1., 156., 30.));
+        assert_eq!(t.bounds(text_el), rect(10., 6., 156., 20.));
+    }
+
+    #[test]
+    fn directwrite_status_bar_shapes_all_labels() {
+        use crate::gfx::{LabelLayout, TextStyle, TextSystem};
+        use crate::types::SharedStr;
+
+        let ts = TextSystem::new().unwrap();
+        let style = TextStyle::regular("Segoe UI Variable Small", 12.0);
+        let labels = ["Ln 1, Col 1", "0 characters", "100%", "Windows (CRLF)", "UTF-8"];
+
+        let build = |t: &mut Tree| {
+            let (t0, t2, t4, t6, t8) = (t.text(), t.text(), t.text(), t.text(), t.text());
+            let div = st().flex_none().w(1.).h(16.);
+            let (d1, d5, d7) = (t.leaf(div), t.leaf(div), t.leaf(div));
+            let sp = t.leaf(st().flex_1().min_w(1.).h(16.));
+            let row = t.node(
+                row_st().items_center().gap(24.).h(31.).pad_xy(22., 0.),
+                &[t0, d1, t2, sp, t4, d5, t6, d7, t8],
+            );
+            let sep = t.leaf(st().flex_none().h(1.));
+            let bar = t.node(st().flex_none(), &[sep, row]);
+            (bar, [t0, t2, t4, t6, t8], sp, d5)
+        };
+
+        let measure_labels = |ids: [usize; 5]| {
+            let (ts, style) = (&ts, &style);
+            move |id: usize, kw: Option<f32>, _: Option<f32>, avail: AvailSize| {
+                let ix = ids.iter().position(|&x| x == id).unwrap();
+                let wrap_width = kw.or(match avail.width {
+                    Space::Definite(x) => Some(x),
+                    _ => None,
+                });
+                ts.shape_label(
+                    SharedStr::Static(labels[ix]),
+                    style,
+                    LabelLayout { line_height: 16.0, wrap_width, line_clamp: None },
+                )
+                .size()
+            }
+        };
+
+        let mut probe = Tree::new(1.0);
+        let (bar_probe, probe_ids, _, _) = build(&mut probe);
+        probe.compute_with(bar_probe, AvailSize::MIN, measure_labels(probe_ids));
+        let min_sz = probe.bounds(bar_probe).size;
+
+        let mut win = Tree::new(1.0);
+        let (bar_win, win_ids, sp, d5) = build(&mut win);
+        let root = win.node(full(), &[bar_win]);
+        win.compute_with(root, AvailSize::definite(min_sz.width, 200.), measure_labels(win_ids));
+
+        let (spacer, zoom, next_div) = (win.bounds(sp), win.bounds(win_ids[2]), win.bounds(d5));
+        assert!(spacer.size.width >= 1.0);
+        assert!(zoom.size.height <= 16.0, "zoom must stay single-line, got {zoom:?}");
+        assert!(zoom.right() < next_div.left());
+    }
+}
