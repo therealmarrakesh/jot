@@ -1,7 +1,7 @@
 //! The main windows. A `MainWindow` is one window: its tabs, menus, find bar and dialogs, the
 //! input that reaches it, and its frame. `Windows` is the list of them, which opens, places and
-//! sweeps them, lets file work see their tabs (`WindowsHost`), and moves tabs between them
-//! (`TabDrag`).
+//! sweeps them and lets file work see their tabs (`WindowsHost`); `TabDrag` moves a tab along
+//! its strip, out into a window of its own, and into another window.
 //!
 //! The app forwards each window event to `on_event`, which also decides whether the window needs
 //! painting. What spans windows (files, tab drags between windows, new windows) leaves as an
@@ -15,7 +15,7 @@ use crate::command::{AppCommand, Command, app_shortcut, edit_shortcut};
 use crate::dialog::{DialogKey, DialogKind, Dialogs};
 use crate::document::{self, DocPath, Format, PathKey};
 use crate::editor::{EditCommand, Editor, EditorPaintParams, EditorPaintStyle};
-use crate::files::{DocHost, FileOps, FileRequest, Prompt, TabSnapshot};
+use crate::files::{DocHost, FileOps, FileRequest, Prompt, PromptId, TabSnapshot};
 use crate::find::{FindBar, FindKey, FindOutcome};
 use crate::geom::{Edges, Point, Rect, ScreenPoint, Size, point, size, transparent_black};
 use crate::gfx::{TextStyle, TextSystem, WindowSurface, fill};
@@ -39,10 +39,12 @@ use crate::ui::{
 };
 use crate::widgets::icon_button;
 
+// A new window's size, at most this share of the screen.
 const WINDOW_WIDTH: f32 = 2213.;
 const WINDOW_HEIGHT: f32 = 1107.;
 const WINDOW_MAX_SCREEN_SHARE: f32 = 0.9;
 
+// The document's text, and how far it zooms.
 const EDITOR_FONT: &str = "Consolas";
 const EDITOR_FONT_SIZE: f32 = 11. * 96. / 72.;
 const EDITOR_LINE_HEIGHT: f32 = 20.;
@@ -56,6 +58,28 @@ const CARET_HEIGHT: f32 = 18.;
 const ZOOM_STEP: f32 = 0.1;
 const ZOOM_MIN: f32 = 0.1;
 const ZOOM_MAX: f32 = 5.;
+
+// The chrome: title bar, menu bar and status bar.
+const HEADER_WIDTH: f32 = 5.;
+const STRIP_TOP: f32 = 10.;
+const CAPTION_BUTTON_WIDTH: f32 = 46.;
+const CAPTION_WIDTH: f32 = 3. * CAPTION_BUTTON_WIDTH;
+/// Room kept beside the strip to drag the window by.
+const DRAG_RESERVE: f32 = 43.;
+const TITLE_BAR_MIN_WIDTH: f32 =
+    HEADER_WIDTH + CAPTION_WIDTH + DRAG_RESERVE + tabs::MIN_STRIP_WIDTH;
+const SEPARATOR_HEIGHT: f32 = 1.;
+const MENU_BAR_LEFT: f32 = 4.;
+const STATUS_BAR_HEIGHT: f32 = 31.;
+const STATUS_DIVIDER_WIDTH: f32 = 1.;
+const STATUS_DIVIDER_HEIGHT: f32 = 16.;
+const THEME_BUTTON_WIDTH: f32 = 30.;
+const THEME_BUTTON_RIGHT: f32 = 8.;
+const THEME_GLYPH_SIZE: f32 = 16.;
+const MOON_GLYPH: &str = "\u{E708}";
+const SUN_GLYPH: &str = "\u{E706}";
+
+// ---- 1. The window --------------------------------------------------------------------------
 
 /// What input goes to first: an open dialog, an open menu, the menu bar, or the editors.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -146,8 +170,8 @@ impl MainWindow {
 
     /// When the window next needs a `tick`.
     pub(crate) fn deadline(&self) -> Option<Instant> {
-        let tabs = self.tabs.iter().map(|tab| &tab.data.editor);
-        let editors = tabs.chain(self.fields()).filter_map(Editor::deadline);
+        let documents = self.tabs.iter().map(|tab| &tab.data.editor);
+        let editors = documents.chain(self.fields()).filter_map(Editor::deadline);
         editors
             .chain(self.tabs.deadline())
             .chain(self.menus.deadline())
@@ -166,8 +190,7 @@ impl MainWindow {
         self.dirty = true;
     }
 
-    // ---- Overlays the app draws for the window
-
+    /// Where the app's overlays for this window (key tips, tooltips) are placed from.
     fn overlay_anchor(&self) -> OverlayAnchor {
         OverlayAnchor {
             window: self.id,
@@ -196,7 +219,7 @@ impl MainWindow {
     }
 }
 
-// ---- Input
+// ---- 2. Input -------------------------------------------------------------------------------
 
 impl MainWindow {
     /// Handles input to the window; for keys, whether it was used.
@@ -241,14 +264,12 @@ impl MainWindow {
                 modifiers,
             } => self.on_scroll_wheel(position, delta_lines, page_scroll, modifiers),
             WindowEvent::KeyDown(ev) => handled = self.on_key_down(ev, cx),
-            WindowEvent::KeyUp(ev) => {
-                if self.mode() != InputMode::Dialog {
-                    let out = self.menus.on_key_up(ev, self.focus);
-                    if out.handled {
-                        handled = self.apply_menu_outcome(out, cx);
-                    } else {
-                        self.dirty |= out.dirty;
-                    }
+            WindowEvent::KeyUp(ev) if self.mode() != InputMode::Dialog => {
+                let out = self.menus.on_key_up(ev, self.focus);
+                if out.handled {
+                    handled = self.apply_menu_outcome(out, cx);
+                } else {
+                    self.dirty |= out.dirty;
                 }
             }
             WindowEvent::CaptureLost => {
@@ -266,7 +287,8 @@ impl MainWindow {
                     ed.handle_ime_composition(&text, cursor, &cx.shell.text_system);
                 }
             }
-            WindowEvent::FilesDropped(_)
+            WindowEvent::KeyUp(_)
+            | WindowEvent::FilesDropped(_)
             | WindowEvent::SizeMoveChanged(_)
             | WindowEvent::CloseRequested => {}
         }
@@ -290,10 +312,8 @@ impl MainWindow {
     }
 
     fn pointer_in_strip(&self, pos: Point) -> bool {
-        self.ui
-            .frame
-            .rect_of(HitId::Tab(TabHit::Strip))
-            .is_some_and(|r| r.contains(pos))
+        let strip = self.ui.frame.rect_of(HitId::Tab(TabHit::Strip));
+        strip.is_some_and(|r| r.contains(pos))
     }
 
     fn on_mouse_move(&mut self, pos: Point, pressed: Option<MouseButton>, cx: &mut Cx<'_>) {
@@ -305,13 +325,11 @@ impl MainWindow {
         ) {
             self.tabs.release_arrow();
         }
-        let mode = self.mode();
-        if mode != InputMode::Dialog {
+        if self.mode() != InputMode::Dialog {
             let (tabs, shell) = (&self.tabs, cx.shell);
             let state = || menu_state(tabs, shell);
-            let out = self
-                .menus
-                .on_hover_change(top, state, shell.settings.menu_show_delay);
+            let delay = shell.settings.menu_show_delay;
+            let out = self.menus.on_hover_change(top, state, delay);
             // Focus that follows the pointer no longer shows as from the keyboard.
             self.ui.last_input_was_keyboard &= !out.followed_pointer;
             self.apply_menu_outcome(out, cx);
@@ -319,21 +337,15 @@ impl MainWindow {
         if !self.pointer_in_strip(pos) {
             self.dirty |= self.tabs.thaw_if_frozen();
         }
-
         self.dirty |= self.tabs.active().editor.hover_scrollbar(pos, &self.ui);
         let dragging = pressed == Some(MouseButton::Left);
         if let Some(notify) = self.tabs.active_mut().editor.drag_scrollbar(pos, dragging) {
             self.dirty |= notify;
-            self.sync_cursor(pos);
-            return;
-        }
-        // Only the editor with the keyboard drag-selects.
-        if self
-            .focused_slot()
-            .and_then(|slot| self.editor_mut(slot))
-            .is_some_and(|ed| ed.on_mouse_move(pos, dragging))
-        {
-            self.dirty = true;
+        } else {
+            // Only the editor with the keyboard drag-selects.
+            let ed = self.focused_slot().and_then(|slot| self.editor_mut(slot));
+            let moved = ed.is_some_and(|ed| ed.on_mouse_move(pos, dragging));
+            self.dirty |= moved;
         }
         self.sync_cursor(pos);
     }
@@ -357,30 +369,26 @@ impl MainWindow {
             self.middle_pressed_tab = tab_at(&chain);
             return;
         }
-        let top = chain.first().copied();
-        if button == MouseButton::Left
-            && let Some(HitId::ScrollTrack(slot, axis)) = top
-            && slot == self.tabs.active_slot()
-            && self.tabs.active_mut().editor.press_scrollbar(axis, pos)
-        {
-            return;
-        }
         if button == MouseButton::Left {
-            match top {
+            match chain.first().copied() {
+                Some(HitId::ScrollTrack(slot, axis))
+                    if slot == self.tabs.active_slot()
+                        && self.tabs.active_mut().editor.press_scrollbar(axis, pos) =>
+                {
+                    return;
+                }
                 Some(
                     HitId::FieldClear(_)
                     | HitId::Dialog(_)
                     | HitId::Find(_)
                     | HitId::Tab(TabHit::Close(_)),
                 ) => return,
+                // A press on a tab shows it and may start dragging it.
                 Some(HitId::Tab(TabHit::Item(id))) => {
                     if let Some(index) = self.tabs.index_of(id) {
                         self.activate_tab(index, cx.shell);
-                        let left = self
-                            .ui
-                            .frame
-                            .rect_of(HitId::Tab(TabHit::Item(id)))
-                            .map_or(pos.x, |r| r.origin.x);
+                        let tab = self.ui.frame.rect_of(HitId::Tab(TabHit::Item(id)));
+                        let left = tab.map_or(pos.x, |r| r.origin.x);
                         cx.emit(Effect::StartTabDrag {
                             window: self.id,
                             tab: id,
@@ -417,12 +425,6 @@ impl MainWindow {
         let top = chain.first().copied();
         let over = tab_at(chain);
         self.tabs.release_arrow();
-        // A press that opened a menu, released on one of its rows, runs the row.
-        let menu_release =
-            (button == MouseButton::Left && clicked.is_none() && self.mode() == InputMode::Popup)
-                .then_some(top)
-                .flatten()
-                .filter(|hit| matches!(hit, HitId::Menu(MenuHit::Row { .. })));
         if button == MouseButton::Middle {
             if let Some(tab) = self.middle_pressed_tab.take()
                 && over == Some(tab)
@@ -431,14 +433,19 @@ impl MainWindow {
             }
             return;
         }
+        // A press that opened a menu, released on one of its rows, runs the row.
+        let menu_release =
+            (button == MouseButton::Left && clicked.is_none() && self.mode() == InputMode::Popup)
+                .then_some(top)
+                .flatten()
+                .filter(|hit| matches!(hit, HitId::Menu(MenuHit::Row { .. })));
         self.tabs.active_mut().editor.release_scrollbar(pos);
         if let Some(ed) = self.focused_field() {
             ed.on_mouse_up(button);
         }
         if let Some(anchor) = self.tabs.active_mut().editor.on_mouse_up(button) {
-            let out = self
-                .menus
-                .open_context_menu(anchor, menu_state(&self.tabs, cx.shell));
+            let state = menu_state(&self.tabs, cx.shell);
+            let out = self.menus.open_context_menu(anchor, state);
             self.apply_menu_outcome(out, cx);
             return;
         }
@@ -483,16 +490,14 @@ impl MainWindow {
         let chain = self.ui.frame.hit_chain(pos);
         if chain.contains(&HitId::Tab(TabHit::List)) && self.tabs.wheel(lines) {
             self.dirty = true;
-            return;
-        }
-        if modifiers.ctrl && chain.contains(&HitId::EditorArea) {
+        } else if modifiers.ctrl && chain.contains(&HitId::EditorArea) {
             if lines.y != 0. {
                 self.set_zoom(self.zoom() + ZOOM_STEP.copysign(lines.y));
             }
-            return;
+        } else {
+            let ed = &mut self.tabs.active_mut().editor;
+            self.dirty |= ed.on_scroll_wheel(lines, page, modifiers);
         }
-        let ed = &mut self.tabs.active_mut().editor;
-        self.dirty |= ed.on_scroll_wheel(lines, page, modifiers);
     }
 
     fn on_key_down(&mut self, ev: KeyEvent, cx: &mut Cx<'_>) -> bool {
@@ -518,7 +523,6 @@ impl MainWindow {
                 DialogKey::Consumed => true,
             };
         }
-
         let was_open = self.menus.is_open();
         let state = menu_state(&self.tabs, cx.shell);
         let out = self.menus.on_key_down(ev, self.focus, state);
@@ -526,7 +530,6 @@ impl MainWindow {
         if handled || was_open {
             return handled;
         }
-
         self.pause_blink();
         match self.find.on_key(ev, self.focus) {
             FindKey::Focus(next) => {
@@ -566,16 +569,17 @@ impl MainWindow {
     }
 }
 
-// ---- Commands
+/// The tab, if any, among the hits under the pointer.
+fn tab_at(chain: &[HitId]) -> Option<TabId> {
+    chain.iter().find_map(|hit| match hit {
+        HitId::Tab(TabHit::Item(id)) => Some(*id),
+        _ => None,
+    })
+}
+
+// ---- 3. Commands, find, dialogs and menus ---------------------------------------------------
 
 impl MainWindow {
-    fn dispatch_command(&mut self, cmd: Command, cx: &mut Cx<'_>) -> bool {
-        match cmd {
-            Command::App(cmd) => self.dispatch_app_command(cmd, cx),
-            Command::Edit(cmd) => self.run_edit_command(self.tabs.active_slot(), cmd, cx.shell),
-        }
-    }
-
     /// Runs `cmd`; whether it applied (none do while a dialog is open).
     fn dispatch_app_command(&mut self, cmd: AppCommand, cx: &mut Cx<'_>) -> bool {
         if self.dialogs.is_open() {
@@ -622,10 +626,8 @@ impl MainWindow {
             AppCommand::SelectLastTab => self.go_to_tab(self.tabs.len() - 1, cx.shell),
             AppCommand::TimeDate => {
                 let stamp = format_local_time_date();
-                self.tabs
-                    .active_mut()
-                    .editor
-                    .replace(&stamp, &cx.shell.text_system);
+                let ed = &mut self.tabs.active_mut().editor;
+                ed.replace(&stamp, &cx.shell.text_system);
             }
             AppCommand::GoTo => {
                 let (line, _) = self.tabs.active().editor.model().caret_line_col();
@@ -669,8 +671,8 @@ impl MainWindow {
 
     /// Runs an editing command in the editor at `slot`; whether it applied.
     fn run_edit_command(&mut self, slot: EditorSlot, cmd: EditCommand, shell: &Shell) -> bool {
-        self.editor_mut(slot)
-            .is_some_and(|ed| ed.handle_command(cmd, &shell.text_system))
+        let ed = self.editor_mut(slot);
+        ed.is_some_and(|ed| ed.handle_command(cmd, &shell.text_system))
     }
 
     fn has_text(&self) -> bool {
@@ -682,8 +684,8 @@ impl MainWindow {
     }
 
     fn set_zoom(&mut self, zoom: f32) {
-        self.tabs.active_mut().zoom =
-            ((zoom / ZOOM_STEP).round() * ZOOM_STEP).clamp(ZOOM_MIN, ZOOM_MAX);
+        let stepped = (zoom / ZOOM_STEP).round() * ZOOM_STEP;
+        self.tabs.active_mut().zoom = stepped.clamp(ZOOM_MIN, ZOOM_MAX);
         self.dirty = true;
     }
 
@@ -695,8 +697,7 @@ impl MainWindow {
         EDITOR_PADDINGS.top + EDITOR_PADDINGS.bottom + self.line_height()
     }
 
-    // ---- Find
-
+    /// Opens the find bar (with replace), seeded with the selection.
     fn open_find(&mut self, replace: bool, shell: &Shell) {
         let model = self.tabs.active().editor.model();
         let selected = model.text().slice(model.selection().range()).to_string();
@@ -727,14 +728,10 @@ impl MainWindow {
         let out = self.find.step(&mut self.tabs.active_mut().editor, forward);
         if matches!(out, FindOutcome::EmptyQuery) {
             self.open_find(false, shell);
-            return;
-        }
-        if !self.find.is_open() {
+        } else if !self.find.is_open() {
             self.focus_active_editor(shell);
         }
     }
-
-    // ---- Dialogs
 
     pub(crate) fn show_prompt(&mut self, prompt: Prompt, shell: &Shell) {
         if let Some(next) = self.dialogs.enqueue(DialogKind::Prompt(prompt)) {
@@ -744,12 +741,14 @@ impl MainWindow {
         }
     }
 
-    fn show_dialog_now(&mut self, kind: DialogKind, shell: &Shell) {
+    /// Shows the go-to dialog, its field holding `line` (or what was typed before).
+    fn show_go_to(&mut self, line: Option<usize>, shell: &Shell) {
         self.cancel_menu(shell);
-        let next = self.dialogs.show_now(kind);
+        let next = self.dialogs.show_go_to(line, &shell.text_system);
         self.set_focus(next, shell);
     }
 
+    /// Closes the open dialog, showing the next one queued, or returning to the document.
     fn close_dialog(&mut self, shell: &Shell) {
         if let Some(next) = self.dialogs.dismiss() {
             self.cancel_menu(shell);
@@ -757,13 +756,6 @@ impl MainWindow {
         } else {
             self.focus_active_editor(shell);
         }
-    }
-
-    /// Shows the go-to dialog, its field holding `line` (or what was typed before).
-    fn show_go_to(&mut self, line: Option<usize>, shell: &Shell) {
-        self.cancel_menu(shell);
-        let next = self.dialogs.show_go_to(line, &shell.text_system);
-        self.set_focus(next, shell);
     }
 
     /// The open dialog's button `button` (or, with `None`, Escape) was chosen.
@@ -779,7 +771,11 @@ impl MainWindow {
                         self.close_dialog(cx.shell);
                         self.tabs.active_mut().editor.go_to_line(line);
                     }
-                    None => self.show_dialog_now(DialogKind::LineOutOfRange, cx.shell),
+                    None => {
+                        self.cancel_menu(cx.shell);
+                        let next = self.dialogs.show_now(DialogKind::LineOutOfRange);
+                        self.set_focus(next, cx.shell);
+                    }
                 }
             }
             DialogKind::GoTo => self.close_dialog(cx.shell),
@@ -793,8 +789,6 @@ impl MainWindow {
             }
         }
     }
-
-    // ---- Menus
 
     fn cancel_menu(&mut self, shell: &Shell) {
         let out = self.menus.cancel(self.focus);
@@ -815,14 +809,20 @@ impl MainWindow {
     fn apply_menu_outcome(&mut self, out: MenuOutcome, cx: &mut Cx<'_>) -> bool {
         self.dirty |= out.dirty;
         self.apply_focus_request(out.focus, cx.shell);
-        if let Some(cmd) = out.command {
-            self.dispatch_command(cmd, cx);
-            return true;
+        match out.command {
+            Some(Command::App(cmd)) => {
+                self.dispatch_app_command(cmd, cx);
+            }
+            Some(Command::Edit(cmd)) => {
+                self.run_edit_command(self.tabs.active_slot(), cmd, cx.shell);
+            }
+            None => return out.handled,
         }
-        out.handled
+        true
     }
 }
 
+/// What the menus show as enabled or checked.
 fn menu_state(tabs: &TabSet, shell: &Shell) -> MenuState {
     let m = tabs.active().editor.model();
     MenuState {
@@ -836,7 +836,7 @@ fn menu_state(tabs: &TabSet, shell: &Shell) -> MenuState {
     }
 }
 
-// ---- Tabs, and the calls the app makes for files and tab drags
+// ---- 4. Tabs, and the calls the app makes for files and tab drags ---------------------------
 
 impl MainWindow {
     fn refresh_title(&self) {
@@ -886,28 +886,9 @@ impl MainWindow {
         self.activate_tab(ix, shell);
     }
 
-    fn begin_tab_save(&mut self, tab: TabId) -> Option<(u64, Rope)> {
-        self.tabs.editor_mut(tab).map(Editor::begin_save)
-    }
-
-    fn mark_tab_saved(
-        &mut self,
-        tab: TabId,
-        snapshot: u64,
-        path: DocPath,
-        format: Format,
-    ) {
-        if self.tabs.mark_saved(tab, snapshot, path, format) {
-            self.refresh_title();
-            self.dirty = true;
-        }
-    }
-
     pub(crate) fn remove_tab(&mut self, ix: usize, shell: &Shell) {
-        let hovering = self
-            .ui
-            .pointer
-            .is_some_and(|p| self.pointer_in_strip(p.pos));
+        let pointer = self.ui.pointer;
+        let hovering = pointer.is_some_and(|p| self.pointer_in_strip(p.pos));
         let removal = self.tabs.remove(ix, hovering);
         if let Removal::Removed { id, .. } = removal {
             self.dialogs.close_for_tab(id);
@@ -922,6 +903,8 @@ impl MainWindow {
         Some(data)
     }
 
+    /// After a tab left: the window closes if it was the last, else the next tab shows (and
+    /// takes focus, unless it's in the find bar and the active tab stayed).
     fn after_removal(&mut self, removal: Removal, shell: &Shell) {
         let Removal::Removed {
             closed_active,
@@ -957,31 +940,6 @@ impl MainWindow {
         self.dirty = true;
     }
 
-    /// Drops a tab dragged in from another window where the pointer is.
-    fn insert_dragged_tab(
-        &mut self,
-        data: TabData,
-        at: ScreenPoint,
-        grab: f32,
-        shell: &Shell,
-    ) {
-        let x = self.hwnd.to_client(at).x - HEADER_WIDTH;
-        let ix = self.tabs.insert_dragged(data, x, grab);
-        self.activate_tab(ix, shell);
-    }
-
-    /// Moves tab `id`, grabbed `grab` from its left after a press at `start`, to the pointer.
-    fn drag_tab(&mut self, id: TabId, at: ScreenPoint, grab: f32, start: f32) {
-        let x = self.hwnd.to_client(at).x;
-        self.tabs
-            .drag(id, x - HEADER_WIDTH, grab, start - HEADER_WIDTH);
-        self.dirty = true;
-    }
-
-    fn release_tab(&mut self) {
-        self.dirty |= self.tabs.release_drag();
-    }
-
     /// Whether a tab dragged from another window may land here.
     fn accepts_tab_drop(&self) -> bool {
         !self.dialogs.is_open() && !self.pending_close && self.hwnd.is_enabled()
@@ -995,14 +953,13 @@ impl MainWindow {
             || self.win.window.logical_size().width - CAPTION_WIDTH,
             |r| r.left(),
         );
-        let (left, top, bottom) = frame.rect_of(HitId::Tab(TabHit::List)).map_or(
-            (
-                HEADER_WIDTH + tabs::LIST_PAD,
-                STRIP_TOP,
-                STRIP_TOP + TAB_HEIGHT,
-            ),
-            |r| (r.left(), r.top(), r.bottom()),
+        let fallback = (
+            HEADER_WIDTH + tabs::LIST_PAD,
+            STRIP_TOP,
+            STRIP_TOP + TAB_HEIGHT,
         );
+        let list = frame.rect_of(HitId::Tab(TabHit::List));
+        let (left, top, bottom) = list.map_or(fallback, |r| (r.left(), r.top(), r.bottom()));
         (left..right).contains(&pos.x) && (top - magnetism..bottom + magnetism).contains(&pos.y)
     }
 
@@ -1015,16 +972,10 @@ impl MainWindow {
     }
 }
 
-// ---- Editors and focus
+// ---- 5. Editors and focus -------------------------------------------------------------------
 
-/// The tab, if any, among the hits under the pointer.
-fn tab_at(chain: &[HitId]) -> Option<TabId> {
-    chain.iter().find_map(|hit| match hit {
-        HitId::Tab(TabHit::Item(id)) => Some(*id),
-        _ => None,
-    })
-}
-
+/// The editor at `slot`: a tab's document, a find field, or the go-to field. Free functions, so
+/// a frame can borrow the editors apart from the rest of the window.
 fn slot_editor<'a>(
     tabs: &'a TabSet,
     find: &'a FindBar,
@@ -1064,11 +1015,8 @@ impl MainWindow {
     }
 
     fn fields_mut(&mut self) -> [&mut Editor; 3] {
-        [
-            &mut self.find.query,
-            &mut self.find.replacement,
-            &mut self.dialogs.line,
-        ]
+        let (find, dialogs) = (&mut self.find, &mut self.dialogs);
+        [&mut find.query, &mut find.replacement, &mut dialogs.line]
     }
 
     fn focused_slot(&self) -> Option<EditorSlot> {
@@ -1080,17 +1028,14 @@ impl MainWindow {
 
     /// The focused editor when it isn't the document's (a find or go-to field).
     fn focused_field(&mut self) -> Option<&mut Editor> {
-        let slot = self
-            .focused_slot()
-            .filter(|&slot| slot != self.tabs.active_slot())?;
+        let active = self.tabs.active_slot();
+        let slot = self.focused_slot().filter(|&slot| slot != active)?;
         self.editor_mut(slot)
     }
 
     /// Keeps the focused caret steady while keys go to it.
     fn pause_blink(&mut self) {
-        if let Some(slot) = self.focused_slot()
-            && let Some(ed) = self.editor_mut(slot)
-        {
+        if let Some(ed) = self.focused_slot().and_then(|slot| self.editor_mut(slot)) {
             ed.pause_blink();
         }
     }
@@ -1123,69 +1068,45 @@ impl MainWindow {
     }
 }
 
-// ---- Drawing
-
-const HEADER_WIDTH: f32 = 5.;
-const STRIP_TOP: f32 = 10.;
-const CAPTION_BUTTON_WIDTH: f32 = 46.;
-const CAPTION_WIDTH: f32 = 3. * CAPTION_BUTTON_WIDTH;
-const DRAG_RESERVE: f32 = 43.;
-const TITLE_BAR_MIN_WIDTH: f32 =
-    HEADER_WIDTH + CAPTION_WIDTH + DRAG_RESERVE + tabs::MIN_STRIP_WIDTH;
-const SEPARATOR_HEIGHT: f32 = 1.;
-const MENU_BAR_LEFT: f32 = 4.;
-const STATUS_BAR_HEIGHT: f32 = 31.;
-const STATUS_DIVIDER_WIDTH: f32 = 1.;
-const STATUS_DIVIDER_HEIGHT: f32 = 16.;
-const THEME_BUTTON_WIDTH: f32 = 30.;
-const THEME_BUTTON_RIGHT: f32 = 8.;
-const THEME_GLYPH_SIZE: f32 = 16.;
-const MOON_GLYPH: &str = "\u{E708}";
-const SUN_GLYPH: &str = "\u{E706}";
+// ---- 6. Drawing -----------------------------------------------------------------------------
 
 impl MainWindow {
     /// Lays out and paints the window; whether another frame should follow on the next vsync.
     pub(crate) fn render_frame(&mut self, now: Instant, shell: &Shell) -> bool {
-        let p = shell.palette;
-        let view = shell.view;
-        let caret_width_px = shell.settings.caret_width_px;
-        let ts = &shell.text_system;
+        let (p, view, ts) = (shell.palette, shell.view, &shell.text_system);
         self.dirty = false;
-        let logical = self.win.window.logical_size();
-        let scale = self.win.window.scale_factor();
-        let window_active = self.win.window.is_active();
+        let window = &self.win.window;
+        let (logical, scale, window_active) = (
+            window.logical_size(),
+            window.scale_factor(),
+            window.is_active(),
+        );
 
         self.ui.begin_frame(now, shell.settings.reduce_motion);
         let strip_column =
             logical.width - HEADER_WIDTH - CAPTION_WIDTH - DRAG_RESERVE - tabs::STRIP_END_RESERVE;
         let strip = self.tabs.sample(strip_column, &mut self.ui);
         self.menus.sample(&mut self.ui);
-
         let title_bar = self.title_bar(&strip, window_active, p);
         let menu_bar = self.menu_bar_row(p);
-        let find_node = self.find.render(self.focused_slot(), p, &mut self.ui);
-        let editor_node = self.editor_area(find_node, p);
-        let status_node = view.status_bar.then(|| self.status_bar(p));
-        let menu_popup = self.menus.render_popup(p, &mut self.ui);
-        let dialog_node = self.dialogs.render(self.focus, p, &mut self.ui);
-
+        let find = self.find.render(self.focused_slot(), p, &mut self.ui);
+        let editor = self.editor_area(find, p);
+        let status = view.status_bar.then(|| self.status_bar(p));
+        let popup = self.menus.render_popup(p, &mut self.ui);
+        let dialog = self.dialogs.render(self.focus, p, &mut self.ui);
         let chrome = box_()
             .size_full()
             .child(title_bar)
             .child(menu_bar)
-            .child(editor_node)
-            .when_some(status_node, AppNode::child);
+            .child(editor)
+            .when_some(status, AppNode::child);
         let root = box_()
             .size_full()
             .child(chrome)
-            .when_some(menu_popup, AppNode::child)
-            .when_some(dialog_node, AppNode::child);
-        let frame = AppFrame::layout(
-            root,
-            AvailSize::definite(logical.width, logical.height),
-            scale,
-            ts,
-        );
+            .when_some(popup, AppNode::child)
+            .when_some(dialog, AppNode::child);
+        let available = AvailSize::definite(logical.width, logical.height);
+        let frame = AppFrame::layout(root, available, scale, ts);
         self.win
             .window
             .set_control_areas(frame.control_areas.clone());
@@ -1213,8 +1134,10 @@ impl MainWindow {
             };
             let focused = self.focus == Focus::Editor(slot);
             let (style, show_selection) = if slot == active_slot {
-                let shown = focused || self.menus.is_open() || self.find.is_open();
-                (&document, shown)
+                (
+                    &document,
+                    focused || self.menus.is_open() || self.find.is_open(),
+                )
             } else {
                 (&field, focused)
             };
@@ -1224,7 +1147,7 @@ impl MainWindow {
                 window_active,
                 show_selection,
                 scale,
-                caret_width_px,
+                caret_width_px: shell.settings.caret_width_px,
                 now,
             };
             let ed = slot_editor_mut(&mut self.tabs, &mut self.find, &mut self.dialogs, slot);
@@ -1234,11 +1157,11 @@ impl MainWindow {
         }
 
         let (tabs, find, dialogs) = (&self.tabs, &self.find, &self.dialogs);
-        let needs_retry = self.win.draw(p.window_clear, |renderer| {
-            frame.paint(renderer, &mut |token, rect, renderer| match token {
+        let needs_retry = self.win.draw(p.window_clear, |canvas| {
+            frame.paint(canvas, &mut |token, rect, canvas| match token {
                 CustomDraw::Editor(slot) => {
                     if let Some(ed) = slot_editor(tabs, find, dialogs, slot) {
-                        ed.paint(p, renderer);
+                        ed.paint(p, canvas);
                     }
                 }
                 // A spacer squeezed narrower than a divider draws one instead.
@@ -1250,21 +1173,20 @@ impl MainWindow {
                             point(x, rect.origin.y),
                             size(STATUS_DIVIDER_WIDTH, rect.size.height),
                         );
-                        renderer.paint_quad(fill(line, p.stroke));
+                        canvas.paint_quad(fill(line, p.stroke));
                     }
                 }
             });
         });
 
-        let caret_hidden = self.key_tips_active();
+        // The IME's caret follows the focused editor's, and the system caret shows unless key
+        // tips cover the window.
         let ime_caret = self
             .focused_slot()
             .and_then(|slot| slot_editor(&self.tabs, &self.find, &self.dialogs, slot))
             .and_then(Editor::ime_caret_bounds);
-        self.win
-            .window
-            .set_text_caret(ime_caret, window_active && !caret_hidden);
-
+        let show_caret = window_active && !self.key_tips_active();
+        self.win.window.set_text_caret(ime_caret, show_caret);
         self.has_painted = true;
         let ui_needs_vsync = self.ui.finish_frame(frame);
         if let Some(ptr) = self.ui.pointer {
@@ -1284,44 +1206,43 @@ impl MainWindow {
         } else {
             (0., 0.)
         };
-        let menu_width = frame
-            .rect_of(HitId::Menu(MenuHit::Bar))
-            .map_or(0., |r| r.size.width);
-        let menu_row = MENU_BAR_LEFT + menu_width + THEME_BUTTON_WIDTH + THEME_BUTTON_RIGHT;
+        let menu = frame.rect_of(HitId::Menu(MenuHit::Bar));
+        let menu_row = MENU_BAR_LEFT
+            + menu.map_or(0., |r| r.size.width)
+            + THEME_BUTTON_WIDTH
+            + THEME_BUTTON_RIGHT;
         let width = status_w.max(menu_row).max(TITLE_BAR_MIN_WIDTH);
         let chrome_top = frame.rect_of(HitId::EditorArea).map_or(0., |r| r.top());
         let next = size(width, chrome_top + self.editor_min_height() + status_h);
-        if self.min_size.is_none_or(|prev| {
+        let moved = |prev: Size| {
             (prev.width - next.width).abs() > 0.5 || (prev.height - next.height).abs() > 0.5
-        }) {
+        };
+        if self.min_size.is_none_or(moved) {
             self.min_size = Some(next);
             self.win.window.set_min_size(Some(next));
         }
     }
 
+    /// The tab strip, with room to drag the window by around it, and the caption buttons.
     fn title_bar(&mut self, strip: &StripFrame, window_active: bool, p: Palette) -> AppNode {
         let drag = || box_().window_area(WindowControlArea::Drag);
-        let strip_node = self.tabs.render(strip, p, &mut self.ui);
+        let strip = self.tabs.render(strip, p, &mut self.ui);
         let maximized = self.hwnd.is_maximized();
         let captions = caption_buttons(window_active, maximized, p, &mut self.ui);
         row()
             .flex_none()
             .h(STRIP_TOP + TAB_HEIGHT)
             .child(drag().flex_none().w(HEADER_WIDTH).h_full())
-            .child(
-                box_()
-                    .flex_none()
-                    .child(drag().h(STRIP_TOP))
-                    .child(strip_node),
-            )
+            .child(box_().flex_none().child(drag().h(STRIP_TOP)).child(strip))
             .child(drag().flex_1().h_full())
             .child(captions)
     }
 
+    /// The menu bar, with the theme switch at its right.
     fn menu_bar_row(&mut self, p: Palette) -> AppNode {
         let menu = self.menus.render_bar(self.focus, p, &mut self.ui);
         let glyph = if p.dark { SUN_GLYPH } else { MOON_GLYPH };
-        let theme_btn = icon_button(
+        let theme = icon_button(
             p,
             HitId::ThemeToggle,
             "Switch theme",
@@ -1330,21 +1251,18 @@ impl MainWindow {
             true,
             &mut self.ui,
         );
-        box_()
-            .flex_none()
-            .child(
-                row()
-                    .h(MENU_BAR_HEIGHT)
-                    .pl(MENU_BAR_LEFT)
-                    .pr(THEME_BUTTON_RIGHT)
-                    .bg(p.layer)
-                    .child(menu)
-                    .child(box_().flex_1())
-                    .child(theme_btn),
-            )
-            .child(separator(p))
+        let bar = row()
+            .h(MENU_BAR_HEIGHT)
+            .pl(MENU_BAR_LEFT)
+            .pr(THEME_BUTTON_RIGHT)
+            .bg(p.layer)
+            .child(menu)
+            .child(box_().flex_1())
+            .child(theme);
+        box_().flex_none().child(bar).child(separator(p))
     }
 
+    /// The active document, with the find bar over it.
     fn editor_area(&self, find: Option<AppNode>, p: Palette) -> AppNode {
         let view = self.tabs.active().editor.view(self.line_height());
         box_()
@@ -1367,32 +1285,30 @@ impl MainWindow {
             .byte_to_char_idx(selection.end)
             .saturating_sub(text.byte_to_char_idx(selection.start));
         let zoom_pct = (tab.zoom * 100.).round() as u32;
-        box_().flex_none().child(separator(p)).child(
-            row()
-                .items_center()
-                .gap(24.)
-                .h(STATUS_BAR_HEIGHT)
-                .px(22.)
-                .bg(p.layer)
-                .font_family(SMALL_FONT)
-                .text_size(12.)
-                .text_color(p.text_secondary)
-                .nowrap()
-                .text_child(format!("Ln {line}, Col {column}"))
-                .child(status_divider(p))
-                .text_child(character_count(selected, text.len_chars()))
-                .child(
-                    custom(CustomDraw::StatusSpacer)
-                        .flex_1()
-                        .min_w(STATUS_DIVIDER_WIDTH)
-                        .h(STATUS_DIVIDER_HEIGHT),
-                )
-                .text_child(format!("{zoom_pct}%"))
-                .child(status_divider(p))
-                .text_child(tab.format.line_ending_label())
-                .child(status_divider(p))
-                .text_child(tab.format.encoding.label()),
-        )
+        let spacer = custom(CustomDraw::StatusSpacer)
+            .flex_1()
+            .min_w(STATUS_DIVIDER_WIDTH)
+            .h(STATUS_DIVIDER_HEIGHT);
+        let bar = row()
+            .items_center()
+            .gap(24.)
+            .h(STATUS_BAR_HEIGHT)
+            .px(22.)
+            .bg(p.layer)
+            .font_family(SMALL_FONT)
+            .text_size(12.)
+            .text_color(p.text_secondary)
+            .nowrap()
+            .text_child(format!("Ln {line}, Col {column}"))
+            .child(status_divider(p))
+            .text_child(character_count(selected, text.len_chars()))
+            .child(spacer)
+            .text_child(format!("{zoom_pct}%"))
+            .child(status_divider(p))
+            .text_child(tab.format.line_ending_label())
+            .child(status_divider(p))
+            .text_child(tab.format.encoding.label());
+        box_().flex_none().child(separator(p)).child(bar)
     }
 }
 
@@ -1408,36 +1324,33 @@ fn status_divider(p: Palette) -> AppNode {
         .bg(p.stroke)
 }
 
-fn group_thousands(n: usize) -> String {
-    let digits = n.to_string();
-    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
-    for (i, c) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i).is_multiple_of(3) {
-            out.push(',');
-        }
-        out.push(c);
-    }
-    out
-}
-
+/// "1,234 characters", or "5 of 1,234 characters" with some selected.
 fn character_count(selected: usize, total: usize) -> String {
+    let grouped = |n: usize| {
+        let digits = n.to_string();
+        let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+        for (i, c) in digits.chars().enumerate() {
+            if i > 0 && (digits.len() - i).is_multiple_of(3) {
+                out.push(',');
+            }
+            out.push(c);
+        }
+        out
+    };
     let noun = if total == 1 {
         "character"
     } else {
         "characters"
     };
     if selected > 0 {
-        format!(
-            "{} of {} {noun}",
-            group_thousands(selected),
-            group_thousands(total)
-        )
+        format!("{} of {} {noun}", grouped(selected), grouped(total))
     } else {
-        format!("{} {noun}", group_thousands(total))
+        format!("{} {noun}", grouped(total))
     }
 }
 
-/// The minimize, maximize (or restore) and close buttons, then room to drag the window by.
+/// The minimize, maximize (or restore) and close buttons, then room to drag the window by. Each
+/// lights up under the pointer, Close in red.
 fn caption_buttons(active: bool, maximized: bool, p: Palette, ui: &mut AppUi) -> AppNode {
     let max_glyph = if maximized { "\u{E923}" } else { "\u{E922}" };
     let buttons = [
@@ -1445,7 +1358,56 @@ fn caption_buttons(active: bool, maximized: bool, p: Palette, ui: &mut AppUi) ->
         (CaptionHit::Max, WindowControlArea::Max, max_glyph),
         (CaptionHit::Close, WindowControlArea::Close, "\u{E8BB}"),
     ]
-    .map(|(hit, area, glyph)| caption_button(hit, area, glyph, active, p, ui));
+    .map(|(caption, area, glyph)| {
+        let (hover_bg, pressed_bg, hover_fg, pressed_fg) = if caption == CaptionHit::Close {
+            (
+                p.close_hover,
+                p.close_pressed,
+                p.close_glyph_hover,
+                p.close_glyph_pressed,
+            )
+        } else {
+            (
+                p.layer_hover,
+                p.subtle_tertiary,
+                p.caption_glyph,
+                p.caption_glyph_pressed,
+            )
+        };
+        let hit = HitId::Caption(caption);
+        let brushes = Brushes {
+            rest: transparent_black(),
+            hover: hover_bg,
+            pressed: pressed_bg,
+        };
+        let bg = ui.brush(hit, brushes, true);
+        let fg = if ui.is_pressed(hit) {
+            pressed_fg
+        } else if ui.is_hovered(hit) {
+            hover_fg
+        } else if active {
+            p.caption_glyph
+        } else {
+            p.caption_glyph_inactive
+        };
+        let minimize = caption == CaptionHit::Min;
+        let glyph = box_()
+            .when(minimize, |this| this.left(1.).top(1.))
+            .child(text(glyph));
+        row()
+            .hit(hit)
+            .flex_none()
+            .w(CAPTION_BUTTON_WIDTH)
+            .h(30.)
+            .items_center()
+            .justify_center()
+            .bg(bg)
+            .font_family(ICON_FONT)
+            .text_size(10.)
+            .text_color(fg)
+            .window_area(area)
+            .child(glyph)
+    });
     box_()
         .flex_none()
         .h_full()
@@ -1453,66 +1415,9 @@ fn caption_buttons(active: bool, maximized: bool, p: Palette, ui: &mut AppUi) ->
         .child(box_().flex_1().window_area(WindowControlArea::Drag))
 }
 
-/// A caption button; Close lights up red.
-fn caption_button(
-    hit: CaptionHit,
-    area: WindowControlArea,
-    glyph: &'static str,
-    active: bool,
-    p: Palette,
-    ui: &mut AppUi,
-) -> AppNode {
-    let (hover_bg, pressed_bg, hover_fg, pressed_fg) = if hit == CaptionHit::Close {
-        (
-            p.close_hover,
-            p.close_pressed,
-            p.close_glyph_hover,
-            p.close_glyph_pressed,
-        )
-    } else {
-        (
-            p.layer_hover,
-            p.subtle_tertiary,
-            p.caption_glyph,
-            p.caption_glyph_pressed,
-        )
-    };
-    let minimize = hit == CaptionHit::Min;
-    let hit = HitId::Caption(hit);
-    let brushes = Brushes {
-        rest: transparent_black(),
-        hover: hover_bg,
-        pressed: pressed_bg,
-    };
-    let bg = ui.brush(hit, brushes, true);
-    let fg = if ui.is_pressed(hit) {
-        pressed_fg
-    } else if ui.is_hovered(hit) {
-        hover_fg
-    } else if active {
-        p.caption_glyph
-    } else {
-        p.caption_glyph_inactive
-    };
-    row()
-        .hit(hit)
-        .flex_none()
-        .w(CAPTION_BUTTON_WIDTH)
-        .h(30.)
-        .items_center()
-        .justify_center()
-        .bg(bg)
-        .font_family(ICON_FONT)
-        .text_size(10.)
-        .text_color(fg)
-        .window_area(area)
-        .child(
-            box_()
-                .when(minimize, |this| this.left(1.).top(1.))
-                .child(text(glyph)),
-        )
-}
+// ---- 7. The window list ---------------------------------------------------------------------
 
+/// How new windows open: shown, focused, and on the display the cursor is on.
 #[derive(Copy, Clone, Debug)]
 pub(crate) struct WindowLaunch {
     pub(crate) show: bool,
@@ -1539,6 +1444,7 @@ impl WindowLaunch {
     };
 }
 
+/// A window that couldn't open, with the tab it was to hold.
 pub(crate) struct OpenWindowError {
     pub(crate) tab: Option<TabData>,
     pub(crate) message: String,
@@ -1553,11 +1459,27 @@ impl std::fmt::Debug for OpenWindowError {
     }
 }
 
+/// The app's windows, oldest first, and the one last active.
 pub(crate) struct Windows {
     list: Vec<MainWindow>,
     active: Option<WindowId>,
+    /// How many new windows have cascaded from the centre.
     cascade_step: u32,
     launch: WindowLaunch,
+}
+
+impl Deref for Windows {
+    type Target = [MainWindow];
+
+    fn deref(&self) -> &[MainWindow] {
+        &self.list
+    }
+}
+
+impl DerefMut for Windows {
+    fn deref_mut(&mut self) -> &mut [MainWindow] {
+        &mut self.list
+    }
 }
 
 impl Windows {
@@ -1594,11 +1516,10 @@ impl Windows {
         self.list.iter().map(|w| w.id).collect()
     }
 
+    /// The window holding tab `tab`, and where in its tabs: as indices.
     pub(crate) fn owner_of(&self, tab: TabId) -> Option<(usize, usize)> {
-        self.list
-            .iter()
-            .enumerate()
-            .find_map(|(wix, w)| w.tabs.index_of(tab).map(|tix| (wix, tix)))
+        let mut found = self.list.iter().enumerate();
+        found.find_map(|(wix, w)| w.tabs.index_of(tab).map(|tix| (wix, tix)))
     }
 
     pub(crate) fn find_by_key(&self, key: &PathKey) -> Option<(WindowId, TabId)> {
@@ -1608,12 +1529,12 @@ impl Windows {
         })
     }
 
+    /// `preferred` if it's still open, else the active window, else the newest.
     pub(crate) fn fallback(&self, preferred: Option<WindowId>) -> Option<WindowId> {
-        preferred
-            .and_then(|id| self.ix(id))
-            .or_else(|| self.active.and_then(|id| self.ix(id)))
-            .or_else(|| (!self.list.is_empty()).then_some(self.list.len() - 1))
-            .map(|ix| self.list[ix].id)
+        let open = |id: Option<WindowId>| id.filter(|&id| self.ix(id).is_some());
+        open(preferred)
+            .or_else(|| open(self.active))
+            .or_else(|| self.list.last().map(|w| w.id))
     }
 
     pub(crate) fn mark_dirty(&mut self, id: WindowId) {
@@ -1644,41 +1565,40 @@ impl Windows {
         self.list.iter().any(|w| w.tabs.has_dirty())
     }
 
-    pub(crate) fn sweep_closed(&mut self) -> Vec<(WindowId, Vec<crate::files::PromptId>)> {
-        if !self.list.iter().any(|w| w.pending_close) {
-            return Vec::new();
-        }
-        let closed: Vec<(WindowId, Vec<crate::files::PromptId>)> = self
-            .list
-            .iter_mut()
-            .filter(|w| w.pending_close)
+    /// Drops the windows that closed: their ids, with the prompts they still had open.
+    pub(crate) fn sweep_closed(&mut self) -> Vec<(WindowId, Vec<PromptId>)> {
+        let closing = self.list.iter_mut().filter(|w| w.pending_close);
+        let closed: Vec<_> = closing
             .map(|w| (w.id, w.dialogs.drain_prompt_ids()))
             .collect();
+        if closed.is_empty() {
+            return closed;
+        }
         self.list.retain(|w| !w.pending_close);
-        if let Some(active) = self.active
-            && self.get(active).is_none()
-        {
+        if self.active.is_some_and(|id| self.ix(id).is_none()) {
             self.active = self.list.last().map(|w| w.id);
         }
         closed
     }
 
-    fn window_config(
+    /// Opens a window holding `initial` (or a new tab), `window_size` or the default size,
+    /// centred on the display `target_point` (else the active window's, or the cursor's) is
+    /// on; a new window of the default size cascades from the last.
+    pub(crate) fn open_at(
         &mut self,
+        initial: Option<TabData>,
         window_size: Option<Size>,
         target_point: Option<ScreenPoint>,
-    ) -> MainWindowConfig {
-        let display = target_point
-            .or_else(|| {
-                self.active
-                    .and_then(|id| self.get(id))
-                    .map(|w| w.hwnd.client_origin())
-            })
-            .or_else(|| self.launch.use_cursor_display.then(cursor_screen_pos))
-            .map_or_else(
-                || WindowsDisplay::from_point(ScreenPoint::default()),
-                WindowsDisplay::from_point,
-            );
+        shell: &Shell,
+    ) -> Result<(WindowId, WindowHandle), Box<OpenWindowError>> {
+        let active_origin = self
+            .active
+            .and_then(|id| self.get(id))
+            .map(|w| w.hwnd.client_origin());
+        let on = target_point
+            .or(active_origin)
+            .or_else(|| self.launch.use_cursor_display.then(cursor_screen_pos));
+        let display = WindowsDisplay::from_point(on.unwrap_or_default());
         let vis = display.visible_bounds();
         let target = window_size.unwrap_or_else(|| {
             size(
@@ -1686,8 +1606,7 @@ impl Windows {
                 WINDOW_HEIGHT.min(vis.size.height * WINDOW_MAX_SCREEN_SHARE),
             )
         });
-        // Centred in the work area (pinned to its top left if larger), and cascaded from the
-        // last new window.
+        // Centred in the work area (pinned to its top left if larger).
         let centre = |span: f32, of: f32| ((span - of) * 0.5).max(0.0);
         let mut origin = vis.origin
             + point(
@@ -1704,26 +1623,16 @@ impl Windows {
                 (origin.y + step).clamp(vis.top(), max_y),
             );
         }
-        MainWindowConfig {
+        let config = MainWindowConfig {
             bounds: Rect::new(origin, target),
             scale: display.scale_factor(),
             focus: self.launch.focus,
             show: self.launch.show,
-        }
-    }
-
-    pub(crate) fn open_at(
-        &mut self,
-        initial: Option<TabData>,
-        window_size: Option<Size>,
-        target_point: Option<ScreenPoint>,
-        shell: &Shell,
-    ) -> std::result::Result<(WindowId, WindowHandle), Box<OpenWindowError>> {
-        let config = self.window_config(window_size, target_point);
-        let win_surface = match NativeWindow::create_main(&config, shell.dark())
-            .and_then(|n| WindowSurface::new(shell.gpu.clone(), n))
-        {
-            Ok(created) => created,
+        };
+        let created = NativeWindow::create_main(&config, shell.dark())
+            .and_then(|native| WindowSurface::new(shell.gpu.clone(), native));
+        let surface = match created {
+            Ok(surface) => surface,
             Err(err) => {
                 let message = err.to_string();
                 debug_log(&format!("window/surface create failed: {message}"));
@@ -1733,10 +1642,8 @@ impl Windows {
                 }));
             }
         };
-        let id = win_surface.window.id;
-        let hwnd = win_surface.window.hwnd();
-        let win = MainWindow::new(win_surface, initial, shell);
-        self.list.push(win);
+        let (id, hwnd) = (surface.window.id, surface.window.hwnd());
+        self.list.push(MainWindow::new(surface, initial, shell));
         self.active = Some(id);
         Ok((id, hwnd))
     }
@@ -1749,34 +1656,28 @@ impl Windows {
     }
 }
 
-impl Deref for Windows {
-    type Target = [MainWindow];
-
-    fn deref(&self) -> &[MainWindow] {
-        &self.list
-    }
-}
-
-impl DerefMut for Windows {
-    fn deref_mut(&mut self) -> &mut [MainWindow] {
-        &mut self.list
-    }
-}
-
+/// The windows as file work sees them: tabs to save, load into, close and ask about.
 pub(crate) struct WindowsHost<'a> {
     windows: &'a mut Windows,
     shell: &'a Shell,
+}
+
+impl WindowsHost<'_> {
+    /// The window holding tab `tab`.
+    fn owner(&mut self, tab: TabId) -> Option<&mut MainWindow> {
+        let (wix, _) = self.windows.owner_of(tab)?;
+        Some(&mut self.windows[wix])
+    }
 }
 
 impl DocHost for WindowsHost<'_> {
     fn tab_info(&self, tab: TabId) -> Option<TabSnapshot> {
         let (wix, tix) = self.windows.owner_of(tab)?;
         let w = &self.windows[wix];
-        let tabs = &w.tabs;
-        let data = &tabs[tix].data;
+        let data = &w.tabs[tix].data;
         Some(TabSnapshot {
             window: w.id,
-            name: tabs.tab_name(tix),
+            name: w.tabs.tab_name(tix),
             path: data.doc_path.clone(),
             format: data.format,
             dirty: data.is_dirty(),
@@ -1785,10 +1686,8 @@ impl DocHost for WindowsHost<'_> {
     }
 
     fn window_dirty_tabs(&self, window: WindowId) -> Vec<TabId> {
-        self.windows
-            .get(window)
-            .map(|w| w.tabs.dirty_tabs())
-            .unwrap_or_default()
+        let w = self.windows.get(window);
+        w.map(|w| w.tabs.dirty_tabs()).unwrap_or_default()
     }
 
     fn active_tab_path(&self, window: WindowId) -> Option<PathBuf> {
@@ -1812,24 +1711,27 @@ impl DocHost for WindowsHost<'_> {
         let Some(w) = self.windows.get_mut(window) else {
             return;
         };
-        let Some(tix) = w.tabs.index_of(tab) else {
-            return;
-        };
-        let hwnd = w.hwnd;
-        w.activate_tab(tix, self.shell);
-        if bring_to_front {
-            hwnd.bring_to_front();
+        if let Some(tix) = w.tabs.index_of(tab) {
+            w.activate_tab(tix, self.shell);
+            if bring_to_front {
+                w.hwnd.bring_to_front();
+            }
         }
     }
 
     fn begin_save(&mut self, tab: TabId) -> Option<(u64, Rope)> {
-        let (wix, _) = self.windows.owner_of(tab)?;
-        self.windows[wix].begin_tab_save(tab)
+        self.owner(tab)?
+            .tabs
+            .editor_mut(tab)
+            .map(Editor::begin_save)
     }
 
     fn mark_saved(&mut self, tab: TabId, snapshot: u64, doc_path: DocPath, format: Format) {
-        if let Some((wix, _)) = self.windows.owner_of(tab) {
-            self.windows[wix].mark_tab_saved(tab, snapshot, doc_path, format);
+        if let Some(w) = self.owner(tab)
+            && w.tabs.mark_saved(tab, snapshot, doc_path, format)
+        {
+            w.refresh_title();
+            w.dirty = true;
         }
     }
 
@@ -1862,27 +1764,46 @@ impl DocHost for WindowsHost<'_> {
     }
 }
 
+// ---- 8. Tab drags ---------------------------------------------------------------------------
+
+/// How far the pointer moves before a pressed tab starts dragging.
 const DRAG_THRESHOLD: f32 = 10.;
+/// How far above or below a strip a dragged tab still counts as over it.
 const DETACH_MAGNETISM: f32 = 15.;
+/// How often a window in Windows' move loop is checked on, and how long the loop may take to
+/// start.
 const MOVE_POLL: Duration = Duration::from_millis(16);
 const MOVE_LOOP_START_TIMEOUT: Duration = Duration::from_millis(500);
 
 #[derive(Clone, Copy)]
 enum Phase {
+    /// Pressed, not yet moved far enough to drag.
     Pressed,
+    /// Dragged along the owner's strip.
     Dragging,
-    Entering { since: Instant },
-    Moving { attaching: bool },
+    /// In a window of its own, handed to Windows' move loop: waiting for it to start, then
+    /// moving (and, over another window's strip, ending the loop to attach there).
+    Entering {
+        since: Instant,
+    },
+    Moving {
+        attaching: bool,
+    },
 }
 
+/// A tab being dragged: from `source`, now in `owner` (they differ once it has moved windows).
 pub(crate) struct TabDrag {
     pub(crate) owner: WindowId,
     pub(crate) source: WindowId,
     tab: TabId,
+    /// Where the tab was held (from its top left), and where the press was, along the strip and
+    /// on the screen.
     grab: Point,
     start: f32,
     press: ScreenPoint,
     phase: Phase,
+    /// Where the tab was in its source, and the source window's placement, to put things back
+    /// on a cancel.
     source_index: usize,
     source_placement: Option<WindowPlacement>,
     /// While Windows moves the dragged tab's window: when to check on the move next.
@@ -1890,6 +1811,7 @@ pub(crate) struct TabDrag {
 }
 
 impl TabDrag {
+    /// A press on tab `tab` (at `index`, held `grab` in) at `position` in window `window_id`.
     pub(crate) fn start(
         window_id: WindowId,
         tab: TabId,
@@ -1899,7 +1821,6 @@ impl TabDrag {
         windows: &mut Windows,
     ) -> Option<Self> {
         let win = windows.get_mut(window_id)?;
-        let press = win.hwnd.to_screen(position);
         win.dirty = true;
         Some(Self {
             owner: window_id,
@@ -1907,7 +1828,7 @@ impl TabDrag {
             tab,
             grab,
             start: position.x,
-            press,
+            press: win.hwnd.to_screen(position),
             phase: Phase::Pressed,
             source_index: index,
             source_placement: None,
@@ -1923,12 +1844,13 @@ impl TabDrag {
         matches!(self.phase, Phase::Entering { .. } | Phase::Moving { .. })
     }
 
+    /// Whether the dragged tab is still where the drag thinks it is.
     pub(crate) fn is_alive(&self, windows: &Windows) -> bool {
-        windows
-            .get(self.owner)
-            .is_some_and(|w| w.tabs.index_of(self.tab).is_some())
+        let owner = windows.get(self.owner);
+        owner.is_some_and(|w| w.tabs.index_of(self.tab).is_some())
     }
 
+    /// The owner entered or left Windows' move loop; whether the drag is over.
     pub(crate) fn on_size_move_changed(
         &mut self,
         window_id: WindowId,
@@ -1940,18 +1862,17 @@ impl TabDrag {
         if self.owner != window_id {
             return false;
         }
-        if entering {
-            if matches!(self.phase, Phase::Entering { .. }) {
-                self.phase = Phase::Moving { attaching: false };
-            }
-            false
-        } else if self.is_in_move_loop() {
-            self.finish_move_loop(windows, file_ops, shell)
-        } else {
-            false
+        if !entering {
+            return self.is_in_move_loop() && self.finish_move_loop(windows, file_ops, shell);
         }
+        if matches!(self.phase, Phase::Entering { .. }) {
+            self.phase = Phase::Moving { attaching: false };
+        }
+        false
     }
 
+    /// The pointer moved during the drag: the tab follows it along the strip, into another
+    /// window's strip, or out into a window of its own. Whether the drag is over.
     pub(crate) fn on_mouse_move(
         &mut self,
         pressed_left: bool,
@@ -1977,16 +1898,20 @@ impl TabDrag {
             Phase::Dragging => {}
             Phase::Entering { .. } | Phase::Moving { .. } => return false,
         }
-
-        let (alone, in_owner_strip) = windows.get(self.owner).map_or((true, false), |w| {
+        // A lone tab takes its window with it.
+        let (alone, in_own_strip) = windows.get(self.owner).map_or((true, false), |w| {
             (w.tabs.len() == 1, w.strip_hit(pt, DETACH_MAGNETISM))
         });
-        if !alone && in_owner_strip {
+        if !alone && in_own_strip {
             if let Some(win) = windows.get_mut(self.owner) {
-                win.drag_tab(self.tab, pt, self.grab.x, self.start);
+                let x = win.hwnd.to_client(pt).x;
+                let start = self.start - HEADER_WIDTH;
+                win.tabs
+                    .drag(self.tab, x - HEADER_WIDTH, self.grab.x, start);
+                win.dirty = true;
             }
-        } else if !alone && let Some(target_id) = strip_window(windows, file_ops, pt, None) {
-            self.attach(target_id, pt, windows, shell);
+        } else if !alone && let Some(target) = strip_window(windows, file_ops, pt, None) {
+            self.attach(target, pt, windows, shell);
         } else {
             self.detach(alone, pt, windows, shell);
         }
@@ -1994,13 +1919,15 @@ impl TabDrag {
         false
     }
 
+    /// The button came up: a dragged tab settles where it is, and a window it moved to comes
+    /// to the front. Whether the drag is over (not while Windows is moving the window).
     pub(crate) fn on_release(&mut self, windows: &mut Windows) -> bool {
         if self.is_in_move_loop() {
             return false;
         }
         if self.is_dragging() {
             if let Some(win) = windows.get_mut(self.owner) {
-                win.release_tab();
+                win.dirty |= win.tabs.release_drag();
             }
             if self.owner != self.source
                 && let Some(hwnd) = windows.hwnd(self.owner)
@@ -2012,21 +1939,18 @@ impl TabDrag {
     }
 
     pub(crate) fn on_capture_lost(&mut self, window_id: WindowId, windows: &mut Windows) -> bool {
-        if self.owner == window_id && self.is_dragging() {
-            self.on_release(windows)
-        } else {
-            false
-        }
+        self.owner == window_id && self.is_dragging() && self.on_release(windows)
     }
 
+    /// Puts the tab back where it came from: in its slot, its source window back in place, or
+    /// (with the source gone) in a window of its own.
     pub(crate) fn cancel(&mut self, windows: &mut Windows, shell: &Shell) {
         self.poll_at = None;
         release_mouse_capture();
         if matches!(self.phase, Phase::Pressed) {
             return;
         }
-        let tab = self.tab;
-        let index = self.source_index;
+        let (tab, index) = (self.tab, self.source_index);
         if self.owner == self.source {
             if self.is_dragging() {
                 if let Some(win) = windows.get_mut(self.source) {
@@ -2039,37 +1963,34 @@ impl TabDrag {
             }
             return;
         }
-
-        let Some(data) = windows
-            .get_mut(self.owner)
-            .and_then(|w| w.take_tab(tab, shell))
-        else {
+        let owner = windows.get_mut(self.owner);
+        let Some(data) = owner.and_then(|w| w.take_tab(tab, shell)) else {
             return;
         };
-
         if let Some(src) = windows.get_mut(self.source) {
-            let src_hwnd = src.hwnd;
             src.restore_tab(data, index, shell);
-            src_hwnd.set_foreground();
-        } else {
-            match windows.open_at(Some(data), None, None, shell) {
-                Ok((_, hwnd)) => {
-                    if let Some(placement) = self.source_placement {
-                        hwnd.restore_placement(placement);
-                    }
+            src.hwnd.set_foreground();
+            return;
+        }
+        match windows.open_at(Some(data), None, None, shell) {
+            Ok((_, hwnd)) => {
+                if let Some(placement) = self.source_placement {
+                    hwnd.restore_placement(placement);
                 }
-                // No window for it: it goes at the end of the last one.
-                Err(err) => {
-                    if let Some(data) = err.tab
-                        && let Some(win) = windows.last_mut()
-                    {
-                        win.restore_tab(data, win.tabs.len(), shell);
-                    }
+            }
+            // No window for it: it goes at the end of the last one.
+            Err(err) => {
+                if let Some(data) = err.tab
+                    && let Some(win) = windows.last_mut()
+                {
+                    win.restore_tab(data, win.tabs.len(), shell);
                 }
             }
         }
     }
 
+    /// Checks on Windows' move loop: over another window's strip, the loop is ended to attach
+    /// there; once it's over (or never started), the drag finishes. Whether the drag is over.
     pub(crate) fn on_poll(
         &mut self,
         windows: &mut Windows,
@@ -2085,10 +2006,9 @@ impl TabDrag {
             Phase::Moving { attaching } => attaching,
             Phase::Pressed | Phase::Dragging => return false,
         };
-        let pt = cursor_screen_pos();
         if hwnd.in_move_loop() {
-            let attaching =
-                attaching || strip_window(windows, file_ops, pt, Some(self.owner)).is_some();
+            let over = strip_window(windows, file_ops, cursor_screen_pos(), Some(self.owner));
+            let attaching = attaching || over.is_some();
             if attaching && !matches!(self.phase, Phase::Moving { attaching: true }) {
                 hwnd.cancel_mode();
             }
@@ -2103,6 +2023,9 @@ impl TabDrag {
         self.finish_move_loop(windows, file_ops, shell)
     }
 
+    /// Windows' move loop ended: over a strip the tab attaches there; still held after an
+    /// attach that missed, the window moves on; otherwise the drag ends (cancelled if the
+    /// loop ended with the button still down). Whether the drag is over.
     fn finish_move_loop(
         &mut self,
         windows: &mut Windows,
@@ -2116,13 +2039,11 @@ impl TabDrag {
         let attaching = matches!(self.phase, Phase::Moving { attaching: true });
         let pt = cursor_screen_pos();
         let pressed = primary_mouse_button_down();
-        if let Some(target_id) = strip_window(windows, file_ops, pt, Some(self.owner)) {
-            self.attach(target_id, pt, windows, shell);
-            if !pressed {
-                return self.on_release(windows);
-            }
-            false
-        } else if pressed && attaching {
+        if let Some(target) = strip_window(windows, file_ops, pt, Some(self.owner)) {
+            self.attach(target, pt, windows, shell);
+            return !pressed && self.on_release(windows);
+        }
+        if pressed && attaching {
             self.run_move_loop(pt, windows);
             windows.mark_dirty(self.owner);
             false
@@ -2136,59 +2057,37 @@ impl TabDrag {
         }
     }
 
-    fn attach(
-        &mut self,
-        target_id: WindowId,
-        pt: ScreenPoint,
-        windows: &mut Windows,
-        shell: &Shell,
-    ) {
-        let Some(target_hwnd) = windows.hwnd(target_id) else {
+    /// Moves the tab into window `target`'s strip, under the pointer at `pt`, and drags it on
+    /// there.
+    fn attach(&mut self, target: WindowId, pt: ScreenPoint, windows: &mut Windows, shell: &Shell) {
+        let Some(target_hwnd) = windows.hwnd(target) else {
             return;
         };
         let prev_owner = self.owner;
-        let Some(data) = windows
-            .get_mut(prev_owner)
-            .and_then(|w| w.take_tab(self.tab, shell))
-        else {
+        let owner = windows.get_mut(prev_owner);
+        let Some(data) = owner.and_then(|w| w.take_tab(self.tab, shell)) else {
             return;
         };
-
-        if let Some(target) = windows.get_mut(target_id) {
-            target.insert_dragged_tab(data, pt, self.grab.x, shell);
+        if let Some(win) = windows.get_mut(target) {
+            let x = win.hwnd.to_client(pt).x - HEADER_WIDTH;
+            let ix = win.tabs.insert_dragged(data, x, self.grab.x);
+            win.activate_tab(ix, shell);
         }
-        self.owner = target_id;
+        self.owner = target;
         self.phase = Phase::Dragging;
         self.poll_at = None;
         target_hwnd.set_capture();
-        windows.mark_dirty(target_id);
+        windows.mark_dirty(target);
         windows.mark_dirty(prev_owner);
     }
 
+    /// Tears the tab out into a window of its own under the pointer (or, a lone tab, takes its
+    /// window along), and hands that window to Windows' move loop.
     fn detach(&mut self, alone: bool, pt: ScreenPoint, windows: &mut Windows, shell: &Shell) {
-        if !alone {
-            let source_win = self.owner;
-            let taken = windows.get_mut(source_win).and_then(|w| {
-                let sz = w.win.window.restored_size();
-                w.take_tab(self.tab, shell).map(|data| (data, sz))
-            });
-            let Some((data, sz)) = taken else {
+        if alone {
+            let Some(win) = windows.get_mut(self.owner) else {
                 return;
             };
-            let (window, _) = match windows.open_at(Some(data), Some(sz), Some(pt), shell) {
-                Ok(created) => created,
-                Err(err) => {
-                    if let Some(data) = err.tab
-                        && let Some(win) = windows.get_mut(source_win)
-                    {
-                        win.restore_tab(data, self.source_index, shell);
-                    }
-                    return;
-                }
-            };
-            windows.mark_dirty(source_win);
-            self.owner = window;
-        } else if let Some(win) = windows.get_mut(self.owner) {
             let hwnd = win.hwnd;
             if self.owner == self.source && self.source_placement.is_none() {
                 self.source_placement = hwnd.saved_placement();
@@ -2196,13 +2095,35 @@ impl TabDrag {
             if hwnd.is_maximized() {
                 hwnd.restore();
             }
-            win.release_tab();
+            win.dirty |= win.tabs.release_drag();
         } else {
-            return;
+            let from = self.owner;
+            let taken = windows.get_mut(from).and_then(|w| {
+                let size = w.win.window.restored_size();
+                w.take_tab(self.tab, shell).map(|data| (data, size))
+            });
+            let Some((data, size)) = taken else {
+                return;
+            };
+            match windows.open_at(Some(data), Some(size), Some(pt), shell) {
+                Ok((window, _)) => {
+                    windows.mark_dirty(from);
+                    self.owner = window;
+                }
+                Err(err) => {
+                    if let Some(data) = err.tab
+                        && let Some(win) = windows.get_mut(from)
+                    {
+                        win.restore_tab(data, self.source_index, shell);
+                    }
+                    return;
+                }
+            }
         }
         self.run_move_loop(pt, windows);
     }
 
+    /// Puts the owner under the pointer and hands it to Windows' move loop.
     fn run_move_loop(&mut self, pt: ScreenPoint, windows: &Windows) {
         let Some(win) = windows.get(self.owner) else {
             return;
@@ -2227,19 +2148,17 @@ impl TabDrag {
     }
 }
 
+/// The window whose tab strip is under `pt` (other than `exclude`), if it may take a tab now.
 fn strip_window(
     windows: &Windows,
     file_ops: &FileOps,
     pt: ScreenPoint,
     exclude: Option<WindowId>,
 ) -> Option<WindowId> {
-    let exclude_hwnd = exclude.and_then(|id| windows.hwnd(id));
-    let hwnd = top_visible_window_at(pt, exclude_hwnd)?;
-    windows.iter().find_map(|w| {
-        let accepts = w.hwnd == hwnd
-            && w.accepts_tab_drop()
-            && !file_ops.has_active_workflow_for(w.id)
-            && w.strip_hit(pt, DETACH_MAGNETISM);
-        accepts.then_some(w.id)
-    })
+    let hwnd = top_visible_window_at(pt, exclude.and_then(|id| windows.hwnd(id)))?;
+    let target = windows.iter().find(|w| w.hwnd == hwnd)?;
+    let accepts = target.accepts_tab_drop()
+        && !file_ops.has_active_workflow_for(target.id)
+        && target.strip_hit(pt, DETACH_MAGNETISM);
+    accepts.then_some(target.id)
 }
