@@ -1,3 +1,9 @@
+//! The window's dialogs: go to line, its out-of-range notice, and the prompts file work asks.
+//!
+//! One dialog shows at a time, over a smoke backdrop; more wait in a queue. A dialog grows in
+//! from slightly large and fades, and on closing grows and fades away, drawn (inert) until it's
+//! gone. Keys move focus around its field and buttons, press them, or cancel.
+
 use std::collections::VecDeque;
 use std::time::Duration;
 
@@ -13,12 +19,15 @@ use crate::ui::{
 };
 use crate::widgets::{button, card, text_field};
 
-const TITLE_FONT: &str = "Segoe UI Variable Display";
+// How a dialog comes and goes.
 const OPEN_SCALE: f32 = 1.05;
-const DIALOG_Z: f32 = 128.;
 const SHOW_CURVE: Curve = Curve::new(Duration::from_millis(250), Easing::DECELERATE);
 const HIDE_CURVE: Curve = Curve::new(Duration::from_millis(167), Easing::DECELERATE);
 const FADE_CURVE: Curve = Curve::new(Duration::from_millis(83), Easing::Linear);
+
+// Its card.
+const TITLE_FONT: &str = "Segoe UI Variable Display";
+const DIALOG_Z: f32 = 128.;
 const MIN_WIDTH: f32 = 320.;
 const MAX_WIDTH: f32 = 548.;
 const PADDING: f32 = 24.;
@@ -28,18 +37,26 @@ const TITLE_GAP: f32 = 12.;
 const HEADER_GAP: f32 = 8.;
 const BUTTON_GAP: f32 = 8.;
 const GO_TO_WIDTH: f32 = 312.;
+/// Lifts the body text a pixel onto the baseline Notepad's has.
+const BODY_BASELINE_SNAP: f32 = -1.;
+
+// What the go-to dialogs say.
 const GO_TO_TITLE: &str = "Go to line";
 const GO_TO_BUTTONS: &[&str] = &["Go to", "Cancel"];
 const OUT_OF_RANGE_MESSAGE: &str = "The line number is beyond the total number of lines";
 const OK_BUTTONS: &[&str] = &["OK"];
-const BODY_BASELINE_SNAP: f32 = -1.;
 
+// ---- 1. Dialogs and their keys --------------------------------------------------------------
+
+/// What a key in a dialog does.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub(crate) enum DialogKey {
+    /// Not the dialog's: the system's (Alt+F4, Alt+Space).
     PassThrough,
     Focus(Focus),
     PressButton(usize),
     Cancel,
+    /// An editing key for the go-to field.
     EditGoToLine,
     Consumed,
 }
@@ -52,41 +69,27 @@ pub(crate) enum DialogKind {
 }
 
 impl DialogKind {
-    fn referenced_tab(&self) -> Option<TabId> {
+    fn prompt(&self) -> Option<&Prompt> {
         match self {
-            Self::Prompt(p) => p.tab(),
+            Self::Prompt(prompt) => Some(prompt),
             Self::GoTo | Self::LineOutOfRange => None,
         }
     }
 
     fn prompt_id(&self) -> Option<PromptId> {
-        match self {
-            Self::Prompt(p) => p.reply.map(|(id, _)| id),
-            Self::GoTo | Self::LineOutOfRange => None,
-        }
-    }
-
-    fn button_count(&self) -> usize {
-        match self {
-            Self::GoTo => GO_TO_BUTTONS.len(),
-            Self::LineOutOfRange => OK_BUTTONS.len(),
-            Self::Prompt(p) => p.choices.len(),
-        }
+        self.prompt()?.reply.map(|(id, _)| id)
     }
 
     fn button_labels(&self) -> Vec<&'static str> {
         match self {
             Self::GoTo => GO_TO_BUTTONS.to_vec(),
             Self::LineOutOfRange => OK_BUTTONS.to_vec(),
-            Self::Prompt(p) => p.choices.iter().map(|&(label, _)| label).collect(),
+            Self::Prompt(prompt) => prompt.choices.iter().map(|&(label, _)| label).collect(),
         }
-    }
-
-    fn is_go_to(&self) -> bool {
-        matches!(self, Self::GoTo)
     }
 }
 
+/// A dialog on screen: coming in, showing, or going away; and how big and opaque it is now.
 struct ActiveDialog {
     kind: DialogKind,
     transition: Transition,
@@ -95,6 +98,7 @@ struct ActiveDialog {
 }
 
 impl ActiveDialog {
+    /// Samples this frame's scale and opacity; whether a closing dialog is gone.
     fn sample(&mut self, ui: &mut AppUi) -> bool {
         let t = self.transition;
         let closing = t.is_closing();
@@ -109,9 +113,13 @@ impl ActiveDialog {
     }
 }
 
+// ---- 2. The queue ---------------------------------------------------------------------------
+
 pub(crate) struct Dialogs {
+    /// What's on screen, the newest last: at most one open, the rest closing.
     open: Vec<ActiveDialog>,
     pending: VecDeque<DialogKind>,
+    /// The go-to dialog's field, which takes digits only.
     pub(crate) line: Editor,
 }
 
@@ -129,14 +137,15 @@ impl Dialogs {
         }
     }
 
-    pub(crate) fn is_open(&self) -> bool {
-        self.active().is_some()
-    }
-
     fn active(&self) -> Option<&ActiveDialog> {
         self.open.iter().rev().find(|d| d.transition.is_open())
     }
 
+    pub(crate) fn is_open(&self) -> bool {
+        self.active().is_some()
+    }
+
+    /// Shows `kind`, or queues it behind the open one; where focus goes if it shows.
     pub(crate) fn enqueue(&mut self, kind: DialogKind) -> Option<Focus> {
         if self.is_open() {
             self.pending.push_back(kind);
@@ -145,12 +154,13 @@ impl Dialogs {
         Some(self.show_now(kind))
     }
 
+    /// Shows `kind` in place of the open one; where focus goes (the go-to field, or the first
+    /// button).
     pub(crate) fn show_now(&mut self, kind: DialogKind) -> Focus {
         self.hide();
-        let initial_focus = if kind.is_go_to() {
-            Focus::Editor(EditorSlot::GoToLine)
-        } else {
-            Focus::DialogButton(0)
+        let focus = match kind {
+            DialogKind::GoTo => Focus::Editor(EditorSlot::GoToLine),
+            _ => Focus::DialogButton(0),
         };
         self.open.push(ActiveDialog {
             kind,
@@ -158,7 +168,7 @@ impl Dialogs {
             scale: OPEN_SCALE,
             opacity: 0.,
         });
-        initial_focus
+        focus
     }
 
     /// Shows the go-to dialog, its field holding `line` (or what was typed before) selected;
@@ -178,9 +188,16 @@ impl Dialogs {
         (1..=lines).contains(&line).then(|| line - 1)
     }
 
+    /// The open dialog, which stays open until it's dismissed.
+    pub(crate) fn take_active(&self) -> Option<DialogKind> {
+        self.active().map(|d| d.kind.clone())
+    }
+
+    /// Closes the open dialog and shows the next queued one; where focus goes if one shows.
     pub(crate) fn dismiss(&mut self) -> Option<Focus> {
         self.hide();
-        self.pending.pop_front().map(|next| self.show_now(next))
+        let next = self.pending.pop_front()?;
+        Some(self.show_now(next))
     }
 
     pub(crate) fn hide(&mut self) {
@@ -189,100 +206,78 @@ impl Dialogs {
         }
     }
 
+    /// Closes and drops the prompts about tab `id`.
     pub(crate) fn close_for_tab(&mut self, id: TabId) {
+        let about = |kind: &DialogKind| kind.prompt().and_then(Prompt::tab) == Some(id);
         for d in &mut self.open {
-            if d.transition.is_open() && d.kind.referenced_tab() == Some(id) {
+            if d.transition.is_open() && about(&d.kind) {
                 d.transition.close();
             }
         }
-        self.pending.retain(|d| d.referenced_tab() != Some(id));
+        self.pending.retain(|kind| !about(kind));
     }
 
+    /// Closes the open prompt and drops the queued ones: the ids of all of them, which won't be
+    /// answered now.
     pub(crate) fn drain_prompt_ids(&mut self) -> Vec<PromptId> {
         let mut ids = Vec::new();
         for d in &mut self.open {
             if d.transition.is_open()
-                && let Some(pid) = d.kind.prompt_id()
+                && let Some(id) = d.kind.prompt_id()
             {
-                ids.push(pid);
+                ids.push(id);
                 d.transition.close();
             }
         }
-        for d in self.pending.drain(..) {
-            if let Some(pid) = d.prompt_id() {
-                ids.push(pid);
-            }
-        }
+        ids.extend(self.pending.drain(..).filter_map(|kind| kind.prompt_id()));
         ids
     }
 
-    pub(crate) fn take_active(&mut self) -> Option<DialogKind> {
-        let ix = self.open.iter().rposition(|d| d.transition.is_open())?;
-        Some(self.open[ix].kind.clone())
-    }
-
+    /// Enter presses the focused button (or the first), Space a focused button, Escape
+    /// cancels, Tab and Shift+Tab move around the field and buttons; everything else stays in
+    /// the dialog, editing the go-to field if that has focus.
     pub(crate) fn on_key(&self, ev: KeyEvent, focus: Focus) -> DialogKey {
         let m = ev.modifiers;
         if m.alt && !m.ctrl && !m.win && matches!(ev.key, Key::F(4) | Key::Space) {
             return DialogKey::PassThrough;
         }
-        match (m.ctrl, m.alt, m.shift, m.win, ev.key) {
-            (false, false, false, false, Key::Enter) => {
-                let btn = match focus {
-                    Focus::DialogButton(ix) => ix,
-                    _ => 0,
-                };
-                return DialogKey::PressButton(btn);
-            }
-            (false, false, false, false, Key::Space) => {
-                if let Focus::DialogButton(ix) = focus {
-                    return DialogKey::PressButton(ix);
-                }
-            }
-            (false, false, false, false, Key::Escape) => {
-                return DialogKey::Cancel;
-            }
-            (false, false, false, false, Key::Tab) => {
-                return self
-                    .next_focus_step(focus, 1)
-                    .map_or(DialogKey::Consumed, DialogKey::Focus);
-            }
-            (false, false, true, false, Key::Tab) => {
-                return self
-                    .next_focus_step(focus, -1)
-                    .map_or(DialogKey::Consumed, DialogKey::Focus);
-            }
-            _ => {}
-        }
-        if focus == Focus::Editor(EditorSlot::GoToLine) {
-            DialogKey::EditGoToLine
-        } else {
-            DialogKey::Consumed
+        let shift_only = m.shift && !m.ctrl && !m.alt && !m.win;
+        let step = |delta| {
+            self.focus_step(focus, delta)
+                .map_or(DialogKey::Consumed, DialogKey::Focus)
+        };
+        match (ev.key, focus) {
+            (Key::Enter, Focus::DialogButton(ix)) if m.none() => DialogKey::PressButton(ix),
+            (Key::Enter, _) if m.none() => DialogKey::PressButton(0),
+            (Key::Space, Focus::DialogButton(ix)) if m.none() => DialogKey::PressButton(ix),
+            (Key::Escape, _) if m.none() => DialogKey::Cancel,
+            (Key::Tab, _) if m.none() => step(1),
+            (Key::Tab, _) if shift_only => step(-1),
+            (_, Focus::Editor(EditorSlot::GoToLine)) => DialogKey::EditGoToLine,
+            _ => DialogKey::Consumed,
         }
     }
 
-    fn next_focus_step(&self, current: Focus, delta: isize) -> Option<Focus> {
-        let dialog = self.active()?;
-        let count = dialog.kind.button_count();
-        let mut ring = Vec::with_capacity(count + 1);
-        if dialog.kind.is_go_to() {
-            ring.push(Focus::Editor(EditorSlot::GoToLine));
-        }
-        for ix in 0..count {
-            ring.push(Focus::DialogButton(ix));
-        }
-        if ring.is_empty() {
-            return None;
-        }
-        let pos = ring.iter().position(|&f| f == current);
-        let next = match pos {
+    /// Focus `delta` steps from `current` around the open dialog's field and buttons (from the
+    /// first or last, if it's elsewhere).
+    fn focus_step(&self, current: Focus, delta: isize) -> Option<Focus> {
+        let kind = &self.active()?.kind;
+        let field = matches!(kind, DialogKind::GoTo).then_some(Focus::Editor(EditorSlot::GoToLine));
+        let buttons = (0..kind.button_labels().len()).map(Focus::DialogButton);
+        let ring: Vec<Focus> = field.into_iter().chain(buttons).collect();
+        let next = match ring.iter().position(|&f| f == current) {
             Some(ix) => (ix as isize + delta).rem_euclid(ring.len() as isize) as usize,
             None if delta > 0 => 0,
-            None => ring.len() - 1,
+            None => ring.len().checked_sub(1)?,
         };
-        Some(ring[next])
+        ring.get(next).copied()
     }
+}
 
+// ---- 3. Drawing -----------------------------------------------------------------------------
+
+impl Dialogs {
+    /// Every dialog still on screen, each over its backdrop; drops the ones that have gone.
     pub(crate) fn render(&mut self, focus: Focus, p: Palette, ui: &mut AppUi) -> Option<AppNode> {
         self.open.retain_mut(|d| !d.sample(ui));
         if self.open.is_empty() {
@@ -296,140 +291,102 @@ impl Dialogs {
         Some(box_().absolute().inset_0().children(layers))
     }
 
-    fn render_layer(&self, dialog: &ActiveDialog, focus: Focus, p: Palette, ui: &mut AppUi) -> AppNode {
-        let focused_btn = match focus {
+    /// A dialog's backdrop (which takes the pointer while it's open) and card: its title and
+    /// body over its buttons, the first accented unless another has focus.
+    fn render_layer(&self, d: &ActiveDialog, focus: Focus, p: Palette, ui: &mut AppUi) -> AppNode {
+        let focused = match focus {
             Focus::DialogButton(ix) => Some(ix),
             _ => None,
         };
-        let labels = dialog.kind.button_labels();
-        let closing = dialog.transition.is_closing();
-        let buttons: Vec<AppNode> = labels
-            .iter()
-            .enumerate()
-            .map(|(ix, &label)| {
-                let accented = ix == 0 && focused_btn.is_none_or(|f| f == ix);
-                let is_focused = !closing && focused_btn == Some(ix);
-                button(
-                    p,
-                    p.command_surface,
-                    HitId::Dialog(DialogHit::Button(ix)),
-                    label,
-                    accented,
-                    is_focused,
-                    ui,
+        let closing = d.transition.is_closing();
+        let labels = d.kind.button_labels();
+        let lone = labels.len() == 1;
+        let buttons = labels.into_iter().enumerate().map(|(ix, label)| {
+            let accented = ix == 0 && focused.is_none_or(|f| f == ix);
+            let has_focus = !closing && focused == Some(ix);
+            let hit = HitId::Dialog(DialogHit::Button(ix));
+            let button = button(p, p.command_surface, hit, label, accented, has_focus, ui);
+            box_().flex_1().min_w_0().child(button)
+        });
+        // A single button sits in the right half.
+        let buttons = row()
+            .p(PADDING)
+            .gap(BUTTON_GAP)
+            .when(lone, |this| this.child(box_().flex_1().min_w_0()))
+            .children(buttons.collect::<Vec<_>>());
+        let (width, title, body) = match &d.kind {
+            DialogKind::GoTo => {
+                let field_focused = focus == Focus::Editor(EditorSlot::GoToLine);
+                let field = text_field(p, p.content_surface, &self.line, field_focused, false, ui);
+                let label = message("Line number".into()).h(BODY_LINE).mb(HEADER_GAP);
+                let width = GO_TO_WIDTH + 2. * PADDING + 2. * BORDER;
+                (
+                    Some(width),
+                    GO_TO_TITLE.into(),
+                    box_().child(label).child(field),
                 )
-            })
-            .collect();
-
-        let (fixed_width, title, body) = match &dialog.kind {
-            DialogKind::GoTo => (
-                Some(GO_TO_WIDTH + 2. * PADDING + 2. * BORDER),
-                SharedStr::Static(GO_TO_TITLE),
-                self.render_go_to_body(focus, p, ui),
-            ),
+            }
             DialogKind::LineOutOfRange => (
                 None,
-                SharedStr::Static(GO_TO_TITLE),
-                message_body(OUT_OF_RANGE_MESSAGE.into()),
+                GO_TO_TITLE.into(),
+                message(OUT_OF_RANGE_MESSAGE.into()),
             ),
-            DialogKind::Prompt(prompt) => (
-                None,
-                prompt.title.clone(),
-                message_body(prompt.message.clone()),
-            ),
+            DialogKind::Prompt(prompt) => {
+                (None, prompt.title.clone(), message(prompt.message.clone()))
+            }
         };
-
+        let title = box_()
+            .mb(TITLE_GAP)
+            .font_family(TITLE_FONT)
+            .font_semibold()
+            .text_size(TITLE_SIZE)
+            .line_height(TITLE_LINE)
+            .line_clamp(2)
+            .child(text(title));
+        let content = box_()
+            .p(PADDING)
+            .rounded_t(OVERLAY_RADIUS - BORDER)
+            .bg(p.content_surface.panel)
+            .border_b(1.)
+            .border_color(p.dialog_divider)
+            .child(title)
+            .child(body);
+        let face = box_()
+            .font_family(TEXT_FONT)
+            .text_size(BODY_SIZE)
+            .text_color(p.text_primary)
+            .child(content)
+            .child(buttons);
+        let fill = p.command_surface.panel;
+        let card = card(p, p.surface_stroke, fill, OVERLAY_RADIUS, DIALOG_Z, face)
+            .hit(HitId::Dialog(DialogHit::Card))
+            .when_some(width, |this, w| this.w(w).max_w_full())
+            .when(width.is_none(), |this| {
+                this.min_w(MIN_WIDTH).max_w(MAX_WIDTH)
+            })
+            .scale(d.scale, d.scale)
+            .when(closing, AppNode::inert);
         row()
             .absolute()
             .inset_0()
             .items_center()
             .justify_center()
             .bg(p.smoke)
-            .opacity(dialog.opacity)
+            .opacity(d.opacity)
             .when(!closing, |this| {
                 this.hit(HitId::Dialog(DialogHit::Backdrop))
                     .cursor(CursorStyle::Arrow)
             })
-            .child(
-                dialog_frame(p, fixed_width, title, body, buttons)
-                    .scale(dialog.scale, dialog.scale)
-                    .when(closing, AppNode::inert),
-            )
-    }
-
-    fn render_go_to_body(&self, focus: Focus, p: Palette, ui: &AppUi) -> AppNode {
-        let slot = EditorSlot::GoToLine;
-        let field = text_field(
-            p,
-            p.content_surface,
-            &self.line,
-            focus == Focus::Editor(slot),
-            false,
-            ui,
-        );
-        box_()
-            .child(message_body("Line number".into()).h(BODY_LINE).mb(HEADER_GAP))
-            .child(field)
+            .child(card)
     }
 }
 
-fn message_body(message: SharedStr) -> AppNode {
+/// A dialog's message, on the body's baseline.
+fn message(msg: SharedStr) -> AppNode {
     box_()
         .top(BODY_BASELINE_SNAP)
         .line_height(BODY_LINE)
-        .child(text(message))
-}
-
-fn dialog_frame(
-    p: Palette,
-    fixed_width: Option<f32>,
-    title: SharedStr,
-    body: AppNode,
-    buttons: Vec<AppNode>,
-) -> AppNode {
-    let spacer = (buttons.len() == 1).then(|| box_().flex_1().min_w_0());
-    let buttons = buttons
-        .into_iter()
-        .map(|btn| box_().flex_1().min_w_0().child(btn));
-    let face = box_()
-        .font_family(TEXT_FONT)
-        .text_size(BODY_SIZE)
-        .text_color(p.text_primary)
-        .child(dialog_content(p, title, body))
-        .child(
-            row()
-                .p(PADDING)
-                .gap(BUTTON_GAP)
-                .when_some(spacer, |this, sp| this.child(sp))
-                .children(buttons),
-        );
-    let fill = p.command_surface.panel;
-    card(p, p.surface_stroke, fill, OVERLAY_RADIUS, DIALOG_Z, face)
-        .hit(HitId::Dialog(DialogHit::Card))
-        .when_some(fixed_width, |this, w| this.w(w).max_w_full())
-        .when(fixed_width.is_none(), |this| {
-            this.min_w(MIN_WIDTH).max_w(MAX_WIDTH)
-        })
-}
-
-fn dialog_content(p: Palette, title: SharedStr, body: AppNode) -> AppNode {
-    box_()
-        .p(PADDING)
-        .rounded_t(OVERLAY_RADIUS - BORDER)
-        .bg(p.content_surface.panel)
-        .border_b(1.)
-        .border_color(p.dialog_divider)
-        .child(
-            box_()
-                .mb(TITLE_GAP)
-                .font_family(TITLE_FONT)
-                .font_semibold()
-                .text_size(TITLE_SIZE)
-                .line_height(TITLE_LINE)
-                .line_clamp(2)
-                .child(text(title)),
-        )
-        .child(body)
+        .child(text(msg))
 }
 
 #[cfg(test)]
