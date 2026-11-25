@@ -6,7 +6,7 @@ use crate::theme::{
     Palette, TEXT_FONT, theme_shadow,
 };
 use crate::types::SharedStr;
-use crate::ui::{AppNode, AppUi, Brushes, HitId, Node, box_, row, text};
+use crate::ui::{AppNode, AppUi, Brushes, HitId, box_, row, text};
 
 const ACCENT_TOP_EDGE: f32 = 0x14 as f32 / 255.;
 const ACCENT_HOVER_OPACITY: f32 = 0.9;
@@ -40,14 +40,14 @@ pub(crate) fn subtle_text(p: Palette, enabled: bool, pressed: bool) -> Rgba {
 
 /// A raised card: a `stroke` border with `radius` corners and the shadow for elevation `z`,
 /// around `face`, which is filled with `fill` inside the border.
-pub(crate) fn card<H, C>(
+pub(crate) fn card(
     p: Palette,
     stroke: Rgba,
     fill: Rgba,
     radius: f32,
     z: f32,
-    face: Node<H, C>,
-) -> Node<H, C> {
+    face: AppNode,
+) -> AppNode {
     box_()
         .border(BORDER, stroke)
         .rounded(radius)

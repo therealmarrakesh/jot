@@ -10,9 +10,7 @@ use crate::platform::{Modifiers, NativeWindow, WindowId, WindowsDisplay, cursor_
 use crate::shell::Shell;
 use crate::theme::{CONTROL_RADIUS, Palette, SMALL_FONT};
 use crate::types::SharedStr;
-use crate::ui::{
-    AnimTracks, AppFrame, Curve, Easing, Frame, HitId, Node, PointerState, box_, text,
-};
+use crate::ui::{AnimTracks, AppFrame, AppNode, Curve, Easing, HitId, PointerState, box_, text};
 use crate::widgets::card;
 
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -56,11 +54,7 @@ impl OverlaySurface {
         }
     }
 
-    fn paint_scene(
-        &mut self,
-        ts: &TextSystem,
-        build: impl FnOnce(Size) -> Node<(), ()>,
-    ) -> bool {
+    fn paint_scene(&mut self, ts: &TextSystem, build: impl FnOnce(Size) -> AppNode) -> bool {
         let Some(live) = &mut self.live else {
             return false;
         };
@@ -69,7 +63,7 @@ impl OverlaySurface {
         }
         let (scale, logical) = (live.window.scale_factor(), live.window.logical_size());
         live.draw(transparent_black(), |canvas| {
-            let frame = Frame::layout(
+            let frame = AppFrame::layout(
                 build(logical),
                 AvailSize::definite(logical.width, logical.height),
                 scale,
@@ -363,7 +357,7 @@ impl Tooltips {
         let entered = snap.entered;
         let display = WindowsDisplay::from_point(entered);
         let (work, scale) = (display.work_area(), display.scale_factor());
-        let measured = Frame::measure(
+        let measured = AppFrame::measure(
             tooltip_card(Palette::resolve(false, None, None), snap.text.clone()),
             AvailSize::MAX,
             scale,
@@ -425,7 +419,7 @@ impl Tooltips {
     }
 }
 
-fn tooltip_card(p: Palette, content: SharedStr) -> Node<(), ()> {
+fn tooltip_card(p: Palette, content: SharedStr) -> AppNode {
     let face = box_()
         .overflow_hidden()
         .child(box_().absolute().inset_0().bg(p.acrylic_luminosity))
@@ -545,7 +539,7 @@ impl KeyTips {
     }
 }
 
-fn render_tips(tips: &[KeyTip], p: Palette) -> Node<(), ()> {
+fn render_tips(tips: &[KeyTip], p: Palette) -> AppNode {
     box_().size_full().children(tips.iter().map(|tip| {
         box_()
             .absolute()

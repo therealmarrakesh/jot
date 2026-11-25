@@ -147,45 +147,35 @@ impl Default for Decor {
     }
 }
 
-struct Interact<H> {
-    hit: Option<H>,
+#[derive(Default)]
+struct Interact {
+    hit: Option<HitId>,
     cursor: Option<CursorStyle>,
     window_area: Option<WindowControlArea>,
     tooltip: Option<SharedStr>,
 }
 
-impl<H> Default for Interact<H> {
-    fn default() -> Self {
-        Self {
-            hit: None,
-            cursor: None,
-            window_area: None,
-            tooltip: None,
-        }
-    }
-}
-
-enum NodePayload<H, C> {
-    Box(Vec<Node<H, C>>),
+enum NodePayload {
+    Box(Vec<AppNode>),
     Text(SharedStr),
-    Custom(C),
+    Custom(CustomDraw),
 }
 
 #[derive(Copy, Clone)]
-pub(crate) enum Anchor<H> {
+pub(crate) enum Anchor {
     Point(Point),
     Target {
-        target: H,
+        target: HitId,
         place: fn(target: Rect, popup: Size, viewport: Size) -> Point,
     },
 }
 
-impl<H: Copy> Anchor<H> {
+impl Anchor {
     fn resolve(
         self,
         viewport: Size,
         popup: Size,
-        mut lookup: impl FnMut(H) -> Option<Rect>,
+        mut lookup: impl FnMut(HitId) -> Option<Rect>,
     ) -> Point {
         let raw = match self {
             Self::Point(p) => p,
@@ -203,13 +193,13 @@ impl<H: Copy> Anchor<H> {
     }
 }
 
-pub(crate) struct Node<H, C> {
+pub(crate) struct AppNode {
     flex: FlexStyle,
     decor: Decor,
-    interact: Interact<H>,
-    anchor: Option<Anchor<H>>,
+    interact: Interact,
+    anchor: Option<Anchor>,
     text: TextOverrides,
-    payload: NodePayload<H, C>,
+    payload: NodePayload,
 }
 
 macro_rules! setters {
@@ -225,7 +215,7 @@ macro_rules! setters {
     };
 }
 
-impl<H, C> Node<H, C> {
+impl AppNode {
     fn new_box(row: bool) -> Self {
         Self {
             flex: FlexStyle {
@@ -296,14 +286,14 @@ impl<H, C> Node<H, C> {
         scale(sx: f32, sy: f32) => |s| { s.decor.transform = Transform::Scale(sx, sy); }
         transform(t: Transform) => |s| { s.decor.transform = t; }
         inert() => |s| { s.decor.inert = true; }
-        anchored(anchor: Anchor<H>) => |s| { s.anchor = Some(anchor); }
+        anchored(anchor: Anchor) => |s| { s.anchor = Some(anchor); }
         font_semibold() => |s| { s.text.weight = Some(FontWeight::Semibold); }
         text_size(size: f32) => |s| { s.text.size = Some(size); }
         line_height(lh: f32) => |s| { s.text.line_height = Some(lh); }
         text_color(color: Rgba) => |s| { s.text.color = Some(color); }
         nowrap() => |s| { s.text.nowrap = Some(true); }
         line_clamp(lines: usize) => |s| { s.text.line_clamp = Some(lines); }
-        hit(id: H) => |s| { s.interact.hit = Some(id); }
+        hit(id: HitId) => |s| { s.interact.hit = Some(id); }
         cursor(cursor: CursorStyle) => |s| { s.interact.cursor = Some(cursor); }
         window_area(area: WindowControlArea) => |s| { s.interact.window_area = Some(area); }
     }
@@ -328,13 +318,13 @@ impl<H, C> Node<H, C> {
         self.interact.tooltip = Some(tip.into());
         self
     }
-    pub(crate) fn child(mut self, child: Node<H, C>) -> Self {
+    pub(crate) fn child(mut self, child: AppNode) -> Self {
         if let NodePayload::Box(children) = &mut self.payload {
             children.push(child);
         }
         self
     }
-    pub(crate) fn children(mut self, iter: impl IntoIterator<Item = Node<H, C>>) -> Self {
+    pub(crate) fn children(mut self, iter: impl IntoIterator<Item = AppNode>) -> Self {
         if let NodePayload::Box(children) = &mut self.payload {
             children.extend(iter);
         }
@@ -351,27 +341,27 @@ impl<H, C> Node<H, C> {
     }
 }
 
-pub(crate) fn row<H, C>() -> Node<H, C> {
-    Node::new_box(true)
+pub(crate) fn row() -> AppNode {
+    AppNode::new_box(true)
 }
 
-pub(crate) fn box_<H, C>() -> Node<H, C> {
-    Node::new_box(false)
+pub(crate) fn box_() -> AppNode {
+    AppNode::new_box(false)
 }
 
-pub(crate) fn text<H, C>(content: impl Into<SharedStr>) -> Node<H, C> {
-    let mut node = Node::new_box(false);
+pub(crate) fn text(content: impl Into<SharedStr>) -> AppNode {
+    let mut node = AppNode::new_box(false);
     node.payload = NodePayload::Text(content.into());
     node
 }
 
-pub(crate) fn custom<H, C>(token: C) -> Node<H, C> {
-    let mut node = Node::new_box(false);
+pub(crate) fn custom(token: CustomDraw) -> AppNode {
+    let mut node = AppNode::new_box(false);
     node.payload = NodePayload::Custom(token);
     node
 }
 
-enum FlatKind<C> {
+enum FlatKind {
     Box {
         children_start: usize,
         children_len: usize,
@@ -381,18 +371,18 @@ enum FlatKind<C> {
         style: ResolvedTextStyle,
         label: Option<Label>,
     },
-    Custom(C),
+    Custom(CustomDraw),
 }
 
-struct FlatNode<H, C> {
+struct FlatNode {
     parent: Option<usize>,
     rect: Rect,
     border: Edges<f32>,
     clip: bool,
     decor: Decor,
-    interact: Interact<H>,
-    anchor: Option<Anchor<H>>,
-    kind: FlatKind<C>,
+    interact: Interact,
+    anchor: Option<Anchor>,
+    kind: FlatKind,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -401,28 +391,17 @@ struct HitEntry {
     clipped_rect: Rect,
 }
 
-pub(crate) struct Frame<H, C> {
-    nodes: Vec<FlatNode<H, C>>,
+#[derive(Default)]
+pub(crate) struct AppFrame {
+    nodes: Vec<FlatNode>,
     child_order: Vec<usize>,
     root: Option<usize>,
     hits: Vec<HitEntry>,
     pub(crate) control_areas: Vec<(Rect, WindowControlArea)>,
 }
 
-impl<H, C> Default for Frame<H, C> {
-    fn default() -> Self {
-        Self {
-            nodes: Vec::new(),
-            child_order: Vec::new(),
-            root: None,
-            hits: Vec::new(),
-            control_areas: Vec::new(),
-        }
-    }
-}
-
-impl<H: Copy + Eq, C: Copy> Frame<H, C> {
-    pub(crate) fn custom_rects(&self) -> impl Iterator<Item = (C, Rect)> + '_ {
+impl AppFrame {
+    pub(crate) fn custom_rects(&self) -> impl Iterator<Item = (CustomDraw, Rect)> + '_ {
         self.nodes.iter().filter_map(|n| match n.kind {
             FlatKind::Custom(token) => Some((token, n.rect)),
             _ => None,
@@ -430,13 +409,13 @@ impl<H: Copy + Eq, C: Copy> Frame<H, C> {
     }
 
     pub(crate) fn layout(
-        root_node: Node<H, C>,
+        root_node: AppNode,
         available: AvailSize,
         scale: f32,
         text_system: &TextSystem,
     ) -> Self {
         let mut tree = LayoutTree::new(scale);
-        let mut frame = Frame::default();
+        let mut frame = AppFrame::default();
         let default_text = ResolvedTextStyle::default();
 
         let root_idx = frame.flatten(root_node, None, &default_text, &mut tree);
@@ -505,7 +484,7 @@ impl<H: Copy + Eq, C: Copy> Frame<H, C> {
     }
 
     pub(crate) fn measure(
-        root_node: Node<H, C>,
+        root_node: AppNode,
         available: AvailSize,
         scale: f32,
         text_system: &TextSystem,
@@ -518,7 +497,7 @@ impl<H: Copy + Eq, C: Copy> Frame<H, C> {
 
     fn flatten(
         &mut self,
-        node: Node<H, C>,
+        node: AppNode,
         parent: Option<usize>,
         inherited_text: &ResolvedTextStyle,
         tree: &mut LayoutTree,
@@ -526,7 +505,7 @@ impl<H: Copy + Eq, C: Copy> Frame<H, C> {
         let resolved_text = inherited_text.merge(&node.text);
         let clip = node.flex.clip[0] || node.flex.clip[1];
         let border = snap_border_edges(node.flex.border, tree.scale);
-        let Node {
+        let AppNode {
             mut flex,
             decor,
             interact,
@@ -625,7 +604,7 @@ impl<H: Copy + Eq, C: Copy> Frame<H, C> {
             .find(|entry| entry.clipped_rect.contains(pos))
     }
 
-    pub(crate) fn hit_chain(&self, pos: Point) -> Vec<H> {
+    pub(crate) fn hit_chain(&self, pos: Point) -> Vec<HitId> {
         let Some(top) = self.top_hit(pos) else {
             return Vec::new();
         };
@@ -640,7 +619,7 @@ impl<H: Copy + Eq, C: Copy> Frame<H, C> {
         chain
     }
 
-    pub(crate) fn rect_of(&self, id: H) -> Option<Rect> {
+    pub(crate) fn rect_of(&self, id: HitId) -> Option<Rect> {
         self.nodes
             .iter()
             .rev()
@@ -662,7 +641,7 @@ impl<H: Copy + Eq, C: Copy> Frame<H, C> {
         CursorStyle::Arrow
     }
 
-    pub(crate) fn tooltip_at(&self, pos: Point) -> Option<(H, SharedStr, Rect)> {
+    pub(crate) fn tooltip_at(&self, pos: Point) -> Option<(HitId, SharedStr, Rect)> {
         let top = self.top_hit(pos)?;
         let mut cur = Some(top.node_idx);
         while let Some(idx) = cur {
@@ -679,7 +658,7 @@ impl<H: Copy + Eq, C: Copy> Frame<H, C> {
     pub(crate) fn paint(
         &self,
         canvas: &mut Canvas,
-        draw_custom: &mut impl FnMut(C, Rect, &mut Canvas),
+        draw_custom: &mut impl FnMut(CustomDraw, Rect, &mut Canvas),
     ) {
         if let Some(root) = self.root {
             self.paint_node(root, canvas, draw_custom);
@@ -690,7 +669,7 @@ impl<H: Copy + Eq, C: Copy> Frame<H, C> {
         &self,
         idx: usize,
         canvas: &mut Canvas,
-        draw_custom: &mut impl FnMut(C, Rect, &mut Canvas),
+        draw_custom: &mut impl FnMut(CustomDraw, Rect, &mut Canvas),
     ) {
         let node = &self.nodes[idx];
         let d = node.decor;
@@ -1393,118 +1372,114 @@ pub(crate) enum AnimKey {
     ScrollThickness(EditorSlot, Axis),
 }
 
-pub(crate) type AppNode = Node<HitId, CustomDraw>;
-pub(crate) type AppFrame = Frame<HitId, CustomDraw>;
-
 #[cfg(test)]
 mod tests {
     use crate::geom::{point, rect, rgb, white};
 
     use super::*;
 
-    #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
-    enum TestHit {
-        Strip,
-        Tab(u64),
-        TabClose(u64),
-        NewTab,
-        Backdrop,
-        Button(usize),
+    const STRIP: HitId = HitId::Tab(TabHit::Strip);
+    const NEW_TAB: HitId = HitId::Tab(TabHit::New);
+    const BACKDROP: HitId = HitId::Dialog(DialogHit::Backdrop);
+    fn tab(id: u64) -> HitId {
+        HitId::Tab(TabHit::Item(TabId(id)))
+    }
+    fn tab_close(id: u64) -> HitId {
+        HitId::Tab(TabHit::Close(TabId(id)))
+    }
+    fn button(ix: usize) -> HitId {
+        HitId::Dialog(DialogHit::Button(ix))
     }
 
     #[test]
     fn scene_hit_chain_bubbles_nested_hits_and_clips_overflow() {
         let ts = TextSystem::new().unwrap();
-        let tree: Node<TestHit, ()> = row()
+        let tree: AppNode = row()
             .size_full()
             .child(
                 row()
                     .w(120.)
                     .h(32.)
                     .overflow_hidden()
-                    .hit(TestHit::Strip)
+                    .hit(STRIP)
                     .child(
-                        row()
-                            .w(100.)
-                            .h(32.)
-                            .flex_none()
-                            .hit(TestHit::Tab(1))
-                            .child(
-                                box_()
-                                    .absolute()
-                                    .right(6.)
-                                    .top(5.)
-                                    .w(22.)
-                                    .h(22.)
-                                    .hit(TestHit::TabClose(1))
-                                    .tooltip("Close tab"),
-                            ),
+                        row().w(100.).h(32.).flex_none().hit(tab(1)).child(
+                            box_()
+                                .absolute()
+                                .right(6.)
+                                .top(5.)
+                                .w(22.)
+                                .h(22.)
+                                .hit(tab_close(1))
+                                .tooltip("Close tab"),
+                        ),
                     )
-                    .child(row().w(100.).h(32.).flex_none().hit(TestHit::Tab(2))),
+                    .child(row().w(100.).h(32.).flex_none().hit(tab(2))),
             )
-            .child(box_().w(40.).h(32.).hit(TestHit::NewTab).bg(rgb(0x123456)));
+            .child(box_().w(40.).h(32.).hit(NEW_TAB).bg(rgb(0x123456)));
 
-        let frame = Frame::layout(tree, AvailSize::definite(200., 32.), 1.0, &ts);
+        let frame = AppFrame::layout(tree, AvailSize::definite(200., 32.), 1.0, &ts);
 
         assert_eq!(
             frame.hit_chain(point(80., 16.)),
-            vec![TestHit::TabClose(1), TestHit::Tab(1), TestHit::Strip]
+            vec![tab_close(1), tab(1), STRIP]
         );
         assert_eq!(
             frame.tooltip_at(point(80., 16.)).map(|(_, tip, _)| tip),
             Some(SharedStr::Static("Close tab"))
         );
 
-        assert_eq!(frame.hit_chain(point(130., 16.)), vec![TestHit::NewTab]);
+        assert_eq!(frame.hit_chain(point(130., 16.)), vec![NEW_TAB]);
 
-        let modal: Node<TestHit, ()> = box_()
+        let modal: AppNode = box_()
             .size_full()
-            .child(box_().w(100.).h(40.).hit(TestHit::NewTab))
+            .child(box_().w(100.).h(40.).hit(NEW_TAB))
             .child(
                 box_()
                     .absolute()
                     .inset_0()
-                    .hit(TestHit::Backdrop)
-                    .child(box_().w(80.).h(32.).hit(TestHit::Button(0)).bg(white())),
+                    .hit(BACKDROP)
+                    .child(box_().w(80.).h(32.).hit(button(0)).bg(white())),
             );
-        let modal_frame = Frame::layout(modal, AvailSize::definite(200., 100.), 1.0, &ts);
+        let modal_frame = AppFrame::layout(modal, AvailSize::definite(200., 100.), 1.0, &ts);
         assert_eq!(
             modal_frame.hit_chain(point(10., 10.)),
-            vec![TestHit::Button(0), TestHit::Backdrop]
+            vec![button(0), BACKDROP]
         );
-        assert_eq!(
-            modal_frame.hit_chain(point(95., 10.)),
-            vec![TestHit::Backdrop]
-        );
+        assert_eq!(modal_frame.hit_chain(point(95., 10.)), vec![BACKDROP]);
 
-        let passthrough: Node<TestHit, ()> = box_()
+        let passthrough: AppNode = box_()
             .size_full()
-            .child(box_().w(100.).h(40.).hit(TestHit::NewTab))
+            .child(box_().w(100.).h(40.).hit(NEW_TAB))
             .child(box_().absolute().inset_0());
-        let pass_frame = Frame::layout(passthrough, AvailSize::definite(200., 100.), 1.0, &ts);
-        assert_eq!(pass_frame.hit_chain(point(10., 10.)), vec![TestHit::NewTab]);
+        let pass_frame = AppFrame::layout(passthrough, AvailSize::definite(200., 100.), 1.0, &ts);
+        assert_eq!(pass_frame.hit_chain(point(10., 10.)), vec![NEW_TAB]);
     }
 
     #[test]
     fn same_frame_anchor_and_measure_fit_work() {
-        #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
-        enum AnchorHit {
-            Trigger,
-            Popup,
-            Item,
-            Submenu,
-            FlyoutBtn,
-            Flyout,
-        }
+        let menu_row = |serial| {
+            HitId::Menu(MenuHit::Row {
+                serial,
+                ix: 0,
+                col: 0,
+            })
+        };
+        let (trigger, popup) = (
+            HitId::Menu(MenuHit::Trigger(MenuKind::File)),
+            HitId::Menu(MenuHit::Panel),
+        );
+        let (item, submenu) = (menu_row(1), menu_row(2));
+        let (flyout_btn, flyout) = (HitId::Find(FindHit::Options), HitId::Find(FindHit::Card));
 
         let ts = TextSystem::new().unwrap();
-        let tree: Node<AnchorHit, ()> = box_()
+        let tree: AppNode = box_()
             .size_full()
             .child(
                 row()
                     .h(32.)
                     .pl(120.)
-                    .child(box_().w(50.).h(32.).hit(AnchorHit::Trigger)),
+                    .child(box_().w(50.).h(32.).hit(trigger)),
             )
             .child(
                 box_()
@@ -1513,67 +1488,47 @@ mod tests {
                     .top(60.)
                     .w(30.)
                     .h(30.)
-                    .hit(AnchorHit::FlyoutBtn),
+                    .hit(flyout_btn),
             )
             .child(
                 box_()
                     .w(120.)
                     .h(80.)
-                    .hit(AnchorHit::Popup)
+                    .hit(popup)
                     .anchored(Anchor::Target {
-                        target: AnchorHit::Trigger,
+                        target: trigger,
                         place: |r, _, _| point(r.left(), r.bottom()),
                     })
-                    .child(
-                        box_()
-                            .absolute()
-                            .left(1.)
-                            .top(20.)
-                            .w(118.)
-                            .h(30.)
-                            .hit(AnchorHit::Item),
-                    )
-                    .child(
-                        box_()
-                            .w(100.)
-                            .h(60.)
-                            .hit(AnchorHit::Submenu)
-                            .anchored(Anchor::Target {
-                                target: AnchorHit::Item,
-                                place: |r, popup, vp| {
-                                    let right_x = r.right() - 3.;
-                                    let x = if right_x + popup.width <= vp.width {
-                                        right_x
-                                    } else {
-                                        r.left() - popup.width + 3.
-                                    };
-                                    point(x, r.top() - 3.)
-                                },
-                            }),
-                    ),
-            )
-            .child(
-                box_()
-                    .w(80.)
-                    .h(50.)
-                    .hit(AnchorHit::Flyout)
-                    .anchored(Anchor::Target {
-                        target: AnchorHit::FlyoutBtn,
-                        place: |r, popup, _| {
-                            let x = r.center().x - (popup.width / 2.).floor();
-                            let above = r.top() - (4. + popup.height);
-                            point(x, if above >= 32. { above } else { r.bottom() + 4. })
+                    .child(box_().absolute().left(1.).top(20.).w(118.).h(30.).hit(item))
+                    .child(box_().w(100.).h(60.).hit(submenu).anchored(Anchor::Target {
+                        target: item,
+                        place: |r, popup, vp| {
+                            let right_x = r.right() - 3.;
+                            let x = if right_x + popup.width <= vp.width {
+                                right_x
+                            } else {
+                                r.left() - popup.width + 3.
+                            };
+                            point(x, r.top() - 3.)
                         },
-                    }),
-            );
+                    })),
+            )
+            .child(box_().w(80.).h(50.).hit(flyout).anchored(Anchor::Target {
+                target: flyout_btn,
+                place: |r, popup, _| {
+                    let x = r.center().x - (popup.width / 2.).floor();
+                    let above = r.top() - (4. + popup.height);
+                    point(x, if above >= 32. { above } else { r.bottom() + 4. })
+                },
+            }));
 
-        let frame = Frame::layout(tree, AvailSize::definite(300., 200.), 1.0, &ts);
-        assert_eq!(frame.rect_of(AnchorHit::Popup).unwrap().origin, point(120., 32.));
-        assert_eq!(frame.rect_of(AnchorHit::Submenu).unwrap().origin, point(24., 49.));
-        assert_eq!(frame.rect_of(AnchorHit::Flyout).unwrap().origin, point(115., 94.));
+        let frame = AppFrame::layout(tree, AvailSize::definite(300., 200.), 1.0, &ts);
+        assert_eq!(frame.rect_of(popup).unwrap().origin, point(120., 32.));
+        assert_eq!(frame.rect_of(submenu).unwrap().origin, point(24., 49.));
+        assert_eq!(frame.rect_of(flyout).unwrap().origin, point(115., 94.));
 
         for scale in [1.0f32, 1.5] {
-            let short: Node<(), ()> = box_()
+            let short: AppNode = box_()
                 .max_w(320.)
                 .border(1., black())
                 .px(9.)
@@ -1582,11 +1537,11 @@ mod tests {
                 .text_size(12.)
                 .line_height(16.)
                 .child(text("New tab"));
-            let short_sz = Frame::measure(short, AvailSize::MAX, scale, &ts);
+            let short_sz = AppFrame::measure(short, AvailSize::MAX, scale, &ts);
             assert!(short_sz.width > 30. && short_sz.width < 150.);
             assert!((short_sz.height - 32.).abs() <= 1.0);
 
-            let long: Node<(), ()> = box_()
+            let long: AppNode = box_()
                 .max_w(320.)
                 .border(1., black())
                 .px(9.)
@@ -1597,7 +1552,7 @@ mod tests {
                 .child(text(
                     "This is a significantly longer tooltip message that must wrap cleanly across multiple lines inside the 320px cap",
                 ));
-            let long_sz = Frame::measure(long, AvailSize::MAX, scale, &ts);
+            let long_sz = AppFrame::measure(long, AvailSize::MAX, scale, &ts);
             assert!(long_sz.width <= 320.5);
             assert!(long_sz.height >= 48. - 1.0);
         }
