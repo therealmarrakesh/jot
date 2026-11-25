@@ -1168,19 +1168,30 @@ impl NativeWindow {
         }
     }
 
-    /// Re-reads the client size and scale (Windows doesn't send them during a live resize of
-    /// another window); `None` while the window has no area.
-    pub(crate) fn sync_live_metrics(&self) -> Option<(u32, u32, f32)> {
+    /// Shows the overlay over `rect`, topmost and without activating it, and takes on the
+    /// client size and scale it ends up with.
+    pub(crate) fn place_overlay(&self, rect: ScreenRect) {
+        let (w, h) = (rect.right - rect.left, rect.bottom - rect.top);
         let mut rc = RECT::default();
-        unsafe { GetClientRect(self.hwnd, &mut rc) }.ok()?;
-        let (w, h) = (rc.right - rc.left, rc.bottom - rc.top);
-        if w <= 0 || h <= 0 {
-            return None;
+        unsafe {
+            let flags = SWP_NOACTIVATE;
+            let _ = SetWindowPos(
+                self.hwnd,
+                Some(HWND_TOPMOST),
+                rect.left,
+                rect.top,
+                w,
+                h,
+                flags,
+            );
+            let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
+            let _ = GetClientRect(self.hwnd, &mut rc);
         }
-        let scale = window_scale(self.hwnd);
-        self.state.physical.set((w as u32, h as u32));
-        self.state.scale.set(scale);
-        Some((w as u32, h as u32, scale))
+        let size = (rc.right - rc.left, rc.bottom - rc.top);
+        self.state
+            .physical
+            .set((size.0.max(0) as u32, size.1.max(0) as u32));
+        self.state.scale.set(window_scale(self.hwnd));
     }
 }
 
@@ -1847,10 +1858,6 @@ impl WindowHandle {
         let _ = unsafe { ShowWindow(self.raw(), SW_HIDE) };
     }
 
-    pub(crate) fn show_noactivate(self) {
-        let _ = unsafe { ShowWindow(self.raw(), SW_SHOWNOACTIVATE) };
-    }
-
     pub(crate) fn set_foreground(self) {
         let _ = unsafe { SetForegroundWindow(self.raw()) };
     }
@@ -1861,21 +1868,6 @@ impl WindowHandle {
             self.restore();
         }
         self.set_foreground();
-    }
-
-    pub(crate) fn place_topmost_noactivate(self, rect: ScreenRect) {
-        let (w, h) = (rect.right - rect.left, rect.bottom - rect.top);
-        let _ = unsafe {
-            SetWindowPos(
-                self.raw(),
-                Some(HWND_TOPMOST),
-                rect.left,
-                rect.top,
-                w,
-                h,
-                SWP_NOACTIVATE,
-            )
-        };
     }
 
     pub(crate) fn move_noactivate(self, x: i32, y: i32) {

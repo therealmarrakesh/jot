@@ -46,9 +46,7 @@ impl OverlaySurface {
             }
         }
         if let Some(live) = &self.live {
-            let hwnd = live.window.hwnd();
-            hwnd.place_topmost_noactivate(rect);
-            hwnd.show_noactivate();
+            live.window.place_overlay(rect);
         }
     }
 
@@ -66,10 +64,10 @@ impl OverlaySurface {
         let Some(live) = &mut self.live else {
             return false;
         };
-        let Some((_, _, scale)) = live.window.sync_live_metrics() else {
+        if live.window.physical_size().0 == 0 || live.window.physical_size().1 == 0 {
             return false;
-        };
-        let logical = live.window.logical_size();
+        }
+        let (scale, logical) = (live.window.scale_factor(), live.window.logical_size());
         live.draw(transparent_black(), |canvas| {
             let frame = Frame::layout(
                 build(logical),

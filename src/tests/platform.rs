@@ -14,15 +14,12 @@ fn overlay_window_resizes_from_1x1_and_renders() {
     let gpu = h.app.borrow().shell.gpu.clone();
     let overlay = NativeWindow::create_overlay().expect("overlay create");
     let mut ws = WindowSurface::new(gpu, overlay).expect("window surface");
-    ws.window.hwnd().place_topmost_noactivate(ScreenRect {
+    ws.window.place_overlay(ScreenRect {
         left: 10,
         top: 10,
         right: 170,
         bottom: 50,
     });
-    ws.window
-        .sync_live_metrics()
-        .expect("overlay must sync resized client rect");
     assert!(
         ws.window.logical_size().width > 10.0 && ws.window.logical_size().height > 10.0,
         "overlay must sync resized client rect before drawing"
