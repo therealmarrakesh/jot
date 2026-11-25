@@ -523,90 +523,63 @@ impl Editor {
         (!self.model.selection().is_empty()).then(|| self.model.text().slice(self.model.selection().range()).to_string())
     }
 
-    fn paste(&mut self, text: &str, ts: &TextSystem) {
-        let change = self.model.replace_selection(text);
-        self.commit_edit(change, ts);
-    }
-
     pub(crate) fn handle_command(&mut self, command: EditCommand, ts: &TextSystem) -> bool {
-        match command {
-            EditCommand::Backspace => {
-                let Some(change) = self.model.delete_backward() else {
-                    return false;
-                };
-                self.commit_edit(Some(change), ts);
-            }
-            EditCommand::Delete => {
-                let change = self.model.delete_forward();
-                self.commit_edit(change, ts);
-            }
-            EditCommand::DeletePrevWord => {
-                let change = self.model.delete_prev_word();
-                self.commit_edit(change, ts);
-            }
-            EditCommand::DeleteNextWord => {
-                let change = self.model.delete_next_word();
-                self.commit_edit(change, ts);
-            }
-            EditCommand::Enter => {
-                let Some(change) = self.model.enter() else {
-                    return false;
-                };
-                self.commit_edit(Some(change), ts);
-            }
+        let m = &mut self.model;
+        let change = match command {
+            // With nothing to do these go unhandled, so the key can mean something else.
+            EditCommand::Backspace => match m.delete_backward() {
+                None => return false,
+                change => change,
+            },
+            EditCommand::Enter => match m.enter() {
+                None => return false,
+                change => change,
+            },
             EditCommand::Escape => {
-                let Some(change) = self.model.cancel_composition() else {
+                let Some(change) = m.cancel_composition() else {
                     return false;
                 };
                 self.apply_change(Some(change), ts);
+                return true;
+            }
+            EditCommand::IndentInline | EditCommand::Indent | EditCommand::Outdent
+                if !m.is_multi_line() =>
+            {
+                return false;
+            }
+            EditCommand::Move { motion, extend } => return self.move_caret(motion, extend),
+            EditCommand::SelectAll => {
+                self.select_all();
+                return true;
             }
             EditCommand::Copy => {
                 if let Some(text) = self.selected_string() {
                     write_clipboard_text(&text);
                 }
+                return true;
             }
-            EditCommand::Cut => {
-                self.model.commit_composition();
-                if let Some(text) = self.selected_string()
-                    && write_clipboard_text(&text)
-                {
-                    let change = self.model.replace_selection("");
-                    self.commit_edit(change, ts);
-                }
-            }
-            EditCommand::Paste => {
-                if let Some(raw) = read_clipboard_text().filter(|s| !s.is_empty()) {
-                    self.paste(&raw, ts);
-                }
-            }
-            EditCommand::Undo => {
-                if let Some(change) = self.model.undo() {
-                    self.commit_edit(Some(change), ts);
-                }
-            }
-            EditCommand::Redo => {
-                if let Some(change) = self.model.redo() {
-                    self.commit_edit(Some(change), ts);
-                }
-            }
-            EditCommand::IndentInline | EditCommand::Indent | EditCommand::Outdent
-                if !self.model.is_multi_line() =>
-            {
-                return false;
-            }
+            EditCommand::Delete => m.delete_forward(),
+            EditCommand::DeletePrevWord => m.delete_prev_word(),
+            EditCommand::DeleteNextWord => m.delete_next_word(),
             EditCommand::IndentInline | EditCommand::Indent => {
-                let change = self.model.indent(matches!(command, EditCommand::Indent));
-                self.commit_edit(change, ts);
+                m.indent(command == EditCommand::Indent)
             }
-            EditCommand::Outdent => {
-                let change = self.model.outdent();
-                self.commit_edit(change, ts);
+            EditCommand::Outdent => m.outdent(),
+            EditCommand::Undo => m.undo(),
+            EditCommand::Redo => m.redo(),
+            EditCommand::Cut => {
+                m.commit_composition();
+                match self.selected_string() {
+                    Some(text) if write_clipboard_text(&text) => self.model.replace_selection(""),
+                    _ => None,
+                }
             }
-            EditCommand::SelectAll => self.select_all(),
-            EditCommand::Move { motion, extend } => {
-                return self.move_caret(motion, extend);
-            }
-        }
+            EditCommand::Paste => match read_clipboard_text().filter(|s| !s.is_empty()) {
+                Some(raw) => m.replace_selection(&raw),
+                None => None,
+            },
+        };
+        self.commit_edit(change, ts);
         true
     }
 
@@ -670,36 +643,22 @@ impl Editor {
         self.request_reveal(self.model.cursor(), false, None, true);
     }
 
-    fn visual_line_start_for(&self, offset: usize, end_affinity: bool) -> usize {
-        let Some(doc) = &self.doc else {
-            return 0;
-        };
-        let text = self.model.text();
-        let pt = text.offset_to_point(offset);
-        let line_start = text.line_start_offset(pt.row);
-        if doc.soft_wrap {
-            let disp = doc.lines.offset_to_display(text, offset, end_affinity);
-            if let Some((range, _)) = doc.lines.visual_row_range(pt.row, disp.sub_row) {
-                return line_start + range.start;
-            }
-        }
-        line_start
-    }
-
-    fn visual_line_end_for(&self, offset: usize, end_affinity: bool) -> (usize, bool) {
+    /// The visual row `offset` is on, as text offsets, and whether it ends at a soft wrap; a
+    /// field's row is all of it.
+    fn visual_row_for(&self, offset: usize, end_affinity: bool) -> (Range<usize>, bool) {
         let text = self.model.text();
         let Some(doc) = &self.doc else {
-            return (text.len(), false);
+            return (0..text.len(), false);
         };
-        let pt = text.offset_to_point(offset);
-        let line_start = text.line_start_offset(pt.row);
+        let row = text.offset_to_point(offset).row;
+        let line_start = text.line_start_offset(row);
         if doc.soft_wrap {
             let disp = doc.lines.offset_to_display(text, offset, end_affinity);
-            if let Some((range, soft_end)) = doc.lines.visual_row_range(pt.row, disp.sub_row) {
-                return (line_start + range.end, soft_end);
+            if let Some((range, soft_end)) = doc.lines.visual_row_range(row, disp.sub_row) {
+                return (line_start + range.start..line_start + range.end, soft_end);
             }
         }
-        (text.line_end_offset(pt.row), false)
+        (line_start..text.line_end_offset(row), false)
     }
 
     fn preferred_x_for(
@@ -724,11 +683,7 @@ impl Editor {
     }
 
     fn page_rows(&self, doc: &DocumentView) -> isize {
-        let lh = self
-            .frame
-            .as_ref()
-            .map_or(doc.last_line_height, |f| f.layout.line_height)
-            .max(1.0);
+        let lh = doc.last_line_height.max(1.0);
         ((self.input_bounds.size.height / lh).floor() as isize).max(1)
     }
 
@@ -823,15 +778,13 @@ impl Editor {
             }
             Motion::PrevWord => (prev_word_start(self.model.text(), sel.head), false, None, None),
             Motion::NextWord => (next_word_end(self.model.text(), sel.head), false, None, None),
-            Motion::LineStart => (
-                self.visual_line_start_for(sel.head, sel.end_affinity),
-                false,
-                None,
-                Some(MoveDirection::Up),
-            ),
+            Motion::LineStart => {
+                let (row, _) = self.visual_row_for(sel.head, sel.end_affinity);
+                (row.start, false, None, Some(MoveDirection::Up))
+            }
             Motion::LineEnd => {
-                let (t, aff) = self.visual_line_end_for(sel.head, sel.end_affinity);
-                (t, aff, None, Some(MoveDirection::Down))
+                let (row, soft_end) = self.visual_row_for(sel.head, sel.end_affinity);
+                (row.end, soft_end, None, Some(MoveDirection::Down))
             }
             Motion::DocStart => (0, false, None, None),
             Motion::DocEnd => (len, false, None, None),
@@ -1137,21 +1090,26 @@ impl Editor {
         let min_y = (-content_h + f64::from(input_bounds.size.height)).min(0.0);
         self.scroll.y = self.scroll.y.clamp(min_y, 0.0);
 
-        // Compute horizontal extent and resolve horizontal reveal before shaping windowed lines.
-        let mut max_line_w = wrap_width.unwrap_or(0.0);
-        if soft_wrap {
-            self.scroll.x = 0.0;
-        } else {
-            max_line_w = doc.lines.longest_line_width(text, ts);
-            if reveal_req.is_some() {
-                let caret_x = doc.lines.unwrapped_x(text, head, ts);
-                max_line_w = max_line_w.max(caret_x);
-                self.scroll.x =
-                    reveal_horizontal_scroll(self.scroll.x, caret_x, input_bounds.size.width);
+        // Unwrapped, the horizontal extent and reveal are settled before the windowed lines are
+        // shaped, then refined from what was shaped.
+        let width = input_bounds.size.width;
+        let mut max_line_w = match wrap_width {
+            Some(wrap) => {
+                self.scroll.x = 0.0;
+                wrap
             }
-            let est_w = content_width_with_margin(max_line_w, input_bounds.size.width);
-            self.scroll.x = clamp_horizontal_scroll(self.scroll.x, est_w, input_bounds.size.width);
-        }
+            None => {
+                let mut max = doc.lines.longest_line_width(text, ts);
+                if reveal_req.is_some() {
+                    let caret_x = doc.lines.unwrapped_x(text, head, ts);
+                    max = max.max(caret_x);
+                    self.scroll.x = reveal_horizontal_scroll(self.scroll.x, caret_x, width);
+                }
+                let estimate = content_width_with_margin(max, width);
+                self.scroll.x = clamp_horizontal_scroll(self.scroll.x, estimate, width);
+                max
+            }
+        };
 
         let prev_scroll_x = self.scroll.x;
         let view = Viewport {
@@ -1162,9 +1120,6 @@ impl Editor {
         let (layout, shaped_windowed) =
             doc.lines
                 .layout_visible(text, view, head, end_affinity, line_height, ts);
-        if !soft_wrap {
-            max_line_w = max_line_w.max(layout.width());
-        }
         let head_pt = layout
             .position_for_offset(text, head, end_affinity)
             .unwrap_or_else(|| {
@@ -1175,19 +1130,13 @@ impl Editor {
                 )
             });
         if !soft_wrap {
-            max_line_w = max_line_w.max(head_pt.x);
+            max_line_w = max_line_w.max(layout.width()).max(head_pt.x);
+            if reveal_req.is_some() {
+                self.scroll.x = reveal_horizontal_scroll(self.scroll.x, head_pt.x, width);
+            }
         }
-
-        self.scroll.content_w = content_width_with_margin(max_line_w, input_bounds.size.width);
-        if reveal_req.is_some() && !soft_wrap {
-            self.scroll.x =
-                reveal_horizontal_scroll(self.scroll.x, head_pt.x, input_bounds.size.width);
-        }
-        self.scroll.x = if soft_wrap {
-            0.0
-        } else {
-            clamp_horizontal_scroll(self.scroll.x, self.scroll.content_w, input_bounds.size.width)
-        };
+        self.scroll.content_w = content_width_with_margin(max_line_w, width);
+        self.scroll.x = clamp_horizontal_scroll(self.scroll.x, self.scroll.content_w, width);
 
         self.finish_frame(layout, style.color, head_pt, false, params);
 
@@ -1296,13 +1245,11 @@ impl Editor {
         x_changed || y_changed
     }
 
-    fn apply_scrollbar_scroll(&mut self, next: Option<Point>) -> bool {
-        let Some(next) = next else {
-            return false;
-        };
-        self.reveal = None;
-        self.clamp_and_set_scroll_f64(next.x, f64::from(next.y));
-        true
+    fn apply_scrollbar_scroll(&mut self, next: Option<Point>) {
+        if let Some(next) = next {
+            self.reveal = None;
+            self.clamp_and_set_scroll_f64(next.x, f64::from(next.y));
+        }
     }
 
     /// A press on a scrollbar track: on the thumb it starts a drag, elsewhere it pages. Whether
@@ -1377,14 +1324,7 @@ impl Editor {
         };
 
         self.reveal = None;
-        let moved = self.clamp_and_set_scroll_f64(self.scroll.x + dx, self.scroll.y + dy);
-        if moved {
-            let scroll = self.scroll_offset();
-            if let Some(doc) = &mut self.doc {
-                doc.scrollbar.on_wheel(scroll, Instant::now());
-            }
-        }
-        moved
+        self.clamp_and_set_scroll_f64(self.scroll.x + dx, self.scroll.y + dy)
     }
 
     /// Acts on whatever is due at `now`: blinking, auto-scrolling, scrollbar fading. Returns
@@ -1675,16 +1615,6 @@ impl ScrollbarState {
 
     fn deadline(&self) -> Option<Instant> {
         self.idle_at.into_iter().chain(self.drag_at).min()
-    }
-
-    fn on_wheel(&mut self, offset: Point, now: Instant) -> bool {
-        if offset == self.last_offset {
-            return false;
-        }
-        self.last_offset = offset;
-        self.last_activity = Some(now);
-        self.idle_at = None;
-        true
     }
 
     /// Works the bars out for the editor's new layout: which are needed, how far each has faded
@@ -2102,7 +2032,7 @@ mod tests {
         assert_eq!(copied.as_deref(), Some("world"));
         assert!(ed.handle_command(EditCommand::Delete, &ts));
         assert_eq!(ed.model().text().to_string(), "hello ");
-        ed.paste("world", &ts);
+        ed.replace("world", &ts);
         assert_eq!(ed.model().text().to_string(), "hello world");
     }
 
@@ -2219,7 +2149,6 @@ mod tests {
             horizontal: false,
         };
 
-        sb.on_wheel(point(0., -40.), t0);
         ui.begin_frame(t0, false);
         assert!(sb.update(slot, vp, p, t0, &mut ui), "the bar appears");
         assert_eq!(sb.tracks(slot, 0.).len(), 1);
