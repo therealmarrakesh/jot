@@ -1,5 +1,3 @@
-use std::borrow::Borrow;
-use std::cmp::Ordering;
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::ops::Deref;
@@ -18,6 +16,8 @@ pub(crate) fn take_due(deadline: &mut Option<Instant>, now: Instant) -> bool {
     due
 }
 
+/// A string that's either static or shared, cheap to clone either way; equal (and hashed) by
+/// its text.
 #[derive(Clone)]
 pub(crate) enum SharedStr {
     Static(&'static str),
@@ -31,7 +31,6 @@ impl Default for SharedStr {
 }
 
 impl SharedStr {
-    #[inline]
     pub(crate) fn as_str(&self) -> &str {
         match self {
             Self::Static(s) => s,
@@ -41,7 +40,6 @@ impl SharedStr {
 }
 
 impl PartialEq for SharedStr {
-    #[inline]
     fn eq(&self, other: &Self) -> bool {
         self.as_str() == other.as_str()
     }
@@ -49,15 +47,7 @@ impl PartialEq for SharedStr {
 
 impl Eq for SharedStr {}
 
-impl PartialOrd for SharedStr {
-    #[inline]
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
 impl Hash for SharedStr {
-    #[inline]
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.as_str().hash(state);
     }
@@ -66,22 +56,13 @@ impl Hash for SharedStr {
 impl Deref for SharedStr {
     type Target = str;
 
-    #[inline]
     fn deref(&self) -> &str {
         self.as_str()
     }
 }
 
 impl AsRef<str> for SharedStr {
-    #[inline]
     fn as_ref(&self) -> &str {
-        self.as_str()
-    }
-}
-
-impl Borrow<str> for SharedStr {
-    #[inline]
-    fn borrow(&self) -> &str {
         self.as_str()
     }
 }
@@ -99,14 +80,12 @@ impl fmt::Debug for SharedStr {
 }
 
 impl From<&'static str> for SharedStr {
-    #[inline]
     fn from(s: &'static str) -> Self {
         Self::Static(s)
     }
 }
 
 impl From<String> for SharedStr {
-    #[inline]
     fn from(s: String) -> Self {
         Self::Owned(s.into())
     }
@@ -181,16 +160,14 @@ mod tests {
     use std::collections::HashMap;
 
     #[test]
-    fn shared_str_equality_and_hash_match_borrow_str_contract() {
+    fn static_and_owned_strings_are_equal_and_hash_alike() {
         let a = SharedStr::Static("hello");
         let b = SharedStr::from(String::from("hello"));
         assert_eq!(a, b);
-        assert_eq!(a.cmp(&b), Ordering::Equal);
 
         let mut map = HashMap::new();
         map.insert(a, 42);
         assert_eq!(map.get(&b), Some(&42));
-        assert_eq!(map.get("hello"), Some(&42));
     }
 
     #[test]
